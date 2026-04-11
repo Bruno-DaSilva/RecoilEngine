@@ -1,0 +1,138 @@
+# Runs the Beyond All Reason "fightertest" sync test against an engine commit.
+#
+# This workflow does NOT build the engine. It looks up the most recent
+# successful "Build Engine v2" run for the target commit and downloads its
+# amd64-linux artifact. If no such run exists, the workflow fails fast.
+#
+# See test/fightertest/README.md for background and how to run locally.
+name: Fightertest sync test
+
+# TODO: eventually have this trigger after every mainline commit and in PRs. Probably as a workflow triggered once engine build is complete.
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: 'Engine commit SHA to test. Leave blank to test the head of the ref selected in the picker above.'
+        type: string
+        default: ''
+
+permissions:
+  # actions:read is required to list workflow runs and download artifacts
+  # produced by a different workflow run (the Build Engine v2 run for the
+  # target commit).
+  actions: read
+  contents: read
+
+jobs:
+  fightertest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Resolve target commit
+        id: resolve
+        run: |
+          set -euo pipefail
+          target="${{ inputs.commit }}"
+          if [ -z "$target" ]; then target="${{ github.sha }}"; fi
+          
+          # Normalize whatever the user pasted (full sha, short sha, branch, tag)
+          # into a full 40-char SHA so the run lookup below is unambiguous.
+          full_sha=$(gh api "repos/${{ github.repository }}/commits/$target" --jq '.sha')
+          echo "Resolved target commit: $full_sha"
+          echo "sha=$full_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout workflow definition and test inputs
+        # Uses the ref picked in the dispatch UI (github.sha), NOT the target
+        # commit — so `test/fightertest/startscript.txt` and any other test
+        # assets come from the workflow-definition ref. The target commit only
+        # controls which engine artifact gets downloaded below.
+        uses: actions/checkout@v4
+
+      - name: Find Build Engine v2 run for this commit
+        id: engine-run
+        run: |
+          set -euo pipefail
+          run_id=$(gh api \
+            "repos/${{ github.repository }}/actions/workflows/engine-build.yml/runs?head_sha=${{ steps.resolve.outputs.sha }}&status=success" \
+            --jq '.workflow_runs[0].id')
+          if [ -z "$run_id" ] || [ "$run_id" = "null" ]; then
+            echo "::error::No successful 'Build Engine v2' run found for commit ${{ steps.resolve.outputs.sha }}."
+            echo "::error::Trigger Build Engine v2 on that commit first (push it, or dispatch engine-build.yml manually) and retry."
+            exit 1
+          fi
+          echo "Using engine-build run $run_id"
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+
+      # TODO: matrix this to test (+ compare) multiple platforms sync hashes.
+      - name: Download engine artifact
+        uses: actions/download-artifact@v4
+        with:
+          pattern: engine-artifacts-amd64-linux*
+          run-id: ${{ steps.engine-run.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: engine-artifact
+          merge-multiple: true
+
+      - name: Extract install tree
+        run: |
+          set -euo pipefail
+          mkdir -p install
+          
+          # Engine is packaged with INSTALL_PORTABLE=ON (CMake default, see
+          # CMakeLists.txt:22), so binaries live at the install-tree root:
+          #   install/spring-headless, install/pr-downloader, install/spring, ...
+          # engine-build also uploads a -dbgsym.tar.zst alongside the 7z; the
+          # glob below intentionally matches only the .7z.
+          7z x engine-artifact/recoil_*_amd64-linux*.7z -oinstall
+          chmod +x install/spring-headless install/pr-downloader
+
+      - name: Restore bar-data cache
+        uses: actions/cache@v4
+        with:
+          path: bar-data
+          # IMPORTANT:
+          # Bump this key in lockstep with any change to the pinned
+          # gametype/mapname in test/fightertest/startscript.txt. See
+          # test/fightertest/README.md.
+          key: bar-data-byar-test-29660-e79286c-jade-empress-1.3
+
+      - name: Fetch pinned BAR assets (no-op on warm cache)
+        run: |
+          set -euo pipefail
+          ./install/pr-downloader \
+              --filesystem-writepath "$PWD/bar-data" \
+              --download-game "Beyond All Reason test-29660-e79286c" \
+              --download-map  "Jade Empress 1.3"
+
+      - name: Run fightertest
+        run: |
+          set -euo pipefail
+          timeout 300s \
+              ./install/spring-headless --isolation --write-dir "$PWD/bar-data" test/fightertest/startscript.txt \
+              2>&1 | tee infolog.txt
+
+      - name: Assert sync-hash file produced
+        run: |
+          set -euo pipefail
+
+          hash_file="bar-data/fightertest_synchash.txt"
+          if [ ! -s "$hash_file" ]; then
+            echo "::error::$hash_file missing or empty — the fightertest did not produce checksum output"
+            exit 1
+          fi
+          echo "Sync hash:"
+          head -n 2 "$hash_file"
+
+      - name: Upload run artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fightertest-${{ steps.resolve.outputs.sha }}
+          path: |
+            infolog.txt
+            bar-data/*.log
+            bar-data/fightertest_synchash.txt
+          retention-days: 30
+          if-no-files-found: ignore
