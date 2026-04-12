@@ -30,7 +30,7 @@
     {}
     [modoptions]
     {
-        debugcommands=1:cheat|15:luarules fightertest armcv armck 11000 15 12000|25:deselect|2015:screenshot|2016:luarules fightertest|2025:quitforce;
+        debugcommands=1:cheat|15:luarules fightertest armcv armck 11000 15 12000|25:deselect|2015:screenshot|2016:luarules fightertest|2100:quitforce;
         scenariooptions=eyJkaWZmaWN1bHR5IjoiMTUgdW5pdCBzcGF3biByYXRlIiwidmVyc2lvbiI6IjEuMCIsInNjZW5hcmlvaWQiOiJiZW5jaG1hcmtfcGF0aGZpbmRpbmciLCJkaXNhYmxlZmFjdGlvbnBpY2tlciI6dHJ1ZSwiYmVuY2htYXJrY29tbWFuZCI6Imx1YXJ1bGVzIGZpZ2h0ZXJ0ZXN0IGFybWN2IGFybWNrIDExMDAwIDEgMTIwMDAiLCJiZW5jaG1hcmtmcmFtZXMiOjIwMDB9;
         maxunits=11000;
     }
@@ -64,7 +64,7 @@
     hostip=127.0.0.1;
     numusers=2;
     startpostype=3;
-    gametype=Beyond All Reason test-29660-e79286c;
+    gametype=Beyond All Reason $VERSION;
     mapname=Jade Empress 1.3;
     myplayername=BubbyMk2;
     numrestrictions=0;
