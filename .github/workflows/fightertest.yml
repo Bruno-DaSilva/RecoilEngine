@@ -167,3 +167,34 @@ jobs:
             bar-data/fightertest_synchash.txt
           retention-days: 30
           if-no-files-found: ignore
+
+  # Collects sync hashes from all fightertest runs into one place.
+  # TODO: compare hashes against known-good values from prior runs to detect
+  # desync regressions automatically.
+  collect-hashes:
+    if: always()
+    needs: [setup, fightertest]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Download all fightertest artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: fightertest-*-${{ needs.setup.outputs.sha }}
+          path: artifacts
+
+      - name: Print sync hashes
+        run: |
+          set -euo pipefail
+          echo "## Sync hashes for ${{ needs.setup.outputs.sha }}"
+          echo ""
+          for dir in artifacts/fightertest-*; do
+            test_name=$(basename "$dir" | sed "s/^fightertest-//; s/-${{ needs.setup.outputs.sha }}$//")
+            hash_file="$dir/fightertest_synchash.txt"
+            if [ -f "$hash_file" ]; then
+              hash=$(head -n 1 "$hash_file")
+              echo "$test_name: $hash"
+            else
+              echo "$test_name: MISSING"
+            fi
+          done
