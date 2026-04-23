@@ -7,12 +7,13 @@
 #       BENCH_OPERATOR_SA  bench-operator@bar-experiments.iam.gserviceaccount.com
 #   - (Optional) Repo variables to control the fixed pieces of the run:
 #       BENCH_BAR_CONTENT  bar-test-29871-90f4bc1
-#       BENCH_MAP          hellas-basin-v1.4
-#       BENCH_SCENARIO     lategame1
 #       BENCH_COUNT        10
 #
-# Cost note: two runs per benchmarked PR. At count=10, c2d-standard-16,
-# ~8 min wall → ~$0.20 per benchmark run, or ~$1 per full benchmark suite.
+# Cost note: 10 benchmark runs per PR (5 scenarios × candidate+baseline).
+# At count=10, c2d-standard-16, ~8 min wall → ~$0.20 per run, ~$2 per PR.
+# fightertest-* legs run 5 iterations per VM (staging paid once) to
+# yield 50 data points per leg at roughly the same infra cost but ~5×
+# wall time — max-run-duration is bumped accordingly.
 
 name: bar-benchmark
 
@@ -23,6 +24,12 @@ on:
         description: "PR number to benchmark"
         required: true
         type: string
+      mode:
+        description: "quick = 1 iter/VM (cheap sanity check); full = matrix iterations (5× on fightertest-*, 2x on lategame1)"
+        required: false
+        type: choice
+        default: full
+        options: [quick, full]
 
 permissions:
   contents: read
@@ -50,9 +57,9 @@ jobs:
         with:
           script: |
             let prNumber;
-            
+
             prNumber = Number(context.payload.inputs.pr_number);
-            
+
             const { data: pr } = await github.rest.pulls.get({
               owner: context.repo.owner, repo: context.repo.repo, pull_number: prNumber,
             });
@@ -64,8 +71,9 @@ jobs:
             if (!labelled) core.info(`PR #${pr.number} is not labelled 'benchmark' — skipping`);
 
   # ------------------------------------------------------------------
-  # Run candidate + baseline in parallel. Each matrix leg writes its
-  # report JSON as an artifact so the final job can diff them.
+  # Run candidate + baseline in parallel across all scenarios. Each
+  # matrix leg writes its report JSON as an artifact so the final job
+  # can diff them.
   # ------------------------------------------------------------------
   run:
     needs: resolve
@@ -73,8 +81,19 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      max-parallel: 3
       matrix:
         variant: [candidate, baseline]
+        case:
+          # fightertest-* scenarios stage quickly and each run is short,
+          # so we loop 5× on the same VM for 50 data points per leg
+          # without paying the spin-up/down cost each time. lategame1 is
+          # already close to the per-task timeout — leave it at 1 iter.
+          - { map: starwatcher-v1.0,  scenario: fightertest-bots,         iterations: 5, max-run-duration: 3600 }
+          - { map: starwatcher-v1.0,  scenario: fightertest-aircraft,     iterations: 5, max-run-duration: 3600 }
+          - { map: starwatcher-v1.0,  scenario: fightertest-tanks,        iterations: 5, max-run-duration: 3600 }
+          - { map: starwatcher-v1.0,  scenario: fightertest-pathfinding,  iterations: 5, max-run-duration: 3600 }
+          - { map: hellas-basin-v1.4, scenario: lategame1,                iterations: 2, max-run-duration: 1800 }
     steps:
       - name: Pick commit for this variant
         id: pick
@@ -82,7 +101,9 @@ jobs:
           if [ "${{ matrix.variant }}" = "candidate" ]; then
             echo "sha=${{ needs.resolve.outputs.head-sha }}" >> "$GITHUB_OUTPUT"
           else
-            echo "sha=${{ needs.resolve.outputs.base-sha }}" >> "$GITHUB_OUTPUT"
+            # echo "sha=${{ needs.resolve.outputs.base-sha }}" >> "$GITHUB_OUTPUT"
+            # hardcode the baseline until this is committed to main BAR repo
+            echo "sha=eb1c69f9036279d58b9e824234acbb34ece0560a" >> "$GITHUB_OUTPUT"
           fi
 
       - uses: google-github-actions/auth@v2
@@ -90,31 +111,56 @@ jobs:
           workload_identity_provider: ${{ vars.BENCHMARKS_IDENTITY_PROVIDER }}
           service_account: ${{ vars.BENCHMARKS_OPERATOR_SA }}
 
-      - uses: beyond-all-reason/bar-benchmarks@v1
+      - uses: bruno-dasilva/bar-benchmarks@master
         id: bench
         with:
-          engine-commit: ${{ steps.pick.outputs.sha }}
-          bar-content:   ${{ vars.BENCH_BAR_CONTENT || 'bar-test-29871-90f4bc1' }}
-          map:           ${{ vars.BENCH_MAP         || 'hellas-basin-v1.4' }}
-          scenario:      ${{ vars.BENCH_SCENARIO    || 'lategame1' }}
-          count:         ${{ vars.BENCH_COUNT       || '10' }}
-          gcp-project:   ${{ vars.BENCHMARKS_GCP_PROJECT }}
-          description:   "${{ matrix.variant }} PR#${{ needs.resolve.outputs.pr }} @ ${{ steps.pick.outputs.sha }}"
+          engine-commit:    ${{ steps.pick.outputs.sha }}
+          bar-content:      ${{ vars.BENCH_BAR_CONTENT || 'bar-test-29871-90f4bc1' }}
+          map:              ${{ matrix.case.map }}
+          scenario:         ${{ matrix.case.scenario }}
+          count:            ${{ vars.BENCH_COUNT || '10' }}
+          iterations:       ${{ github.event.inputs.mode == 'quick' && '1' || matrix.case.iterations }}
+          max-run-duration: ${{ matrix.case.max-run-duration }}
+          gcp-project:      ${{ vars.BENCHMARKS_GCP_PROJECT }}
+          description:   "${{ matrix.variant }} PR#${{ needs.resolve.outputs.pr }} ${{ matrix.case.scenario }} @ ${{ steps.pick.outputs.sha }}"
+          # Reuse prior results when the same (engine-commit, scenario,
+          # map, count, machine-type) has already been benchmarked — the
+          # baseline commit rarely changes, and re-running the same PR
+          # head should short-circuit too.
+          lookup-prior-results: "true"
 
       - name: Stash report for diff step
         run: |
           mkdir -p out
-          cp "${{ steps.bench.outputs.report-json-path }}" "out/${{ matrix.variant }}.json"
-          jq '{variant: "${{ matrix.variant }}", sha: "${{ steps.pick.outputs.sha }}", job_uid, mean: .sim_mean_ms_mean, p95: .sim_mean_ms_p95, median: .sim_mean_ms_median, stddev: .sim_mean_ms_stddev, valid, invalid}' \
-            "out/${{ matrix.variant }}.json" > "out/${{ matrix.variant }}-summary.json"
+          CACHED="${{ steps.bench.outputs.prior-run-hit }}"
+          if [ "${CACHED}" = "true" ]; then
+            echo "::notice title=cache hit::${{ matrix.variant }} / ${{ matrix.case.scenario }} reused a prior run"
+          fi
+          # summary.json drives the candidate/baseline cells + footer.
+          # wall_s_cum = per-VM cumulative engine wall (per-iter mean ×
+          # iterations), the quantity the max-run-duration budget bounds.
+          jq --arg variant  "${{ matrix.variant }}" \
+             --arg scenario "${{ matrix.case.scenario }}" \
+             --arg map      "${{ matrix.case.map }}" \
+             --arg sha      "${{ steps.pick.outputs.sha }}" \
+             --argjson cached "$( [ "${CACHED}" = "true" ] && echo true || echo false )" \
+             --argjson iterations "${{ github.event.inputs.mode == 'quick' && '1' || matrix.case.iterations }}" \
+             '{variant: $variant, scenario: $scenario, map: $map, sha: $sha, cached: $cached, job_uid, mean: .sim_mean_ms_mean, wall_s_cum: (if .engine_wall_s_mean == null then null else .engine_wall_s_mean * $iterations end), valid, invalid, compute_usd}' \
+            "${{ steps.bench.outputs.report-json-path }}" > "out/${{ matrix.variant }}-${{ matrix.case.scenario }}-summary.json"
+          # Full BatchReport — fed to `bar-bench compare` in the comment
+          # job for Welch's t CI on the per-VM means.
+          cp "${{ steps.bench.outputs.report-json-path }}" \
+            "out/${{ matrix.variant }}-${{ matrix.case.scenario }}-report.json"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: bench-${{ matrix.variant }}
+          name: bench-${{ matrix.variant }}-${{ matrix.case.scenario }}
           path: out/*
 
   # ------------------------------------------------------------------
-  # Diff candidate vs baseline and post a PR comment.
+  # Diff candidate vs baseline across all scenarios and post a PR
+  # comment with the mean±σ table and a 95% Welch CI on the relative
+  # delta (so reviewers can tell real regressions from measurement noise).
   # ------------------------------------------------------------------
   comment:
     needs: [resolve, run]
@@ -127,47 +173,207 @@ jobs:
           path: reports
           merge-multiple: true
 
-      - id: diff
+      # Set up the bar-benchmarks CLI so we can shell out to
+      # `bar-bench compare` for Welch's t CI per scenario. Same bootstrap
+      # the composite action uses internally.
+      - uses: actions/checkout@v4
+        with:
+          repository: bruno-dasilva/bar-benchmarks
+          ref: master
+          path: bar-benchmarks-tool
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: bar-benchmarks-tool/uv.lock
+      - name: uv sync bar-benchmarks
+        working-directory: bar-benchmarks-tool
+        run: uv sync --frozen
+
+      - name: Compute Welch CI per scenario
         run: |
           set -euo pipefail
-          cand=$(jq -c . reports/candidate-summary.json)
-          base=$(jq -c . reports/baseline-summary.json)
-          {
-            echo "candidate=$cand"
-            echo "baseline=$base"
-          } >> "$GITHUB_OUTPUT"
+          mkdir -p comparisons
+          for sc in fightertest-bots fightertest-aircraft fightertest-tanks fightertest-pathfinding lategame1; do
+            cand="reports/candidate-${sc}-report.json"
+            base="reports/baseline-${sc}-report.json"
+            if [ ! -f "${cand}" ] || [ ! -f "${base}" ]; then
+              echo "::warning::missing report for ${sc} — skipping comparison"
+              continue
+            fi
+            (cd bar-benchmarks-tool && uv run bar-bench compare \
+              --candidate "${GITHUB_WORKSPACE}/${cand}" \
+              --baseline  "${GITHUB_WORKSPACE}/${base}" \
+              --output    "${GITHUB_WORKSPACE}/comparisons/${sc}.json")
+          done
 
       - uses: actions/github-script@v7
         with:
           script: |
-            const cand = ${{ steps.diff.outputs.candidate }};
-            const base = ${{ steps.diff.outputs.baseline }};
-            const fmt = (v) => v == null ? "n/a" : Number(v).toFixed(3);
-            const pct = (c, b) => (c == null || b == null || b === 0) ? "n/a"
-                                 : (((c - b) / b) * 100).toFixed(2) + "%";
-            const row = (label, key) =>
-              `| ${label} | ${fmt(cand[key])} ms | ${fmt(base[key])} ms | ${pct(cand[key], base[key])} |`;
+            const fs = require('fs');
+            const path = require('path');
+
+            const scenarios = [
+              'fightertest-bots',
+              'fightertest-aircraft',
+              'fightertest-tanks',
+              'fightertest-pathfinding',
+              'lategame1',
+            ];
+
+            const load = (variant, scenario) => {
+              const p = path.join('reports', `${variant}-${scenario}-summary.json`);
+              if (!fs.existsSync(p)) return null;
+              return JSON.parse(fs.readFileSync(p, 'utf8'));
+            };
+
+            const loadCmp = (scenario) => {
+              const p = path.join('comparisons', `${scenario}.json`);
+              if (!fs.existsSync(p)) return null;
+              return JSON.parse(fs.readFileSync(p, 'utf8'));
+            };
+
+            const fmtCell = (stat, cached) => {
+              if (stat == null) return "n/a";
+              const core = `${Number(stat).toFixed(2)} ms`;
+              // ♻️ = "this cell came from a prior, reused Batch run"
+              return cached ? `${core} ♻️` : core;
+            };
+            // Per-VM cumulative engine wall (per-iter mean × iterations)
+            // and valid iteration count, candidate leg only — the
+            // baseline runs the same scenario at the same spec, so a
+            // single number on each side is enough as a sanity gauge
+            // against the max-run-duration budget.
+            const fmtWall = (r) => {
+              if (!r || r.wall_s_cum == null) return "n/a";
+              return `~${Number(r.wall_s_cum).toFixed(0)}s`;
+            };
+            const fmtN = (r) => (r ? String(r.valid) : "—");
+            // 95% CI on the relative candidate−baseline mean difference.
+            // Each endpoint is colored individually: negative
+            // (improvement, faster) = green, positive (regression,
+            // slower) = red. A CI with both endpoints the same color
+            // is a significant result; a mixed-color CI straddles 0
+            // and is noise at 95% confidence.
+            //
+            // Escape gotcha: markdown processes the comment body before
+            // KaTeX does, and CommonMark strips `\` before ASCII
+            // punctuation like `%` — so `\%` in the source reaches
+            // KaTeX as a bare `%`, which starts a LaTeX comment and
+            // eats the closing brace ("missing close brace"). We emit
+            // `\\%` in the markdown (→ `\%` post-markdown → literal `%`
+            // in KaTeX), which in a JS string literal is `\\\\%`.
+            const fmtCI = (cmp) => {
+              if (!cmp || cmp.delta_pct_low == null || cmp.delta_pct_high == null) {
+                return "n/a";
+              }
+              const colored = (x) => {
+                const s = (x >= 0 ? "+" : "") + x.toFixed(2) + "\\\\%";
+                const color = x > 0 ? "red" : x < 0 ? "green" : "gray";
+                return `\\color{${color}}{${s}}`;
+              };
+              return `$${colored(cmp.delta_pct_low)} \\text{ to } ${colored(cmp.delta_pct_high)}$`;
+            };
+
+            const buildTable = () => {
+              const lines = [
+                `| scenario | candidate | baseline | Δ (95% CI) | n | engine wall |`,
+                `|---|---|---|---|---|---|`,
+              ];
+              for (const sc of scenarios) {
+                const c = load('candidate', sc);
+                const b = load('baseline',  sc);
+                const cmp = loadCmp(sc);
+                const cStat = c ? c.mean : null;
+                const bStat = b ? b.mean : null;
+                lines.push(
+                  `| ${sc} | ${fmtCell(cStat, c && c.cached)} | ${fmtCell(bStat, b && b.cached)} | ${fmtCI(cmp)} | ${fmtN(c)} | ${fmtWall(c)} |`
+                );
+              }
+              return lines.join("\n");
+            };
+
+            // Pull a representative pair of SHAs for the header.
+            let candSha = "", baseSha = "";
+            for (const sc of scenarios) {
+              const c = load('candidate', sc);
+              const b = load('baseline',  sc);
+              if (c) candSha = c.sha;
+              if (b) baseSha = b.sha;
+            }
+
+            // Sum compute cost across all legs. Cached legs report $0
+            // (bar-bench lookup zeroes compute_usd), so the total only
+            // reflects fresh Batch runs. Legs whose cost is null (e.g.
+            // unknown machine-type entry in the price table) are
+            // ignored with a note.
+            let totalUsd = 0, fresh = 0, cached = 0, unpriced = 0;
+            for (const variant of ['candidate', 'baseline']) {
+              for (const sc of scenarios) {
+                const r = load(variant, sc);
+                if (!r) continue;
+                if (r.cached) cached++;
+                else if (r.compute_usd == null) unpriced++;
+                else { totalUsd += r.compute_usd; fresh++; }
+              }
+            }
+            const costBits = [`$${totalUsd.toFixed(2)}`, `${fresh} fresh leg${fresh === 1 ? "" : "s"}`];
+            if (cached) costBits.push(`${cached} cached at $0`);
+            if (unpriced) costBits.push(`${unpriced} unpriced`);
+            const costLine = `💰 compute cost: ${costBits.join(" · ")}`;
+
+            // Hidden marker used to locate a prior bar-benchmark comment
+            // on this PR so we update it in place instead of posting a
+            // new one on every workflow re-trigger. HTML comments don't
+            // render in markdown but are visible to listComments().
+            const MARKER = "<!-- bar-benchmark:comment -->";
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
 
             const body = [
+              MARKER,
               `### bar-benchmark — PR #${{ needs.resolve.outputs.pr }}`,
               ``,
-              `candidate \`${cand.sha.slice(0,7)}\` vs baseline \`${base.sha.slice(0,7)}\``,
+              `candidate \`${candSha.slice(0,7)}\` vs baseline \`${baseSha.slice(0,7)}\``,
               ``,
-              `| metric | candidate | baseline | Δ |`,
-              `|---|---|---|---|`,
-              row("sim mean",   "mean"),
-              row("sim p95",    "p95"),
-              row("sim median", "median"),
-              row("pooled σ",   "stddev"),
+              `#### sim mean (ms) with 95% CI on the relative delta`,
+              buildTable(),
               ``,
-              `valid / invalid: **${cand.valid}/${cand.invalid}** (candidate) · **${base.valid}/${base.invalid}** (baseline)`,
+              `<sub>${costLine}</sub>`,
               ``,
-              `<sub>candidate job: \`${cand.job_uid}\` · baseline job: \`${base.job_uid}\`</sub>`,
+              `<sub>last updated: ${new Date().toISOString()} · [workflow run](${runUrl})</sub>`,
             ].join("\n");
 
-            await github.rest.issues.createComment({
-              issue_number: ${{ needs.resolve.outputs.pr }},
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body,
-            });
+            // Find-or-update: locate any prior bar-benchmark comment on
+            // this PR via the hidden marker and mutate it in place.
+            // Falls back to createComment on the very first run.
+            const issueNumber = ${{ needs.resolve.outputs.pr }};
+            const existing = await github.paginate(
+              github.rest.issues.listComments,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                per_page: 100,
+              },
+            );
+            const prior = existing.find(c => c.body && c.body.includes(MARKER));
+
+            if (prior) {
+              core.info(`updating existing comment ${prior.id}`);
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: prior.id,
+                body,
+              });
+            } else {
+              core.info("no prior bar-benchmark comment found — creating a new one");
+              await github.rest.issues.createComment({
+                issue_number: issueNumber,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body,
+              });
+            }
