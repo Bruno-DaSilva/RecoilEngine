@@ -1,0 +1,173 @@
+# Repo prereqs (one-time):
+#   - WIF pool trusting this repo's OIDC, bound to an operator service
+#     account in the bar-experiments GCP project. See
+#     beyond-all-reason/bar-benchmarks docs/github-action.md.
+#   - Repo variables:
+#       WIF_PROVIDER       projects/.../workloadIdentityPools/.../providers/...
+#       BENCH_OPERATOR_SA  bench-operator@bar-experiments.iam.gserviceaccount.com
+#   - (Optional) Repo variables to control the fixed pieces of the run:
+#       BENCH_BAR_CONTENT  bar-test-29871-90f4bc1
+#       BENCH_MAP          hellas-basin-v1.4
+#       BENCH_SCENARIO     lategame1
+#       BENCH_COUNT        10
+#
+# Cost note: two runs per benchmarked PR. At count=10, c2d-standard-16,
+# ~8 min wall → ~$0.20 per benchmark run, or ~$1 per full benchmark suite.
+
+name: bar-benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to benchmark"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read        # read the triggering workflow_run + its artifacts
+  pull-requests: write # post the results comment
+  id-token: write      # Workload Identity Federation
+
+jobs:
+  # ------------------------------------------------------------------
+  # Resolve PR context (head SHA, base SHA, label gate) from either
+  # trigger. Without this a workflow_run job has no direct PR payload.
+  # ------------------------------------------------------------------
+  resolve:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch'
+    outputs:
+      pr:        ${{ steps.meta.outputs.pr }}
+      head-sha:  ${{ steps.meta.outputs.head-sha }}
+      base-sha:  ${{ steps.meta.outputs.base-sha }}
+      go:        ${{ steps.meta.outputs.go }}
+    steps:
+      - id: meta
+        uses: actions/github-script@v7
+        with:
+          script: |
+            let prNumber;
+            
+            prNumber = Number(context.payload.inputs.pr_number);
+            
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner, repo: context.repo.repo, pull_number: prNumber,
+            });
+            const labelled = pr.labels.some(l => l.name === 'benchmark');
+            core.setOutput('pr',       String(pr.number));
+            core.setOutput('head-sha', pr.head.sha);
+            core.setOutput('base-sha', pr.base.sha);
+            core.setOutput('go',       labelled ? 'true' : 'false');
+            if (!labelled) core.info(`PR #${pr.number} is not labelled 'benchmark' — skipping`);
+
+  # ------------------------------------------------------------------
+  # Run candidate + baseline in parallel. Each matrix leg writes its
+  # report JSON as an artifact so the final job can diff them.
+  # ------------------------------------------------------------------
+  run:
+    needs: resolve
+    if: needs.resolve.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [candidate, baseline]
+    steps:
+      - name: Pick commit for this variant
+        id: pick
+        run: |
+          if [ "${{ matrix.variant }}" = "candidate" ]; then
+            echo "sha=${{ needs.resolve.outputs.head-sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=${{ needs.resolve.outputs.base-sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.BENCHMARKS_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.BENCHMARKS_OPERATOR_SA }}
+
+      - uses: beyond-all-reason/bar-benchmarks@v1
+        id: bench
+        with:
+          engine-commit: ${{ steps.pick.outputs.sha }}
+          bar-content:   ${{ vars.BENCH_BAR_CONTENT || 'bar-test-29871-90f4bc1' }}
+          map:           ${{ vars.BENCH_MAP         || 'hellas-basin-v1.4' }}
+          scenario:      ${{ vars.BENCH_SCENARIO    || 'lategame1' }}
+          count:         ${{ vars.BENCH_COUNT       || '10' }}
+          gcp-project:   ${{ vars.BENCHMARKS_GCP_PROJECT }}
+          description:   "${{ matrix.variant }} PR#${{ needs.resolve.outputs.pr }} @ ${{ steps.pick.outputs.sha }}"
+
+      - name: Stash report for diff step
+        run: |
+          mkdir -p out
+          cp "${{ steps.bench.outputs.report-json-path }}" "out/${{ matrix.variant }}.json"
+          jq '{variant: "${{ matrix.variant }}", sha: "${{ steps.pick.outputs.sha }}", job_uid, mean: .sim_mean_ms_mean, p95: .sim_mean_ms_p95, median: .sim_mean_ms_median, stddev: .sim_mean_ms_stddev, valid, invalid}' \
+            "out/${{ matrix.variant }}.json" > "out/${{ matrix.variant }}-summary.json"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ matrix.variant }}
+          path: out/*
+
+  # ------------------------------------------------------------------
+  # Diff candidate vs baseline and post a PR comment.
+  # ------------------------------------------------------------------
+  comment:
+    needs: [resolve, run]
+    if: needs.resolve.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bench-*
+          path: reports
+          merge-multiple: true
+
+      - id: diff
+        run: |
+          set -euo pipefail
+          cand=$(jq -c . reports/candidate-summary.json)
+          base=$(jq -c . reports/baseline-summary.json)
+          {
+            echo "candidate=$cand"
+            echo "baseline=$base"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const cand = ${{ steps.diff.outputs.candidate }};
+            const base = ${{ steps.diff.outputs.baseline }};
+            const fmt = (v) => v == null ? "n/a" : Number(v).toFixed(3);
+            const pct = (c, b) => (c == null || b == null || b === 0) ? "n/a"
+                                 : (((c - b) / b) * 100).toFixed(2) + "%";
+            const row = (label, key) =>
+              `| ${label} | ${fmt(cand[key])} ms | ${fmt(base[key])} ms | ${pct(cand[key], base[key])} |`;
+
+            const body = [
+              `### bar-benchmark — PR #${{ needs.resolve.outputs.pr }}`,
+              ``,
+              `candidate \`${cand.sha.slice(0,7)}\` vs baseline \`${base.sha.slice(0,7)}\``,
+              ``,
+              `| metric | candidate | baseline | Δ |`,
+              `|---|---|---|---|`,
+              row("sim mean",   "mean"),
+              row("sim p95",    "p95"),
+              row("sim median", "median"),
+              row("pooled σ",   "stddev"),
+              ``,
+              `valid / invalid: **${cand.valid}/${cand.invalid}** (candidate) · **${base.valid}/${base.invalid}** (baseline)`,
+              ``,
+              `<sub>candidate job: \`${cand.job_uid}\` · baseline job: \`${base.job_uid}\`</sub>`,
+            ].join("\n");
+
+            await github.rest.issues.createComment({
+              issue_number: ${{ needs.resolve.outputs.pr }},
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });
