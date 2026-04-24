@@ -27,18 +27,17 @@
         startrecttop=0;
     }
     [restrict]
-    {}
+    {
+    }
     [modoptions]
     {
-        debugcommands=1:cheat|15:luarules fightertest armcv armck 11000 15 12000|25:deselect|2015:screenshot|2016:luarules fightertest|2100:quitforce;
-        scenariooptions=eyJkaWZmaWN1bHR5IjoiMTUgdW5pdCBzcGF3biByYXRlIiwidmVyc2lvbiI6IjEuMCIsInNjZW5hcmlvaWQiOiJiZW5jaG1hcmtfcGF0aGZpbmRpbmciLCJkaXNhYmxlZmFjdGlvbnBpY2tlciI6dHJ1ZSwiYmVuY2htYXJrY29tbWFuZCI6Imx1YXJ1bGVzIGZpZ2h0ZXJ0ZXN0IGFybWN2IGFybWNrIDExMDAwIDEgMTIwMDAiLCJiZW5jaG1hcmtmcmFtZXMiOjIwMDB9;
-        maxunits=11000;
+        debugcommands=2:cheat|3:globallos|15:luarules fightersynctest 2000 0.33 0.33 0.1 0.5|20:setspeed 20|21:speedcontrol 0|2100:quitforce;
     }
     [player0]
     {
         rank=0;
         team=0;
-        name=BubbyMk2;
+        name=Player;
         isfromdemo=0;
     }
     [ai0]
@@ -59,18 +58,18 @@
         rgbcolor=0.99609375 0.546875 0;
         side=Cortex;
         startposz=800;
-    }
-    ishost=1;
-    hostip=127.0.0.1;
-    numusers=2;
-    startpostype=3;
-    gametype=Beyond All Reason $VERSION;
-    mapname=Jade Empress 1.3;
-    myplayername=BubbyMk2;
-    numrestrictions=0;
-    fixedrngseed=123123;
-    numplayers=1;
-    gamestartdelay=5;
-    nohelperais=0;
-    hostport=0;
+        }
+        ishost=1;
+        hostip=127.0.0.1;
+        numusers=2;
+        startpostype=3;
+        gametype=Beyond All Reason $VERSION;
+        mapname=Jade Empress 1.3;
+        myplayername=Player;
+        numrestrictions=0;
+        fixedrngseed=123123;
+        numplayers=1;
+        gamestartdelay=5;
+        nohelperais=0;
+        hostport=0;
 }
