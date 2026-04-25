@@ -16,6 +16,7 @@
 # wall time — max-run-duration is bumped accordingly.
 
 name: bar-benchmark
+run-name: bar-benchmark PR#${{ inputs.pr_number }} (${{ inputs.mode }})
 
 on:
   workflow_dispatch:
