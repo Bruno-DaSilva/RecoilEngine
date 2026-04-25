@@ -187,10 +187,14 @@ jobs:
           max-run-duration: 3600
           gcp-project:      ${{ vars.BENCHMARKS_GCP_PROJECT }}
           description:   "${{ matrix.variant }} PR#${{ needs.resolve.outputs.pr }} ${{ matrix.case.scenario }} @ ${{ steps.pick.outputs.sha }}"
-          # Reuse prior results when the same (engine-commit, scenario,
-          # map, count, machine-type) has already been benchmarked — the
-          # baseline commit rarely changes, and re-running the same PR
-          # head should short-circuit too.
+          # Aggregate the rolling window of recent runs sharing the same
+          # (engine-commit, bar-content, scenario, map, machine-type) and
+          # skip a fresh Batch submission when the pool already has
+          # ≥ lookup-min-samples (default 50) valid results. The
+          # baseline commit rarely changes, so its window saturates
+          # quickly; re-running the same PR head also short-circuits.
+          # Either way, the action's mean-ms / p95-ms / etc. outputs
+          # reflect the rolling aggregate, not just one batch.
           lookup-prior-results: "true"
 
       - name: Stash report for diff step
@@ -201,18 +205,15 @@ jobs:
             echo "::notice title=cache hit::${{ matrix.variant }} / ${{ matrix.case.scenario }} reused a prior run"
           fi
           # summary.json drives the candidate/baseline cells + footer.
-          # wall_s_cum = per-VM cumulative engine wall (per-iter mean ×
-          # iterations), the quantity the max-run-duration budget bounds.
           jq --arg variant  "${{ matrix.variant }}" \
              --arg scenario "${{ matrix.case.scenario }}" \
              --arg map      "${{ matrix.case.map }}" \
              --arg sha      "${{ steps.pick.outputs.sha }}" \
              --argjson cached "$( [ "${CACHED}" = "true" ] && echo true || echo false )" \
-             --argjson iterations "${{ matrix.case.iterations }}" \
-             '{variant: $variant, scenario: $scenario, map: $map, sha: $sha, cached: $cached, job_uid, mean: .sim_mean_ms_mean, wall_s_cum: (if .engine_wall_s_mean == null then null else .engine_wall_s_mean * $iterations end), valid, invalid, compute_usd}' \
+             '{variant: $variant, scenario: $scenario, map: $map, sha: $sha, cached: $cached, job_uid, mean: .sim_mean_ms_mean, valid, invalid, compute_usd}' \
             "${{ steps.bench.outputs.report-json-path }}" > "out/${{ matrix.variant }}-${{ matrix.case.scenario }}-summary.json"
           # Full BatchReport — fed to `bar-bench compare` in the comment
-          # job for Welch's t CI on the per-VM means.
+          # job for a BCa bootstrap CI on the per-VM trimmed-mean delta.
           cp "${{ steps.bench.outputs.report-json-path }}" \
             "out/${{ matrix.variant }}-${{ matrix.case.scenario }}-report.json"
 
@@ -223,8 +224,10 @@ jobs:
 
   # ------------------------------------------------------------------
   # Diff candidate vs baseline across all scenarios and post a PR
-  # comment with the mean±σ table and a 95% Welch CI on the relative
-  # delta (so reviewers can tell real regressions from measurement noise).
+  # comment with the mean±σ table and a 95% BCa bootstrap CI on the
+  # relative delta of the per-VM trimmed mean (so reviewers can tell
+  # real regressions from measurement noise; trim is 20% per side at
+  # min(n) ≤ 20, else 10%).
   # ------------------------------------------------------------------
   comment:
     needs: [resolve, run]
@@ -238,8 +241,9 @@ jobs:
           merge-multiple: true
 
       # Set up the bar-benchmarks CLI so we can shell out to
-      # `bar-bench compare` for Welch's t CI per scenario. Same bootstrap
-      # the composite action uses internally.
+      # `bar-bench compare` for a BCa bootstrap CI per scenario. Same
+      # bootstrap (the harness one, not the statistical one) the
+      # composite action uses internally.
       - uses: actions/checkout@v4
         with:
           repository: bruno-dasilva/bar-benchmarks
@@ -256,7 +260,7 @@ jobs:
         working-directory: bar-benchmarks-tool
         run: uv sync --frozen
 
-      - name: Compute Welch CI per scenario
+      - name: Compute BCa CI per scenario
         run: |
           set -euo pipefail
           mkdir -p comparisons
@@ -320,15 +324,11 @@ jobs:
               // ♻️ = "this cell came from a prior, reused Batch run"
               return cached ? `${core} ♻️` : core;
             };
-            // Per-VM cumulative engine wall (per-iter mean × iterations)
-            // and valid iteration count, candidate leg only — the
-            // baseline runs the same scenario at the same spec, so a
-            // single number on each side is enough as a sanity gauge
-            // against the max-run-duration budget.
-            const fmtWall = (r) => {
-              if (!r || r.wall_s_cum == null) return "n/a";
-              return `~${Number(r.wall_s_cum).toFixed(0)}s`;
-            };
+            // Valid sample count behind each cell. Candidate and
+            // baseline are reported separately because the rolling
+            // window (see `lookup-prior-results`) means each side may
+            // pool a different number of historical results — useful
+            // context for reading the CI's tightness.
             const fmtN = (r) => (r ? String(r.valid) : "—");
             // 95% CI on the relative candidate−baseline mean difference.
             // Each endpoint is colored individually: negative
@@ -358,17 +358,21 @@ jobs:
 
             const buildTable = () => {
               const lines = [
-                `| scenario | candidate | baseline | Δ (95% CI) | n | engine wall |`,
+                `| scenario | candidate | baseline | Δ (95% CI) | n cand | n base |`,
                 `|---|---|---|---|---|---|`,
               ];
               for (const sc of scenarios) {
                 const c = load('candidate', sc);
                 const b = load('baseline',  sc);
                 const cmp = loadCmp(sc);
-                const cStat = c ? c.mean : null;
-                const bStat = b ? b.mean : null;
+                // Cell stat is the per-side trimmed mean (the same
+                // statistic the BCa CI is computed on), so the cell
+                // numbers and the ± column are consistent. Falls back
+                // to n/a when compare didn't run for this scenario.
+                const cStat = cmp ? cmp.cand_trimmed_mean_ms : null;
+                const bStat = cmp ? cmp.base_trimmed_mean_ms : null;
                 lines.push(
-                  `| ${sc} | ${fmtCell(cStat, c && c.cached)} | ${fmtCell(bStat, b && b.cached)} | ${fmtCI(cmp)} | ${fmtN(c)} | ${fmtWall(c)} |`
+                  `| ${sc} | ${fmtCell(cStat, c && c.cached)} | ${fmtCell(bStat, b && b.cached)} | ${fmtCI(cmp)} | ${fmtN(c)} | ${fmtN(b)} |`
                 );
               }
               return lines.join("\n");
@@ -416,7 +420,7 @@ jobs:
               ``,
               `candidate \`${candSha.slice(0,7)}\` vs baseline \`${baseSha.slice(0,7)}\``,
               ``,
-              `#### sim mean (ms) with 95% CI on the relative delta`,
+              `#### sim trimmed mean (ms) with 95% CI on the relative delta`,
               buildTable(),
               ``,
               `<sub>${costLine}</sub>`,
