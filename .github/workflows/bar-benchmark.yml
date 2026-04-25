@@ -258,12 +258,14 @@ jobs:
           cache-dependency-glob: bar-benchmarks-tool/uv.lock
       - name: uv sync bar-benchmarks
         working-directory: bar-benchmarks-tool
-        run: uv sync --frozen
+        # `--extra plot` pulls altair + pandas + vl-convert-python so
+        # the box-plot step below can render PNGs.
+        run: uv sync --frozen --extra plot
 
-      - name: Compute BCa CI per scenario
+      - name: Compute BCa CI + box plots per scenario
         run: |
           set -euo pipefail
-          mkdir -p comparisons
+          mkdir -p comparisons plots
           # Derive the scenario list from artifacts that actually
           # landed, so deselected scenarios don't show up as warnings.
           for cand in reports/candidate-*-report.json; do
@@ -279,13 +281,52 @@ jobs:
               --candidate "${GITHUB_WORKSPACE}/${cand}" \
               --baseline  "${GITHUB_WORKSPACE}/${base}" \
               --output    "${GITHUB_WORKSPACE}/comparisons/${sc}.json")
+            # Pull a 7-char SHA from the matching summary.json for
+            # human-readable row labels in the plot.
+            cand_sha=$(jq -r '.sha' "reports/candidate-${sc}-summary.json" | cut -c1-7)
+            base_sha=$(jq -r '.sha' "reports/baseline-${sc}-summary.json" | cut -c1-7)
+            (cd bar-benchmarks-tool && uv run bar-bench plot \
+              --candidate "${GITHUB_WORKSPACE}/${cand}" \
+              --baseline  "${GITHUB_WORKSPACE}/${base}" \
+              --label-a   "candidate ${cand_sha}" \
+              --label-b   "baseline ${base_sha}" \
+              --x-title   "sim mean (ms)" \
+              --title     "${sc}" \
+              --output    "${GITHUB_WORKSPACE}/plots/${sc}.png")
           done
 
+      # Upload the PNGs to a public-read GCS prefix so the PR comment
+      # can embed them as standard markdown images. The bucket has
+      # allUsers:objectViewer granted once. Per-run-id keying means
+      # re-running the workflow produces fresh URLs and the
+      # find-or-update comment logic naturally swaps them in.
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.BENCHMARKS_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.BENCHMARKS_OPERATOR_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Upload box plots to GCS
+        id: upload-plots
+        run: |
+          set -euo pipefail
+          if ! ls plots/*.png >/dev/null 2>&1; then
+            echo "::notice::no plots produced — skipping upload"
+            echo "plots-base-url=" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          gcloud storage cp plots/*.png "gs://bar-experiments-bench-plots/${{ github.run_id }}/"
+          echo "plots-base-url=https://storage.googleapis.com/bar-experiments-bench-plots/${{ github.run_id }}" >> "${GITHUB_OUTPUT}"
+
       - uses: actions/github-script@v7
+        env:
+          PLOTS_BASE_URL: ${{ steps.upload-plots.outputs.plots-base-url }}
         with:
           script: |
             const fs = require('fs');
             const path = require('path');
+            const plotsBaseUrl = process.env.PLOTS_BASE_URL || "";
 
             // Derive the scenario list from candidate summary files
             // that actually landed; deselected scenarios are absent.
@@ -414,6 +455,25 @@ jobs:
             const MARKER = "<!-- bar-benchmark:comment -->";
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
 
+            // Box-plot section: one inline image per scenario whose
+            // PNG was uploaded to the public GCS prefix. Wrapped in
+            // <details> so the comment stays scannable; reviewers
+            // expand to inspect distribution shape.
+            const buildPlots = () => {
+              if (!plotsBaseUrl) return "";
+              const imgs = scenarios
+                .filter(sc => fs.existsSync(path.join('plots', `${sc}.png`)))
+                .map(sc => `<p><img alt="${sc}" src="${plotsBaseUrl}/${sc}.png" /></p>`);
+              if (imgs.length === 0) return "";
+              return [
+                `<details><summary>Per-VM distribution box plots (${imgs.length})</summary>`,
+                ``,
+                ...imgs,
+                ``,
+                `</details>`,
+              ].join("\n");
+            };
+
             const body = [
               MARKER,
               `### bar-benchmark — PR #${{ needs.resolve.outputs.pr }}`,
@@ -423,10 +483,12 @@ jobs:
               `#### sim trimmed mean (ms) with 95% CI on the relative delta`,
               buildTable(),
               ``,
+              buildPlots(),
+              ``,
               `<sub>${costLine}</sub>`,
               ``,
               `<sub>last updated: ${new Date().toISOString()} · [workflow run](${runUrl})</sub>`,
-            ].join("\n");
+            ].filter(s => s !== "").join("\n");
 
             // Find-or-update: locate any prior bar-benchmark comment on
             // this PR via the hidden marker and mutate it in place.
