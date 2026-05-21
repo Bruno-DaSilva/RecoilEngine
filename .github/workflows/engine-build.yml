@@ -78,7 +78,7 @@ jobs:
       - nscloud-exp-container-image-cache
     steps:
       - name: Checkout code
-        uses: namespacelabs/nscloud-checkout-action@v7
+        uses: namespacelabs/nscloud-checkout-action@v8.2.2
         with:
           # We fetch full history because engine automatic version naming uses
           # that.
