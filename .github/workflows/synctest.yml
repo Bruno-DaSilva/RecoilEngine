@@ -141,6 +141,10 @@ jobs:
               --filesystem-writepath "$PWD/bar-data" \
               --download-game "${{ env.GAME }}" \
               --download-map  "${{ env.MAP }}"
+        env:
+          PRD_RAPID_USE_STREAMER: "false"
+          PRD_RAPID_REPO_MASTER: "https://repos-cdn.beyondallreason.dev/repos.gz"
+          PRD_HTTP_SEARCH_URL: "https://files-cdn.beyondallreason.dev/find"
 
       - name: Substitute $VERSION in startscript
         run: |
