@@ -215,7 +215,7 @@ jobs:
           for dir in artifacts/synctest-*; do
             # dir name format: synctest-{platform}-{sha}
             platform=$(basename "$dir" | sed "s/^synctest-//; s/-${TESTED_SHA}$//")
-            hash_file="$dir/${{ env.HASH_FILE }}"
+            hash_file="$dir/bar-data/${{ env.HASH_FILE }}"
             if [ -f "$hash_file" ]; then
               digest=$(jq -r .digest "$hash_file")
               echo "$platform ${digest:-MISSING}"
