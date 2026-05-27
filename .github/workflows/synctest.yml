@@ -10,7 +10,7 @@
 # intended as a merge-blocking required check.
 #
 # See test/synctest/README.md for background and how to run locally.
-name: Synctest sync test
+name: Sync test
 
 on:
   workflow_dispatch:
