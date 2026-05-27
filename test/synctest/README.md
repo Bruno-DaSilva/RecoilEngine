@@ -2,8 +2,6 @@
 
 Engine CI sync test driven by BAR's synctest gadget (see beyond-all-reason/Beyond-All-Reason#7440 and #7445). The `.github/workflows/synctest.yml` workflow runs a single seeded scenario on each supported platform (amd64-linux, arm64-linux, amd64-windows) on top of a pinned BAR game + map and asserts that a deterministic sync-hash JSON file lands in `$SPRING_DATADIR`. The `cross-platform-check` job then verifies all platforms produced identical digests, catching architecture-specific desyncs. Background: beyond-all-reason/RecoilEngine#2910, beyond-all-reason/RecoilEngine#2906.
 
-> The startscript and workflow currently invoke `/luarules fightersynctest` and read `fightersynctest_synchash.json` (matching BAR master today, PR #7440). When PR #7445 merges, swap both to `synctest` / `synctest_synchash.json` — see the TODO block on the workflow `env:`.
-
 The gadget itself rotates through unit categories (bots, tanks, fighters, bombers, hover, subs, ships, spiders) internally, so one scenario is enough — no per-category scripts needed.
 
 ## Running locally
@@ -18,7 +16,7 @@ pr-downloader --filesystem-writepath ./bar-data \
 spring-headless --isolation --write-dir ./bar-data test/synctest/synctest-startscript.txt
 ```
 
-A successful run exits 0 at game frame ~2100 (the startscript's trailing `quitforce`) and leaves `bar-data/fightersynctest_synchash.json` (or `synctest_synchash.json` post-#7445) — a JSON file whose `digest` field is what CI compares.
+A successful run exits 0 at game frame ~2100 (the startscript's trailing `quitforce`) and leaves `bar-data/synctest_synchash.json` — a JSON file whose `digest` field is what CI compares.
 
 ## Bumping the pinned BAR version
 
