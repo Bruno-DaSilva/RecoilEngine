@@ -210,6 +210,14 @@ public:
 
 	static size_t GenerateWeaponTargets(const CWeapon* weapon, const CUnit* avoidUnit, std::vector<std::pair<float, CUnit*>>& targets);
 
+	// Declarative auto-target priority (a cheap C++ replacement for the AllowWeaponTarget Lua
+	// callout in the common case where a weapon's target priority is a static function of the
+	// target's unitDef). GenerateWeaponTargets multiplies each candidate's computed priority by
+	// targetPriorityByUnitDef[targetUnitDefID], but only for weapons opted-in via
+	// applyTargetPriorityByWeaponDef[weaponDefID]. Both tables are lazily sized on first use.
+	void SetUnitDefAutoTargetPriority(int unitDefID, float multiplier);
+	void SetWeaponAutoTargetPriorityEnabled(int weaponDefID, bool enabled);
+
 	void Init();
 	void Kill();
 	void Update();
@@ -268,6 +276,10 @@ private:
 public:
 	std::vector<int> targetUnitIDs; // GetEnemyUnits{NoLosTest}
 	std::vector<std::pair<float, CUnit*>> targetPairs; // GenerateWeaponTargets
+
+	// see SetUnitDefAutoTargetPriority / SetWeaponAutoTargetPriorityEnabled
+	std::vector<float>   targetPriorityByUnitDef;       // [targetUnitDefID] -> priority multiplier (default 1)
+	std::vector<uint8_t> applyTargetPriorityByWeaponDef; // [weaponDefID] -> opt-in flag (default 0)
 };
 
 extern CGameHelper* helper;
