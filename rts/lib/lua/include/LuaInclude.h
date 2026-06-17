@@ -30,6 +30,30 @@
 // Never crashes; at worst it is more lenient about wrong-typed optional args.
 static inline bool spring_lua_in_pcall(const lua_State*) { return false; }
 
+// luajit-spike: the PUC fork made lua_toboolean return bool and added a
+// non-asserting luaL_checknumber (the fork's plain luaL_checknumber asserts on
+// NaN/Inf). LuaJIT has neither, so provide adapters.
+static inline bool spring_lua_toboolean(lua_State* L, int idx) { return lua_toboolean(L, idx) != 0; }
+static inline lua_Number luaL_checknumber_noassert(lua_State* L, int idx) { return luaL_checknumber(L, idx); }
+
+// luajit-spike: the PUC fork used 32-bit LUA_NUMBER (float) and LUA_INTEGER
+// (int), and the entire engine was written against those narrower types.
+// LuaJIT uses double / ptrdiff_t, which breaks type-exact templates such as
+// std::clamp / std::min at many call sites. Narrow the engine-facing accessors
+// back at the boundary (matching the fork's truncation) via function-like
+// macros. The wrappers below are defined before the macros so they still call
+// the real functions; bare references (function pointers handed to the
+// luaL_SpringOpt wrappers) are unaffected, since a function-like macro only
+// expands when followed by '('.
+static inline float SpringLua_tonumber    (lua_State* L, int i) { return (float)lua_tonumber(L, i); }
+static inline float SpringLua_checknumber (lua_State* L, int i) { return (float)luaL_checknumber(L, i); }
+static inline int   SpringLua_tointeger   (lua_State* L, int i) { return (int)lua_tointeger(L, i); }
+static inline int   SpringLua_checkinteger(lua_State* L, int i) { return (int)luaL_checkinteger(L, i); }
+#define lua_tonumber(L,i)      SpringLua_tonumber((L),(i))
+#define luaL_checknumber(L,i)  SpringLua_checknumber((L),(i))
+#define lua_tointeger(L,i)     SpringLua_tointeger((L),(i))
+#define luaL_checkinteger(L,i) SpringLua_checkinteger((L),(i))
+
 
 
 ///////////////////////////////////////////////////////////////////////////
@@ -210,11 +234,13 @@ static inline const char* luaL_SpringOptCString(lua_State* L, int idx, const cha
 }
 
 
-#define luaL_optboolean(L,idx,def)     (luaL_SpringOpt<bool>(L,idx,def,::luaL_optboolean,lua_toboolean,LUA_TBOOLEAN,__FUNCTION__))
-#define luaL_optfloat(L,idx,def)       ((float)luaL_SpringOpt<lua_Number>(L,idx,def,::luaL_optfloat,lua_tofloat,LUA_TNUMBER,__FUNCTION__))
-#define luaL_optinteger(L,idx,def)     (luaL_SpringOpt<lua_Integer>(L,idx,def,::luaL_optinteger,lua_tointeger,LUA_TNUMBER,__FUNCTION__))
+#define luaL_optboolean(L,idx,def)     (luaL_SpringOpt<bool>(L,idx,def,::luaL_optboolean,spring_lua_toboolean,LUA_TBOOLEAN,__FUNCTION__))
+// luajit-spike: instantiate with float (not lua_Number, which is double under
+// LuaJIT) since the paired helpers ::luaL_optfloat / lua_tofloat are float-typed.
+#define luaL_optfloat(L,idx,def)       (luaL_SpringOpt<float>(L,idx,def,::luaL_optfloat,lua_tofloat,LUA_TNUMBER,__FUNCTION__))
+#define luaL_optinteger(L,idx,def)     ((int)luaL_SpringOpt<lua_Integer>(L,idx,def,::luaL_optinteger,lua_tointeger,LUA_TNUMBER,__FUNCTION__))
 #define luaL_optlstring(L,idx,def,len) (luaL_SpringOptCString(L,idx,def,len,::luaL_optlstring,lua_tolstring,LUA_TSTRING,__FUNCTION__))
-#define luaL_optnumber(L,idx,def)      (luaL_SpringOpt<lua_Number>(L,idx,def,::luaL_optnumber,lua_tonumber,LUA_TNUMBER,__FUNCTION__))
+#define luaL_optnumber(L,idx,def)      ((float)luaL_SpringOpt<lua_Number>(L,idx,def,::luaL_optnumber,lua_tonumber,LUA_TNUMBER,__FUNCTION__))
 
 #define luaL_optsstring(L,idx,def)     (luaL_SpringOptString(L,idx,def,::luaL_optsstring,luaL_tosstring,LUA_TSTRING,__FUNCTION__))
 
