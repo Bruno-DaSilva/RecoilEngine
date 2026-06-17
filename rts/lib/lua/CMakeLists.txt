@@ -53,7 +53,11 @@ add_custom_command(
 	# in-tree build, so `make clean` in the copy guarantees a from-scratch build
 	# (and regenerates luajit.h / lj_vm.S / ... into the copy, not the source).
 	COMMAND ${CMAKE_COMMAND} -E copy_directory ${LUAJIT_DIR} ${LUAJIT_BUILD_DIR}
-	COMMAND ${CMAKE_COMMAND} -E env make -C ${LUAJIT_BUILD_DIR}/src clean
+	# Pass CC here too: LuaJIT's Makefile detects the target arch at parse time
+	# via `$(CC) -E lj_arch.h`, so even `clean` needs a CC that exists (the
+	# docker image has gcc-13, not a bare `gcc`).
+	COMMAND ${CMAKE_COMMAND} -E env make -C ${LUAJIT_BUILD_DIR}/src
+	        "CC=${CMAKE_C_COMPILER} -fPIC" clean
 	COMMAND ${CMAKE_COMMAND} -E env make -C ${LUAJIT_BUILD_DIR}/src
 	        BUILDMODE=static
 	        LJCORE_O=ljamalg.o
