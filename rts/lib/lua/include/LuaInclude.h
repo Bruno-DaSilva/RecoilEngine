@@ -11,10 +11,24 @@
 #include "lua.h"
 #include "lualib.h"
 #include "lauxlib.h"
-#include "lib/lua/src/lstate.h"
 #include "lib/streflop/streflop_cond.h"
 #include "System/Log/ILog.h"
 #include "System/BranchPrediction.h"
+
+// luajit-spike: the engine calls lua_lock()/lua_unlock() directly in a few
+// places. On master these map to LuaMutex* (no-ops, since ENABLE_USERSTATE_LOCKS
+// is 0). LuaJIT does not expose these hooks to embedders, so define them here.
+#undef lua_lock
+#undef lua_unlock
+#define lua_lock(L)   LuaMutexLock(L)
+#define lua_unlock(L) LuaMutexUnlock(L)
+
+// luajit-spike: PUC exposed L->errorJmp so the Spring opt-wrappers below could
+// tell whether they run inside a protected call (safe to raise) or not (must
+// not longjmp -> exit). LuaJIT does not expose this; conservatively report
+// "not protected" so the wrappers warn + return the default instead of raising.
+// Never crashes; at worst it is more lenient about wrong-typed optional args.
+static inline bool spring_lua_in_pcall(const lua_State*) { return false; }
 
 
 
@@ -147,7 +161,7 @@ static inline int luaS_absIndex(lua_State* L, const int i)
 template<typename T>
 static inline T luaL_SpringOpt(lua_State* L, int idx, const T def, T(*lua_optFoo)(lua_State*, int, const T), T(*lua_toFoo)(lua_State*, int), int typeFoo, const char* caller)
 {
-	if (L->errorJmp)
+	if (spring_lua_in_pcall(L))
 		return (*lua_optFoo)(L, idx, def);
 
 	T ret = (*lua_toFoo)(L, idx);
@@ -163,7 +177,7 @@ static inline T luaL_SpringOpt(lua_State* L, int idx, const T def, T(*lua_optFoo
 
 static inline std::string luaL_SpringOptString(lua_State* L, int idx, const std::string& def, std::string(*lua_optFoo)(lua_State*, int, const std::string&), std::string(*lua_toFoo)(lua_State*, int), int typeFoo, const char* caller)
 {
-	if (L->errorJmp)
+	if (spring_lua_in_pcall(L))
 		return (*lua_optFoo)(L, idx, def);
 
 	std::string ret = (*lua_toFoo)(L, idx);
@@ -179,7 +193,7 @@ static inline std::string luaL_SpringOptString(lua_State* L, int idx, const std:
 
 static inline const char* luaL_SpringOptCString(lua_State* L, int idx, const char* def, size_t* len, const char*(*lua_optFoo)(lua_State*, int, const char*, size_t*), const char*(*lua_toFoo)(lua_State*, int, size_t*), int typeFoo, const char* caller)
 {
-	if (L->errorJmp)
+	if (spring_lua_in_pcall(L))
 		return (*lua_optFoo)(L, idx, def, len);
 
 	const char* ret = (*lua_toFoo)(L, idx, len);
@@ -223,7 +237,12 @@ struct luaContextData;
 
 static inline luaContextData* GetLuaContextData(const lua_State* L)
 {
-	return reinterpret_cast<luaContextData*>(G(L)->ud);
+	// luajit-spike: PUC read this off the global_State (G(L)->ud). LuaJIT keeps
+	// it opaque, but the context pointer is the `ud` we passed to lua_newstate,
+	// which lua_getallocf returns (shared across the state + its coroutines).
+	void* ud = nullptr;
+	lua_getallocf(const_cast<lua_State*>(L), &ud);
+	return reinterpret_cast<luaContextData*>(ud);
 }
 
 static inline lua_State* LUA_OPEN(luaContextData* lcd) {

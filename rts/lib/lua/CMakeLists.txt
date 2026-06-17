@@ -1,64 +1,53 @@
 # Spring supplied CMake build file
+#
+# luajit-spike: the engine's `lua` target is built against vendored LuaJIT 2.1
+# (rts/lib/luajit) instead of the modified PUC Lua 5.1 that used to live in
+# this directory's src/. We build LuaJIT via its own (well-tested) Makefile and
+# wrap it in a small static lib that carries the engine-side glue (LuaUser.cpp)
+# and the fork's custom-symbol shim. Sync determinism is out of scope on this
+# pass -- this is purely to measure the performance delta.
 
 # deactivate signaling-NANs for this library
 remove_flag("-fsignaling-nans")
 
 INCLUDE_DIRECTORIES(BEFORE ../streflop include)
 
+set(LUAJIT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../luajit)
+set(LUAJIT_LIB ${LUAJIT_DIR}/src/libluajit.a)
+
+# Native (host == target) build. -fPIC so the static archive links into the
+# (PIE) engine. Driven through CC so the host tools pick it up too.
+add_custom_command(
+	OUTPUT  ${LUAJIT_LIB}
+	COMMAND ${CMAKE_COMMAND} -E env make -C ${LUAJIT_DIR}
+	        BUILDMODE=static
+	        "CC=${CMAKE_C_COMPILER} -fPIC"
+	        amalg
+	DEPENDS ${LUAJIT_DIR}/Makefile ${LUAJIT_DIR}/src/Makefile
+	COMMENT "Building vendored LuaJIT 2.1 (static, PIC)"
+	VERBATIM
+)
+add_custom_target(luajit_build DEPENDS ${LUAJIT_LIB})
+
 SET(luaSources
-		"src/lapi.cpp"
-		"src/lauxlib.cpp"
-		"src/lbaselib.cpp"
-		"src/lcode.cpp"
-		"src/ldblib.cpp"
-		"src/ldebug.cpp"
-		"src/ldo.cpp"
-		"src/ldump.cpp"
-		"src/lfunc.cpp"
-		"src/lgc.cpp"
-		"src/linit.cpp"
-		"src/liolib.cpp"
-		"src/llex.cpp"
-		"src/lmathlib.cpp"
-		"src/lmem.cpp"
-		"src/loadlib.cpp"
-		"src/lobject.cpp"
-		"src/lopcodes.cpp"
-		"src/loslib.cpp"
-		"src/lparser.cpp"
-		"src/lstate.cpp"
-		"src/lstring.cpp"
-		"src/lstrlib.cpp"
-		"src/ltable.cpp"
-		"src/ltablib.cpp"
-		"src/ltm.cpp"
-		"src/lundump.cpp"
-		"src/lvm.cpp"
-		"src/lzio.cpp"
-		"src/print.cpp"
-		"src/lua_privileges.cpp"
+		"src/spring_luajit_shim.cpp"
 		"include/LuaUser.cpp"
 	)
 
 ADD_LIBRARY(lua STATIC EXCLUDE_FROM_ALL ${luaSources})
+add_dependencies(lua luajit_build)
+
+# Consumers (engine, luasocket) get LuaJIT's headers (via the forwarders in
+# include/) and link the LuaJIT archive.
+target_include_directories(lua PUBLIC include ${LUAJIT_DIR}/src)
+target_link_libraries(lua PUBLIC ${LUAJIT_LIB} ${CMAKE_DL_LIBS})
 
 if (ENABLE_STREFLOP)
-TARGET_LINK_LIBRARIES(lua streflop)
-else ()
-TARGET_LINK_LIBRARIES(lua)
+	TARGET_LINK_LIBRARIES(lua PUBLIC streflop)
 endif ()
-
-target_include_directories(lua PUBLIC include)
 
 if (UNIX)
 	SET_TARGET_PROPERTIES(lua PROPERTIES COMPILE_FLAGS "-DLUA_USE_MKSTEMP ${PIC_FLAG}")
 else (UNIX)
 	SET_TARGET_PROPERTIES(lua PROPERTIES COMPILE_FLAGS "${PIC_FLAG}")
 endif (UNIX)
-
-# Vendored lua has an intentional empty-body loop (lauxlib.cpp shebang skip).
-if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-	target_compile_options(lua PRIVATE
-		-Wno-empty-body
-	)
-endif()
