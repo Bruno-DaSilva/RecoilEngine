@@ -9,7 +9,7 @@
 # Tier 1 synced determinism: LuaJIT is built with a fixed string-hash seed
 # (LUAJIT_SECURITY_*=0) so table iteration order is identical across clients,
 # and its interpreter math is routed through streflop (spring_luajit_detmath +
-# the vm_x86.dasc lj_sfm_* redirects). The synced VM additionally runs
+# the vm_x64.dasc lj_sfm_* redirects). The synced VM additionally runs
 # interpreter-only (jit.off, see CSyncedLuaHandle::Init).
 
 # deactivate signaling-NANs for this library
@@ -18,7 +18,15 @@ remove_flag("-fsignaling-nans")
 INCLUDE_DIRECTORIES(BEFORE ../streflop include)
 
 set(LUAJIT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../luajit)
-set(LUAJIT_LIB ${LUAJIT_DIR}/src/libluajit.a)
+# LuaJIT's Makefile builds strictly in-tree: it writes intermediate objects
+# (host/minilua.o, ...) and *generated* headers (luajit.h, lj_bcdef.h, lj_vm.S,
+# ...) straight into src/. The official docker build mounts the source tree
+# read-only ("can't create host/minilua.o: Read-only file system"), so we build
+# a private copy of the whole vendored tree under the (writable) CMake binary
+# dir and link/include from there. Local (writable-source) builds work the same
+# way; nothing is written back into the source tree anymore.
+set(LUAJIT_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/luajit)
+set(LUAJIT_LIB ${LUAJIT_BUILD_DIR}/src/libluajit.a)
 
 # Rebuild the archive when any vendored LuaJIT source changes (e.g. our 5.1
 # lexer-compat patch or the vm_x86.dasc streflop redirects). GLOB is
@@ -40,7 +48,13 @@ file(GLOB LUAJIT_SRCS
 # refs resolve there. LJCORE_O=ljamalg.o keeps the fast amalgamated compile.
 add_custom_command(
 	OUTPUT  ${LUAJIT_LIB}
-	COMMAND ${CMAKE_COMMAND} -E env make -C ${LUAJIT_DIR}/src
+	# Refresh the writable copy, then build it clean. copy_directory does not
+	# prune files removed upstream and may drag in stale objects from a prior
+	# in-tree build, so `make clean` in the copy guarantees a from-scratch build
+	# (and regenerates luajit.h / lj_vm.S / ... into the copy, not the source).
+	COMMAND ${CMAKE_COMMAND} -E copy_directory ${LUAJIT_DIR} ${LUAJIT_BUILD_DIR}
+	COMMAND ${CMAKE_COMMAND} -E env make -C ${LUAJIT_BUILD_DIR}/src clean
+	COMMAND ${CMAKE_COMMAND} -E env make -C ${LUAJIT_BUILD_DIR}/src
 	        BUILDMODE=static
 	        LJCORE_O=ljamalg.o
 	        "CC=${CMAKE_C_COMPILER} -fPIC"
@@ -58,7 +72,7 @@ add_custom_target(luajit_build DEPENDS ${LUAJIT_LIB})
 # appear AFTER libluajit.a on the link line: it lives in its own archive linked
 # after ${LUAJIT_LIB} below, not folded into liblua.a (which links first).
 ADD_LIBRARY(luajit_detmath STATIC EXCLUDE_FROM_ALL "src/spring_luajit_detmath.cpp")
-target_include_directories(luajit_detmath PUBLIC ${LUAJIT_DIR}/src)
+target_include_directories(luajit_detmath PUBLIC ${LUAJIT_BUILD_DIR}/src)
 if (ENABLE_STREFLOP)
 	TARGET_LINK_LIBRARIES(luajit_detmath PUBLIC streflop)
 endif ()
@@ -74,7 +88,7 @@ add_dependencies(lua luajit_build)
 # Consumers (engine, luasocket) get LuaJIT's headers (via the forwarders in
 # include/) and link the LuaJIT archive. Order matters: libluajit.a first, then
 # luajit_detmath (resolves lj_sfm_*), then streflop (resolves detmath).
-target_include_directories(lua PUBLIC include ${LUAJIT_DIR}/src)
+target_include_directories(lua PUBLIC include ${LUAJIT_BUILD_DIR}/src)
 target_link_libraries(lua PUBLIC ${LUAJIT_LIB} luajit_detmath ${CMAKE_DL_LIBS})
 
 if (UNIX)
