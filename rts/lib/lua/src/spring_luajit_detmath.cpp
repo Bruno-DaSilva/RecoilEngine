@@ -16,23 +16,43 @@
 
 #include "lib/streflop/streflop_cond.h"
 
+/*
+** Args MUST be wrapped in streflop::Double. streflop's math functions are
+** overloaded on its Simple/Double/Extended wrapper types (SMath.h); calling
+** them with a raw `double` resolves to the wrong overload (the Extended /
+** long-double path, broken under STREFLOP_SSE) and returns garbage -- e.g.
+** pow(2,3) came back as 92581. Double(x) selects the fdlibm double overload,
+** matching what the engine's own math:: wrappers (streflop_cond.h) do.
+*/
+using streflop::Simple;
+
+/*
+** Route through streflop's Simple (32-bit float) functions, exactly as the PUC
+** fork's lmathlib did (math::pow -> streflop::pow(Simple,Simple)). The engine
+** runs synced code with the FPU limited to float precision (streflop_init<
+** Simple>, see LuaUser.cpp), and streflop's Double fdlibm routines misbehave in
+** that context (pow(2,3) came back as 92581). The Simple routines match the
+** ambient mode and are what the fork used for determinism. We take a small
+** precision hit vs LuaJIT's native doubles, but that is precisely the float
+** precision BAR's synced code was written against.
+*/
 extern "C" {
 
-double lj_sfm_sin  (double x)           { return streflop::sin(x); }
-double lj_sfm_cos  (double x)           { return streflop::cos(x); }
-double lj_sfm_tan  (double x)           { return streflop::tan(x); }
-double lj_sfm_asin (double x)           { return streflop::asin(x); }
-double lj_sfm_acos (double x)           { return streflop::acos(x); }
-double lj_sfm_atan (double x)           { return streflop::atan(x); }
-double lj_sfm_sinh (double x)           { return streflop::sinh(x); }
-double lj_sfm_cosh (double x)           { return streflop::cosh(x); }
-double lj_sfm_tanh (double x)           { return streflop::tanh(x); }
-double lj_sfm_exp  (double x)           { return streflop::exp(x); }
-double lj_sfm_log  (double x)           { return streflop::log(x); }
-double lj_sfm_log10(double x)           { return streflop::log10(x); }
-double lj_sfm_pow  (double x, double y) { return streflop::pow(x, y); }
-double lj_sfm_atan2(double x, double y) { return streflop::atan2(x, y); }
-double lj_sfm_fmod (double x, double y) { return streflop::fmod(x, y); }
+double lj_sfm_sin  (double x)           { return (double)streflop::sin  (Simple((float)x)); }
+double lj_sfm_cos  (double x)           { return (double)streflop::cos  (Simple((float)x)); }
+double lj_sfm_tan  (double x)           { return (double)streflop::tan  (Simple((float)x)); }
+double lj_sfm_asin (double x)           { return (double)streflop::asin (Simple((float)x)); }
+double lj_sfm_acos (double x)           { return (double)streflop::acos (Simple((float)x)); }
+double lj_sfm_atan (double x)           { return (double)streflop::atan (Simple((float)x)); }
+double lj_sfm_sinh (double x)           { return (double)streflop::sinh (Simple((float)x)); }
+double lj_sfm_cosh (double x)           { return (double)streflop::cosh (Simple((float)x)); }
+double lj_sfm_tanh (double x)           { return (double)streflop::tanh (Simple((float)x)); }
+double lj_sfm_exp  (double x)           { return (double)streflop::exp  (Simple((float)x)); }
+double lj_sfm_log  (double x)           { return (double)streflop::log  (Simple((float)x)); }
+double lj_sfm_log10(double x)           { return (double)streflop::log10(Simple((float)x)); }
+double lj_sfm_pow  (double x, double y) { return (double)streflop::pow  (Simple((float)x), Simple((float)y)); }
+double lj_sfm_atan2(double x, double y) { return (double)streflop::atan2(Simple((float)x), Simple((float)y)); }
+double lj_sfm_fmod (double x, double y) { return (double)streflop::fmod (Simple((float)x), Simple((float)y)); }
 
 } // extern "C"
 
