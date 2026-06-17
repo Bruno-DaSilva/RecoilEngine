@@ -35,3 +35,16 @@ double lj_sfm_atan2(double x, double y) { return streflop::atan2(x, y); }
 double lj_sfm_fmod (double x, double y) { return streflop::fmod(x, y); }
 
 } // extern "C"
+
+/*
+** luajit-spike: satisfy a latent streflop mangling bug. mpsqrt.cpp forward-
+** declares fastiroot() at *global* scope but defines it inside namespace
+** streflop_libm, so __mpsqrt's call references ::fastiroot(double)
+** (_Z9fastirootd) while only streflop_libm::fastiroot(double) is defined. The
+** engine's own synced math never pulls mpsqrt.o, but routing LuaJIT's pow/sqrt
+** through streflop does -- which is the first thing to expose the missing ref.
+** Forward the global symbol to the real definition rather than patching the
+** streflop submodule (kept self-contained on this spike branch).
+*/
+namespace streflop_libm { double fastiroot(double); }
+double fastiroot(double x) { return streflop_libm::fastiroot(x); }
