@@ -67,16 +67,15 @@ endif ()
 
 add_custom_command(
 	OUTPUT  ${LUAJIT_LIB}
-	# Refresh the writable copy, then build it clean. copy_directory does not
-	# prune files removed upstream and may drag in stale objects from a prior
-	# in-tree build, so `make clean` in the copy guarantees a from-scratch build
-	# (and regenerates luajit.h / lj_vm.S / ... into the copy, not the source).
+	# Wipe any previous copy, THEN copy fresh. copy_directory MERGES into an
+	# existing dir and never prunes, so a stale/partial tree left in the build
+	# dir by an earlier run would survive (this broke CI: a leftover truncated
+	# Makefile had no `clean` target). Removing first guarantees a pristine,
+	# from-scratch tree -- which also lets us drop the previous `make clean`
+	# step (its only purpose was to prune copy_directory leftovers). The build
+	# regenerates luajit.h / lj_vm.S / ... into the copy, never the source.
+	COMMAND ${CMAKE_COMMAND} -E remove_directory ${LUAJIT_BUILD_DIR}
 	COMMAND ${CMAKE_COMMAND} -E copy_directory ${LUAJIT_DIR} ${LUAJIT_BUILD_DIR}
-	# Pass the CC knobs here too: LuaJIT detects the target arch at parse time
-	# via `$(TARGET_CC) -E lj_arch.h`, so even `clean` needs a CC that exists
-	# (the images have gcc-13 / mingw, not a bare `gcc`).
-	COMMAND ${CMAKE_COMMAND} -E env make -C ${LUAJIT_BUILD_DIR}/src
-	        ${LUAJIT_MAKE_CC} clean
 	COMMAND ${CMAKE_COMMAND} -E env make -C ${LUAJIT_BUILD_DIR}/src
 	        BUILDMODE=static
 	        LJCORE_O=ljamalg.o
