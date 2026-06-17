@@ -19,6 +19,20 @@
 extern "C" {
 #endif
 #include "../../luajit/src/lua.h"
+
+/*
+** JIT engine control. The real declarations live in luajit.h, which is
+** generated from luajit_rolling.h at build time (the latter has a #error guard
+** against direct inclusion). Rather than depend on a generated header, declare
+** the small, stable LuaJIT 2.1 public-ABI subset we need to run the synced VM
+** interpreter-only (see CSyncedLuaHandle::Init).
+*/
+#ifndef LUAJIT_MODE_ENGINE
+#define LUAJIT_MODE_ENGINE 0       /* first entry of luajit.h's mode enum */
+#define LUAJIT_MODE_OFF    0x0000  /* turn feature off */
+LUA_API int luaJIT_setmode(lua_State *L, int idx, int mode);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

@@ -2125,7 +2125,7 @@ static void build_subroutines(BuildCtx *ctx)
   |  movsd FPARG1, xmm0
   |.endif
   |  mov RB, BASE
-  |  call extern log
+  |  call extern lj_sfm_log		// luajit-spike: deterministic (streflop)
   |  mov BASE, RB
   |  jmp ->fff_resfp
   |
@@ -2135,7 +2135,7 @@ static void build_subroutines(BuildCtx *ctx)
   |  movsd FPARG1, xmm0
   |.endif
   |  mov RB, BASE
-  |  call extern func
+  |  call extern lj_sfm_ .. func	// luajit-spike: deterministic (streflop)
   |  mov BASE, RB
   |  jmp ->fff_resfp
   |.endmacro
@@ -2147,7 +2147,7 @@ static void build_subroutines(BuildCtx *ctx)
   |  movsd FPARG3, xmm1
   |.endif
   |  mov RB, BASE
-  |  call extern func
+  |  call extern lj_sfm_ .. func	// luajit-spike: deterministic (streflop)
   |  mov BASE, RB
   |  jmp ->fff_resfp
   |.endmacro
@@ -4041,7 +4041,7 @@ static void build_ins(BuildCtx *ctx, BCOp op, int defop)
     |  movsd FPARG1, xmm0
     |  movsd FPARG3, xmm1
     |.endif
-    |  call extern pow
+    |  call extern lj_sfm_pow		// luajit-spike: deterministic ^ (streflop)
     |  movzx RA, PC_RA
     |  mov BASE, RB
     |.if X64

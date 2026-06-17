@@ -425,6 +425,13 @@ bool CSyncedLuaHandle::Init(std::string code, const std::string& file)
 	if (!IsValid())
 		return false;
 
+	// luajit-spike Tier 1: run the synced VM interpreter-only. LuaJIT's tracing
+	// JIT can yield FP results that differ from the interpreter (e.g. it folds
+	// x^2 -> x*x) and emits CPU-dependent code, either of which would desync
+	// multiplayer. The interpreter -- with streflop-routed math and a fixed
+	// string-hash seed -- is deterministic across clients. Unsynced keeps JIT.
+	luaJIT_setmode(L, 0, LUAJIT_MODE_ENGINE | LUAJIT_MODE_OFF);
+
 	watchUnitDefs.resize(unitDefHandler->NumUnitDefs() + 1, false);
 	watchFeatureDefs.resize(featureDefHandler->NumFeatureDefs() + 1, false);
 	watchExplosionDefs.resize(weaponDefHandler->NumWeaponDefs(), false);
