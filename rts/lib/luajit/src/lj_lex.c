@@ -255,7 +255,9 @@ static void lex_string(LexState *ls, TValue *tv)
       case LEX_EOF: continue;
       default:
 	if (!lj_char_isdigit(c))
-	  goto err_xesc;
+	  break;  /* luajit-spike: Lua 5.1 silently accepts unknown escape
+	             sequences (keep the char, drop the backslash). BAR content
+	             relies on this; LuaJIT's 5.2+ semantics would error here. */
 	c -= '0';  /* Decimal escape '\ddd'. */
 	if (lj_char_isdigit(lex_next(ls))) {
 	  c = c*10 + (ls->c - '0');

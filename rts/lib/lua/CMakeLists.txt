@@ -15,6 +15,12 @@ INCLUDE_DIRECTORIES(BEFORE ../streflop include)
 set(LUAJIT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../luajit)
 set(LUAJIT_LIB ${LUAJIT_DIR}/src/libluajit.a)
 
+# Rebuild the archive when any vendored LuaJIT source changes (e.g. our 5.1
+# lexer-compat patch). GLOB is configure-time, which is fine for edits.
+file(GLOB LUAJIT_SRCS
+	${LUAJIT_DIR}/src/*.c ${LUAJIT_DIR}/src/*.h
+	${LUAJIT_DIR}/Makefile ${LUAJIT_DIR}/src/Makefile)
+
 # Native (host == target) build. -fPIC so the static archive links into the
 # (PIE) engine. Driven through CC so the host tools pick it up too.
 add_custom_command(
@@ -23,7 +29,7 @@ add_custom_command(
 	        BUILDMODE=static
 	        "CC=${CMAKE_C_COMPILER} -fPIC"
 	        amalg
-	DEPENDS ${LUAJIT_DIR}/Makefile ${LUAJIT_DIR}/src/Makefile
+	DEPENDS ${LUAJIT_SRCS}
 	COMMENT "Building vendored LuaJIT 2.1 (static, PIC)"
 	VERBATIM
 )
