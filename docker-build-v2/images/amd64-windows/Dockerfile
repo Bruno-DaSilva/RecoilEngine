@@ -4,7 +4,7 @@ ENV ENGINE_PLATFORM=amd64-windows
 RUN apt-get update \
  && apt-get upgrade --yes \
  && apt-get install --no-install-recommends --yes \
-    g++-mingw-w64-x86-64-posix git ninja-build ccache pipx p7zip-full binutils zstd \
+    g++-mingw-w64-x86-64-posix gcc-13 libc6-dev make git ninja-build ccache pipx p7zip-full binutils zstd \
  && rm -rf /var/lib/apt/lists/*
 
 # Using `pipx --global` would be better but it's available only since pipx 1.5

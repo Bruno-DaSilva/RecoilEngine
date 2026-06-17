@@ -46,6 +46,25 @@ file(GLOB LUAJIT_SRCS
 # are defined in liblua.a (spring_luajit_detmath.cpp, C++/streflop), not inside
 # LuaJIT's own C world. The engine links liblua.a + libluajit.a together, so the
 # refs resolve there. LJCORE_O=ljamalg.o keeps the fast amalgamated compile.
+# LuaJIT's Makefile knobs differ for a native build vs cross-compiling. On a
+# native (host == target) build we just hand it the engine's compiler. When
+# cross-compiling to Windows with mingw we MUST follow LuaJIT's documented cross
+# recipe (see its src/Makefile header): the host tools minilua/buildvm run on
+# the *build* machine and emit the target VM, so HOST_CC has to be a native
+# compiler (the image carries plain `gcc`), while the target objects go through
+# the mingw cross-compiler via CROSS+CC. TARGET_SYS=Windows picks the Win64
+# VM/ABI. Jamming the mingw compiler into CC (the native recipe) wrongly builds
+# the host tools for Windows, which then can't execute on the linux host.
+if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
+	set(LUAJIT_MAKE_CC
+		HOST_CC=gcc-13
+		CROSS=x86_64-w64-mingw32-
+		CC=gcc-posix
+		TARGET_SYS=Windows)
+else ()
+	set(LUAJIT_MAKE_CC "CC=${CMAKE_C_COMPILER} -fPIC")
+endif ()
+
 add_custom_command(
 	OUTPUT  ${LUAJIT_LIB}
 	# Refresh the writable copy, then build it clean. copy_directory does not
@@ -53,15 +72,15 @@ add_custom_command(
 	# in-tree build, so `make clean` in the copy guarantees a from-scratch build
 	# (and regenerates luajit.h / lj_vm.S / ... into the copy, not the source).
 	COMMAND ${CMAKE_COMMAND} -E copy_directory ${LUAJIT_DIR} ${LUAJIT_BUILD_DIR}
-	# Pass CC here too: LuaJIT's Makefile detects the target arch at parse time
-	# via `$(CC) -E lj_arch.h`, so even `clean` needs a CC that exists (the
-	# docker image has gcc-13, not a bare `gcc`).
+	# Pass the CC knobs here too: LuaJIT detects the target arch at parse time
+	# via `$(TARGET_CC) -E lj_arch.h`, so even `clean` needs a CC that exists
+	# (the images have gcc-13 / mingw, not a bare `gcc`).
 	COMMAND ${CMAKE_COMMAND} -E env make -C ${LUAJIT_BUILD_DIR}/src
-	        "CC=${CMAKE_C_COMPILER} -fPIC" clean
+	        ${LUAJIT_MAKE_CC} clean
 	COMMAND ${CMAKE_COMMAND} -E env make -C ${LUAJIT_BUILD_DIR}/src
 	        BUILDMODE=static
 	        LJCORE_O=ljamalg.o
-	        "CC=${CMAKE_C_COMPILER} -fPIC"
+	        ${LUAJIT_MAKE_CC}
 	        "XCFLAGS=-DLUAJIT_SECURITY_PRNG=0 -DLUAJIT_SECURITY_STRHASH=0 -DLUAJIT_SECURITY_STRID=0"
 	        libluajit.a
 	DEPENDS ${LUAJIT_SRCS}
