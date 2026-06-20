@@ -15,6 +15,7 @@
 #include "LuaMathExtra.h"
 #include "LuaTableExtra.h"
 #include "LuaTracyExtra.h"
+#include "LuaUnsyncedRead.h"
 #include "LuaUtils.h"
 #include "LuaZip.h"
 #include "Game/Game.h"
@@ -138,6 +139,27 @@ static int handlepanic(lua_State* L)
 }
 
 
+// Wrappers that drive the CPU-attribution profiler (/profiledump) from the
+// per-addon tracy zones the widget/gadget handlers already emit, while still
+// calling the original tracy.ZoneBeginN/ZoneEnd (captured as upvalue 1) so Tracy
+// itself keeps working when compiled in. Installed onto the global tracy table at
+// state init below; gated on the profiling config there.
+static int profilerZoneBeginWrap(lua_State* L)
+{
+	lua_pushvalue(L, lua_upvalueindex(1)); // original tracy.ZoneBeginN
+	lua_pushvalue(L, 1);                   // zone name
+	lua_call(L, 1, 0);
+	return LuaUnsyncedRead::ProfilerPushZone(L); // reads the name at index 1
+}
+
+static int profilerZoneEndWrap(lua_State* L)
+{
+	lua_pushvalue(L, lua_upvalueindex(1)); // original tracy.ZoneEnd
+	lua_call(L, 0, 0);
+	return LuaUnsyncedRead::ProfilerPopZone(L);
+}
+
+
 
 CLuaHandle::CLuaHandle(const string& _name, int _order, bool _userMode, bool _synced)
 	: CEventClient(_name, _order, _synced)
@@ -177,6 +199,28 @@ CLuaHandle::CLuaHandle(const string& _name, int _order, bool _userMode, bool _sy
 		LuaTracyExtra::PushEntries(L);
 		lua_pop(L, 1);
 	#endif
+
+	// Drive the CPU-attribution profiler (/profiledump) from the per-addon tracy zones
+	// the widget/gadget handlers already emit (W:DrawScreen:<widget>, G:GameFrame:<gadget>,
+	// ...), so time attributes per addon with no game-side changes. Wrap (not replace)
+	// tracy.ZoneBeginN/ZoneEnd on the state's global table so each zone also drives
+	// ProfilerPushZone/PopZone while Tracy still works when compiled in. Gated on the
+	// profiling config => zero overhead in normal play; ProfilerPushZone itself no-ops
+	// until a dump force-enables the profiler. NOTE: this only works because
+	// LuaUtils::TracyRemoveAlsoExtras keeps the zone calls in the script source under
+	// the same config (otherwise Tracy strips the calls and there is nothing to drive).
+	if (configHandler != nullptr && configHandler->GetInt("LuaTrackCalloutCounts") > 0) {
+		lua_getglobal(L, "tracy");
+		if (lua_istable(L, -1)) {
+			lua_getfield(L, -1, "ZoneBeginN");
+			lua_pushcclosure(L, profilerZoneBeginWrap, 1);
+			lua_setfield(L, -2, "ZoneBeginN");
+			lua_getfield(L, -1, "ZoneEnd");
+			lua_pushcclosure(L, profilerZoneEndWrap, 1);
+			lua_setfield(L, -2, "ZoneEnd");
+		}
+		lua_pop(L, 1);
+	}
 }
 
 

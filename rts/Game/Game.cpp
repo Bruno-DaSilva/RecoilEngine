@@ -1676,6 +1676,10 @@ void CGame::StartPlaying()
 static const char* const tracingSimFrameName = "SimFrame";
 
 void CGame::SimFrame() {
+	// tag every zone (incl. unsynced widget callins run from here) as sim-budget,
+	// so the profiler can split sim vs draw/update time
+	ScopedSimFramePhase simPhase;
+
 	ENTER_SYNCED_CODE();
 	ASSERT_SYNCED(gsRNG.GetGenState());
 
@@ -1801,6 +1805,9 @@ void CGame::SimFrame() {
 	eventHandler.DbgTimingInfo(TIMING_SIM, lastFrameTime, lastSimFrameTime);
 
 	FrameMarkEnd(tracingSimFrameName);
+
+	// sample per-sim-frame profiler self/inclusive/count for an active /profiledump
+	CTimeProfiler::GetInstance().DumpFrame(gs->frameNum);
 
 	#ifdef HEADLESS
 	{

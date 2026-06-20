@@ -21,6 +21,9 @@ class LuaUnsyncedRead {
 
 		static int GetProfilerTimeRecord(lua_State* L);
 		static int GetProfilerRecordNames(lua_State* L);
+		static int GetCalloutCounts(lua_State* L);
+		static int ProfilerPushZone(lua_State* L);
+		static int ProfilerPopZone(lua_State* L);
 
 		static int GetLuaMemUsage(lua_State* L);
 		static int GetVidMemUsage(lua_State* L);

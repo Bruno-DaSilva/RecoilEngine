@@ -72,6 +72,8 @@
 #include "System/Sound/ISound.h"
 #include "System/Sound/ISoundChannels.h"
 #include "System/StringUtil.h"
+#include "System/StringHash.h"
+#include "System/UnorderedSet.hpp"
 #include "System/Misc/SpringTime.h"
 #include "System/ScopedResource.h"
 #include "System/Math/NURBS.h"
@@ -106,6 +108,9 @@ bool LuaUnsyncedRead::PushEntries(lua_State* L)
 
 	REGISTER_LUA_CFUNC(GetProfilerTimeRecord);
 	REGISTER_LUA_CFUNC(GetProfilerRecordNames);
+	REGISTER_LUA_CFUNC(GetCalloutCounts);
+	REGISTER_LUA_CFUNC(ProfilerPushZone);
+	REGISTER_LUA_CFUNC(ProfilerPopZone);
 
 	REGISTER_LUA_CFUNC(GetLuaMemUsage);
 	REGISTER_LUA_CFUNC(GetVidMemUsage);
@@ -547,18 +552,22 @@ int LuaUnsyncedRead::GetMenuName(lua_State* L)
  * @return number max_dt
  * @return number time_pct
  * @return number peak_pct
+ * @return number self_total in ms (inclusive minus differently-named children)
+ * @return number self_current in ms
  * @return table<number,number>? frameData Table where key is the frame index and value is duration.
  */
 int LuaUnsyncedRead::GetProfilerTimeRecord(lua_State* L)
 {
 	const CTimeProfiler::TimeRecord& record = CTimeProfiler::GetInstance().GetTimeRecord(lua_tostring(L, 1));
 
-	int numRet = 5;
+	int numRet = 7;
 	lua_pushnumber(L, record.total.toMilliSecsf());
 	lua_pushnumber(L, record.current.toMilliSecsf());
 	lua_pushnumber(L, record.stats.x); // max-dt
 	lua_pushnumber(L, record.stats.y); // time-%
 	lua_pushnumber(L, record.stats.z); // peak-%
+	lua_pushnumber(L, record.selfTotal.toMilliSecsf());   // self-total
+	lua_pushnumber(L, record.selfCurrent.toMilliSecsf()); // self-current
 
 	if (luaL_optboolean(L, 2, false)) {
 		for (size_t i = 0; i < record.frames.size(); i++) {
@@ -591,6 +600,78 @@ int LuaUnsyncedRead::GetProfilerRecordNames(lua_State* L)
 	}
 
 	return 1;
+}
+
+/***
+ * Per-callout call counts since process start, keyed by callout name.
+ *
+ * Empty unless the `LuaTrackCalloutCounts` config var is set (the counting
+ * trampoline is opt-in, see the CPU-attribution profiler).
+ *
+ * @function Spring.GetCalloutCounts
+ *
+ * @return table<string,number> counts callout name -> cumulative call count
+ */
+int LuaUnsyncedRead::GetCalloutCounts(lua_State* L)
+{
+	static std::vector<std::pair<std::string, std::uint64_t>> counts;
+	counts.clear();
+	LuaCalloutCounters::GetCounts(counts);
+
+	lua_createtable(L, 0, counts.size());
+
+	for (const auto& [name, count]: counts) {
+		lua_pushsstring(L, name); // key
+		lua_pushnumber(L, double(count)); // val
+		lua_rawset(L, -3);
+	}
+
+	return 1;
+}
+
+/***
+ * Open a named native profiler zone on the calling thread's self-time stack.
+ *
+ * Pair each call with Spring.ProfilerPopZone(). Zones nest in the engine's own
+ * profiler tree, so a per-addon-callin zone gets self-time, its triggered callouts
+ * as children, the sim/draw phase tag, and `/profiledump` capture for free.
+ *
+ * @function Spring.ProfilerPushZone
+ * @param name string zone name (e.g. "Widget:MyWidget:DrawScreen")
+ */
+int LuaUnsyncedRead::ProfilerPushZone(lua_State* L)
+{
+	// skip name hashing/registration entirely when not profiling
+	if (!CTimeProfiler::GetInstance().IsEnabled())
+		return 0;
+
+	const char* name = luaL_checkstring(L, 1);
+	const unsigned nameHash = hashString(name);
+
+	// register the name once so the profiler/dump can resolve the hash to text
+	static spring::unordered_set<unsigned> registered;
+	if (registered.insert(nameHash).second)
+		CTimeProfiler::RegisterTimer(name);
+
+	CTimeProfiler::GetInstance().PushZone(nameHash);
+	return 0;
+}
+
+/***
+ * Close the most-recently-opened Spring.ProfilerPushZone zone.
+ *
+ * @function Spring.ProfilerPopZone
+ */
+int LuaUnsyncedRead::ProfilerPopZone(lua_State* L)
+{
+	// match ProfilerPushZone's gate: while the profiler is disabled the matching push
+	// was a no-op, so popping would warn "no matching open zone" on every tracy.ZoneEnd
+	// (millions of lines per session). Only pop when enabled (a dump force-enables).
+	if (!CTimeProfiler::GetInstance().IsEnabled())
+		return 0;
+
+	CTimeProfiler::GetInstance().PopZone();
+	return 0;
 }
 
 

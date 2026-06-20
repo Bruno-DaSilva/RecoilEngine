@@ -4,6 +4,8 @@
 #define LUA_UTILS_H
 
 #include <string>
+#include <utility>
+#include <vector>
 
 #include <fmt/printf.h>
 
@@ -294,10 +296,22 @@ static inline void LuaPushNamedCFunc(lua_State* L, const string& key, lua_CFunct
 	lua_rawset(L, -3);
 }
 
+// Per-callout call-count profiling (opt-in via the LuaTrackCalloutCounts
+// config var). When disabled (default) PushMaybeCounted just does
+// lua_pushcfunction, so the callout invocation path is byte-for-byte unchanged;
+// when enabled it pushes a counting closure that bumps a per-name counter.
+// Out-of-line so the registry state lives in one TU and counting can be
+// compiled out on unitsync/dedicated/AI builds (no TimeProfiler there).
+namespace LuaCalloutCounters {
+	void PushMaybeCounted(lua_State* L, const char* name, lua_CFunction func);
+	// cumulative per-callout-name counts since process start, for queries/dumps
+	void GetCounts(std::vector<std::pair<std::string, std::uint64_t>>& out);
+}
+
 static inline void LuaPushRawNamedCFunc(lua_State* L, const char* key, lua_CFunction func)
 {
 	lua_pushstring(L, key);
-	lua_pushcfunction(L, func);
+	LuaCalloutCounters::PushMaybeCounted(L, key, func);
 	lua_rawset(L, -3);
 }
 

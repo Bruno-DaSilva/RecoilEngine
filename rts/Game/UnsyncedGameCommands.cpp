@@ -105,6 +105,8 @@
 #include "System/Log/ILog.h"
 #include "System/Config/ConfigHandler.h"
 #include "System/FileSystem/SimpleParser.h"
+#include "System/FileSystem/FileSystem.h"
+#include "System/FileSystem/DataDirLocater.h"
 #include "System/Sound/ISound.h"
 #include "System/Sound/ISoundChannels.h"
 #include "System/Sync/DumpState.h"
@@ -1476,6 +1478,38 @@ public:
 
 };
 
+
+
+class ProfileDumpActionExecutor : public IUnsyncedActionExecutor {
+public:
+	ProfileDumpActionExecutor() : IUnsyncedActionExecutor(
+		"ProfileDump",
+		"Dump per-sim-frame profiler self/inclusive/count over a frame range to a CSV: /profiledump <startFrame> <endFrame> [outPath]"
+	) {}
+
+	bool Execute(const UnsyncedAction& action) const final {
+		const auto args = CSimpleParser::Tokenize(action.GetArgs());
+
+		if (args.size() < 2) {
+			LOG_L(L_WARNING, "[/profiledump] usage: /profiledump <startFrame> <endFrame> [outPath]");
+			return true;
+		}
+
+		const int f0 = StringToInt(args[0]);
+		const int f1 = StringToInt(args[1]);
+		std::string path = (args.size() > 2) ? args[2] : "profiledump.csv";
+
+		// resolve a relative path against the write data-dir (not the process CWD,
+		// which for a deployed build is wherever it was launched); .folded sibling
+		// inherits this. Absolute paths are passed through untouched.
+		if (!FileSystem::IsAbsolutePath(path))
+			path = dataDirLocater.GetWriteDirPath() + path;
+
+		// force-enables the profiler over [f0,f1]; sampled from CGame::SimFrame
+		CTimeProfiler::GetInstance().StartDump(f0, f1, path);
+		return true;
+	}
+};
 
 
 class DebugActionExecutor : public IUnsyncedActionExecutor {
@@ -4085,6 +4119,7 @@ void UnsyncedGameCommands::AddDefaultActionExecutors()
 	AddActionExecutor(AllocActionExecutor<TrackModeActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<PauseActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<DebugActionExecutor>());
+	AddActionExecutor(AllocActionExecutor<ProfileDumpActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<DebugCubeMapActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<DebugQuadFieldActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<DrawSkyActionExecutor>());

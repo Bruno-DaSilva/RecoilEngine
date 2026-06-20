@@ -11,6 +11,7 @@
 #include "LuaPathFinder.h"
 #include "LuaRules.h"
 #include "LuaRulesParams.h"
+#include "LuaUnsyncedRead.h" // shared profiler-zone callouts (sync-safe: return nothing)
 #include "LuaUtils.h"
 #include "ExternalAI/SkirmishAIHandler.h"
 #include "Game/Game.h"
@@ -104,6 +105,12 @@ bool LuaSyncedRead::PushEntries(lua_State* L)
 	LuaPushNamedNumber(L, "MY_UNITS", LuaUtils::MyUnits);
 	LuaPushNamedNumber(L, "ALLY_UNITS", LuaUtils::AllyUnits);
 	LuaPushNamedNumber(L, "ENEMY_UNITS", LuaUtils::EnemyUnits);
+
+	// profiler zone primitive, shared with the unsynced table (sync-safe: opens/
+	// closes a native self-time zone, returns nothing) — lets gadgets mark per-addon
+	// zones in the engine profiler, same as widgets
+	REGISTER_NAMED_LUA_CFUNC("ProfilerPushZone", LuaUnsyncedRead::ProfilerPushZone);
+	REGISTER_NAMED_LUA_CFUNC("ProfilerPopZone", LuaUnsyncedRead::ProfilerPopZone);
 
 	// READ routines, sync safe
 	REGISTER_LUA_CFUNC(IsCheatingEnabled);

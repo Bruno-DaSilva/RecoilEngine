@@ -29,6 +29,8 @@
 
 #if !defined UNITSYNC && !defined DEDICATED && !defined BUILDING_AI
 	#include "System/TimeProfiler.h"
+	#include "System/Config/ConfigHandler.h"
+	#define CALLOUT_COUNTERS 1
 #else
 	#define SCOPED_TIMER(x)
 #endif
@@ -36,6 +38,169 @@
 #include <tracy/TracyLua.hpp>
 
 static const int maxDepth = 16;
+
+
+//////////////////////////////////////////////////////////////////////
+// Per-callout call-count profiling (see LuaUtils.h / cpu-attribution plan)
+//////////////////////////////////////////////////////////////////////
+
+#ifdef CALLOUT_COUNTERS
+CONFIG(int, LuaTrackCalloutCounts)
+	.defaultValue(0)
+	.description("Per-callout culprit profiling. 0=off, 1=count every callout invocation by name, 2=also time each callout body (deep mode: ~5ms/frame, perturbs timings). Wraps callouts in a closure when >=1; leave off unless profiling.");
+#endif
+
+namespace LuaCalloutCounters {
+#ifdef CALLOUT_COUNTERS
+	// Counts aggregate by name: a callout name maps to a stable counter id, so the
+	// same name registered across multiple Lua states sums into one count (the
+	// "GetUnitDefID called 9000x/frame" number). Dispatch must NOT aggregate
+	// though — the same name can bind different functions in different states —
+	// so each registration keeps its own func in a per-registration slot. All
+	// registration is single-threaded at state creation, and callouts run on the
+	// main thread, so plain (non-atomic) counters are safe.
+	static spring::unordered_map<unsigned, int> nameToId;
+	static std::vector<std::string> idToName;
+	static std::vector<unsigned> idToHash;             // counterId -> hashString(name), for folded paths
+	static std::vector<std::uint64_t> counts;
+	static std::vector<spring_time> bodySelfTimes;    // deep: body wall-time, nested callouts excluded
+	static std::vector<spring_time> bodyInclTimes;    // deep: body wall-time, nested callouts included
+	static std::vector<spring_time> bodySelfSimTimes; // sim-phase portion of bodySelfTimes
+	static std::vector<spring_time> bodyInclSimTimes; // sim-phase portion of bodyInclTimes
+	static std::vector<lua_CFunction> funcs;          // index == per-registration funcSlot
+
+	// per-thread tally of nested-callout inclusive time for the callout currently
+	// executing on this thread; lets a higher-order callout (e.g. gl.RenderToTexture,
+	// which lua_pcalls a Lua draw fn full of other callouts) record self-time instead
+	// of inclusive, so its body does not double-count children timed in their own
+	// buckets. Mirrors TimeProfiler's timerStack childTime, but the callout trampoline
+	// has its own accounting and never touches that stack.
+	static thread_local spring_time tlCalloutChild = spring_notime;
+
+	// stack of currently-open callout name-hashes on this thread, maintained only while
+	// a dump is folding, so the trampoline can hand TimeProfiler the callout call path
+	// (under the open zone path) for the unified flamegraph.
+	static thread_local std::vector<unsigned> tlCalloutPath;
+
+	static int level = 0;       // 0 off, 1 counts, 2 counts+body-time
+	static bool deep = false;   // level >= 2
+	static bool inited = false;
+
+	// adapter matching CTimeProfiler's hook signature, so callout stats land in
+	// the /profiledump callout rows
+	static void DumpSnapshot(std::vector<CTimeProfiler::CalloutStat>& out) {
+		out.reserve(idToName.size());
+		for (size_t i = 0; i < idToName.size(); ++i)
+			out.push_back({hashString(idToName[i].c_str()), counts[i], bodySelfTimes[i], bodyInclTimes[i], bodySelfSimTimes[i], bodyInclSimTimes[i]});
+	}
+
+	static bool Enabled() {
+		if (!inited) {
+			level = (configHandler != nullptr) ? configHandler->GetInt("LuaTrackCalloutCounts") : 0;
+			deep = (level >= 2);
+			inited = true;
+
+			if (level >= 1)
+				CTimeProfiler::SetCalloutCountSnapshotFn(&DumpSnapshot);
+		}
+		return (level >= 1);
+	}
+
+	static int CounterIdForName(const char* name) {
+		const unsigned h = hashString(name);
+		const auto it = nameToId.find(h);
+		if (it != nameToId.end())
+			return it->second;
+
+		const int id = int(idToName.size());
+		nameToId.emplace(h, id);
+		idToName.emplace_back(name);
+		idToHash.push_back(h);
+		counts.push_back(0);
+		bodySelfTimes.push_back(spring_notime);
+		bodyInclTimes.push_back(spring_notime);
+		bodySelfSimTimes.push_back(spring_notime);
+		bodyInclSimTimes.push_back(spring_notime);
+		// register the name so the dump can resolve its hash to text
+		CTimeProfiler::RegisterTimer(name);
+		return id;
+	}
+
+	static int Trampoline(lua_State* L) {
+		const int counterId = int(lua_tointeger(L, lua_upvalueindex(1)));
+		const int funcSlot  = int(lua_tointeger(L, lua_upvalueindex(2)));
+		counts[counterId]++;
+
+		if (!deep)
+			return funcs[funcSlot](L);
+
+		// deep mode: bracket the body with a clock (perturbs timings). Record self-
+		// time — inclusive minus time spent in nested callouts — so a higher-order
+		// callout does not double-count children that bill their own buckets, while
+		// charging our full inclusive to the enclosing callout via tlCalloutChild.
+		const bool inSim = ScopedSimFramePhase::InSimFrame();
+		// while a dump is folding, track the open-callout path so the callout can be
+		// emitted as a flamegraph leaf under the open zone (unified flamegraph)
+		const bool folded = CTimeProfiler::IsFoldedActive();
+		if (folded)
+			tlCalloutPath.push_back(idToHash[counterId]);
+
+		const spring_time t0 = spring_gettime();
+		const spring_time parentChild = tlCalloutChild; // save enclosing callout's tally
+		tlCalloutChild = spring_notime;                 // our nested callouts accumulate here
+
+		const int ret = funcs[funcSlot](L);
+
+		const spring_time incl = spring_gettime() - t0;
+		// clamp: a longjmp'd callout error (luaL_error past our exit) can leave the
+		// accumulator stale; deep mode is a dev tool, so accept slight misattribution
+		// on error frames rather than report negative self-time.
+		spring_time self = incl - tlCalloutChild;
+		if (self < spring_notime)
+			self = spring_notime;
+
+		bodySelfTimes[counterId] += self;
+		bodyInclTimes[counterId] += incl;
+		if (inSim) {
+			bodySelfSimTimes[counterId] += self;
+			bodyInclSimTimes[counterId] += incl;
+		}
+
+		if (folded) {
+			// path is [open zones] ++ tlCalloutPath (this callout last); top-level when
+			// it is the only open callout (so its subtree is charged to the open zone)
+			CTimeProfiler::FoldCalloutSample(tlCalloutPath, self, incl, tlCalloutPath.size() == 1);
+			tlCalloutPath.pop_back();
+		}
+
+		tlCalloutChild = parentChild + incl;            // we are a child of the enclosing callout
+		return ret;
+	}
+#endif
+
+	void PushMaybeCounted(lua_State* L, const char* name, lua_CFunction func) {
+#ifdef CALLOUT_COUNTERS
+		if (Enabled()) {
+			const int counterId = CounterIdForName(name);
+			const int funcSlot  = int(funcs.size());
+			funcs.push_back(func);
+			lua_pushinteger(L, counterId);
+			lua_pushinteger(L, funcSlot);
+			lua_pushcclosure(L, Trampoline, 2);
+			return;
+		}
+#endif
+		lua_pushcfunction(L, func);
+	}
+
+	void GetCounts(std::vector<std::pair<std::string, std::uint64_t>>& out) {
+#ifdef CALLOUT_COUNTERS
+		out.reserve(idToName.size());
+		for (size_t i = 0; i < idToName.size(); ++i)
+			out.emplace_back(idToName[i], counts[i]);
+#endif
+	}
+}
 
 Json::Value LuaUtils::LuaStackDumper::root  = {};
 
@@ -1970,8 +2135,19 @@ void LuaUtils::PushAttackerInfo(lua_State* L, const CUnit* const attacker)
 
 void LuaUtils::TracyRemoveAlsoExtras(char* script)
 {
-	// tracy's built-in remover; does not handle our local TracyExtra functions
-	tracy::LuaRemove(script);
+	// tracy's built-in remover strips tracy.Zone*()/Message() CALLS out of the script
+	// source (without a Tracy server they are no-ops, so Tracy deletes them for speed).
+	// When the CPU-attribution profiler is active we KEEP them, so the per-addon zones
+	// the handlers emit can drive /profiledump via the tracy.ZoneBeginN/ZoneEnd wrappers
+	// installed in CLuaHandle. (The LuaTracyPlot wipe below still runs unconditionally,
+	// since that callout is unregistered when Tracy is compiled out.)
+#ifdef CALLOUT_COUNTERS
+	const bool keepZones = (configHandler != nullptr && configHandler->GetInt("LuaTrackCalloutCounts") > 0);
+#else
+	const bool keepZones = false; // unitsync/dedicated/AI: no profiler, strip as usual
+#endif
+	if (!keepZones)
+		tracy::LuaRemove(script);
 
 #ifndef TRACY_ENABLE
 	// Our extras are handled manually below, the same way Tracy does.
