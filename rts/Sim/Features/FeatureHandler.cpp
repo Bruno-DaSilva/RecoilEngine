@@ -10,8 +10,10 @@
 #include "Sim/Ecs/Registry.h"
 #include "Sim/Misc/QuadField.h"
 #include "Sim/Units/CommandAI/BuilderCaches.h"
+#include "Sim/Misc/GlobalSynced.h"
 #include "System/creg/STL_Set.h"
 #include "System/EventHandler.h"
+#include "System/Log/ILog.h"
 #include "System/TimeProfiler.h"
 
 #include "System/Misc/TracyDefs.h"
@@ -24,7 +26,8 @@ CR_REG_METADATA(CFeatureHandler, (
 	CR_MEMBER(deletedFeatureIDs),
 	CR_MEMBER(activeFeatureIDs),
 	CR_MEMBER(features),
-	CR_MEMBER(updateFeatures)
+	CR_MEMBER(updateFeatures),
+	CR_MEMBER(savedUpdateQueue)
 ))
 
 /******************************************************************************/
@@ -275,6 +278,42 @@ void CFeatureHandler::SetFeatureUpdateable(CFeature* feature)
 
 	// always true
 	feature->inUpdateQue = spring::VectorInsertUnique(updateFeatures, feature);
+}
+
+
+void CFeatureHandler::SnapshotUpdateQueueForSave()
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+
+	// Capture the genuine update queue just before serialization. On a checkpoint
+	// load updateFeatures gets polluted (every active feature is re-queued), but
+	// this serialized copy is never appended to, so it survives the load intact.
+	savedUpdateQueue = updateFeatures;
+}
+
+void CFeatureHandler::RebuildUpdateQueueAfterLoad()
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+
+	// A checkpoint load re-queues every active feature into updateFeatures. A
+	// predicate cannot reconstruct the genuine membership: a feature stays queued
+	// whenever CFeature::Update moved it this frame (e.g. a wreck perpetually
+	// settling under gravity), which is not derivable from its instantaneous
+	// speed/IsMoving/fire/smoke state. So restore the EXACT saved queue (captured
+	// in SnapshotUpdateQueueForSave) - same set and order a continuous run had.
+	for (CFeature* feature: updateFeatures)
+		feature->inUpdateQue = false; // clear the polluted flags
+
+	updateFeatures.clear();
+	for (CFeature* feature: savedUpdateQueue) {
+		if (feature == nullptr)
+			continue;
+		feature->inUpdateQue = true;
+		updateFeatures.push_back(feature);
+	}
+
+	savedUpdateQueue.clear();
+	savedUpdateQueue.shrink_to_fit();
 }
 
 

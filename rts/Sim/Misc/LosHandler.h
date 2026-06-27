@@ -15,6 +15,8 @@
 #include "System/EventClient.h"
 #include "System/UnorderedMap.hpp"
 
+namespace creg { class ISerializer; }
+
 
 /**
  * LoS Instance
@@ -133,7 +135,27 @@ public:
 	void RemoveUnit(CUnit* unit, bool delayed = false);
 	void UpdateUnit(CUnit* unit, bool ignore = false);
 
+	// --- replay-checkpoint restore support ---------------------------------
+	// The delayed-delete (dead-unit LOS decay, 1.5s) and delayed-terraform
+	// (stale-coverage relos, 2s) queues hold sight coverage that is applied to
+	// the maps but is NOT rederivable from live units. On a checkpoint restore
+	// the live-unit maps are rebuilt from scratch, which silently drops this
+	// transient coverage and changes what each ally-team can see -> desync.
+	// We capture these records on save and reapply them after the live rebuild.
+	struct LingerRecord {
+		int allyteam = -1;
+		int radius = -1;
+		int2 basePos;
+		float baseHeight = 0.0f;
+		int timeoutTime = 0;
+		std::vector<SLosInstance::RLE> squares;
+	};
+	void CollectLingerRecords(std::vector<LingerRecord>& delRecs, std::vector<LingerRecord>& terraRecs) const;
+	void ApplyLingerRecords(const std::vector<LingerRecord>& delRecs, const std::vector<LingerRecord>& terraRecs);
+
 private:
+	SLosInstance* FindLiveInstance(int allyteam, int2 basePos, int radius, float baseHeight) const;
+
 	//void PostLoad();
 
 	void LosAdd(SLosInstance* instance);
@@ -298,6 +320,12 @@ public:
 	void Update() override;
 	void UpdateHeightMapSynced(SRectangle rect);
 
+	// replay-checkpoint restore: serialize the per-losType delayed-delete and
+	// delayed-terraform coverage (see ILosType::LingerRecord), and reapply it
+	// after the live-unit LOS maps have been rebuilt on load.
+	void SerializeLinger(creg::ISerializer* s);
+	void RestoreLingerAfterRebuild();
+
 public:
 	ILosType los;
 	ILosType airLos;
@@ -324,6 +352,11 @@ private:
 
 	std::vector<float> radarErrorSizes;
 	std::array<ILosType*, 7> losTypes;
+
+	// transient: holds delayed-delete/terraform LOS coverage read from a
+	// checkpoint by SerializeLinger, consumed by RestoreLingerAfterRebuild.
+	std::array<std::vector<ILosType::LingerRecord>, ILosType::LOS_TYPE_COUNT> restoredLingerDel;
+	std::array<std::vector<ILosType::LingerRecord>, ILosType::LOS_TYPE_COUNT> restoredLingerTerra;
 };
 
 

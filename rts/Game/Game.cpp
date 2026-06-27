@@ -97,6 +97,7 @@
 #include "Sim/Projectiles/ProjectileHandler.h"
 #include "Sim/Projectiles/WeaponProjectiles/WeaponProjectile.h"
 #include "Sim/Units/CommandAI/CommandAI.h"
+#include "Sim/Units/CommandAI/BuilderCaches.h"
 #include "Sim/Units/Scripts/UnitScriptFactory.h"
 #include "Sim/Units/Scripts/UnitScriptEngine.h"
 #include "Sim/Units/UnitHandler.h"
@@ -2376,6 +2377,11 @@ void CGame::FinalizeLoadSavePostLoad()
 	// replay instead of one frame of empty maps.
 	if (losHandler != nullptr) {
 		losHandler->Update();
+		// the live-unit rebuild above cannot recreate sight coverage that was
+		// lingering from dead units (delayed-delete decay) or left stale by a
+		// pending terraform relos; reapply that serialized coverage so a rewound
+		// replay sees identical LOS/radar to an uninterrupted one.
+		losHandler->RestoreLingerAfterRebuild();
 		LOG("[Game::%s] rebuilt LOS and sensor maps from restored units", __func__);
 	}
 
@@ -2430,6 +2436,16 @@ void CGame::FinalizeLoadSavePostLoad()
 		}
 	}
 
+	if (gameSetup != nullptr && gameSetup->replayCheckpoint) {
+		featureHandler.RebuildUpdateQueueAfterLoad();
+		unitScriptEngine->RebuildAnimatingAfterLoad();
+		// reclaim/resurrect arbitration caches are not creg-serialized; rebuild
+		// them from the restored command queues so cons do not re-target features
+		// already being reclaimed/resurrected (which injected phantom CMD_RECLAIM
+		// orders and desynced the resumed demo ~one read-ahead window after the
+		// checkpoint). See CBuilderCaches::RepopulateAfterLoad.
+		CBuilderCaches::RepopulateAfterLoad();
+	}
 	Sim::systemUtils.NotifyPostLoad();
 
 	if (gameServer != nullptr) {

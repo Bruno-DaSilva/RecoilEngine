@@ -18,6 +18,49 @@ void CBuilderCaches::InitStatic()
 	spring::clear_unordered_set(resurrecters);
 }
 
+void CBuilderCaches::RepopulateAfterLoad()
+{
+	// Caches are not creg-serialized; rebuild them to match the restored command
+	// queues so the reclaim/resurrect arbitration is correct on the very first
+	// post-load frame instead of healing only after each builder's next
+	// SlowUpdate re-runs ExecuteReclaim/ExecuteResurrect. Mirror the exact
+	// membership the Add* calls and the Is* validators expect: a CMD_RECLAIM
+	// front command with a unit target populates reclaimers, with a feature
+	// target featureReclaimers, and a CMD_RESURRECT front command resurrecters.
+	InitStatic();
+
+	for (const CUnit* unit: unitHandler.GetActiveUnits()) {
+		if (unit == nullptr)
+			continue;
+
+		const CCommandAI* cai = unit->commandAI;
+		if (cai == nullptr)
+			continue;
+
+		const CCommandQueue& cq = cai->commandQue;
+		if (cq.empty())
+			continue;
+
+		const Command& c = cq.front();
+		const unsigned int numParams = c.GetNumParams();
+		if (numParams != 1 && numParams != 5)
+			continue;
+
+		switch (c.GetID()) {
+			case CMD_RECLAIM: {
+				if (static_cast<int>(c.GetParam(0)) >= static_cast<int>(unitHandler.MaxUnits()))
+					featureReclaimers.insert(unit->id);
+				else
+					reclaimers.insert(unit->id);
+			} break;
+			case CMD_RESURRECT: {
+				resurrecters.insert(unit->id);
+			} break;
+			default: break;
+		}
+	}
+}
+
 void CBuilderCaches::AddUnitToReclaimers(CUnit* unit) { reclaimers.insert(unit->id); }
 void CBuilderCaches::RemoveUnitFromReclaimers(CUnit* unit) { reclaimers.erase(unit->id); }
 

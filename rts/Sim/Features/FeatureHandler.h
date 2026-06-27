@@ -66,6 +66,16 @@ public:
 	void SetFeatureUpdateable(CFeature* feature);
 	void TerrainChanged(int x1, int y1, int x2, int y2);
 
+	// A checkpoint load re-queues extra features for update (terrain restore and
+	// quadfield re-registration add them), whereas a continuous run only keeps the
+	// features that actually need per-frame updates. Processing the spurious extras
+	// on the first post-load frame performs synced feature physics they would not
+	// otherwise run, which desyncs the running checksum even though the resulting
+	// state is identical. PostLoad snapshots the saved queue (before those side
+	// effects) and RebuildUpdateQueueAfterLoad restores it exactly.
+	void SnapshotUpdateQueueForSave();
+	void RebuildUpdateQueueAfterLoad();
+
 	const spring::unordered_set<int>& GetActiveFeatureIDs() const { return activeFeatureIDs; }
 
 private:
@@ -89,6 +99,12 @@ private:
 	std::vector<int> deletedFeatureIDs;
 	std::vector<CFeature*> features;
 	std::vector<CFeature*> updateFeatures;
+
+	// The genuine update queue captured at save time (SnapshotUpdateQueueForSave).
+	// Serialized alongside updateFeatures but, unlike it, never touched by the
+	// checkpoint-load re-queue-every-feature pollution, so on load it still holds
+	// exactly the saved set/order. RebuildUpdateQueueAfterLoad restores from it.
+	std::vector<CFeature*> savedUpdateQueue;
 };
 
 extern CFeatureHandler featureHandler;

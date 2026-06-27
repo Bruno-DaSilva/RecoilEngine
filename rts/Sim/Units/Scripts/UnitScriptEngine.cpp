@@ -124,6 +124,16 @@ void CUnitScriptEngine::RemoveInstance(CUnitScript* instance)
 	spring::VectorErase(animating, instance);
 }
 
+void CUnitScriptEngine::RebuildAnimatingAfterLoad()
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+
+	const auto iter = std::remove_if(animating.begin(), animating.end(), [](const CUnitScript* s) {
+		return (s == nullptr) || !s->HaveAnimations();
+	});
+	animating.erase(iter, animating.end());
+}
+
 void CUnitScriptEngine::Tick(int deltaTime)
 {
 	SCOPED_TIMER("CUnitScriptEngine::Tick");

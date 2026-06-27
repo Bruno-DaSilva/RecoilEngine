@@ -63,6 +63,8 @@
 #include "System/Sync/SyncChecker.h"
 #include "System/TdfParser.h"
 
+#include <future>
+
 #define MAX_STRING_SIZE (1 << 19) // 512kB excluding null-term
 
 
@@ -74,6 +76,18 @@ CCregLoadSaveHandler::~CCregLoadSaveHandler() = default;
 namespace {
 	bool pendingSyncChecksumRestore = false;
 	unsigned int pendingSyncChecksum = 0;
+
+	// The checkpoint gzip write runs asynchronously (SaveGame). We keep its
+	// future here so a subsequent load (e.g. rewinding to a just-created
+	// checkpoint) can block until the file is fully flushed; otherwise the
+	// reader gets a truncated stream and creg deserialization fails.
+	std::future<void> pendingCheckpointWriteFuture;
+
+	void WaitForPendingCheckpointWrite()
+	{
+		if (pendingCheckpointWriteFuture.valid())
+			pendingCheckpointWriteFuture.wait();
+	}
 }
 
 bool cregLoadSave::ApplyPendingSyncChecksumRestore(unsigned int& checksum)
@@ -864,6 +878,11 @@ void CCregLoadSaveHandler::SaveGame(const std::string& path)
 		}
 	}
 
+	// Capture the genuine feature update queue so a checkpoint load can restore it
+	// exactly (the load otherwise re-queues every active feature). See
+	// CFeatureHandler::RebuildUpdateQueueAfterLoad.
+	featureHandler.SnapshotUpdateQueueForSave();
+
 	// NB: Selection leaves CObject reference as Unit's listener,
 	//     But isn't serialized - leak on load.
 	selectedUnitsHandler.ClearSelected();
@@ -926,9 +945,13 @@ void CCregLoadSaveHandler::SaveGame(const std::string& path)
 				gzclose(file);
 			};
 
-			// gzFile is just a plain typedef (struct gzFile_s {}* gzFile), can be copied
-			// need to keep a reference to the future around or its destructor will block
-			ThreadPool::AddExtJob(std::move(std::async(std::launch::async, std::move(func), file, std::move(data))));
+			// Serialize against any previous still-running checkpoint write, then
+			// launch this one asynchronously and retain its future so a later load
+			// (rewind to this checkpoint) can wait for the write to finish. The
+			// future is stored (not dropped) so its destructor does not block here.
+			// gzFile is just a plain typedef (struct gzFile_s {}* gzFile), can be copied.
+			WaitForPendingCheckpointWrite();
+			pendingCheckpointWriteFuture = std::async(std::launch::async, std::move(func), file, std::move(data));
 		}
 
 		//FIXME add lua state
@@ -951,6 +974,12 @@ void CCregLoadSaveHandler::SaveGame(const std::string& path)
 /// loads the data (map&mod-name,setup-script) needed by PreGame
 bool CCregLoadSaveHandler::LoadGameStartInfo(const std::string& path)
 {
+	// A checkpoint save flushes its gzip stream on a background thread; make sure
+	// any in-flight write has completed before we read the file back (e.g. when
+	// rewinding to a just-created checkpoint), otherwise CGZFileHandler reads a
+	// truncated stream and creg deserialization throws "unknown class".
+	WaitForPendingCheckpointWrite();
+
 	CGZFileHandler saveFile(dataDirsAccess.LocateFile(FindSaveFile(path)), SPRING_VFS_RAW_FIRST);
 
 	std::stringbuf* sbuf = iss.rdbuf();

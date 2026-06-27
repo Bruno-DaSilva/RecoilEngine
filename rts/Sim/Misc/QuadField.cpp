@@ -39,7 +39,14 @@ CR_REG_METADATA(CQuadField, (
 CR_BIND(CQuadField::Quad, )
 CR_REG_METADATA_SUB(CQuadField, Quad, (
 	CR_MEMBER(units),
-	CR_IGNORED(teamUnits),
+	// teamUnits must be serialized, not rebuilt from `units` on load: both lists
+	// are maintained with independent swap-and-pop erases (spring::VectorErase),
+	// so their orderings diverge over a game's history. Rebuilding teamUnits as
+	// the in-order subsequence of `units` would yield a different per-allyteam
+	// order than the original timeline, which changes quadfield-iteration order
+	// in target selection (CGameHelper::GenerateWeaponTargets) and desyncs a
+	// replay-checkpoint restore. See CQuadField::Quad::PostLoad.
+	CR_MEMBER(teamUnits),
 	CR_MEMBER(features),
 	CR_MEMBER(projectiles),
 	CR_MEMBER(repulsers),
@@ -55,11 +62,12 @@ void CQuadField::Quad::PostLoad()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 #ifndef UNIT_TEST
+	// teamUnits is serialized (CR_MEMBER) so its exact per-allyteam ordering is
+	// preserved across a load; do NOT rebuild it from `units` here. The two
+	// lists diverge in order over a game (independent swap-and-pop erases), so
+	// rebuilding would corrupt iteration order and desync replay-checkpoint
+	// restores. Just make sure the outer vector is sized for the allyteam count.
 	Resize(teamHandler.ActiveAllyTeams());
-
-	for (CUnit* unit: units) {
-		spring::VectorInsertUnique(teamUnits[unit->allyteam], unit, false);
-	}
 #endif
 }
 

@@ -25,6 +25,12 @@ public:
 
 	void Tick(int deltaTime);
 
+	// A checkpoint load can leave the synced `animating` list over-populated
+	// (scripts with no active animations) relative to a continuous run, which
+	// desyncs the checksum hashed over it. Drop the non-animating entries while
+	// preserving the order of the genuinely-animating ones.
+	void RebuildAnimatingAfterLoad();
+
 	void Init() { animating.reserve(256); }
 	void Kill() { animating.clear(); }
 

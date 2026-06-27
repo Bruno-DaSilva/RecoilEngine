@@ -16,6 +16,15 @@ public:
 	 * Checks if a unit is being reclaimed by a friendly con.
 	 */
 	static void InitStatic();
+	/**
+	 * Rebuild the reclaimer/resurrecter caches from the restored unit command
+	 * queues after a creg load (e.g. a replay-rewind checkpoint restore). These
+	 * sets are not part of creg ("should repopulate itself"), but a checkpoint
+	 * restore does not re-issue commands, so without this they stay empty until
+	 * each builder's next SlowUpdate - a window in which IsFeatureBeingReclaimed/
+	 * Resurrected wrongly return false and the synced sim diverges from the demo.
+	 */
+	static void RepopulateAfterLoad();
 	static bool IsUnitBeingReclaimed(const CUnit* unit, const CUnit* friendUnit = nullptr);
 	static bool IsFeatureBeingReclaimed(int featureId, const CUnit* friendUnit = nullptr);
 	static bool IsFeatureBeingResurrected(int featureId, const CUnit* friendUnit = nullptr);

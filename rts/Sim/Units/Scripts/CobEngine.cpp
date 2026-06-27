@@ -19,8 +19,13 @@ CR_REG_METADATA(CCobEngine, (
 	CR_MEMBER(tickRemovedThreads),
 	CR_MEMBER(runningThreadIDs),
 	CR_MEMBER(sleepingThreadIDs),
-	// always null/empty when saving
-	CR_IGNORED(waitingThreadIDs),
+	// NOT empty at the end-of-frame save point: WakeSleepingThreads() runs after
+	// TickRunningThreads() swaps waitingThreadIDs into runningThreadIDs, so threads
+	// woken from sleep (or started) during waking that reschedule as Run land here
+	// and must run next frame. Leaving this unserialized orphans them in
+	// threadInstances on a (replay-checkpoint) restore -> their scripts freeze and
+	// the sim desyncs. See CCobEngine::Tick().
+	CR_MEMBER(waitingThreadIDs),
 
 	CR_IGNORED(curThread),
 	CR_IGNORED(deferredCallins),

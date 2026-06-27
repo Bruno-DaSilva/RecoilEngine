@@ -11,6 +11,7 @@
 #include "System/Log/ILog.h"
 #include "System/SpringHash.h"
 #include "System/creg/STL_Deque.h"
+#include "System/creg/Serializer.h"
 #include "System/EventHandler.h"
 #include "System/SafeUtil.h"
 #include "System/TimeProfiler.h"
@@ -43,7 +44,12 @@ CR_REG_METADATA(CLosHandler,(
 	CR_MEMBER(baseRadarErrorSize),
 	CR_MEMBER(baseRadarErrorMult),
 	CR_MEMBER(radarErrorSizes),
-	CR_IGNORED(losTypes)
+	CR_IGNORED(losTypes),
+	CR_IGNORED(restoredLingerDel),
+	CR_IGNORED(restoredLingerTerra),
+	// captures/restores the delayed-delete + delayed-terraform sight coverage
+	// that ILosTypes cannot rederive from live units after a checkpoint load
+	CR_SERIALIZER(SerializeLinger)
 ))
 
 
@@ -614,6 +620,93 @@ void ILosType::Update()
 }
 
 
+SLosInstance* ILosType::FindLiveInstance(int allyteam, int2 basePos, int radius, float baseHeight) const
+{
+	const int hash = GetHashNum(allyteam, basePos, radius);
+	const auto it = instanceHashes.find(hash);
+	if (it == instanceHashes.end())
+		return nullptr;
+	for (SLosInstance* li: it->second) {
+		if (li->basePos == basePos && li->baseHeight == baseHeight && li->radius == radius && li->allyteam == allyteam)
+			return li;
+	}
+	return nullptr;
+}
+
+
+void ILosType::CollectLingerRecords(std::vector<LingerRecord>& delRecs, std::vector<LingerRecord>& terraRecs) const
+{
+	const auto toRec = [](const DelayedInstance& di) {
+		const SLosInstance* li = di.instance;
+		LingerRecord r;
+		r.allyteam    = li->allyteam;
+		r.radius      = li->radius;
+		r.basePos     = li->basePos;
+		r.baseHeight  = li->baseHeight;
+		r.timeoutTime = di.timeoutTime;
+		r.squares     = li->squares;
+		return r;
+	};
+	for (const DelayedInstance& di: delayedDeleteQue) delRecs.push_back(toRec(di));
+	for (const DelayedInstance& di: delayedTerraQue)  terraRecs.push_back(toRec(di));
+}
+
+
+void ILosType::ApplyLingerRecords(const std::vector<LingerRecord>& delRecs, const std::vector<LingerRecord>& terraRecs)
+{
+	// delayed-delete: coverage that lingered after a unit died. Recreate it as a
+	// standalone instance ONLY where the live-unit rebuild did not already cover
+	// the same (allyteam, basePos, radius, height) key, to avoid double-counting.
+	std::vector<SLosInstance*> created;
+	const auto findCreated = [&](const LingerRecord& r) -> SLosInstance* {
+		for (SLosInstance* c: created) {
+			if (c->basePos == r.basePos && c->baseHeight == r.baseHeight && c->radius == r.radius && c->allyteam == r.allyteam)
+				return c;
+		}
+		return nullptr;
+	};
+
+	for (const LingerRecord& r: delRecs) {
+		SLosInstance* li = findCreated(r);
+
+		if (li == nullptr) {
+			// a live unit already provides this coverage -> the rebuild handled it
+			if (FindLiveInstance(r.allyteam, r.basePos, r.radius, r.baseHeight) != nullptr)
+				continue;
+
+			const int hash = GetHashNum(r.allyteam, r.basePos, r.radius);
+			li = CreateInstance();
+			li->Init(r.radius, r.allyteam, r.basePos, r.baseHeight, hash);
+			li->squares = r.squares;
+			li->refCount = 0; // bumped once per pending delayed-unref below
+			instanceHashes[hash].push_back(li);
+			LosAdd(li); // apply the lingering coverage to the map exactly once
+			created.push_back(li);
+		}
+
+		// one pending delayed-unref per original queue entry; when each timeout
+		// fires the refCount decrements and the instance is removed on reaching 0
+		li->refCount += 1;
+		delayedDeleteQue.push_back(DelayedInstance{li, r.timeoutTime});
+	}
+
+	// delayed-terraform: a live unit's instance whose map coverage is the STALE
+	// pre-terraform raycast, with a deferred recompute. The rebuild gave it fresh
+	// coverage; swap it back to the saved stale squares and requeue the relos.
+	for (const LingerRecord& r: terraRecs) {
+		SLosInstance* li = FindLiveInstance(r.allyteam, r.basePos, r.radius, r.baseHeight);
+		if (li == nullptr || li->isQueuedForTerraform)
+			continue;
+
+		LosRemove(li);        // remove the rebuild's fresh coverage
+		li->squares = r.squares;
+		LosAdd(li);           // reapply the original stale coverage
+		li->isQueuedForTerraform = true;
+		delayedTerraQue.push_back(DelayedInstance{li, r.timeoutTime});
+	}
+}
+
+
 void ILosType::UpdateHeightMapSynced(SRectangle rect)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
@@ -776,6 +869,62 @@ void CLosHandler::SetGlobalLOS(const int allyTeamId, const bool newState)
 
 	if (globalLOS[allyTeamId])
 		readMap->BecomeSpectator(); //update unsynced heightmap
+}
+
+
+void CLosHandler::SerializeLinger(creg::ISerializer* s)
+{
+	const auto serRecs = [&](std::vector<ILosType::LingerRecord>& recs) {
+		int n = static_cast<int>(recs.size());
+		s->SerializeInt(&n, sizeof(n));
+		if (!s->IsWriting())
+			recs.resize(n);
+
+		for (int i = 0; i < n; ++i) {
+			ILosType::LingerRecord& r = recs[i];
+			s->SerializeInt(&r.allyteam,    sizeof(r.allyteam));
+			s->SerializeInt(&r.radius,      sizeof(r.radius));
+			s->SerializeInt(&r.basePos.x,   sizeof(r.basePos.x));
+			s->SerializeInt(&r.basePos.y,   sizeof(r.basePos.y));
+			s->Serialize   (&r.baseHeight,  sizeof(r.baseHeight));
+			s->SerializeInt(&r.timeoutTime, sizeof(r.timeoutTime));
+
+			int sq = static_cast<int>(r.squares.size());
+			s->SerializeInt(&sq, sizeof(sq));
+			if (!s->IsWriting())
+				r.squares.resize(sq);
+
+			for (int j = 0; j < sq; ++j) {
+				s->SerializeInt(&r.squares[j].start,  sizeof(r.squares[j].start));
+				s->SerializeInt(&r.squares[j].length, sizeof(r.squares[j].length));
+			}
+		}
+	};
+
+	for (int t = 0; t < ILosType::LOS_TYPE_COUNT; ++t) {
+		if (s->IsWriting()) {
+			std::vector<ILosType::LingerRecord> del, terra;
+			losTypes[t]->CollectLingerRecords(del, terra);
+			serRecs(del);
+			serRecs(terra);
+		} else {
+			serRecs(restoredLingerDel[t]);
+			serRecs(restoredLingerTerra[t]);
+		}
+	}
+}
+
+
+void CLosHandler::RestoreLingerAfterRebuild()
+{
+	for (int t = 0; t < ILosType::LOS_TYPE_COUNT; ++t) {
+		if (restoredLingerDel[t].empty() && restoredLingerTerra[t].empty())
+			continue;
+
+		losTypes[t]->ApplyLingerRecords(restoredLingerDel[t], restoredLingerTerra[t]);
+		restoredLingerDel[t].clear();
+		restoredLingerTerra[t].clear();
+	}
 }
 
 void CLosHandler::UnitDestroyed(const CUnit* unit, const CUnit* attacker, int weaponDefID)
