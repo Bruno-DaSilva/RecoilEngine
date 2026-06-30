@@ -98,6 +98,57 @@ namespace {
 		shader->Link();
 		return shader;
 	}
+
+	// textured (VA_TYPE_TC) shader: MODULATE = texture * vertex color.
+	const char* fsTexSrc =
+		"#version 150\n"
+		"uniform sampler2D tex;\n"
+		"in vec2 vuv;\n"
+		"in vec4 vcolor;\n"
+		"out vec4 outColor;\n"
+		"void main() { outColor = texture(tex, vuv) * vcolor; }\n";
+
+	std::string MakeTexVertexSrc(bool explicitAttribLoc)
+	{
+		std::string s = "#version 150 compatibility\n";
+		if (explicitAttribLoc) {
+			s += "#extension GL_ARB_explicit_attrib_location : require\n";
+			s += "layout(location = 0) in vec3 apos;\n";
+			s += "layout(location = 1) in vec2 auv;\n";
+			s += "layout(location = 2) in vec4 acolor;\n";
+		} else {
+			s += "in vec3 apos;\n";
+			s += "in vec2 auv;\n";
+			s += "in vec4 acolor;\n";
+		}
+		s += "uniform mat4 uMVP;\n";
+		s += "out vec2 vuv;\n";
+		s += "out vec4 vcolor;\n";
+		s += "void main() { vuv = auv; vcolor = acolor; gl_Position = uMVP * vec4(apos, 1.0); }\n";
+		return s;
+	}
+
+	Shader::IProgramObject* GetModernTexShader()
+	{
+		Shader::IProgramObject* shader = shaderHandler->GetProgramObject("[LuaImmediateBuffer]", "VA_TYPE_TC");
+		if (shader != nullptr && shader->IsValid())
+			return shader;
+
+		const bool eal = globalRendering->supportExplicitAttribLoc;
+
+		shader = shaderHandler->CreateProgramObject("[LuaImmediateBuffer]", "VA_TYPE_TC");
+		shader->AttachShaderObject(shaderHandler->CreateShaderObject(MakeTexVertexSrc(eal), "", GL_VERTEX_SHADER));
+		shader->AttachShaderObject(shaderHandler->CreateShaderObject(fsTexSrc, "", GL_FRAGMENT_SHADER));
+
+		if (!eal) {
+			shader->BindAttribLocation("apos", 0);
+			shader->BindAttribLocation("auv", 1);
+			shader->BindAttribLocation("acolor", 2);
+		}
+
+		shader->Link();
+		return shader;
+	}
 }
 
 void LuaImmediateBuffer::FlushLegacy() const
@@ -131,5 +182,46 @@ void LuaImmediateBuffer::FlushModern() const
 	shader->Enable();
 	shader->SetUniformMatrix4x4("uMVP", false, static_cast<const float*>(mvp));
 	rb.DrawArrays(drawMode);
+	shader->Disable();
+}
+
+void LuaImmediateBuffer::FlushTexRectLegacy() const
+{
+	if (!texRect.set)
+		return;
+
+	// caller has bound the texture and enabled GL_TEXTURE_2D; FF MODULATE
+	// gives texture * glColor.
+	glColor4ub(texRect.c.r, texRect.c.g, texRect.c.b, texRect.c.a);
+	glBegin(GL_QUADS);
+		glTexCoord2f(texRect.s0, texRect.t0); glVertex2f(texRect.x0, texRect.y0);
+		glTexCoord2f(texRect.s1, texRect.t0); glVertex2f(texRect.x1, texRect.y0);
+		glTexCoord2f(texRect.s1, texRect.t1); glVertex2f(texRect.x1, texRect.y1);
+		glTexCoord2f(texRect.s0, texRect.t1); glVertex2f(texRect.x0, texRect.y1);
+	glEnd();
+}
+
+void LuaImmediateBuffer::FlushTexRectModern() const
+{
+	if (!texRect.set)
+		return;
+
+	// caller has bound the texture to unit 0; the shader samples it (no
+	// GL_TEXTURE_2D enable needed). Quad as two CCW triangles.
+	const SColor c = texRect.c;
+	const VA_TYPE_TC bl{ {texRect.x0, texRect.y0, 0.0f}, texRect.s0, texRect.t0, c };
+	const VA_TYPE_TC br{ {texRect.x1, texRect.y0, 0.0f}, texRect.s1, texRect.t0, c };
+	const VA_TYPE_TC tr{ {texRect.x1, texRect.y1, 0.0f}, texRect.s1, texRect.t1, c };
+	const VA_TYPE_TC tl{ {texRect.x0, texRect.y1, 0.0f}, texRect.s0, texRect.t1, c };
+
+	auto& rb = RenderBuffer::GetTypedRenderBuffer<VA_TYPE_TC>();
+	rb.AddVertex(VA_TYPE_TC{bl}); rb.AddVertex(VA_TYPE_TC{br}); rb.AddVertex(VA_TYPE_TC{tr});
+	rb.AddVertex(VA_TYPE_TC{bl}); rb.AddVertex(VA_TYPE_TC{tr}); rb.AddVertex(VA_TYPE_TC{tl});
+
+	Shader::IProgramObject* shader = GetModernTexShader();
+	shader->Enable();
+	shader->SetUniformMatrix4x4("uMVP", false, static_cast<const float*>(mvp));
+	shader->SetUniform("tex", 0);
+	rb.DrawArrays(GL_TRIANGLES);
 	shader->Disable();
 }

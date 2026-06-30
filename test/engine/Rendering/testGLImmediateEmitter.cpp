@@ -50,6 +50,25 @@ DiffResult CompareBothFlushes(const LuaImmediateBuffer& buf, const CMatrix44f& m
 	return Compare(legacy, modern);
 }
 
+// a small distinctive 2x2 RGBA texture (NEAREST, CLAMP) for the TexRect A/B.
+GLuint MakeTestTexture()
+{
+	const uint8_t px[4 * 4] = {
+		255,   0,   0, 255,    0, 255,   0, 255, // red,    green
+		  0,   0, 255, 255,  255, 255,   0, 255, // blue,   yellow
+	};
+	GLuint tex = 0;
+	glGenTextures(1, &tex);
+	glBindTexture(GL_TEXTURE_2D, tex);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+	glBindTexture(GL_TEXTURE_2D, 0);
+	return tex;
+}
+
 } // namespace
 
 
@@ -174,6 +193,53 @@ TEST_CASE("GLImmediateEmitter: GL_LINES (width 1) matches legacy")
 	// width-1 lines: FF vs core line rasterization should agree on llvmpipe
 	CHECK(d.maxAbsDelta <= 1);
 
+	RenderBuffer::KillStatic();
+}
+
+
+TEST_CASE("GLImmediateEmitter: TexRect (textured, MODULATE) matches legacy")
+{
+	if (!EnsureGL())
+		SKIP("no usable OpenGL context (headless box); skipping GL harness");
+
+	RenderBuffer::InitStatic();
+	const CMatrix44f mvp = OrthoMVP();
+	const GLuint tex = MakeTestTexture();
+
+	LuaImmediateBuffer buf;
+	buf.SetMVP(mvp);
+	// white color -> MODULATE shows the texture directly; full 0..1 texcoords
+	buf.SetTexRect(40, 40, 200, 160, 0.0f, 0.0f, 1.0f, 1.0f,
+		SColor(uint8_t(255), uint8_t(255), uint8_t(255), uint8_t(255)));
+
+	const auto legacy = RenderToBuffer([&] {
+		ClearTo(0.0f, 0.0f, 0.0f, 1.0f);
+		LoadFFMatrix(mvp);
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D, tex);
+		glEnable(GL_TEXTURE_2D);          // FF needs the texture target enabled
+		buf.FlushTexRectLegacy();
+		glDisable(GL_TEXTURE_2D);
+	});
+	const auto modern = RenderToBuffer([&] {
+		ClearTo(0.0f, 0.0f, 0.0f, 1.0f);
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D, tex); // shader samples unit 0; no FF enable
+		buf.FlushTexRectModern();
+	});
+
+	const DiffResult d = Compare(legacy, modern);
+	INFO("maxAbsDelta=" << d.maxAbsDelta << " diffBytes=" << d.diffBytes);
+	CHECK(d.maxAbsDelta <= 1);
+
+	// the four quadrants should carry the four texel colors (NEAREST): sample
+	// the lower-left quadrant center -> red texel (modern path actually textured)
+	const size_t ll = (size_t(70) * kSize + 80) * 4;
+	CHECK(modern[ll + 0] == 255);
+	CHECK(modern[ll + 1] == 0);
+	CHECK(modern[ll + 2] == 0);
+
+	glDeleteTextures(1, &tex);
 	RenderBuffer::KillStatic();
 }
 

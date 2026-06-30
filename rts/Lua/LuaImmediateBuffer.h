@@ -54,17 +54,36 @@ public:
 	void FlushLegacy() const;
 	void FlushModern() const;
 
+	// textured quad (gl.TexRect). The texture is bound by the caller (as in
+	// gl.Texture); the shading is MODULATE = texture * color. As with BeginEnd,
+	// one SetTexRect can be flushed either backend for an A/B compare.
+	void SetTexRect(float x0, float y0, float x1, float y1,
+	                float s0, float t0, float s1, float t1, const SColor& c) {
+		texRect = TexRectData{x0, y0, x1, y1, s0, t0, s1, t1, c, true};
+	}
+	void FlushTexRect(Backend b) const { (b == Backend::Legacy) ? FlushTexRectLegacy() : FlushTexRectModern(); }
+	void FlushTexRectLegacy() const;
+	void FlushTexRectModern() const;
+
 	void Clear() { verts.clear(); }
 	bool Empty() const { return verts.empty(); }
 	uint32_t GetMode() const { return mode; }
 	const std::vector<VA_TYPE_C>& GetVerts() const { return verts; }
 
 private:
+	struct TexRectData {
+		float x0, y0, x1, y1;
+		float s0, t0, s1, t1;
+		SColor c;
+		bool set = false;
+	};
+
 	Backend backend = Backend::Legacy;
 	uint32_t mode = 0;
 	SColor curColor = SColor(uint8_t(255), uint8_t(255), uint8_t(255), uint8_t(255));
 	CMatrix44f mvp;
 	std::vector<VA_TYPE_C> verts;
+	TexRectData texRect;
 };
 
 #endif // LUA_IMMEDIATE_BUFFER_H
