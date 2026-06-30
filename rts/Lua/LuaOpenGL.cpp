@@ -61,7 +61,6 @@
 #include "Rendering/Models/3DModelMisc.hpp"
 #include "Rendering/Models/3DModelPiece.hpp"
 #include "Rendering/Shaders/Shader.h"
-#include "Rendering/Shaders/ShaderHandler.h"
 #include "Rendering/Textures/Bitmap.h"
 #include "Rendering/Textures/TextureAtlas.h"
 #include "Rendering/Textures/NamedTextures.h"
@@ -106,6 +105,18 @@ static CMatrix44f GetCurrentFixedFunctionMVP()
 	glGetFloatv(GL_PROJECTION_MATRIX, static_cast<float*>(proj));
 	glGetFloatv(GL_MODELVIEW_MATRIX, static_cast<float*>(modelView));
 	return proj * modelView;
+}
+
+// True only in fixed-function mode (no shader program bound) -- the only case
+// the modern immediate backend may take over; otherwise the primitive is meant
+// to feed the bound shader and must go the legacy way. Queries the live GL
+// state so it catches BOTH engine shaders and Lua gl.UseShader, which calls
+// glUseProgram directly without notifying shaderHandler.
+static bool NoShaderBound()
+{
+	GLint prog = 0;
+	glGetIntegerv(GL_CURRENT_PROGRAM, &prog);
+	return prog == 0;
 }
 
 // per-Lua-caller dedup of LuaGLCompareMode results so the log isn't spammed.
@@ -2879,7 +2890,7 @@ int LuaOpenGL::Rect(lua_State* L)
 	const float x2 = luaL_checkfloat(L, 3);
 	const float y2 = luaL_checkfloat(L, 4);
 
-	const bool noShader = shaderHandler->GetCurrentlyBoundProgram() == nullptr;
+	const bool noShader = NoShaderBound();
 
 	const auto drawLegacy = [&]() { glRectf(x1, y1, x2, y2); };
 	const auto drawModern = [&]() {
@@ -2963,7 +2974,7 @@ int LuaOpenGL::TexRect(lua_State* L)
 		t2 = luaL_checkfloat(L, 8);
 	}
 
-	const bool noShader = shaderHandler->GetCurrentlyBoundProgram() == nullptr;
+	const bool noShader = NoShaderBound();
 
 	const auto drawLegacy = [&]() {
 		glBegin(GL_QUADS); {
