@@ -9,6 +9,8 @@
 #include "Rendering/Shaders/Shader.h"
 
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace {
 	// uniform-MVP shader for the modern backend: transforms by a uniform mat4,
@@ -36,6 +38,44 @@ namespace {
 		s += "out vec4 vcolor;\n";
 		s += "void main() { vcolor = acolor; gl_Position = uMVP * vec4(apos, 1.0); }\n";
 		return s;
+	}
+
+	// GL_QUADS / GL_QUAD_STRIP / GL_POLYGON are not in the core profile, so the
+	// modern path triangulates them; other modes pass through unchanged. For a
+	// planar convex quad/polygon the triangle union (hence coverage) is the same
+	// as the fixed-function decomposition, so flat-colored fills stay bit-exact;
+	// only smooth-shaded fills can differ by the diagonal choice.
+	std::pair<std::vector<VA_TYPE_C>, uint32_t> TriangulateForModern(uint32_t mode, const std::vector<VA_TYPE_C>& in)
+	{
+		std::vector<VA_TYPE_C> out;
+
+		switch (mode) {
+			case GL_QUADS: {
+				out.reserve((in.size() / 4) * 6);
+				for (size_t i = 0; i + 3 < in.size(); i += 4) {
+					out.push_back(in[i + 0]); out.push_back(in[i + 1]); out.push_back(in[i + 2]);
+					out.push_back(in[i + 0]); out.push_back(in[i + 2]); out.push_back(in[i + 3]);
+				}
+				return {std::move(out), GL_TRIANGLES};
+			}
+			case GL_QUAD_STRIP: {
+				// quad k spans verts {2k, 2k+1, 2k+3, 2k+2}
+				for (size_t i = 0; i + 3 < in.size(); i += 2) {
+					out.push_back(in[i + 0]); out.push_back(in[i + 1]); out.push_back(in[i + 3]);
+					out.push_back(in[i + 0]); out.push_back(in[i + 3]); out.push_back(in[i + 2]);
+				}
+				return {std::move(out), GL_TRIANGLES};
+			}
+			case GL_POLYGON: {
+				// triangle fan from the first vertex (matches FF for convex polys)
+				for (size_t i = 1; i + 1 < in.size(); ++i) {
+					out.push_back(in[0]); out.push_back(in[i]); out.push_back(in[i + 1]);
+				}
+				return {std::move(out), GL_TRIANGLES};
+			}
+			default:
+				return {in, mode};
+		}
 	}
 
 	Shader::IProgramObject* GetModernShader()
@@ -79,13 +119,17 @@ void LuaImmediateBuffer::FlushModern() const
 	if (verts.empty())
 		return;
 
+	auto [drawVerts, drawMode] = TriangulateForModern(mode, verts);
+	if (drawVerts.empty())
+		return;
+
 	auto& rb = RenderBuffer::GetTypedRenderBuffer<VA_TYPE_C>();
-	for (const VA_TYPE_C& v : verts)
+	for (const VA_TYPE_C& v : drawVerts)
 		rb.AddVertex(VA_TYPE_C{v});
 
 	Shader::IProgramObject* shader = GetModernShader();
 	shader->Enable();
 	shader->SetUniformMatrix4x4("uMVP", false, static_cast<const float*>(mvp));
-	rb.DrawArrays(mode);
+	rb.DrawArrays(drawMode);
 	shader->Disable();
 }

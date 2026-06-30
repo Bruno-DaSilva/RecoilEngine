@@ -103,6 +103,81 @@ TEST_CASE("GLImmediateEmitter: smooth-colored triangle flushed both ways within 
 }
 
 
+TEST_CASE("GLImmediateEmitter: GL_QUADS flat fill triangulates to match legacy bit-exact")
+{
+	if (!EnsureGL())
+		SKIP("no usable OpenGL context (headless box); skipping GL harness");
+
+	RenderBuffer::InitStatic();
+	const CMatrix44f mvp = OrthoMVP();
+
+	LuaImmediateBuffer buf;
+	buf.SetMVP(mvp);
+	buf.Begin(GL_QUADS);
+	buf.Color(0.70f, 0.30f, 0.55f, 1.0f);
+	// one CCW quad; modern triangulates, legacy uses GL_QUADS natively
+	buf.Vertex( 40,  40, 0); buf.Vertex(200,  40, 0); buf.Vertex(200, 160, 0); buf.Vertex( 40, 160, 0);
+
+	const DiffResult d = CompareBothFlushes(buf, mvp);
+	INFO("maxAbsDelta=" << d.maxAbsDelta << " diffBytes=" << d.diffBytes);
+	CHECK(d.equal);            // flat fill: triangle union == FF quad coverage
+	CHECK(d.maxAbsDelta == 0);
+
+	RenderBuffer::KillStatic();
+}
+
+
+TEST_CASE("GLImmediateEmitter: GL_POLYGON flat pentagon triangulates to match legacy")
+{
+	if (!EnsureGL())
+		SKIP("no usable OpenGL context (headless box); skipping GL harness");
+
+	RenderBuffer::InitStatic();
+	const CMatrix44f mvp = OrthoMVP();
+
+	LuaImmediateBuffer buf;
+	buf.SetMVP(mvp);
+	buf.Begin(GL_POLYGON);
+	buf.Color(0.25f, 0.65f, 0.90f, 1.0f);
+	// convex pentagon around (128,128)
+	buf.Vertex(128, 208, 0);
+	buf.Vertex( 52, 153, 0);
+	buf.Vertex( 81,  64, 0);
+	buf.Vertex(175,  64, 0);
+	buf.Vertex(204, 153, 0);
+
+	const DiffResult d = CompareBothFlushes(buf, mvp);
+	INFO("maxAbsDelta=" << d.maxAbsDelta << " diffBytes=" << d.diffBytes);
+	CHECK(d.maxAbsDelta <= 1); // FF fan vs our fan: flat fill, expect bit-exact
+
+	RenderBuffer::KillStatic();
+}
+
+
+TEST_CASE("GLImmediateEmitter: GL_LINES (width 1) matches legacy")
+{
+	if (!EnsureGL())
+		SKIP("no usable OpenGL context (headless box); skipping GL harness");
+
+	RenderBuffer::InitStatic();
+	const CMatrix44f mvp = OrthoMVP();
+
+	LuaImmediateBuffer buf;
+	buf.SetMVP(mvp);
+	buf.Begin(GL_LINES);
+	buf.Color(1.0f, 1.0f, 1.0f, 1.0f);
+	buf.Vertex( 40,  40, 0); buf.Vertex(210, 150, 0);
+	buf.Vertex( 40, 150, 0); buf.Vertex(210,  40, 0);
+
+	const DiffResult d = CompareBothFlushes(buf, mvp);
+	INFO("maxAbsDelta=" << d.maxAbsDelta << " diffBytes=" << d.diffBytes);
+	// width-1 lines: FF vs core line rasterization should agree on llvmpipe
+	CHECK(d.maxAbsDelta <= 1);
+
+	RenderBuffer::KillStatic();
+}
+
+
 TEST_CASE("GLImmediateEmitter: sticky color applies to later vertices")
 {
 	if (!EnsureGL())
