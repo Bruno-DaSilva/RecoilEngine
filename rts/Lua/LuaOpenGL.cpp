@@ -83,6 +83,8 @@
 
 CONFIG(bool, LuaShaders).defaultValue(true).headlessValue(false).safemodeValue(false);
 CONFIG(int, DeprecatedGLWarnLevel).defaultValue(0).headlessValue(0).safemodeValue(0);
+CONFIG(bool, LuaMatrixTracking).defaultValue(false).headlessValue(false).safemodeValue(false)
+	.description("Mirror Lua fixed-function matrix ops (gl.Translate/Rotate/Scale/...) into a CPU-side matrix stack. Phase 1 of the modern-GL migration; off => legacy behavior is unchanged.");
 
 /*** Callouts for OpenGL API
  *
@@ -100,6 +102,7 @@ LuaOpenGL::DrawMode LuaOpenGL::prevDrawMode = LuaOpenGL::DRAW_NONE;
 bool  LuaOpenGL::safeMode = true;
 bool  LuaOpenGL::canUseShaders = false;
 int  LuaOpenGL::deprecatedGLWarnLevel = 0;
+bool  LuaOpenGL::trackMatrices = false;
 
 std::unordered_set<std::string> LuaOpenGL::deprecatedGLWarned = {};
 
@@ -262,6 +265,8 @@ void LuaOpenGL::Init()
 		deprecatedGLWarned.reserve(64); // only deprecated calls are logged
 	else if (deprecatedGLWarnLevel >= 2)
 		deprecatedGLWarned.reserve(4096); // deprecated calls are logged along with caller information
+
+	trackMatrices = configHandler->GetBool("LuaMatrixTracking");
 }
 
 void LuaOpenGL::Free()
@@ -2133,6 +2138,7 @@ int LuaOpenGL::DrawGroundQuad(lua_State* L)
 {
 	// FIXME: incomplete (esp. texcoord clamping)
 	CheckDrawingEnabled(L, __func__);
+	CondWarnDeprecatedGL(L, __func__);
 	const float x0 = luaL_checknumber(L, 1);
 	const float z0 = luaL_checknumber(L, 2);
 	const float x1 = luaL_checknumber(L, 3);
@@ -2815,6 +2821,7 @@ int LuaOpenGL::EdgeFlag(lua_State* L)
 int LuaOpenGL::Rect(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	CondWarnDeprecatedGL(L, __func__);
 	const float x1 = luaL_checkfloat(L, 1);
 	const float y1 = luaL_checkfloat(L, 2);
 	const float x2 = luaL_checkfloat(L, 3);
@@ -2848,6 +2855,7 @@ int LuaOpenGL::Rect(lua_State* L)
 int LuaOpenGL::TexRect(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	CondWarnDeprecatedGL(L, __func__);
 
 	const int args = lua_gettop(L); // number of arguments
 
@@ -5155,6 +5163,8 @@ int LuaOpenGL::Translate(lua_State* L)
 	const float y = luaL_checkfloat(L, 2);
 	const float z = luaL_checkfloat(L, 3);
 	glTranslatef(x, y, z);
+	if (trackMatrices)
+		GetLuaContextData(L)->glMatrixTracker.Translate(x, y, z);
 	return 0;
 }
 
@@ -5173,6 +5183,8 @@ int LuaOpenGL::Scale(lua_State* L)
 	const float y = luaL_checkfloat(L, 2);
 	const float z = luaL_checkfloat(L, 3);
 	glScalef(x, y, z);
+	if (trackMatrices)
+		GetLuaContextData(L)->glMatrixTracker.Scale(x, y, z);
 	return 0;
 }
 
@@ -5193,6 +5205,8 @@ int LuaOpenGL::Rotate(lua_State* L)
 	const float y = luaL_checkfloat(L, 3);
 	const float z = luaL_checkfloat(L, 4);
 	glRotatef(r, x, y, z);
+	if (trackMatrices)
+		GetLuaContextData(L)->glMatrixTracker.Rotate(r, x, y, z);
 	return 0;
 }
 
@@ -5217,6 +5231,8 @@ int LuaOpenGL::Ortho(lua_State* L)
 	const float _near  = luaL_checknumber(L, 5);
 	const float _far   = luaL_checknumber(L, 6);
 	glOrtho(left, right, bottom, top, _near, _far);
+	if (trackMatrices)
+		GetLuaContextData(L)->glMatrixTracker.Ortho(left, right, bottom, top, _near, _far);
 	return 0;
 }
 
@@ -5241,6 +5257,8 @@ int LuaOpenGL::Frustum(lua_State* L)
 	const float _near  = luaL_checknumber(L, 5);
 	const float _far   = luaL_checknumber(L, 6);
 	glFrustum(left, right, bottom, top, _near, _far);
+	if (trackMatrices)
+		GetLuaContextData(L)->glMatrixTracker.Frustum(left, right, bottom, top, _near, _far);
 	return 0;
 }
 
@@ -5253,6 +5271,8 @@ int LuaOpenGL::Billboard(lua_State* L)
 	CheckDrawingEnabled(L, __func__);
 	CondWarnDeprecatedGL(L, __func__);
 	glMultMatrixf(camera->GetBillBoardMatrix());
+	if (trackMatrices)
+		GetLuaContextData(L)->glMatrixTracker.MultMatrix(camera->GetBillBoardMatrix());
 	return 0;
 }
 
@@ -5433,6 +5453,8 @@ int LuaOpenGL::LoadIdentity(lua_State* L)
 		luaL_error(L, "gl.LoadIdentity takes no arguments");
 	}
 	glLoadIdentity();
+	if (trackMatrices)
+		GetLuaContextData(L)->glMatrixTracker.LoadIdentity();
 	return 0;
 }
 
@@ -5495,6 +5517,8 @@ int LuaOpenGL::LoadMatrix(lua_State* L)
 		const CMatrix44f* matptr = LuaOpenGLUtils::GetNamedMatrix(lua_tostring(L, 1));
 		if (matptr != NULL) {
 			glLoadMatrixf(*matptr);
+			if (trackMatrices)
+				GetLuaContextData(L)->glMatrixTracker.LoadMatrix(*matptr);
 		} else {
 			luaL_error(L, "Incorrect arguments to gl.LoadMatrix()");
 		}
@@ -5512,6 +5536,11 @@ int LuaOpenGL::LoadMatrix(lua_State* L)
 			}
 		}
 		glLoadMatrixf(matrix);
+		if (trackMatrices) {
+			CMatrix44f m44;
+			std::copy(matrix, matrix + 16, m44.m);
+			GetLuaContextData(L)->glMatrixTracker.LoadMatrix(m44);
+		}
 	}
 	return 0;
 }
@@ -5554,6 +5583,8 @@ int LuaOpenGL::MultMatrix(lua_State* L)
 		const CMatrix44f* matptr = LuaOpenGLUtils::GetNamedMatrix(lua_tostring(L, 1));
 		if (matptr != NULL) {
 			glMultMatrixf(*matptr);
+			if (trackMatrices)
+				GetLuaContextData(L)->glMatrixTracker.MultMatrix(*matptr);
 		} else {
 			luaL_error(L, "Incorrect arguments to gl.MultMatrix()");
 		}
@@ -5571,6 +5602,11 @@ int LuaOpenGL::MultMatrix(lua_State* L)
 			}
 		}
 		glMultMatrixf(matrix);
+		if (trackMatrices) {
+			CMatrix44f m44;
+			std::copy(matrix, matrix + 16, m44.m);
+			GetLuaContextData(L)->glMatrixTracker.MultMatrix(m44);
+		}
 	}
 	return 0;
 }
@@ -5767,6 +5803,7 @@ int LuaOpenGL::GetMatrixData(lua_State* L)
 int LuaOpenGL::PushAttrib(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	CondWarnDeprecatedGL(L, __func__);
 	int mask = luaL_optnumber(L, 1, static_cast<lua_Number>(GL_ALL_ATTRIB_BITS));
 	if (mask < 0) {
 		mask = -mask;
@@ -5783,6 +5820,7 @@ int LuaOpenGL::PushAttrib(lua_State* L)
 int LuaOpenGL::PopAttrib(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
+	CondWarnDeprecatedGL(L, __func__);
 	glPopAttrib();
 	return 0;
 }

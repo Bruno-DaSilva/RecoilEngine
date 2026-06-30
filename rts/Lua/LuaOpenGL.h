@@ -147,6 +147,11 @@ class LuaOpenGL {
 		static bool safeMode;
 		static bool canUseShaders;
 		static int deprecatedGLWarnLevel;
+		// when set, group-B matrix callouts also drive the CPU-side
+		// GLMatrixStateTracker value stacks (Phase 1 of the modern-GL
+		// migration, see doc/bar-gl4-immediate-mode-inventory.md). Off by
+		// default => byte-identical to the legacy fixed-function-only path.
+		static bool trackMatrices;
 		static float screenWidth;
 		static float screenDistance;
 		static void (*resetMatrixFunc)(void);
