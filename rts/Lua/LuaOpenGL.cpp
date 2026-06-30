@@ -61,6 +61,7 @@
 #include "Rendering/Models/3DModelMisc.hpp"
 #include "Rendering/Models/3DModelPiece.hpp"
 #include "Rendering/Shaders/Shader.h"
+#include "Rendering/Shaders/ShaderHandler.h"
 #include "Rendering/Textures/Bitmap.h"
 #include "Rendering/Textures/TextureAtlas.h"
 #include "Rendering/Textures/NamedTextures.h"
@@ -80,11 +81,30 @@
 #include "System/Config/ConfigHandler.h"
 #include "System/Log/ILog.h"
 #include "System/Matrix44f.h"
+#include "Lua/LuaImmediateBuffer.h"
 
 CONFIG(bool, LuaShaders).defaultValue(true).headlessValue(false).safemodeValue(false);
 CONFIG(int, DeprecatedGLWarnLevel).defaultValue(0).headlessValue(0).safemodeValue(0);
 CONFIG(bool, LuaMatrixTracking).defaultValue(false).headlessValue(false).safemodeValue(false)
 	.description("Mirror Lua fixed-function matrix ops (gl.Translate/Rotate/Scale/...) into a CPU-side matrix stack. Phase 1 of the modern-GL migration; off => legacy behavior is unchanged.");
+CONFIG(bool, LuaModernGLBackend).defaultValue(false).headlessValue(false).safemodeValue(false)
+	.description("Draw self-contained Lua immediate-mode primitives (gl.Rect/gl.TexRect) via the modern LuaImmediateBuffer backend (no glBegin/glRectf). Experimental; off => legacy path unchanged.");
+
+// transient accumulator for the modern immediate-mode backend; reused across
+// calls (Lua GL calls are serial on the render thread).
+static LuaImmediateBuffer luaImmBuffer;
+
+// bridge until Phase 0: read the current MVP straight off the fixed-function
+// stack (a query, not a deprecated set-call) so the modern shader gets the same
+// transform the engine scaffolding established.
+static CMatrix44f GetCurrentFixedFunctionMVP()
+{
+	CMatrix44f proj;
+	CMatrix44f modelView;
+	glGetFloatv(GL_PROJECTION_MATRIX, static_cast<float*>(proj));
+	glGetFloatv(GL_MODELVIEW_MATRIX, static_cast<float*>(modelView));
+	return proj * modelView;
+}
 
 /*** Callouts for OpenGL API
  *
@@ -103,6 +123,7 @@ bool  LuaOpenGL::safeMode = true;
 bool  LuaOpenGL::canUseShaders = false;
 int  LuaOpenGL::deprecatedGLWarnLevel = 0;
 bool  LuaOpenGL::trackMatrices = false;
+bool  LuaOpenGL::modernImmediate = false;
 
 std::unordered_set<std::string> LuaOpenGL::deprecatedGLWarned = {};
 
@@ -266,7 +287,9 @@ void LuaOpenGL::Init()
 	else if (deprecatedGLWarnLevel >= 2)
 		deprecatedGLWarned.reserve(4096); // deprecated calls are logged along with caller information
 
-	trackMatrices = configHandler->GetBool("LuaMatrixTracking");
+	modernImmediate = configHandler->GetBool("LuaModernGLBackend");
+	// the modern backend needs a CPU-side MVP; force matrix tracking on with it.
+	trackMatrices = configHandler->GetBool("LuaMatrixTracking") || modernImmediate;
 }
 
 void LuaOpenGL::Free()
@@ -2826,6 +2849,20 @@ int LuaOpenGL::Rect(lua_State* L)
 	const float y1 = luaL_checkfloat(L, 2);
 	const float x2 = luaL_checkfloat(L, 3);
 	const float y2 = luaL_checkfloat(L, 4);
+
+	if (modernImmediate && shaderHandler->GetCurrentlyBoundProgram() == nullptr) {
+		const SColor col(color[0], color[1], color[2], color[3]);
+		luaImmBuffer.SetBackend(LuaImmediateBuffer::Backend::Modern);
+		luaImmBuffer.SetMVP(GetCurrentFixedFunctionMVP());
+		luaImmBuffer.Begin(GL_TRIANGLES);
+		luaImmBuffer.Color(col);
+		// glRectf fills the quad (x1,y1)-(x2,y2); emit it as two CCW triangles
+		luaImmBuffer.Vertex(x1, y1, 0.0f); luaImmBuffer.Vertex(x2, y1, 0.0f); luaImmBuffer.Vertex(x2, y2, 0.0f);
+		luaImmBuffer.Vertex(x1, y1, 0.0f); luaImmBuffer.Vertex(x2, y2, 0.0f); luaImmBuffer.Vertex(x1, y2, 0.0f);
+		luaImmBuffer.End();
+		return 0;
+	}
+
 	glRectf(x1, y1, x2, y2);
 	return 0;
 }
@@ -2866,12 +2903,13 @@ int LuaOpenGL::TexRect(lua_State* L)
 
 	// Spring's textures get loaded with a vertical flip
 	// We change that for the default settings.
+	float s1, t1, s2, t2;
 
 	if (args <= 6) {
-		float s1 = 0.0f;
-		float t1 = 1.0f;
-		float s2 = 1.0f;
-		float t2 = 0.0f;
+		s1 = 0.0f;
+		t1 = 1.0f;
+		s2 = 1.0f;
+		t2 = 0.0f;
 		if ((args >= 5) && luaL_optboolean(L, 5, false)) {
 			// flip s-coords
 			s1 = 1.0f;
@@ -2882,20 +2920,21 @@ int LuaOpenGL::TexRect(lua_State* L)
 			t1 = 0.0f;
 			t2 = 1.0f;
 		}
-		glBegin(GL_QUADS); {
-			glTexCoord2f(s1, t1); glVertex2f(x1, y1);
-			glTexCoord2f(s2, t1); glVertex2f(x2, y1);
-			glTexCoord2f(s2, t2); glVertex2f(x2, y2);
-			glTexCoord2f(s1, t2); glVertex2f(x1, y2);
-		}
-		glEnd();
+	} else {
+		s1 = luaL_checkfloat(L, 5);
+		t1 = luaL_checkfloat(L, 6);
+		s2 = luaL_checkfloat(L, 7);
+		t2 = luaL_checkfloat(L, 8);
+	}
+
+	if (modernImmediate && shaderHandler->GetCurrentlyBoundProgram() == nullptr) {
+		const SColor col(color[0], color[1], color[2], color[3]);
+		luaImmBuffer.SetMVP(GetCurrentFixedFunctionMVP());
+		luaImmBuffer.SetTexRect(x1, y1, x2, y2, s1, t1, s2, t2, col);
+		luaImmBuffer.FlushTexRectModern();
 		return 0;
 	}
 
-	const float s1 = luaL_checkfloat(L, 5);
-	const float t1 = luaL_checkfloat(L, 6);
-	const float s2 = luaL_checkfloat(L, 7);
-	const float t2 = luaL_checkfloat(L, 8);
 	glBegin(GL_QUADS); {
 		glTexCoord2f(s1, t1); glVertex2f(x1, y1);
 		glTexCoord2f(s2, t1); glVertex2f(x2, y1);

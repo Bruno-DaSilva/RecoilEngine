@@ -152,6 +152,11 @@ class LuaOpenGL {
 		// migration, see doc/bar-gl4-immediate-mode-inventory.md). Off by
 		// default => byte-identical to the legacy fixed-function-only path.
 		static bool trackMatrices;
+		// when set, self-contained immediate-mode primitives (gl.Rect/TexRect,
+		// later BeginEnd) draw via the modern LuaImmediateBuffer backend
+		// (TypedRenderBuffer + uniform-MVP shader) instead of glBegin/glRectf.
+		// Off by default => legacy path unchanged. See LuaImmediateBuffer.
+		static bool modernImmediate;
 		static float screenWidth;
 		static float screenDistance;
 		static void (*resetMatrixFunc)(void);
