@@ -1,0 +1,70 @@
+/* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+
+#ifndef LUA_IMMEDIATE_BUFFER_H
+#define LUA_IMMEDIATE_BUFFER_H
+
+#include <cstdint>
+#include <vector>
+
+#include "Rendering/GL/VertexArrayTypes.h"
+#include "System/Color.h"
+#include "System/Matrix44f.h"
+
+// lua_State-free immediate-mode emitter for the modern-GL migration
+// (doc/bar-gl4-immediate-mode-inventory.md).
+//
+// It accumulates a pos+color immediate-mode vertex stream (current color is
+// sticky, OpenGL-style), then flushes it one of two ways:
+//   - Legacy: glBegin/glColor/glVertex (the deprecated path; transforms via the
+//     fixed-function matrix the caller has set).
+//   - Modern: GL::TypedRenderBuffer + a uniform-mat4-MVP shader that makes NO
+//     fixed-function matrix calls (RenderDoc-clean); the MVP is supplied via
+//     SetMVP (in the engine, from GLMatrixStateTracker).
+//
+// Because the SAME accumulated stream drives both flushes, the two paths can be
+// A/B compared with identical input by construction — that is the whole point:
+// it makes "the modern path renders the same" a measured property, and lets the
+// production code pick a backend by flag with the other as the oracle/fallback.
+//
+// This first iteration handles pos+color (VA_TYPE_C) and the core primitive
+// modes that map straight to the core profile; QUADS/POLYGON triangulation,
+// textures (TexRect), normals, and the lua-side wiring come in later iterations.
+class LuaImmediateBuffer {
+public:
+	enum class Backend { Legacy, Modern };
+
+	void SetBackend(Backend b) { backend = b; }
+	Backend GetBackend() const { return backend; }
+
+	// MVP used by the modern backend's uMVP uniform (ignored by the legacy
+	// backend, which reads the fixed-function matrix).
+	void SetMVP(const CMatrix44f& m) { mvp = m; }
+
+	void Begin(uint32_t glMode) { mode = glMode; verts.clear(); }
+	void Color(float r, float g, float b, float a) { curColor = SColor(r, g, b, a); }
+	void Color(const SColor& c) { curColor = c; }
+	void Vertex(float x, float y, float z) { verts.push_back(VA_TYPE_C{float3{x, y, z}, curColor}); }
+
+	// flush via the active backend and reset the vertex list.
+	void End() { Flush(backend); verts.clear(); }
+
+	// flush a given backend WITHOUT clearing, so the same accumulated scene can
+	// be rendered both ways for an A/B compare.
+	void Flush(Backend b) const { (b == Backend::Legacy) ? FlushLegacy() : FlushModern(); }
+	void FlushLegacy() const;
+	void FlushModern() const;
+
+	void Clear() { verts.clear(); }
+	bool Empty() const { return verts.empty(); }
+	uint32_t GetMode() const { return mode; }
+	const std::vector<VA_TYPE_C>& GetVerts() const { return verts; }
+
+private:
+	Backend backend = Backend::Legacy;
+	uint32_t mode = 0;
+	SColor curColor = SColor(uint8_t(255), uint8_t(255), uint8_t(255), uint8_t(255));
+	CMatrix44f mvp;
+	std::vector<VA_TYPE_C> verts;
+};
+
+#endif // LUA_IMMEDIATE_BUFFER_H

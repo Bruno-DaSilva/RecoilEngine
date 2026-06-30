@@ -6,9 +6,11 @@
 remove_definitions(-DUNIT_TEST)
 
 if (TARGET SDL2::SDL2 AND TARGET glad)
-	set(test_name GLRenderBufferCompare)
-	set(test_src
-			"${CMAKE_CURRENT_SOURCE_DIR}/testGLRenderBufferCompare.cpp"
+	# shared engine rendering sources + stubs that every engine-GL test links.
+	# -DNOT_USING_CREG drops CMatrix44f's creg; --gc-sections (set per target
+	# below) strips Shader.cpp's file/Lua shader-loading paths that the inline
+	# RenderBuffer shaders never call.
+	set(gl_engine_srcs
 			"${CMAKE_CURRENT_SOURCE_DIR}/GLEngineStubs.cpp"
 			"${ENGINE_SOURCE_DIR}/Rendering/GL/RenderBuffers.cpp"
 			"${ENGINE_SOURCE_DIR}/Rendering/GL/VAO.cpp"
@@ -19,6 +21,7 @@ if (TARGET SDL2::SDL2 AND TARGET glad)
 			"${ENGINE_SOURCE_DIR}/Rendering/Shaders/ShaderHandler.cpp"
 			"${ENGINE_SOURCE_DIR}/Rendering/Shaders/ShaderStates.cpp"
 			"${ENGINE_SOURCE_DIR}/Rendering/Shaders/GLSLCopyState.cpp"
+			"${ENGINE_SOURCE_DIR}/Lua/LuaImmediateBuffer.cpp"
 			"${ENGINE_SOURCE_DIR}/System/Matrix44f.cpp"
 			"${ENGINE_SOURCE_DIR}/System/Quaternion.cpp"
 			"${ENGINE_SOURCE_DIR}/System/float3.cpp"
@@ -28,20 +31,17 @@ if (TARGET SDL2::SDL2 AND TARGET glad)
 			"${ENGINE_SOURCE_DIR}/System/Config/ConfigVariable.cpp"
 			${test_Common_sources}
 		)
+	set(gl_engine_libs SDL2::SDL2 glad streflop ${WINMM_LIBRARY})
+	set(gl_engine_flags "-DNOT_USING_CREG -ffunction-sections -fdata-sections")
 
-	set(test_libs
-			SDL2::SDL2
-			glad
-			streflop
-			${WINMM_LIBRARY}
-		)
+	# helper to declare an engine-GL test linking the shared set
+	macro(add_engine_gl_test name srcfile)
+		set(_src "${CMAKE_CURRENT_SOURCE_DIR}/${srcfile}" ${gl_engine_srcs})
+		add_spring_test(${name} "${_src}" "${gl_engine_libs}" "${gl_engine_flags}")
+		target_link_options(test_${name} PRIVATE -Wl,--gc-sections)
+		target_include_directories(test_${name} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+	endmacro()
 
-	# -DNOT_USING_CREG: avoid pulling the creg serializer (CMatrix44f's CR_BIND).
-	# --gc-sections: strip Shader.cpp's file/Lua shader-loading paths (CFileHandler,
-	# LuaMatTexture, ...) that the inline-shader RenderBuffer path never calls.
-	add_spring_test(${test_name} "${test_src}" "${test_libs}"
-		"-DNOT_USING_CREG -ffunction-sections -fdata-sections")
-	target_link_options(test_${test_name} PRIVATE -Wl,--gc-sections)
-	# the test .cpp includes GLTestHarness.h from the parent test dir
-	target_include_directories(test_${test_name} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+	add_engine_gl_test(GLRenderBufferCompare testGLRenderBufferCompare.cpp)
+	add_engine_gl_test(GLImmediateEmitter    testGLImmediateEmitter.cpp)
 endif()
