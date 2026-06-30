@@ -340,6 +340,44 @@ TEST_CASE("GLImmediateEmitter: more primitive modes match legacy")
 }
 
 
+TEST_CASE("GLImmediateEmitter: smooth-shaded QUADS/POLYGON vs legacy (diagonal split)")
+{
+	if (!EnsureGL())
+		SKIP("no usable OpenGL context (headless box); skipping GL harness");
+
+	RenderBuffer::InitStatic();
+	const CMatrix44f mvp = OrthoMVP();
+
+	// per-vertex distinct colors -> interpolation depends on the triangulation
+	// diagonal; the modern path splits a quad on v0-v2, the conventional GL/Mesa
+	// quad decomposition.
+	LuaImmediateBuffer q;
+	q.SetMVP(mvp);
+	q.Begin(GL_QUADS);
+	q.Color(1.0f, 0.0f, 0.0f, 1.0f); q.Vertex( 50,  50, 0);
+	q.Color(0.0f, 1.0f, 0.0f, 1.0f); q.Vertex(200,  50, 0);
+	q.Color(0.0f, 0.0f, 1.0f, 1.0f); q.Vertex(200, 180, 0);
+	q.Color(1.0f, 1.0f, 1.0f, 1.0f); q.Vertex( 50, 180, 0);
+	const int dq = CompareBothFlushes(q, mvp).maxAbsDelta;
+	INFO("smooth QUADS maxAbsDelta=" << dq);
+	CHECK(dq <= 1);
+
+	LuaImmediateBuffer p;
+	p.SetMVP(mvp);
+	p.Begin(GL_POLYGON);
+	p.Color(1.0f, 0.0f, 0.0f, 1.0f); p.Vertex(128, 200, 0);
+	p.Color(0.0f, 1.0f, 0.0f, 1.0f); p.Vertex( 55, 150, 0);
+	p.Color(0.0f, 0.0f, 1.0f, 1.0f); p.Vertex( 85,  70, 0);
+	p.Color(1.0f, 1.0f, 0.0f, 1.0f); p.Vertex(170,  70, 0);
+	p.Color(0.0f, 1.0f, 1.0f, 1.0f); p.Vertex(200, 150, 0);
+	const int dp = CompareBothFlushes(p, mvp).maxAbsDelta;
+	INFO("smooth POLYGON maxAbsDelta=" << dp);
+	CHECK(dp <= 1);
+
+	RenderBuffer::KillStatic();
+}
+
+
 TEST_CASE("GLImmediateEmitter: translucent draw-order composites identically (C4)")
 {
 	if (!EnsureGL())
