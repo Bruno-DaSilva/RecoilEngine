@@ -244,6 +244,45 @@ TEST_CASE("GLImmediateEmitter: TexRect (textured, MODULATE) matches legacy")
 }
 
 
+TEST_CASE("GLImmediateEmitter: modern flush leaks no GL state (C3)")
+{
+	if (!EnsureGL())
+		SKIP("no usable OpenGL context (headless box); skipping GL harness");
+
+	RenderBuffer::InitStatic();
+	const CMatrix44f mvp = OrthoMVP();
+
+	LuaImmediateBuffer buf;
+	buf.SetMVP(mvp);
+	buf.Begin(GL_TRIANGLES);
+	buf.Color(0.5f, 0.5f, 0.5f, 1.0f);
+	buf.Vertex(40, 40, 0); buf.Vertex(200, 40, 0); buf.Vertex(120, 160, 0);
+
+	RenderTarget rt;
+	REQUIRE(rt.Make(kSize, kSize));
+	rt.Bind();
+
+	// known pre-state (these are the transient bits the modern flush touches)
+	GLint prog0 = -1, vao0 = -1;
+	glGetIntegerv(GL_CURRENT_PROGRAM, &prog0);
+	glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &vao0);
+	while (glGetError() != GL_NO_ERROR) {} // drain
+
+	buf.FlushModern();
+
+	CHECK(glGetError() == GL_NO_ERROR); // flush raised no GL error
+
+	GLint prog1 = -1, vao1 = -1;
+	glGetIntegerv(GL_CURRENT_PROGRAM, &prog1);
+	glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &vao1);
+	CHECK(prog1 == prog0); // shader Disabled -> program restored
+	CHECK(vao1 == vao0);   // VAO unbound -> binding restored
+
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	RenderBuffer::KillStatic();
+}
+
+
 TEST_CASE("GLImmediateEmitter: sticky color applies to later vertices")
 {
 	if (!EnsureGL())
