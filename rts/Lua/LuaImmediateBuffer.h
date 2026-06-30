@@ -41,10 +41,11 @@ public:
 	// backend, which reads the fixed-function matrix).
 	void SetMVP(const CMatrix44f& m) { mvp = m; }
 
-	void Begin(uint32_t glMode) { mode = glMode; verts.clear(); }
+	void Begin(uint32_t glMode) { mode = glMode; verts.clear(); textured = false; curS = curT = 0.0f; }
 	void Color(float r, float g, float b, float a) { curColor = SColor(r, g, b, a); }
 	void Color(const SColor& c) { curColor = c; }
-	void Vertex(float x, float y, float z) { verts.push_back(VA_TYPE_C{float3{x, y, z}, curColor}); }
+	void TexCoord(float s, float t) { curS = s; curT = t; textured = true; }
+	void Vertex(float x, float y, float z) { verts.push_back(VA_TYPE_TC{float3{x, y, z}, curS, curT, curColor}); }
 
 	// flush via the active backend and reset the vertex list.
 	void End() { Flush(backend); verts.clear(); }
@@ -68,8 +69,9 @@ public:
 
 	void Clear() { verts.clear(); }
 	bool Empty() const { return verts.empty(); }
+	bool IsTextured() const { return textured; }
 	uint32_t GetMode() const { return mode; }
-	const std::vector<VA_TYPE_C>& GetVerts() const { return verts; }
+	const std::vector<VA_TYPE_TC>& GetVerts() const { return verts; }
 
 private:
 	struct TexRectData {
@@ -82,8 +84,10 @@ private:
 	Backend backend = Backend::Legacy;
 	uint32_t mode = 0;
 	SColor curColor = SColor(uint8_t(255), uint8_t(255), uint8_t(255), uint8_t(255));
+	float curS = 0.0f, curT = 0.0f;
+	bool textured = false; // any TexCoord seen this Begin()
 	CMatrix44f mvp;
-	std::vector<VA_TYPE_C> verts;
+	std::vector<VA_TYPE_TC> verts; // superset; s/t unused when !textured
 	TexRectData texRect;
 };
 

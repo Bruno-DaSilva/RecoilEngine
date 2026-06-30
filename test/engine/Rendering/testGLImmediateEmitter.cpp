@@ -244,6 +244,49 @@ TEST_CASE("GLImmediateEmitter: TexRect (textured, MODULATE) matches legacy")
 }
 
 
+TEST_CASE("GLImmediateEmitter: textured BeginEnd captures texcoords, falls back to legacy")
+{
+	if (!EnsureGL())
+		SKIP("no usable OpenGL context (headless box); skipping GL harness");
+
+	RenderBuffer::InitStatic();
+	const CMatrix44f mvp = OrthoMVP();
+	const GLuint tex = MakeTestTexture();
+
+	LuaImmediateBuffer buf;
+	buf.SetMVP(mvp);
+	buf.Begin(GL_TRIANGLES);
+	buf.Color(1.0f, 1.0f, 1.0f, 1.0f);
+	// textured quad [40,200]x[40,160] as two CCW triangles
+	buf.TexCoord(0, 0); buf.Vertex( 40,  40, 0);
+	buf.TexCoord(1, 0); buf.Vertex(200,  40, 0);
+	buf.TexCoord(1, 1); buf.Vertex(200, 160, 0);
+	buf.TexCoord(0, 0); buf.Vertex( 40,  40, 0);
+	buf.TexCoord(1, 1); buf.Vertex(200, 160, 0);
+	buf.TexCoord(0, 1); buf.Vertex( 40, 160, 0);
+	REQUIRE(buf.IsTextured());
+
+	const auto bindTex = [&] {
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D, tex);
+		glEnable(GL_TEXTURE_2D); // FlushModern falls back to FlushLegacy (FF texturing)
+	};
+	const auto legacy = RenderToBuffer([&] { ClearTo(0, 0, 0, 1); bindTex(); buf.FlushLegacy(); glDisable(GL_TEXTURE_2D); });
+	const auto modern = RenderToBuffer([&] { ClearTo(0, 0, 0, 1); bindTex(); buf.FlushModern(); glDisable(GL_TEXTURE_2D); });
+
+	// textured BeginEnd is not modernized yet -> modern falls back to legacy
+	CHECK(Compare(legacy, modern).maxAbsDelta == 0);
+	// and it actually sampled the texture (lower-left quadrant -> red texel)
+	const size_t c = (size_t(70) * kSize + 80) * 4;
+	CHECK(modern[c + 0] == 255);
+	CHECK(modern[c + 1] == 0);
+	CHECK(modern[c + 2] == 0);
+
+	glDeleteTextures(1, &tex);
+	RenderBuffer::KillStatic();
+}
+
+
 TEST_CASE("GLImmediateEmitter: LuaGLCompare::CompareDraws confirms and denies")
 {
 	if (!EnsureGL())

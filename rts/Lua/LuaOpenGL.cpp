@@ -94,6 +94,9 @@ CONFIG(bool, LuaGLCompareMode).defaultValue(false).headlessValue(false).safemode
 // transient accumulator for the modern immediate-mode backend; reused across
 // calls (Lua GL calls are serial on the render thread).
 static LuaImmediateBuffer luaImmBuffer;
+// true while a captured gl.BeginEnd callback runs, so gl.Vertex/Color/TexCoord
+// route into luaImmBuffer instead of emitting fixed-function calls.
+static bool inModernBeginEnd = false;
 
 // bridge until Phase 0: read the current MVP straight off the fixed-function
 // stack (a query, not a deprecated set-call) so the modern shader gets the same
@@ -2454,16 +2457,44 @@ int LuaOpenGL::BeginEnd(lua_State* L)
 		WorkaroundATIPointSizeBug();
 	}
 
-	// call the function
-	glBegin(primMode);
+	// legacy path (unchanged) unless the modern backend or compare mode is on
+	// and we're in fixed-function mode (no shader bound).
+	if (!((modernImmediate || glCompareMode) && NoShaderBound())) {
+		glBegin(primMode);
+		const int error = lua_pcall(L, (args - 2), 0, 0);
+		glEnd();
+
+		if (error != 0) {
+			LOG_L(L_ERROR, "gl.BeginEnd: error(%i) = %s", error, lua_tostring(L, -1));
+			lua_error(L);
+		}
+		return 0;
+	}
+
+	// capture the immediate-mode stream once (gl.Vertex/Color/TexCoord route
+	// into luaImmBuffer), then render it -- and optionally compare both ways.
+	luaImmBuffer.Begin(primMode);
+	luaImmBuffer.SetMVP(GetCurrentFixedFunctionMVP());
+
+	inModernBeginEnd = true;
 	const int error = lua_pcall(L, (args - 2), 0, 0);
-	glEnd();
+	inModernBeginEnd = false;
 
 	if (error != 0) {
-		LOG_L(L_ERROR, "gl.BeginEnd: error(%i) = %s",
-				error, lua_tostring(L, -1));
+		luaImmBuffer.Clear();
+		LOG_L(L_ERROR, "gl.BeginEnd: error(%i) = %s", error, lua_tostring(L, -1));
 		lua_error(L);
 	}
+
+	if (glCompareMode) {
+		GLint vp[4]; glGetIntegerv(GL_VIEWPORT, vp);
+		LogGLCompare(L, __func__, LuaGLCompare::CompareDraws(vp[2], vp[3],
+			[]() { luaImmBuffer.FlushLegacy(); },
+			[]() { luaImmBuffer.FlushModern(); }));
+	}
+
+	modernImmediate ? luaImmBuffer.FlushModern() : luaImmBuffer.FlushLegacy();
+	luaImmBuffer.Clear();
 	return 0;
 }
 
@@ -2496,58 +2527,55 @@ int LuaOpenGL::Vertex(lua_State* L)
 
 	const int args = lua_gettop(L); // number of arguments
 
-	if (args == 1) {
-		if (!lua_istable(L, 1)) {
-			luaL_error(L, "Bad data passed to gl.Vertex()");
-		}
-		lua_rawgeti(L, 1, 1);
-		if (!lua_isnumber(L, -1)) {
-			luaL_error(L, "Bad data passed to gl.Vertex()");
-		}
-		const float x = lua_tofloat(L, -1);
-		lua_rawgeti(L, 1, 2);
-		if (!lua_isnumber(L, -1)) {
-			luaL_error(L, "Bad data passed to gl.Vertex()");
-		}
-		const float y = lua_tofloat(L, -1);
-		lua_rawgeti(L, 1, 3);
-		if (!lua_isnumber(L, -1)) {
-			glVertex2f(x, y);
-			return 0;
-		}
-		const float z = lua_tofloat(L, -1);
-		lua_rawgeti(L, 1, 4);
-		if (!lua_isnumber(L, -1)) {
-			glVertex3f(x, y, z);
-			return 0;
-		}
-		const float w = lua_tofloat(L, -1);
-		glVertex4f(x, y, z, w);
-		return 0;
-	}
+	// gather coordinates (table form or 2/3/4 numeric args)
+	float x = 0.0f, y = 0.0f, z = 0.0f, w = 1.0f;
+	int dim = 0;
 
-	if (args == 3) {
-		const float x = luaL_checkfloat(L, 1);
-		const float y = luaL_checkfloat(L, 2);
-		const float z = luaL_checkfloat(L, 3);
-		glVertex3f(x, y, z);
+	if (args == 1) {
+		if (!lua_istable(L, 1))
+			luaL_error(L, "Bad data passed to gl.Vertex()");
+		lua_rawgeti(L, 1, 1);
+		if (!lua_isnumber(L, -1)) luaL_error(L, "Bad data passed to gl.Vertex()");
+		x = lua_tofloat(L, -1);
+		lua_rawgeti(L, 1, 2);
+		if (!lua_isnumber(L, -1)) luaL_error(L, "Bad data passed to gl.Vertex()");
+		y = lua_tofloat(L, -1);
+		dim = 2;
+		lua_rawgeti(L, 1, 3);
+		if (lua_isnumber(L, -1)) {
+			z = lua_tofloat(L, -1);
+			dim = 3;
+			lua_rawgeti(L, 1, 4);
+			if (lua_isnumber(L, -1)) {
+				w = lua_tofloat(L, -1);
+				dim = 4;
+			}
+		}
 	}
 	else if (args == 2) {
-		const float x = luaL_checkfloat(L, 1);
-		const float y = luaL_checkfloat(L, 2);
-		glVertex2f(x, y);
+		x = luaL_checkfloat(L, 1); y = luaL_checkfloat(L, 2); dim = 2;
+	}
+	else if (args == 3) {
+		x = luaL_checkfloat(L, 1); y = luaL_checkfloat(L, 2); z = luaL_checkfloat(L, 3); dim = 3;
 	}
 	else if (args == 4) {
-		const float x = luaL_checkfloat(L, 1);
-		const float y = luaL_checkfloat(L, 2);
-		const float z = luaL_checkfloat(L, 3);
-		const float w = luaL_checkfloat(L, 4);
-		glVertex4f(x, y, z, w);
+		x = luaL_checkfloat(L, 1); y = luaL_checkfloat(L, 2); z = luaL_checkfloat(L, 3); w = luaL_checkfloat(L, 4); dim = 4;
 	}
 	else {
 		luaL_error(L, "Incorrect arguments to gl.Vertex()");
 	}
 
+	if (inModernBeginEnd) {
+		// VA_TYPE_TC carries x,y,z; 2D -> z=0, 4D w is dropped (not used by UI)
+		luaImmBuffer.Vertex(x, y, (dim >= 3) ? z : 0.0f);
+		return 0;
+	}
+
+	switch (dim) {
+		case 2: glVertex2f(x, y); break;
+		case 3: glVertex3f(x, y, z); break;
+		case 4: glVertex4f(x, y, z, w); break;
+	}
 	return 0;
 }
 
@@ -2627,6 +2655,21 @@ int LuaOpenGL::TexCoord(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
 	CondWarnDeprecatedGL(L, __func__);
+
+	if (inModernBeginEnd) {
+		// capture 2D s,t (the universal case); higher-dim texcoords are not used
+		// by immediate-mode UI and would be flagged by LuaGLCompareMode.
+		float s = 0.0f, t = 0.0f;
+		if (lua_istable(L, 1)) {
+			lua_rawgeti(L, 1, 1); if (lua_isnumber(L, -1)) s = lua_tofloat(L, -1);
+			lua_rawgeti(L, 1, 2); if (lua_isnumber(L, -1)) t = lua_tofloat(L, -1);
+		} else {
+			if (lua_isnumber(L, 1)) s = lua_tofloat(L, 1);
+			if (lua_isnumber(L, 2)) t = lua_tofloat(L, 2);
+		}
+		luaImmBuffer.TexCoord(s, t);
+		return 0;
+	}
 
 	const int args = lua_gettop(L); // number of arguments
 
@@ -3106,6 +3149,11 @@ int LuaOpenGL::Color(lua_State* L)
 	}
 	else {
 		luaL_error(L, "Incorrect arguments to gl.Color()");
+	}
+
+	if (inModernBeginEnd) {
+		luaImmBuffer.Color(SColor(color[0], color[1], color[2], color[3]));
+		return 0;
 	}
 
 	glColor4fv(color.data());

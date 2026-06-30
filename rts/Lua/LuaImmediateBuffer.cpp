@@ -159,9 +159,13 @@ void LuaImmediateBuffer::FlushLegacy() const
 	if (verts.empty())
 		return;
 
-	// transforms via the fixed-function matrix the caller has already set.
+	// transforms via the fixed-function matrix the caller has already set;
+	// replays texcoords when the stream was textured so it is an exact legacy
+	// equivalent either way.
 	glBegin(mode);
-	for (const VA_TYPE_C& v : verts) {
+	for (const VA_TYPE_TC& v : verts) {
+		if (textured)
+			glTexCoord2f(v.s, v.t);
 		glColor4ub(v.c.r, v.c.g, v.c.b, v.c.a);
 		glVertex3f(v.pos.x, v.pos.y, v.pos.z);
 	}
@@ -173,7 +177,19 @@ void LuaImmediateBuffer::FlushModern() const
 	if (verts.empty())
 		return;
 
-	auto [drawVerts, drawMode] = TriangulateForModern(mode, verts);
+	// textured BeginEnd streams (FF texturing) are not modernized yet -- fall
+	// back to the exact legacy replay (which carries the texcoords).
+	if (textured) {
+		FlushLegacy();
+		return;
+	}
+
+	std::vector<VA_TYPE_C> colorVerts;
+	colorVerts.reserve(verts.size());
+	for (const VA_TYPE_TC& v : verts)
+		colorVerts.push_back(VA_TYPE_C{v.pos, v.c});
+
+	auto [drawVerts, drawMode] = TriangulateForModern(mode, colorVerts);
 	if (drawVerts.empty())
 		return;
 
