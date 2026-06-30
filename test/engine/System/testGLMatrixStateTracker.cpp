@@ -22,6 +22,10 @@
 #include "System/float3.h"
 #include "System/MathConstants.h"
 
+#include <array>
+#include <random>
+#include <vector>
+
 #include <catch_amalgamated.hpp>
 
 
@@ -318,6 +322,69 @@ TEST_CASE("GLMatrixTracker: HasMatrixStateError flags unbalanced state")
 	CHECK(tr.HasMatrixStateError());
 	REQUIRE(tr.SetMatrixMode(GL_MODELVIEW));
 	CHECK_FALSE(tr.HasMatrixStateError());
+}
+
+
+TEST_CASE("GLMatrixTracker: randomized op sequence matches an independent stack")
+{
+	// Drive the tracker through a long random sequence of ops/push/pop/mode
+	// switches, mirroring each into an independent per-mode std::vector stack,
+	// and assert the active matrix matches after every op. This exercises the
+	// stack/mode bookkeeping far beyond the fixed cases above. Fixed seed =>
+	// reproducible.
+	std::mt19937 rng(0xC0FFEE);
+	const auto rf = [&](float lo, float hi) { return std::uniform_real_distribution<float>(lo, hi)(rng); };
+
+	const unsigned modes[3] = {GL_MODELVIEW, GL_PROJECTION, GL_TEXTURE};
+
+	GLMatrixStateTracker tr;
+	std::array<std::vector<CMatrix44f>, 3> ref;
+	for (auto& s : ref)
+		s.emplace_back(); // identity "current" per mode
+	int cur = 0;
+
+	for (int i = 0; i < 3000; ++i) {
+		switch (rng() % 6) {
+			case 0: { // Translate
+				const float x = rf(-5, 5), y = rf(-5, 5), z = rf(-5, 5);
+				tr.Translate(x, y, z);
+				ref[cur].back().Translate(x, y, z);
+			} break;
+			case 1: { // Scale
+				const float s = rf(0.2f, 3.0f);
+				tr.Scale(s, s, s);
+				ref[cur].back().Scale(float3(s, s, s));
+			} break;
+			case 2: { // Rotate (tracker normalizes axis + deg->rad; mirror it)
+				const float a = rf(-180.0f, 180.0f);
+				float3 axis(rf(-1, 1), rf(-1, 1), rf(-1, 1));
+				if (axis.SqLength() < 1e-4f)
+					axis = float3(0.0f, 0.0f, 1.0f);
+				float3 axisN = axis;
+				axisN.Normalize();
+				CMatrix44f rot;
+				rot.Rotate(a * (math::PI / 180.0f), axisN);
+				tr.Rotate(a, axis.x, axis.y, axis.z);
+				ref[cur].back() = ref[cur].back() * rot;
+			} break;
+			case 3: { // Push
+				if (tr.PushMatrix())
+					ref[cur].push_back(ref[cur].back());
+			} break;
+			case 4: { // Pop (only when something is pushed)
+				if (ref[cur].size() > 1) {
+					REQUIRE(tr.PopMatrix());
+					ref[cur].pop_back();
+				}
+			} break;
+			case 5: { // switch matrix mode
+				cur = rng() % 3;
+				REQUIRE(tr.SetMatrixMode(modes[cur]));
+			} break;
+		}
+
+		REQUIRE(tr.GetMatrix(modes[cur]).equals(ref[cur].back()));
+	}
 }
 
 
