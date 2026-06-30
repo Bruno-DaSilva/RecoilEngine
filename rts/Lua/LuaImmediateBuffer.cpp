@@ -48,9 +48,10 @@ namespace {
 	// planar convex quad/polygon the triangle union (hence coverage) is the same
 	// as the fixed-function decomposition, so flat-colored fills stay bit-exact;
 	// only smooth-shaded fills can differ by the diagonal choice.
-	std::pair<std::vector<VA_TYPE_C>, uint32_t> TriangulateForModern(uint32_t mode, const std::vector<VA_TYPE_C>& in)
+	template<typename V>
+	std::pair<std::vector<V>, uint32_t> TriangulateForModern(uint32_t mode, const std::vector<V>& in)
 	{
-		std::vector<VA_TYPE_C> out;
+		std::vector<V> out;
 
 		switch (mode) {
 			case GL_QUADS: {
@@ -177,8 +178,12 @@ void LuaImmediateBuffer::FlushModern() const
 	if (verts.empty())
 		return;
 
-	// textured BeginEnd streams (FF texturing) are not modernized yet -- fall
-	// back to the exact legacy replay (which carries the texcoords).
+	// Textured BeginEnd streams fall back to the exact legacy replay (which
+	// carries the texcoords). A single MODULATE/unit-0 shader can't reproduce
+	// the per-widget texture-unit / texenv variety real widgets use -- the
+	// in-engine compare caught gui_pip's textured overlays diverging (255) when
+	// this path used a modern shader. General textured BeginEnd is deferred;
+	// gl.TexRect (a controlled single MODULATE quad) is modernized separately.
 	if (textured) {
 		FlushLegacy();
 		return;
@@ -189,7 +194,7 @@ void LuaImmediateBuffer::FlushModern() const
 	for (const VA_TYPE_TC& v : verts)
 		colorVerts.push_back(VA_TYPE_C{v.pos, v.c});
 
-	auto [drawVerts, drawMode] = TriangulateForModern(mode, colorVerts);
+	auto [drawVerts, drawMode] = TriangulateForModern<VA_TYPE_C>(mode, colorVerts);
 	if (drawVerts.empty())
 		return;
 

@@ -277,7 +277,7 @@ TEST_CASE("GLImmediateEmitter: textured BeginEnd captures texcoords, falls back 
 	const auto legacy = RenderToBuffer([&] { ClearTo(0, 0, 0, 1); bindTex(); buf.FlushLegacy(); glDisable(GL_TEXTURE_2D); });
 	const auto modern = RenderToBuffer([&] { ClearTo(0, 0, 0, 1); bindTex(); buf.FlushModern(); glDisable(GL_TEXTURE_2D); });
 
-	// textured BeginEnd is not modernized yet -> modern falls back to legacy
+	// general textured BeginEnd is deferred -> modern falls back to legacy
 	CHECK(Compare(legacy, modern).maxAbsDelta == 0);
 	// and it actually sampled the texture (lower-left quadrant -> red texel)
 	const size_t c = (size_t(70) * kSize + 80) * 4;
