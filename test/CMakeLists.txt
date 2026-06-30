@@ -58,7 +58,7 @@ set(test_List_sources
 )
 
 set(test_Catch_main
-	"lib/catch2/catch_main.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/lib/catch2/catch_main.cpp"
 )
 
 set(test_Common_sources "")
@@ -640,5 +640,7 @@ endif()
 
 ################################################################################
 
+
+add_subdirectory(engine/Rendering)
 
 add_subdirectory(headercheck)
