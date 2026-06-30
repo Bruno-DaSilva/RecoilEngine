@@ -414,40 +414,92 @@ TEST_CASE("GLImmediateEmitter: empty and degenerate primitives don't crash (C5)"
 }
 
 
-TEST_CASE("GLImmediateEmitter: modern flush leaks no GL state (C3)")
+namespace {
+
+// observable, restorable GL state that a draw must not silently change (C3).
+// FF-only state the modern path intentionally abandons (current color, the
+// matrix stack) is deliberately excluded -- that's an expected divergence, not
+// a leak.
+struct GLState {
+	GLint program = 0, vao = 0, arrayBuf = 0;
+	GLint blendSrc = 0, blendDst = 0, activeTex = 0, boundTex2D = 0;
+	GLboolean blend = GL_FALSE, depthTest = GL_FALSE, depthMask = GL_TRUE;
+
+	bool operator==(const GLState& o) const {
+		return program == o.program && vao == o.vao && arrayBuf == o.arrayBuf &&
+		       blendSrc == o.blendSrc && blendDst == o.blendDst &&
+		       activeTex == o.activeTex && boundTex2D == o.boundTex2D &&
+		       blend == o.blend && depthTest == o.depthTest && depthMask == o.depthMask;
+	}
+};
+
+GLState CaptureGLState()
+{
+	GLState s;
+	glGetIntegerv(GL_CURRENT_PROGRAM, &s.program);
+	glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &s.vao);
+	glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &s.arrayBuf);
+	glGetIntegerv(GL_BLEND_SRC_RGB, &s.blendSrc);
+	glGetIntegerv(GL_BLEND_DST_RGB, &s.blendDst);
+	glGetIntegerv(GL_ACTIVE_TEXTURE, &s.activeTex);
+	glGetIntegerv(GL_TEXTURE_BINDING_2D, &s.boundTex2D);
+	s.blend = glIsEnabled(GL_BLEND);
+	s.depthTest = glIsEnabled(GL_DEPTH_TEST);
+	glGetBooleanv(GL_DEPTH_WRITEMASK, &s.depthMask);
+	return s;
+}
+
+} // namespace
+
+
+TEST_CASE("GLImmediateEmitter: modern flush leaves observable GL state intact (C3)")
 {
 	if (!EnsureGL())
 		SKIP("no usable OpenGL context (headless box); skipping GL harness");
 
 	RenderBuffer::InitStatic();
 	const CMatrix44f mvp = OrthoMVP();
+	const GLuint tex = MakeTestTexture();
+
+	RenderTarget rt;
+	REQUIRE(rt.Make(kSize, kSize));
+	rt.Bind();
+
+	// establish a distinctive fixed-function context (no shader / VAO / VBO
+	// bound, as in real immediate-mode use) with non-default blend/depth/texture
+	// state the modern flush must not disturb.
+	glUseProgram(0);
+	glBindVertexArray(0);
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_ONE, GL_ZERO);
+	glDisable(GL_DEPTH_TEST);
+	glDepthMask(GL_FALSE);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, tex);
+	while (glGetError() != GL_NO_ERROR) {} // drain
+
+	const GLState before = CaptureGLState();
 
 	LuaImmediateBuffer buf;
 	buf.SetMVP(mvp);
 	buf.Begin(GL_TRIANGLES);
 	buf.Color(0.5f, 0.5f, 0.5f, 1.0f);
 	buf.Vertex(40, 40, 0); buf.Vertex(200, 40, 0); buf.Vertex(120, 160, 0);
-
-	RenderTarget rt;
-	REQUIRE(rt.Make(kSize, kSize));
-	rt.Bind();
-
-	// known pre-state (these are the transient bits the modern flush touches)
-	GLint prog0 = -1, vao0 = -1;
-	glGetIntegerv(GL_CURRENT_PROGRAM, &prog0);
-	glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &vao0);
-	while (glGetError() != GL_NO_ERROR) {} // drain
-
 	buf.FlushModern();
 
-	CHECK(glGetError() == GL_NO_ERROR); // flush raised no GL error
+	const GLState after = CaptureGLState();
 
-	GLint prog1 = -1, vao1 = -1;
-	glGetIntegerv(GL_CURRENT_PROGRAM, &prog1);
-	glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &vao1);
-	CHECK(prog1 == prog0); // shader Disabled -> program restored
-	CHECK(vao1 == vao0);   // VAO unbound -> binding restored
+	CHECK(glGetError() == GL_NO_ERROR);
+	CHECK(before == after);     // nothing observable leaked
+	CHECK(after.program == 0);  // shader disabled
+	CHECK(after.vao == 0);      // VAO unbound
+	CHECK(after.blend == GL_TRUE);          // blend left enabled
+	CHECK(after.depthMask == GL_FALSE);     // depth mask left as set
+	CHECK(after.boundTex2D == GLint(tex));  // bound texture untouched
 
+	glBindTexture(GL_TEXTURE_2D, 0);
+	glDeleteTextures(1, &tex);
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	RenderBuffer::KillStatic();
 }
