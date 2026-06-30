@@ -256,6 +256,7 @@ endif()
 	# the test itself SKIPs gracefully if no context can be created at runtime
 	# (headless CI box). See doc/bar-gl4-immediate-mode-inventory.md.
 	if (TARGET SDL2::SDL2 AND TARGET glad)
+		# harness self-validation (controls): SDL2 + glad only
 		set(test_name GLImmediateCompare)
 		set(test_src
 				"${CMAKE_CURRENT_SOURCE_DIR}/engine/Rendering/testGLImmediateCompare.cpp"
@@ -268,8 +269,29 @@ endif()
 			)
 
 		add_spring_test(${test_name} "${test_src}" "${test_libs}" "")
+
+		# modern uniform-MVP shader vs legacy glBegin, MVP from the Phase-1
+		# matrix tracker; also links CMatrix44f.
+		set(test_name GLMatrixDrawCompare)
+		set(test_src
+				"${CMAKE_CURRENT_SOURCE_DIR}/engine/Rendering/testGLMatrixDrawCompare.cpp"
+				"${ENGINE_SOURCE_DIR}/System/Matrix44f.cpp"
+				"${ENGINE_SOURCE_DIR}/System/Quaternion.cpp"
+				"${ENGINE_SOURCE_DIR}/System/float3.cpp"
+				"${ENGINE_SOURCE_DIR}/System/float4.cpp"
+				${test_Common_sources}
+			)
+
+		set(test_libs
+				SDL2::SDL2
+				glad
+				streflop
+				${WINMM_LIBRARY}
+			)
+
+		add_spring_test(${test_name} "${test_src}" "${test_libs}" "-DNOT_USING_CREG -DBUILDING_AI")
 	else()
-		message(STATUS "SDL2 or glad target missing; skipping testGLImmediateCompare")
+		message(STATUS "SDL2 or glad target missing; skipping testGLImmediateCompare/testGLMatrixDrawCompare")
 	endif()
 
 ################################################################################
