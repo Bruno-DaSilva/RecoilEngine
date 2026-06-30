@@ -8,6 +8,9 @@
 #include "Rendering/Shaders/ShaderHandler.h"
 #include "Rendering/Shaders/Shader.h"
 
+#include <algorithm>
+#include <cstdint>
+#include <cstdlib>
 #include <string>
 #include <utility>
 #include <vector>
@@ -224,4 +227,109 @@ void LuaImmediateBuffer::FlushTexRectModern() const
 	shader->SetUniform("tex", 0);
 	rb.DrawArrays(GL_TRIANGLES);
 	shader->Disable();
+}
+
+
+namespace LuaGLCompare {
+	static GLuint fboA = 0, texA = 0, fboB = 0, texB = 0, depthRB = 0;
+	static int fbW = 0, fbH = 0;
+
+	static void DeleteFBOs()
+	{
+		if (fboA)    glDeleteFramebuffers(1, &fboA);
+		if (fboB)    glDeleteFramebuffers(1, &fboB);
+		if (texA)    glDeleteTextures(1, &texA);
+		if (texB)    glDeleteTextures(1, &texB);
+		if (depthRB) glDeleteRenderbuffers(1, &depthRB);
+		fboA = texA = fboB = texB = depthRB = 0;
+	}
+
+	static GLuint MakeColorTex(int w, int h)
+	{
+		GLuint t = 0;
+		glGenTextures(1, &t);
+		glBindTexture(GL_TEXTURE_2D, t);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		return t;
+	}
+
+	static bool EnsureFBOs(int w, int h)
+	{
+		if (w == fbW && h == fbH && fboA != 0)
+			return true;
+
+		DeleteFBOs();
+		if (w <= 0 || h <= 0)
+			return false;
+
+		texA = MakeColorTex(w, h);
+		texB = MakeColorTex(w, h);
+
+		glGenRenderbuffers(1, &depthRB);
+		glBindRenderbuffer(GL_RENDERBUFFER, depthRB);
+		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, w, h);
+
+		const auto makeFBO = [&](GLuint tex) {
+			GLuint f = 0;
+			glGenFramebuffers(1, &f);
+			glBindFramebuffer(GL_FRAMEBUFFER, f);
+			glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+			glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depthRB);
+			return f;
+		};
+		fboA = makeFBO(texA);
+		fboB = makeFBO(texB);
+
+		const bool ok = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		fbW = w; fbH = h;
+
+		if (!ok) {
+			DeleteFBOs();
+			fbW = fbH = 0;
+			return false;
+		}
+		return true;
+	}
+
+	int CompareDraws(int w, int h, const std::function<void()>& drawLegacy, const std::function<void()>& drawModern)
+	{
+		if (!EnsureFBOs(w, h))
+			return -1;
+
+		GLint prevFBO = 0;
+		GLint prevVP[4] = {0, 0, 0, 0};
+		GLfloat prevClear[4] = {0, 0, 0, 0};
+		glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
+		glGetIntegerv(GL_VIEWPORT, prevVP);
+		glGetFloatv(GL_COLOR_CLEAR_VALUE, prevClear);
+
+		std::vector<uint8_t> a(static_cast<size_t>(w) * h * 4);
+		std::vector<uint8_t> b(static_cast<size_t>(w) * h * 4);
+
+		glViewport(0, 0, w, h);
+		glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+		glPixelStorei(GL_PACK_ALIGNMENT, 1);
+
+		glBindFramebuffer(GL_FRAMEBUFFER, fboA);
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+		drawLegacy();
+		glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, a.data());
+
+		glBindFramebuffer(GL_FRAMEBUFFER, fboB);
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+		drawModern();
+		glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, b.data());
+
+		glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prevFBO));
+		glViewport(prevVP[0], prevVP[1], prevVP[2], prevVP[3]);
+		glClearColor(prevClear[0], prevClear[1], prevClear[2], prevClear[3]);
+
+		int maxDelta = 0;
+		for (size_t i = 0; i < a.size(); ++i)
+			maxDelta = std::max(maxDelta, std::abs(int(a[i]) - int(b[i])));
+		return maxDelta;
+	}
 }

@@ -89,6 +89,8 @@ CONFIG(bool, LuaMatrixTracking).defaultValue(false).headlessValue(false).safemod
 	.description("Mirror Lua fixed-function matrix ops (gl.Translate/Rotate/Scale/...) into a CPU-side matrix stack. Phase 1 of the modern-GL migration; off => legacy behavior is unchanged.");
 CONFIG(bool, LuaModernGLBackend).defaultValue(false).headlessValue(false).safemodeValue(false)
 	.description("Draw self-contained Lua immediate-mode primitives (gl.Rect/gl.TexRect) via the modern LuaImmediateBuffer backend (no glBegin/glRectf). Experimental; off => legacy path unchanged.");
+CONFIG(bool, LuaGLCompareMode).defaultValue(false).headlessValue(false).safemodeValue(false)
+	.description("Validation: draw wired Lua primitives (gl.Rect/gl.TexRect) both ways (legacy + modern) into offscreen FBOs and log per-caller pixel deltas. Debug only; the frame still renders normally.");
 
 // transient accumulator for the modern immediate-mode backend; reused across
 // calls (Lua GL calls are serial on the render thread).
@@ -104,6 +106,31 @@ static CMatrix44f GetCurrentFixedFunctionMVP()
 	glGetFloatv(GL_PROJECTION_MATRIX, static_cast<float*>(proj));
 	glGetFloatv(GL_MODELVIEW_MATRIX, static_cast<float*>(modelView));
 	return proj * modelView;
+}
+
+// per-Lua-caller dedup of LuaGLCompareMode results so the log isn't spammed.
+static std::unordered_set<std::string> glCompareLogged;
+
+static void LogGLCompare(lua_State* L, const char* caller, int maxDelta)
+{
+	std::string luaCaller = "<unknown>";
+	lua_Debug info;
+	if (lua_getstack(L, 1, &info)) {
+		lua_getinfo(L, "nSl", &info);
+		luaCaller = fmt::format("[{}]:{} {}", info.short_src, info.currentline, (info.name ? info.name : "?"));
+	}
+
+	const std::string key = fmt::format("{}|{}", caller, luaCaller);
+	if (!glCompareLogged.insert(key).second)
+		return; // already reported this call-site
+
+	if (maxDelta < 0) {
+		LOG_L(L_WARNING, "LuaGLCompare: gl.%s in %s -- compare FBO unavailable", caller, luaCaller.c_str());
+	} else if (maxDelta <= 1) {
+		LOG_L(L_INFO, "LuaGLCompare: gl.%s in %s -- max byte delta = %d (ok)", caller, luaCaller.c_str(), maxDelta);
+	} else {
+		LOG_L(L_WARNING, "LuaGLCompare: gl.%s in %s -- max byte delta = %d", caller, luaCaller.c_str(), maxDelta);
+	}
 }
 
 /*** Callouts for OpenGL API
@@ -124,6 +151,7 @@ bool  LuaOpenGL::canUseShaders = false;
 int  LuaOpenGL::deprecatedGLWarnLevel = 0;
 bool  LuaOpenGL::trackMatrices = false;
 bool  LuaOpenGL::modernImmediate = false;
+bool  LuaOpenGL::glCompareMode = false;
 
 std::unordered_set<std::string> LuaOpenGL::deprecatedGLWarned = {};
 
@@ -288,6 +316,7 @@ void LuaOpenGL::Init()
 		deprecatedGLWarned.reserve(4096); // deprecated calls are logged along with caller information
 
 	modernImmediate = configHandler->GetBool("LuaModernGLBackend");
+	glCompareMode = configHandler->GetBool("LuaGLCompareMode");
 	// the modern backend needs a CPU-side MVP; force matrix tracking on with it.
 	trackMatrices = configHandler->GetBool("LuaMatrixTracking") || modernImmediate;
 }
@@ -2850,7 +2879,10 @@ int LuaOpenGL::Rect(lua_State* L)
 	const float x2 = luaL_checkfloat(L, 3);
 	const float y2 = luaL_checkfloat(L, 4);
 
-	if (modernImmediate && shaderHandler->GetCurrentlyBoundProgram() == nullptr) {
+	const bool noShader = shaderHandler->GetCurrentlyBoundProgram() == nullptr;
+
+	const auto drawLegacy = [&]() { glRectf(x1, y1, x2, y2); };
+	const auto drawModern = [&]() {
 		const SColor col(color[0], color[1], color[2], color[3]);
 		luaImmBuffer.SetBackend(LuaImmediateBuffer::Backend::Modern);
 		luaImmBuffer.SetMVP(GetCurrentFixedFunctionMVP());
@@ -2860,10 +2892,14 @@ int LuaOpenGL::Rect(lua_State* L)
 		luaImmBuffer.Vertex(x1, y1, 0.0f); luaImmBuffer.Vertex(x2, y1, 0.0f); luaImmBuffer.Vertex(x2, y2, 0.0f);
 		luaImmBuffer.Vertex(x1, y1, 0.0f); luaImmBuffer.Vertex(x2, y2, 0.0f); luaImmBuffer.Vertex(x1, y2, 0.0f);
 		luaImmBuffer.End();
-		return 0;
+	};
+
+	if (glCompareMode && noShader) {
+		GLint vp[4]; glGetIntegerv(GL_VIEWPORT, vp);
+		LogGLCompare(L, __func__, LuaGLCompare::CompareDraws(vp[2], vp[3], drawLegacy, drawModern));
 	}
 
-	glRectf(x1, y1, x2, y2);
+	(modernImmediate && noShader) ? drawModern() : drawLegacy();
 	return 0;
 }
 
@@ -2927,22 +2963,30 @@ int LuaOpenGL::TexRect(lua_State* L)
 		t2 = luaL_checkfloat(L, 8);
 	}
 
-	if (modernImmediate && shaderHandler->GetCurrentlyBoundProgram() == nullptr) {
+	const bool noShader = shaderHandler->GetCurrentlyBoundProgram() == nullptr;
+
+	const auto drawLegacy = [&]() {
+		glBegin(GL_QUADS); {
+			glTexCoord2f(s1, t1); glVertex2f(x1, y1);
+			glTexCoord2f(s2, t1); glVertex2f(x2, y1);
+			glTexCoord2f(s2, t2); glVertex2f(x2, y2);
+			glTexCoord2f(s1, t2); glVertex2f(x1, y2);
+		}
+		glEnd();
+	};
+	const auto drawModern = [&]() {
 		const SColor col(color[0], color[1], color[2], color[3]);
 		luaImmBuffer.SetMVP(GetCurrentFixedFunctionMVP());
 		luaImmBuffer.SetTexRect(x1, y1, x2, y2, s1, t1, s2, t2, col);
 		luaImmBuffer.FlushTexRectModern();
-		return 0;
+	};
+
+	if (glCompareMode && noShader) {
+		GLint vp[4]; glGetIntegerv(GL_VIEWPORT, vp);
+		LogGLCompare(L, __func__, LuaGLCompare::CompareDraws(vp[2], vp[3], drawLegacy, drawModern));
 	}
 
-	glBegin(GL_QUADS); {
-		glTexCoord2f(s1, t1); glVertex2f(x1, y1);
-		glTexCoord2f(s2, t1); glVertex2f(x2, y1);
-		glTexCoord2f(s2, t2); glVertex2f(x2, y2);
-		glTexCoord2f(s1, t2); glVertex2f(x1, y2);
-	}
-	glEnd();
-
+	(modernImmediate && noShader) ? drawModern() : drawLegacy();
 	return 0;
 }
 

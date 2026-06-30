@@ -157,6 +157,11 @@ class LuaOpenGL {
 		// (TypedRenderBuffer + uniform-MVP shader) instead of glBegin/glRectf.
 		// Off by default => legacy path unchanged. See LuaImmediateBuffer.
 		static bool modernImmediate;
+		// when set, wired primitives (gl.Rect/TexRect) are additionally drawn
+		// both ways (legacy + modern) into offscreen FBOs and per-Lua-caller
+		// pixel deltas are logged. Validation/debug only; the real frame still
+		// renders normally. See LuaGLCompare.
+		static bool glCompareMode;
 		static float screenWidth;
 		static float screenDistance;
 		static void (*resetMatrixFunc)(void);

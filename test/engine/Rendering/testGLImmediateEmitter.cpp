@@ -244,6 +244,27 @@ TEST_CASE("GLImmediateEmitter: TexRect (textured, MODULATE) matches legacy")
 }
 
 
+TEST_CASE("GLImmediateEmitter: LuaGLCompare::CompareDraws confirms and denies")
+{
+	if (!EnsureGL())
+		SKIP("no usable OpenGL context (headless box); skipping GL harness");
+
+	// CompareDraws renders both lambdas with the current FF matrices into its
+	// own FBOs; set up an ortho so glRectf lands inside.
+	glViewport(0, 0, kSize, kSize);
+	glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0, kSize, 0, kSize, -1, 1);
+	glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+
+	const auto rectA = [] { glColor4f(1, 1, 1, 1); glRectf(40, 40, 200, 160); };
+	const auto rectB = [] { glColor4f(1, 1, 1, 1); glRectf(60, 40, 220, 160); }; // shifted
+
+	// identical draws -> zero delta (comparator confirms)
+	CHECK(LuaGLCompare::CompareDraws(kSize, kSize, rectA, rectA) == 0);
+	// different draws -> nonzero delta (comparator denies)
+	CHECK(LuaGLCompare::CompareDraws(kSize, kSize, rectA, rectB) > 0);
+}
+
+
 TEST_CASE("GLImmediateEmitter: modern flush leaks no GL state (C3)")
 {
 	if (!EnsureGL())

@@ -4,6 +4,7 @@
 #define LUA_IMMEDIATE_BUFFER_H
 
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 #include "Rendering/GL/VertexArrayTypes.h"
@@ -85,5 +86,16 @@ private:
 	std::vector<VA_TYPE_C> verts;
 	TexRectData texRect;
 };
+
+// LuaGLCompareMode support: render two draws (legacy vs modern of the same
+// primitive) into matching offscreen RGBA8 FBOs and report how far apart they
+// are. Validates the wired modern path against legacy over real frames.
+namespace LuaGLCompare {
+	// Render drawLegacy and drawModern into two w*h FBOs (the caller's viewport)
+	// over a common cleared background, read both back, and return the max abs
+	// per-byte delta; returns -1 if the FBOs could not be created. Saves and
+	// restores the bound framebuffer, viewport and clear color.
+	int CompareDraws(int w, int h, const std::function<void()>& drawLegacy, const std::function<void()>& drawModern);
+}
 
 #endif // LUA_IMMEDIATE_BUFFER_H
