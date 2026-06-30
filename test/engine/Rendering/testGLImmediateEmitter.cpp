@@ -16,6 +16,9 @@
 #include "System/Matrix44f.h"
 #include "System/Color.h"
 
+#include <utility>
+#include <vector>
+
 using namespace gltest;
 
 namespace {
@@ -305,6 +308,109 @@ TEST_CASE("GLImmediateEmitter: LuaGLCompare::CompareDraws confirms and denies")
 	CHECK(LuaGLCompare::CompareDraws(kSize, kSize, rectA, rectA) == 0);
 	// different draws -> nonzero delta (comparator denies)
 	CHECK(LuaGLCompare::CompareDraws(kSize, kSize, rectA, rectB) > 0);
+}
+
+
+TEST_CASE("GLImmediateEmitter: more primitive modes match legacy")
+{
+	if (!EnsureGL())
+		SKIP("no usable OpenGL context (headless box); skipping GL harness");
+
+	RenderBuffer::InitStatic();
+	const CMatrix44f mvp = OrthoMVP();
+
+	const auto deltaFor = [&](uint32_t mode, const std::vector<std::pair<float, float>>& pts) {
+		LuaImmediateBuffer buf;
+		buf.SetMVP(mvp);
+		buf.Begin(mode);
+		buf.Color(0.70f, 0.70f, 0.70f, 1.0f);
+		for (const auto& p : pts)
+			buf.Vertex(p.first, p.second, 0.0f);
+		return CompareBothFlushes(buf, mvp).maxAbsDelta;
+	};
+
+	CHECK(deltaFor(GL_TRIANGLE_FAN,   {{128,128},{60,60},{196,60},{196,196},{60,196}}) <= 1);
+	CHECK(deltaFor(GL_TRIANGLE_STRIP, {{50,50},{50,150},{120,50},{120,150},{190,50},{190,150}}) <= 1);
+	CHECK(deltaFor(GL_QUAD_STRIP,     {{50,50},{50,150},{120,50},{120,150},{190,50},{190,150}}) <= 1);
+	CHECK(deltaFor(GL_LINE_STRIP,     {{40,40},{200,60},{80,180},{210,200}}) <= 1);
+	CHECK(deltaFor(GL_LINE_LOOP,      {{50,50},{200,60},{180,190},{60,180}}) <= 1);
+	CHECK(deltaFor(GL_POINTS,         {{60,60},{120,90},{180,150},{90,200}}) <= 1);
+
+	RenderBuffer::KillStatic();
+}
+
+
+TEST_CASE("GLImmediateEmitter: translucent draw-order composites identically (C4)")
+{
+	if (!EnsureGL())
+		SKIP("no usable OpenGL context (headless box); skipping GL harness");
+
+	RenderBuffer::InitStatic();
+	const CMatrix44f mvp = OrthoMVP();
+
+	// two overlapping half-transparent quads, drawn A then B
+	LuaImmediateBuffer a, b;
+	a.SetMVP(mvp);
+	a.Begin(GL_TRIANGLES); a.Color(1.0f, 0.0f, 0.0f, 0.5f);
+	a.Vertex(40, 40, 0); a.Vertex(160, 40, 0); a.Vertex(160, 160, 0);
+	a.Vertex(40, 40, 0); a.Vertex(160, 160, 0); a.Vertex(40, 160, 0);
+	b.SetMVP(mvp);
+	b.Begin(GL_TRIANGLES); b.Color(0.0f, 1.0f, 0.0f, 0.5f);
+	b.Vertex(90, 90, 0); b.Vertex(210, 90, 0); b.Vertex(210, 210, 0);
+	b.Vertex(90, 90, 0); b.Vertex(210, 210, 0); b.Vertex(90, 210, 0);
+
+	const auto blendOn  = [] { glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); };
+	const int d = LuaGLCompare::CompareDraws(kSize, kSize,
+		[&] { blendOn(); a.FlushLegacy(); b.FlushLegacy(); glDisable(GL_BLEND); },
+		[&] { blendOn(); a.FlushModern(); b.FlushModern(); glDisable(GL_BLEND); });
+
+	INFO("blend/draw-order maxAbsDelta=" << d);
+	CHECK(d >= 0);
+	CHECK(d <= 1); // identical compositing of the overlap region
+
+	RenderBuffer::KillStatic();
+}
+
+
+TEST_CASE("GLImmediateEmitter: empty and degenerate primitives don't crash (C5)")
+{
+	if (!EnsureGL())
+		SKIP("no usable OpenGL context (headless box); skipping GL harness");
+
+	RenderBuffer::InitStatic();
+	const CMatrix44f mvp = OrthoMVP();
+
+	RenderTarget rt;
+	REQUIRE(rt.Make(kSize, kSize));
+	rt.Bind();
+	while (glGetError() != GL_NO_ERROR) {}
+
+	LuaImmediateBuffer buf;
+	buf.SetMVP(mvp);
+
+	// empty BeginEnd: nothing accumulated
+	buf.Begin(GL_TRIANGLES);
+	CHECK(buf.Empty());
+	buf.FlushLegacy();
+	buf.FlushModern();
+	CHECK(glGetError() == GL_NO_ERROR);
+
+	// single vertex with TRIANGLES: not enough for a primitive, must not crash
+	buf.Begin(GL_TRIANGLES);
+	buf.Color(1.0f, 1.0f, 1.0f, 1.0f);
+	buf.Vertex(50, 50, 0);
+	buf.FlushLegacy();
+	buf.FlushModern();
+	CHECK(glGetError() == GL_NO_ERROR);
+
+	// degenerate (zero-area) triangle
+	buf.Begin(GL_TRIANGLES);
+	buf.Vertex(80, 80, 0); buf.Vertex(80, 80, 0); buf.Vertex(80, 80, 0);
+	buf.FlushModern();
+	CHECK(glGetError() == GL_NO_ERROR);
+
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+	RenderBuffer::KillStatic();
 }
 
 
