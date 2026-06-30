@@ -251,6 +251,28 @@ endif()
 	add_spring_test(${test_name} "${test_src}" "${test_libs}" "-DNOT_USING_CREG -DBUILDING_AI")
 
 ################################################################################
+### GLImmediateCompare (Tier-2 offscreen A/B render harness + controls)
+	# Needs a real GL context (SDL2 + glad). Only built when SDL2 is available;
+	# the test itself SKIPs gracefully if no context can be created at runtime
+	# (headless CI box). See doc/bar-gl4-immediate-mode-inventory.md.
+	if (TARGET SDL2::SDL2 AND TARGET glad)
+		set(test_name GLImmediateCompare)
+		set(test_src
+				"${CMAKE_CURRENT_SOURCE_DIR}/engine/Rendering/testGLImmediateCompare.cpp"
+				${test_Common_sources}
+			)
+
+		set(test_libs
+				SDL2::SDL2
+				glad
+			)
+
+		add_spring_test(${test_name} "${test_src}" "${test_libs}" "")
+	else()
+		message(STATUS "SDL2 or glad target missing; skipping testGLImmediateCompare")
+	endif()
+
+################################################################################
 ### Transform
 	set(test_name Transform)
 	set(test_src
