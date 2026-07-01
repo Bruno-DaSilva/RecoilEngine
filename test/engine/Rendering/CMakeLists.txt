@@ -44,4 +44,5 @@ if (TARGET SDL2::SDL2 AND TARGET glad)
 
 	add_engine_gl_test(GLRenderBufferCompare testGLRenderBufferCompare.cpp)
 	add_engine_gl_test(GLImmediateEmitter    testGLImmediateEmitter.cpp)
+	add_engine_gl_test(GLFontMVPCompare      testGLFontMVPCompare.cpp)
 endif()

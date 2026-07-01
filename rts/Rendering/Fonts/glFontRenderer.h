@@ -54,14 +54,40 @@ public:
 	bool IsLegacy() const override { return false; }
 	bool IsValid() const override { return fontShader->IsValid(); }
 	void GetStats(std::array<size_t, 8>& stats) const override;
+
+	// Runtime toggle of the uMVP branch (default from config FontUseMVPUniform);
+	// used by the whole-frame A/B compare to render text both ways. Read per-draw
+	// in PushGLState, so flipping it takes effect on the next draw.
+	static void SetUseMVPUniform(bool b) { useMVPUniform = b; }
+	static bool GetUseMVPUniform() { return useMVPUniform; }
 private:
+	// Same-frame, same-process A/B (config FontShaderMVPCompare): draw the
+	// accumulated glyph buffers twice -- uUseMVP=0 (builtin) and uUseMVP=1 (uMVP
+	// bridge) -- into two FBOs and log the max byte delta. Immune to cross-run /
+	// temporal noise since only the shader branch differs. See
+	// doc/bar-gl4-immediate-mode-inventory.md.
+	void CompareMVPDraws();
+
 	TypedRenderBuffer<VA_TYPE_TC> primaryBufferTC;
 	TypedRenderBuffer<VA_TYPE_TC> outlineBufferTC;
+
+	// the program Enabled by the last PushGLState (alpha vs color), needed by the
+	// MVP-compare path to set its uniforms on the active program.
+	Shader::IProgramObject* boundFontShader = nullptr;
 
 	static inline size_t fontShaderRefs = 0;
 	static inline std::unique_ptr<Shader::IProgramObject> fontShader = nullptr;
 	static inline size_t fontShaderColorRefs = 0;
 	static inline std::unique_ptr<Shader::IProgramObject> fontShaderColor = nullptr;
+
+	// Phase-1 modern-GL migration: when set (config FontUseMVPUniform), glyphs
+	// transform by the uMVP uniform fed from the fixed-function bridge instead of
+	// gl_ModelViewProjectionMatrix. Latched at first construction (shaders are
+	// built once); off => byte-identical legacy path.
+	static inline bool useMVPUniform = false;
+
+	// config FontShaderMVPCompare: run the same-frame uMVP-vs-builtin A/B above.
+	static inline bool mvpCompare = false;
 };
 
 class CglNoShaderFontRenderer final: public CglFontRenderer {
