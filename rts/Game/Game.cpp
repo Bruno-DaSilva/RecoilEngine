@@ -2,6 +2,7 @@
 
 #include "Rendering/GL/myGL.h"
 
+#include <cstdlib> // getenv (AB_FORCE_LEGACY diagnostic)
 #include <Rml/Backends/RmlUi_Backend.h>
 #include <RmlUi/Core.h>
 #include "Game.h"
@@ -41,6 +42,8 @@
 #include "Rendering/CommandDrawer.h"
 #include "Rendering/LineDrawer.h"
 #include "Rendering/GlobalRendering.h"
+#include "Rendering/Fonts/glFontRenderer.h" // whole-frame A/B: runtime font uMVP toggle
+#include "Rendering/Textures/Bitmap.h" // whole-frame A/B diagnostic image dump
 #include "Rendering/DebugDrawerAI.h"
 #include "Rendering/HUDDrawer.h"
 #include "Rendering/IconHandler.h"
@@ -59,6 +62,7 @@
 #include "Lua/LuaOpenGL.h"
 #include "Lua/LuaParser.h"
 #include "Lua/LuaSyncedRead.h"
+#include "Lua/LuaUnsyncedRead.h" // whole-frame A/B: pin Spring.GetTimer during the paired draw
 #include "Lua/LuaUI.h"
 #include "Map/MapDamage.h"
 #include "Map/MapInfo.h"
@@ -141,6 +145,22 @@
 
 CONFIG(bool, GameEndOnConnectionLoss).defaultValue(true);
 // CONFIG(bool, LuaCollectGarbageOnSimFrame).defaultValue(true);
+
+CONFIG(bool, GLFrameABCompare).defaultValue(false).headlessValue(false).safemodeValue(false)
+	.description("Validation \"test mode\": draw each sim state twice, on two consecutive real "
+	             "display frames with the modern-GL paths off then on (so the game runs at half "
+	             "the true framerate), and log the modern-vs-legacy backbuffer delta. The sim is "
+	             "frozen and the draw clock pinned between the pair so both frames draw identical "
+	             "content. The legacy frame is held on screen (no flicker). Default off.");
+CONFIG(int, GLFrameABCompareInterval).defaultValue(1).minimumValue(1)
+	.description("With GLFrameABCompare, emit the summary log line (and consider a dump) at most "
+	             "once per N compared pairs when there is no divergence. Default 1 (every pair).");
+CONFIG(bool, GLFrameABCompareHeatmap).defaultValue(false).headlessValue(false).safemodeValue(false)
+	.description("With GLFrameABCompare, overlay a red heatmap of the modern-vs-legacy diff on the "
+	             "held legacy frame so divergences are visible live while playing. Default off.");
+CONFIG(bool, GLFrameABCompareDump).defaultValue(false).headlessValue(false).safemodeValue(false)
+	.description("With GLFrameABCompare, when modern diverges from legacy, periodically save "
+	             "frameab_{legacy,modern,diff}.png to the write-dir.");
 
 CONFIG(bool, ShowFPS).defaultValue(false).description("Displays current framerate.");
 CONFIG(bool, ShowClock).defaultValue(true).headlessValue(false).description("Displays a clock on the top-right corner of the screen showing the elapsed time of the current game.");
@@ -1156,6 +1176,175 @@ int CGame::TextEditing(const std::string& utf8Text, unsigned int start, unsigned
 }
 
 
+// ---------------------------------------------------------------------------
+// Whole-frame A/B compare (config GLFrameABCompare) -- "test mode".
+//
+// Renders each sim state twice, on two CONSECUTIVE real display frames with the
+// modern-GL paths toggled off then on, so the game runs at half the true fps.
+// Unlike an in-frame re-render, each pass is a distinct real frame:
+// globalRendering->drawFrame advances (so drawFrame-throttled widgets rebuild)
+// and each frame clears its own buffers (so screen-grab widgets like the blur /
+// guishader mask don't feed back on themselves). To make the two frames draw
+// IDENTICAL content, the sim is frozen for the second frame (no SimFrame issued)
+// and the interpolation offset + draw clock are pinned to the first frame's
+// values.
+//
+// Temporal-accumulation effects that key off the drawFrame COUNTER (TAA jitter,
+// auto-exposure / eye adaptation, SSAO history) still advance between the pair --
+// the counter must advance for widgets to rebuild -- so they'd show up as a diff
+// unrelated to the backend. To subtract that noise, every other pair is a CONTROL
+// (legacy<->legacy): its per-pixel diff is exactly the counter-driven drift, and
+// we store it as a noise mask that excludes those pixels from the real modern-vs-
+// legacy signal and heatmap. So the cadence is: [L,M] [L,L] [L,M] [L,L] ...
+//
+// The first (legacy) frame is captured and re-blitted over the second frame so the
+// screen shows a steady legacy image (no flicker); an optional heatmap overlays the
+// noise-masked diff.
+// Unsynced Lua RNG save/restore (defined in lib/lua/include/LuaUser.cpp): the A/B
+// test mode snapshots the RNG before the reference draw and restores it before the
+// duplicate draw so both replay the identical math.random() stream.
+extern void spring_lua_unsynced_rand_save_state();
+extern void spring_lua_unsynced_rand_restore_state();
+
+namespace {
+	enum class ABPhase { First, Second };
+
+	ABPhase abPhase = ABPhase::First;
+	bool    abSuppressSim = false; // read by CGame::Update() to skip SimFrame on the 2nd frame
+	bool    abHavePin = false;
+	bool    abSecondIsControl = false; // this pair's 2nd frame: false => modern (test), true => legacy (control)
+	bool    abNoiseValid = false;
+	// Reference-frame draw clocks, captured on the First pass and replayed on the Second.
+	// grTime (UBO drawSeconds) is pinned before UpdateUnsynced; timeOffset/gameTime are
+	// pinned INSIDE UpdateUnsynced -- after they're computed, before worldDrawer.Update
+	// bakes per-particle GetDrawPos(timeOffset) and the per-draw UBO.
+	spring_time  abPinGrTime;
+	unsigned int abPinDrawFrame  = 1;
+	float        abPinTimeOffset  = 0.0f;
+	float        abPinGameTime    = 0.0f;
+	float        abPinModGameTime = 0.0f;
+	std::vector<uint8_t> abFirstBuf;   // the legacy reference frame
+	std::vector<uint8_t> abSecondBuf;  // the modern (test) or legacy (control) duplicate
+	std::vector<uint8_t> abNoiseMask;  // 1 where the last control pair drifted (>1 LSB)
+	CGlobalUnsyncedRNG   abGuRNGSaved; // engine unsynced RNG snapshot (FX draw jitter)
+
+	inline int abAbs(int v) { return (v < 0) ? -v : v; }
+	inline int abMaxRGB(const uint8_t* a, const uint8_t* b) {
+		int d = 0;
+		for (int k = 0; k < 3; ++k) { const int dk = abAbs(int(a[k]) - int(b[k])); if (dk > d) d = dk; }
+		return d;
+	}
+
+	void ABCapture(int w, int h, std::vector<uint8_t>& buf) {
+		buf.resize(size_t(w) * h * 4);
+		glFinish();
+		glPixelStorei(GL_PACK_ALIGNMENT, 1);
+		glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, buf.data());
+	}
+
+	// From a control (legacy<->legacy) pair, mark every pixel that drifted >1 LSB as
+	// counter-driven noise so the test pass can exclude it.
+	void ABBuildNoiseMask(int w, int h, const std::vector<uint8_t>& l, const std::vector<uint8_t>& c) {
+		const size_t px = size_t(w) * h;
+		if (l.size() < px * 4 || c.size() < px * 4) return;
+		abNoiseMask.assign(px, 0);
+		for (size_t p = 0; p < px; ++p)
+			abNoiseMask[p] = (abMaxRGB(&l[p*4], &c[p*4]) > 1) ? 1 : 0;
+		abNoiseValid = true;
+	}
+
+	// Changed-pixel count (>1 LSB on any RGB channel), excluding known noise pixels;
+	// sets maxDelta to the peak byte delta over the counted (non-noise) pixels.
+	long ABMaskedDiff(int w, int h, const std::vector<uint8_t>& l, const std::vector<uint8_t>& m, int& maxDelta) {
+		const size_t px = size_t(w) * h;
+		const size_t n = (l.size() < m.size()) ? l.size() : m.size();
+		const bool haveMask = abNoiseValid && abNoiseMask.size() == px;
+		long changed = 0; int mx = 0;
+		for (size_t p = 0; p * 4 + 3 < n; ++p) {
+			if (haveMask && abNoiseMask[p]) continue;
+			const int d = abMaxRGB(&l[p*4], &m[p*4]);
+			if (d > mx) mx = d;
+			changed += (d > 1);
+		}
+		maxDelta = mx;
+		return changed;
+	}
+
+	// Paint the held legacy image (optionally with a noise-masked red diff heatmap)
+	// straight to the backbuffer. glReadPixels/glDrawPixels share a bottom-up origin.
+	void ABDisplayLegacy(int w, int h, const std::vector<uint8_t>& l, const std::vector<uint8_t>& m, bool heatmap) {
+		const size_t px = size_t(w) * h;
+		const size_t n = px * 4;
+		if (l.size() < n)
+			return;
+
+		const uint8_t* src = l.data();
+		static std::vector<uint8_t> out;
+		const bool haveMask = abNoiseValid && abNoiseMask.size() == px;
+		if (heatmap && m.size() >= n) {
+			out.resize(n);
+			for (size_t p = 0; p < px; ++p) {
+				const size_t i = p * 4;
+				const int d = (haveMask && abNoiseMask[p]) ? 0 : abMaxRGB(&l[i], &m[i]);
+				if (d > 1) {
+					const int r = (128 + d > 255) ? 255 : (128 + d);
+					out[i+0] = uint8_t(r); out[i+1] = uint8_t(l[i+1] / 3); out[i+2] = uint8_t(l[i+2] / 3);
+				} else {
+					out[i+0] = l[i+0]; out[i+1] = l[i+1]; out[i+2] = l[i+2];
+				}
+				out[i+3] = 255;
+			}
+			src = out.data();
+		}
+
+		// neutral raster state so the blit lands verbatim on GL_BACK
+		glUseProgram(0);
+		glDisable(GL_DEPTH_TEST);
+		glDisable(GL_BLEND);
+		glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+		glWindowPos2i(0, 0);
+		glDrawPixels(w, h, GL_RGBA, GL_UNSIGNED_BYTE, src);
+	}
+}
+
+// Save a legacy/modern/diff triplet into the write-dir (GLFrameABCompareDump). The
+// diff highlights pixels differing by >1 LSB in red over a dimmed grayscale of the
+// legacy frame, so a real divergence is easy to localize. idx numbers the triplet so
+// several frames can be captured over a run without overwriting.
+static void SaveFrameABImages(int w, int h, const std::vector<uint8_t>& legacy, const std::vector<uint8_t>& modern, int idx)
+{
+	const size_t n = size_t(w) * h * 4;
+	std::vector<uint8_t> diff(n);
+	for (size_t i = 0; i < n; i += 4) {
+		int d = 0;
+		for (int k = 0; k < 3; ++k) {
+			const int dk = (legacy[i+k] > modern[i+k]) ? (legacy[i+k] - modern[i+k]) : (modern[i+k] - legacy[i+k]);
+			if (dk > d) d = dk;
+		}
+		if (d > 1) {
+			diff[i+0] = 255; diff[i+1] = 0; diff[i+2] = 0;
+		} else {
+			const uint8_t g = uint8_t((int(legacy[i]) + int(legacy[i+1]) + int(legacy[i+2])) / 6);
+			diff[i+0] = diff[i+1] = diff[i+2] = g;
+		}
+		diff[i+3] = 255;
+	}
+
+	CBitmap bl, bm, bd;
+	bl.Alloc(w, h, 4); std::memcpy(bl.GetRawMem(), legacy.data(), n);
+	bm.Alloc(w, h, 4); std::memcpy(bm.GetRawMem(), modern.data(), n);
+	bd.Alloc(w, h, 4); std::memcpy(bd.GetRawMem(), diff.data(),   n);
+	// glReadPixels is bottom-up; flip so the PNGs are the right way round
+	bl.ReverseYAxis(); bm.ReverseYAxis(); bd.ReverseYAxis();
+
+	char name[64];
+	snprintf(name, sizeof(name), "frameab_%02d_legacy.png", idx); bl.Save(name, false);
+	snprintf(name, sizeof(name), "frameab_%02d_modern.png", idx); bm.Save(name, false);
+	snprintf(name, sizeof(name), "frameab_%02d_diff.png",   idx); bd.Save(name, false);
+	LOG_L(L_WARNING, "[Frame A/B] saved frameab_%02d_{legacy,modern,diff}.png", idx);
+}
+
+
 bool CGame::Update()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
@@ -1171,7 +1360,11 @@ bool CGame::Update()
 
 	ENTER_SYNCED_CODE();
 	SendClientProcUsage();
-	ClientReadNet(); // issues new SimFrame()s
+	// Whole-frame A/B test mode freezes the sim on the modern (duplicate) frame so it
+	// re-draws the exact same state; skip issuing SimFrame()s for that one iteration.
+	// Net reads just defer by one display frame and catch up next legacy frame.
+	if (!abSuppressSim)
+		ClientReadNet(); // issues new SimFrame()s
 
 	if (!gameOver) {
 		if (clientNet->NeedsReconnect())
@@ -1356,6 +1549,31 @@ bool CGame::UpdateUnsynced(const spring_time currentTime)
 	// set camera
 	camHandler->UpdateController(playerHandler.Player(gu->myPlayerNum), gu->fpsMode);
 
+	// A/B "test mode": drawFrame (1450) and timeOffset (above) are now finalized. Pin the
+	// whole draw clock HERE -- before the per-draw Update()s (stipple, mouse hover,
+	// command paths, widget:Update) AND before worldDrawer.Update bakes particle draw
+	// positions + the per-draw UBO. On the duplicate (Second) pass, replay the reference
+	// frame's drawFrame + interpolation + zero the frame-delta, so everything animated by
+	// the counter/clock (wind lerp, path scroll, event-text fade, perlin smoke) holds on
+	// the exact reference phase instead of stepping one frame ahead. Capture on First.
+	{
+		static const bool abTimePin = configHandler->GetBool("GLFrameABCompare");
+		if (abTimePin) {
+			if (abPhase == ABPhase::Second && abHavePin) {
+				globalRendering->drawFrame     = abPinDrawFrame;
+				globalRendering->timeOffset    = abPinTimeOffset;
+				globalRendering->lastFrameTime = 0.0f; // freeze per-draw accumulators (stipple, perlin)
+				gu->gameTime                   = abPinGameTime;
+				gu->modGameTime                = abPinModGameTime;
+			} else {
+				abPinDrawFrame   = globalRendering->drawFrame;
+				abPinTimeOffset  = globalRendering->timeOffset;
+				abPinGameTime    = gu->gameTime;
+				abPinModGameTime = gu->modGameTime;
+			}
+		}
+	}
+
 	lineDrawer.UpdateLineStipple();
 
 	icon::iconHandler.Update();
@@ -1429,8 +1647,57 @@ bool CGame::UpdateUnsynced(const spring_time currentTime)
 bool CGame::Draw() {
 	const spring_time currentTimePreUpdate = spring_gettime();
 
+	// Whole-frame A/B "test mode": on the duplicate (Second) pass, make UpdateUnsynced
+	// REPRODUCE the reference frame exactly. UpdateUnsynced computes the interpolation
+	// offset AND, via worldDrawer.Update()->projectileDrawer, the per-particle draw
+	// positions (GetDrawPos(timeOffset)) AND bakes the per-draw UBO (timeInfo.drawSeconds
+	// from grTime, frameTimeOffset, rndVec3 from guRNG). If the duplicate enters it with
+	// a wall clock advanced by ~one frame, exploded pieces and smoke land at slightly
+	// different positions and emissive shaders animate a frame ahead -- exactly the
+	// combat shimmer. So replay the reference entropy + wall clocks + timestamp here,
+	// BEFORE calling it, rather than trying to override its outputs afterward.
+	static const bool abCompare = configHandler->GetBool("GLFrameABCompare");
+	const bool abSecondPass = abCompare && (abPhase == ABPhase::Second) && abHavePin;
+	// expose to Lua (Spring.GetABDuplicatePass) so stateful widgets freeze on the duplicate
+	LuaUnsyncedRead::SetABDuplicatePass(abSecondPass);
+	if (abCompare) {
+		if (abSecondPass) {
+			// replay the reference entropy + wall clock; grTime feeds the UBO drawSeconds
+			// (baked inside UpdateUnsynced), timeOffset/gameTime are pinned in there too.
+			spring_lua_unsynced_rand_restore_state();
+			guRNG = abGuRNGSaved;
+			LuaUnsyncedRead::PinDrawTime(true);
+			globalRendering->grTime = abPinGrTime;
+		} else {
+			spring_lua_unsynced_rand_save_state();
+			abGuRNGSaved = guRNG;
+			LuaUnsyncedRead::PinDrawTime(false);
+			abPinGrTime  = globalRendering->grTime;
+		}
+	}
+
 	if (UpdateUnsynced(currentTimePreUpdate))
 		return false;
+
+	// drawFrame / timeOffset / lastFrameTime / gameTime were all pinned inside
+	// UpdateUnsynced (before the per-draw Update()s and the draw-pos/UBO bake). Here we
+	// only flip the backend for the test pass.
+	if (abCompare) {
+		const auto setModern = [](bool on) {
+			LuaOpenGL::SetModernImmediate(on);
+			CglShaderFontRenderer::SetUseMVPUniform(on);
+		};
+		if (abSecondPass) {
+			// test pair => modern; control pair => legacy (measures counter-driven noise).
+			// AB_FORCE_LEGACY: diagnostic -- make the test pair legacy too, so the whole
+			// run is legacy-vs-legacy and any residual is pure frame-to-frame nondeterminism.
+			static const bool abForceLegacy = getenv("AB_FORCE_LEGACY") != nullptr;
+			setModern(!abSecondIsControl && !abForceLegacy);
+		} else {
+			abHavePin = true;
+			setModern(false);
+		}
+	}
 
 	RmlGui::Update();
 	const spring_time currentTimePreDraw = spring_gettime();
@@ -1455,8 +1722,11 @@ bool CGame::Draw() {
 		// return early if and only if less than 30K milliseconds have passed since last draw-frame
 		// so we force render two frames per minute when minimized to clear batches and free memory
 		// don't need to mess with globalRendering->active since only mouse-input code depends on it
-		if ((currentTimePreDraw - lastDrawFrameTime).toSecsi() < 30)
+		if ((currentTimePreDraw - lastDrawFrameTime).toSecsi() < 30) {
+			// don't leave the A/B draw-clock pinned when skipping the draw
+			LuaUnsyncedRead::UnpinDrawTime();
 			return false;
+		}
 	}
 
 	if (globalRendering->drawDebug) {
@@ -1491,14 +1761,18 @@ bool CGame::Draw() {
 
 	//FIXME move both to UpdateUnsynced?
 	CTeamHighlight::Enable(spring_tomsecs(currentTimePreDraw));
-	{
-		minimap->Update();
 
-		// note: neither this call nor DrawWorld can be made conditional on minimap->GetMaximized()
-		// minimap never covers entire screen when maximized unless map aspect-ratio matches screen
-		// (unlikely);
-		worldDrawer.GenerateIBLTextures();
+	minimap->Update();
 
+	// note: neither this call nor DrawWorld can be made conditional on minimap->GetMaximized()
+	// minimap never covers entire screen when maximized unless map aspect-ratio matches screen
+	// (unlikely);
+	worldDrawer.GenerateIBLTextures();
+
+	// The visible-frame work, factored out so the modern-GL paths (already toggled
+	// above for A/B test mode) wrap exactly the migration-relevant draw. IBL/minimap
+	// above are done once (unaffected by the migration).
+	const auto drawVisibleFrame = [&]() {
 		// restore back to the default FBO / Viewport
 		if (FBO::IsSupported())
 			FBO::Unbind();
@@ -1506,26 +1780,86 @@ bool CGame::Draw() {
 
 		worldDrawer.Draw();
 		worldDrawer.ResetMVPMatrices();
-	}
 
-	{
-		SCOPED_TIMER("Draw::Screen");
-		SCOPED_GL_DEBUGGROUP("Draw::Screen");
-		if (CUnitDrawer::UseScreenIcons())
-			unitDrawer->DrawUnitIconsScreen();
+		{
+			SCOPED_TIMER("Draw::Screen");
+			SCOPED_GL_DEBUGGROUP("Draw::Screen");
+			if (CUnitDrawer::UseScreenIcons())
+				unitDrawer->DrawUnitIconsScreen();
 
-		eventHandler.DrawScreenEffects();
+			eventHandler.DrawScreenEffects();
 
-		hudDrawer->Draw((gu->GetMyPlayer())->fpsController.GetControllee());
-		debugDrawerAI->Draw();
+			hudDrawer->Draw((gu->GetMyPlayer())->fpsController.GetControllee());
+			debugDrawerAI->Draw();
 
-		DrawInputReceivers();
-		DrawInputText();
-		DrawInterfaceWidgets();
-		RmlGui::RenderFrame();
-		mouse->DrawCursor();
+			DrawInputReceivers();
+			DrawInputText();
+			DrawInterfaceWidgets();
+			RmlGui::RenderFrame();
+			mouse->DrawCursor();
 
-		eventHandler.DrawScreenPost();
+			eventHandler.DrawScreenPost();
+		}
+	};
+
+	// Each real frame draws exactly once; A/B test mode alternates the backend across
+	// consecutive frames (set up in the pin block above) and captures/compares here.
+	drawVisibleFrame();
+
+	if (abCompare) {
+		const int w = globalRendering->viewSizeX;
+		const int h = globalRendering->viewSizeY;
+
+		if (w > 0 && h > 0) {
+			if (abPhase == ABPhase::Second) {
+				// second frame of the pair: capture and compare against the held first
+				// (legacy) frame, then re-blit legacy (+ heatmap) so the screen never
+				// flickers. A control pair refreshes the noise mask; a test pair reports.
+				ABCapture(w, h, abSecondBuf);
+
+				static const bool heatmap = configHandler->GetBool("GLFrameABCompareHeatmap");
+				static const bool dump    = configHandler->GetBool("GLFrameABCompareDump");
+				static const int  logEvery = configHandler->GetInt("GLFrameABCompareInterval");
+				const int logStride = (logEvery > 1) ? logEvery : 1;
+
+				if (abSecondIsControl) {
+					// legacy<->legacy: everything that differs is counter-driven noise
+					ABBuildNoiseMask(w, h, abFirstBuf, abSecondBuf);
+				} else {
+					int maxDelta = 0;
+					const long net = ABMaskedDiff(w, h, abFirstBuf, abSecondBuf, maxDelta);
+
+					static int pair = 0;
+					if (net > 0 || (pair % logStride) == 0) {
+						LOG_L(L_WARNING, "[Frame A/B] modern-vs-legacy: %ld / %d px changed (noise-masked), max byte delta %d%s",
+							net, w * h, maxDelta, abNoiseValid ? "" : " [no control yet]");
+					}
+					// capture the first several diverging pairs (net past the noise floor)
+					// as numbered legacy/modern/diff triplets for inspection.
+					static int dumpIdx = 0;
+					if (dump && net > 64 && dumpIdx < 8)
+						SaveFrameABImages(w, h, abFirstBuf, abSecondBuf, dumpIdx++);
+					pair++;
+				}
+
+				ABDisplayLegacy(w, h, abFirstBuf, abSecondBuf, heatmap && !abSecondIsControl);
+
+				// leave the engine in the legacy default; alternate test/control; re-arm
+				LuaOpenGL::SetModernImmediate(false);
+				CglShaderFontRenderer::SetUseMVPUniform(false);
+				abPhase = ABPhase::First;
+				abSuppressSim = false;
+				abSecondIsControl = !abSecondIsControl;
+			} else {
+				// first frame (legacy reference): capture it, freeze the sim for the dup
+				ABCapture(w, h, abFirstBuf);
+				abPhase = ABPhase::Second;
+				abSuppressSim = true;
+			}
+		}
+
+		// draw done: let the rest of the frame (and non-draw code) see the live clock
+		LuaUnsyncedRead::UnpinDrawTime();
 	}
 
 	glEnable(GL_DEPTH_TEST);
