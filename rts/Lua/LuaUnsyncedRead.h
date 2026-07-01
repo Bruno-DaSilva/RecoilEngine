@@ -12,6 +12,21 @@ class LuaUnsyncedRead {
 	public:
 		static bool PushEntries(lua_State* L);
 
+		// Whole-frame A/B "test mode": freeze the wall-clock timer that Spring.GetTimer /
+		// GetTimerMicros return, so the duplicate (modern) draw sees the same instant as
+		// the reference (legacy) draw. reuse=false snapshots the current time; reuse=true
+		// re-pins the previously snapshotted value (for the 2nd pass of a pair).
+		static void PinDrawTime(bool reuse);
+		static void UnpinDrawTime();
+		// Replacement os.clock for unsynced states (honors the pin above); installed in
+		// LuaLibs::OpenUnsynced so os.clock-driven widget animation freezes on the pair.
+		static int OsClock(lua_State* L);
+		// Whole-frame A/B "test mode": true only on the duplicate (2nd) pass of a pair.
+		// Stateful widgets guard their per-draw animation advance with Spring.GetABDuplicatePass()
+		// so they redraw the reference pass's exact state -> byte-identical frame.
+		static void SetABDuplicatePass(bool v);
+		static int  GetABDuplicatePass(lua_State* L);
+
 	public:
 		static int IsReplay(lua_State* L);
 		static int GetReplayLength(lua_State* L);

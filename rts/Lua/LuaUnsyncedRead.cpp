@@ -2,6 +2,7 @@
 
 #include "LuaUnsyncedRead.h"
 
+#include <ctime> // std::clock for the pinned os.clock (A/B test mode)
 #include "LuaConfig.h"
 #include "LuaInclude.h"
 #include "LuaHandle.h"
@@ -116,6 +117,7 @@ bool LuaUnsyncedRead::PushEntries(lua_State* L)
 	REGISTER_LUA_CFUNC(GetVidMemUsage);
 
 	REGISTER_LUA_CFUNC(GetDrawFrame);
+	REGISTER_LUA_CFUNC(GetABDuplicatePass);
 	REGISTER_LUA_CFUNC(GetFrameTimeOffset);
 	REGISTER_LUA_CFUNC(GetGameSecondsInterpolated);
 	REGISTER_LUA_CFUNC(GetLastUpdateSeconds);
@@ -764,9 +766,62 @@ static void PushTimer(lua_State* L, const spring_time& time, bool microseconds)
  * @function Spring.GetTimer
  * @return integer
  */
+// Whole-frame A/B "test mode": when pinned, GetTimer/GetTimerMicros (and os.clock, see
+// OsClock) return a frozen instant so both passes of a pair see the identical wall/CPU
+// clock (see PinDrawTime). This freezes clock-driven widget animation (e.g. the wind
+// turbine, which spins off os.clock) onto the reference frame's phase.
+static bool luaDrawTimePinned = false;
+static spring_time luaDrawTimePinVal;
+static double luaDrawOsClockPinVal = 0.0;
+
+void LuaUnsyncedRead::PinDrawTime(bool reuse)
+{
+	if (!reuse) {
+		luaDrawTimePinVal    = spring_now();
+		luaDrawOsClockPinVal = double(std::clock()) / CLOCKS_PER_SEC;
+	}
+	luaDrawTimePinned = true;
+}
+
+void LuaUnsyncedRead::UnpinDrawTime()
+{
+	luaDrawTimePinned = false; // keep the pinned values for the 2nd pass's reuse=true
+}
+
+static inline spring_time LuaDrawNow()
+{
+	return luaDrawTimePinned ? luaDrawTimePinVal : spring_now();
+}
+
+// Replacement for os.clock in unsynced Lua states (installed in LuaLibs::OpenUnsynced):
+// honors the A/B draw-time pin. When not pinned (the default / A/B off) it is identical
+// to stock os.clock, so there is no behavioural change for normal play.
+int LuaUnsyncedRead::OsClock(lua_State* L)
+{
+	lua_pushnumber(L, luaDrawTimePinned ? luaDrawOsClockPinVal : (double(std::clock()) / CLOCKS_PER_SEC));
+	return 1;
+}
+
+static bool luaABDuplicatePass = false;
+
+void LuaUnsyncedRead::SetABDuplicatePass(bool v) { luaABDuplicatePass = v; }
+
+/***
+ * @function Spring.GetABDuplicatePass
+ * @return boolean duplicate true only on the duplicate (2nd) pass of a whole-frame A/B
+ *   "test mode" pair. Guard per-draw animation state advances with this so the duplicate
+ *   redraws the reference pass's exact state (byte-identical). Always false in normal play.
+ */
+int LuaUnsyncedRead::GetABDuplicatePass(lua_State* L)
+{
+	lua_pushboolean(L, luaABDuplicatePass);
+	return 1;
+}
+
+
 int LuaUnsyncedRead::GetTimer(lua_State* L)
 {
-	PushTimer(L, spring_now(), false);
+	PushTimer(L, LuaDrawNow(), false);
 	return 1;
 }
 
@@ -778,7 +833,7 @@ int LuaUnsyncedRead::GetTimer(lua_State* L)
  */
 int LuaUnsyncedRead::GetTimerMicros(lua_State* L)
 {
-	PushTimer(L, spring_now(), true);
+	PushTimer(L, LuaDrawNow(), true);
 	return 1;
 }
 
