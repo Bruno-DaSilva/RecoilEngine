@@ -42,6 +42,12 @@ class LuaOpenGL {
 		static bool GetSafeMode() { return safeMode; }
 		static void SetSafeMode(bool value) { safeMode = value; }
 
+		// Runtime toggle of the modern immediate-mode backend (default from config
+		// LuaModernGLBackend); read per-call at dispatch, so the whole-frame A/B
+		// compare can flip it between passes. Enables matrix tracking when on.
+		static void SetModernImmediate(bool value) { modernImmediate = value; trackMatrices = trackMatrices || value; }
+		static bool GetModernImmediate() { return modernImmediate; }
+
 		#define NOOP_STATE_FUNCS(Name)    \
 		static void Enable  ## Name () {} \
 		static void Disable ## Name () {} \

@@ -207,6 +207,16 @@ void LuaImmediateBuffer::FlushModern() const
 	shader->SetUniformMatrix4x4("uMVP", false, static_cast<const float*>(mvp));
 	rb.DrawArrays(drawMode);
 	shader->Disable();
+
+	// Legacy glBegin/glEnd leaves the FF current color at the body's last vertex
+	// color, and the compatibility profile exposes that as gl_Color to LATER
+	// shader draws -- BAR's gui_pip minimap shader reads its alpha. FlushModern
+	// draws via a shader and never touches glColor, so without this the stale
+	// current color leaks and washes the minimap (apitrace-confirmed: gl_Color.a
+	// 0.09 vs 1.0). Replicate the side effect so a modern BeginEnd is GL-state-
+	// identical to legacy for downstream draws.
+	const SColor& lc = verts.back().c;
+	glColor4ub(lc.r, lc.g, lc.b, lc.a);
 }
 
 void LuaImmediateBuffer::FlushTexRectLegacy() const
@@ -248,6 +258,13 @@ void LuaImmediateBuffer::FlushTexRectModern() const
 	shader->SetUniform("tex", 0);
 	rb.DrawArrays(GL_TRIANGLES);
 	shader->Disable();
+
+	// FlushTexRectLegacy sets glColor4ub(texRect.c); the compatibility profile
+	// carries that FF current color into LATER draws (gl_Color). Replicate it so a
+	// modern gl.TexRect is state-identical to legacy -- otherwise a following text
+	// draw inherits a stale color (apitrace class: the minimap wash, here on the
+	// countdown text).
+	glColor4ub(c.r, c.g, c.b, c.a);
 }
 
 
@@ -337,11 +354,13 @@ namespace LuaGLCompare {
 		glBindFramebuffer(GL_FRAMEBUFFER, fboA);
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 		drawLegacy();
+		glFinish(); // ensure the draw completes before readback (threaded sw rasterizers)
 		glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, a.data());
 
 		glBindFramebuffer(GL_FRAMEBUFFER, fboB);
 		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 		drawModern();
+		glFinish(); // ensure the draw completes before readback (threaded sw rasterizers)
 		glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, b.data());
 
 		glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prevFBO));
