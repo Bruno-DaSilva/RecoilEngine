@@ -35,4 +35,10 @@ extern void spring_lua_format(float f, const char* fmt, char *buf);
 extern int spring_lua_unsynced_rand(lua_State* L);
 extern int spring_lua_unsynced_srand(lua_State* L);
 
+// Snapshot / restore the unsynced Lua RNG state. Used by the whole-frame A/B
+// "test mode" so the duplicate (modern) draw replays the exact same math.random()
+// stream as the reference (legacy) draw, making the two frames byte-comparable.
+extern void spring_lua_unsynced_rand_save_state();
+extern void spring_lua_unsynced_rand_restore_state();
+
 #endif // SPRING_LUA_USER_H

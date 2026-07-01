@@ -36,6 +36,14 @@
 // Custom (Unsynced) Random Number Generator
 
 static CGlobalUnsyncedRNG lguRNG;
+static CGlobalUnsyncedRNG lguRNGSaved;
+
+// Whole-frame A/B "test mode": copy the whole RNG object (PCG32 generator state +
+// seeds) out and back so the modern duplicate draw sees the identical stream as the
+// legacy reference draw. CGlobalRNG is trivially copyable, so a plain copy is a
+// complete, exact snapshot -- no need to expose the generator internals.
+void spring_lua_unsynced_rand_save_state()    { lguRNGSaved = lguRNG; }
+void spring_lua_unsynced_rand_restore_state() { lguRNG = lguRNGSaved; }
 
 int spring_lua_unsynced_rand(lua_State* L) {
 	const lua_Number r = lguRNG.NextFloat();
