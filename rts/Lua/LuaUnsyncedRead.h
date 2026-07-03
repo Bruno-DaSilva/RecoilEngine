@@ -13,31 +13,34 @@ class LuaUnsyncedRead {
 		static bool PushEntries(lua_State* L);
 
 		// Whole-frame A/B "test mode": freeze the wall-clock timer that Spring.GetTimer /
-		// GetTimerMicros return, so the duplicate (modern) draw sees the same instant as
-		// the reference (legacy) draw. reuse=false snapshots the current time; reuse=true
-		// re-pins the previously snapshotted value (for the 2nd pass of a pair).
+		// GetTimerMicros return, so every render pass of an iteration sees the same
+		// instant as the first (reference) pass. reuse=false snapshots the current time;
+		// reuse=true re-pins the previously snapshotted value (for repeat passes).
 		static void PinDrawTime(bool reuse);
 		static void UnpinDrawTime();
 		// Replacement os.clock for unsynced states (honors the pin above); installed in
-		// LuaLibs::OpenUnsynced so os.clock-driven widget animation freezes on the pair.
+		// LuaLibs::OpenUnsynced so os.clock-driven widget animation freezes across passes.
 		static int OsClock(lua_State* L);
-		// Whole-frame A/B "test mode": true only on the duplicate (2nd) pass of a pair.
-		// Stateful widgets guard their per-draw animation advance with Spring.GetABDuplicatePass()
-		// so they redraw the reference pass's exact state -> byte-identical frame.
-		static void SetABDuplicatePass(bool v);
+		// Whole-frame A/B "test mode": 0-based index of the current render pass within
+		// the iteration (0 = reference legacy, 1 = control legacy, 2 = modern; always 0
+		// in normal play). Stateful widgets guard their per-draw animation advance with
+		// Spring.GetABDuplicatePass() (passIndex > 0) so repeat passes redraw the
+		// reference pass's exact state; per-pass dedups key on Spring.GetABPassIndex().
+		static void SetABPassIndex(int v);
+		static int  GetABPassIndex(lua_State* L);
 		static int  GetABDuplicatePass(lua_State* L);
 		static bool GetABDuplicatePassCpp();
-		// Whole-frame A/B "test mode": true for BOTH passes while a compare pair is in
+		// Whole-frame A/B "test mode": true for ALL passes while the compare is in
 		// flight. Console-spamming warnings (e.g. deprecated-GL) query this to stay a
-		// no-op during the pair, so pass 1 cannot log/dedup a console line that pass 2
-		// would then skip (which would diverge the on-screen console between passes).
+		// no-op during the iteration, so pass 1 cannot log/dedup a console line that a
+		// later pass would then skip (which would diverge the on-screen console).
 		static void SetABCompareActive(bool v);
 		// C++ helper (used by CondWarnDeprecatedGL); Lua-callable variant below.
 		static bool IsABCompareActive();
-		// Lua: Spring.GetABCompareActive() -- true for BOTH passes of a compare pair.
+		// Lua: Spring.GetABCompareActive() -- true for all passes of an active compare.
 		// Stateful widgets whose per-DRAW GPU accumulators (e.g. render-to-texture blends
-		// sampled the same frame) would otherwise diverge between the two captured frames
-		// freeze those updates while this is true, so both passes sample identical state.
+		// sampled the same frame) would otherwise diverge between the captured passes
+		// freeze those updates while this is true, so all passes sample identical state.
 		static int  GetABCompareActive(lua_State* L);
 
 	public:

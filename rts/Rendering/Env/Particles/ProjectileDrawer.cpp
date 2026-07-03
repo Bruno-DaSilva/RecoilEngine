@@ -42,7 +42,6 @@
 #include "System/StringUtil.h"
 #include "System/ScopedResource.h"
 
-#include "Lua/LuaUnsyncedRead.h"
 #include "System/Misc/TracyDefs.h"
 
 CONFIG(int, SoftParticles).defaultValue(1).safemodeValue(0).description("Soften up CEG particles on clipping edges");
@@ -372,25 +371,6 @@ void CProjectileDrawer::Kill() {
 void CProjectileDrawer::UpdateDrawFlags()
 {
 	ZoneScopedN("ProjectileDrawer::UpdateDrawFlags");
-
-	// A/B "test mode": a projectile's Draw() can mutate its own draw-radius (e.g.
-	// CBitmapMuzzleFlame::SetDrawRadius from the animated growth term). drawRadius is unsynced
-	// and used here for visibility culling (InView below). On the reference pass this cull runs
-	// with the pre-draw (previous-frame) radius; the reference Draw() then overwrites it, so the
-	// duplicate pass's cull would run with a different radius and flip InView for edge particles
-	// -> they cull on one frame and draw on the other. Snapshot the pre-draw radii on the
-	// reference pass and restore them here on the duplicate so both passes cull identically.
-	if (LuaUnsyncedRead::IsABCompareActive()) {
-		static std::vector<float> abRadii;
-		if (!LuaUnsyncedRead::GetABDuplicatePassCpp()) {
-			abRadii.resize(renderProjectiles.size());
-			for (size_t i = 0; i < renderProjectiles.size(); ++i)
-				abRadii[i] = renderProjectiles[i]->GetDrawRadius();
-		} else if (abRadii.size() == renderProjectiles.size()) {
-			for (size_t i = 0; i < renderProjectiles.size(); ++i)
-				renderProjectiles[i]->SetDrawRadius(abRadii[i]);
-		}
-	}
 
 	for_mt(0, renderProjectiles.size(), [this](int i) {
 		CProjectile* p = renderProjectiles[i];

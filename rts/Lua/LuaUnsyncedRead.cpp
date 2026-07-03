@@ -118,6 +118,7 @@ bool LuaUnsyncedRead::PushEntries(lua_State* L)
 
 	REGISTER_LUA_CFUNC(GetDrawFrame);
 	REGISTER_LUA_CFUNC(GetABDuplicatePass);
+	REGISTER_LUA_CFUNC(GetABPassIndex);
 	REGISTER_LUA_CFUNC(GetABCompareActive);
 	REGISTER_LUA_CFUNC(GetFrameTimeOffset);
 	REGISTER_LUA_CFUNC(GetGameSecondsInterpolated);
@@ -803,21 +804,21 @@ int LuaUnsyncedRead::OsClock(lua_State* L)
 	return 1;
 }
 
-static bool luaABDuplicatePass = false;
+static int  luaABPassIndex = 0;
 static bool luaABCompareActive = false;
 
-void LuaUnsyncedRead::SetABDuplicatePass(bool v) { luaABDuplicatePass = v; }
+void LuaUnsyncedRead::SetABPassIndex(int v) { luaABPassIndex = v; }
 void LuaUnsyncedRead::SetABCompareActive(bool v) { luaABCompareActive = v; }
 bool LuaUnsyncedRead::IsABCompareActive() { return luaABCompareActive; }
-bool LuaUnsyncedRead::GetABDuplicatePassCpp() { return luaABDuplicatePass; }
+bool LuaUnsyncedRead::GetABDuplicatePassCpp() { return luaABPassIndex > 0; }
 
 /***
  * @function Spring.GetABCompareActive
- * @return boolean active true for BOTH passes while a whole-frame A/B "test mode" compare
- *   pair is in flight (false in normal play). Widgets with per-DRAW GPU accumulators that
- *   are written and sampled within the same frame (e.g. render-to-texture temporal blends)
- *   pause those writes while this is true, so the reference and duplicate passes sample the
- *   identical settled state and stay byte-identical.
+ * @return boolean active true for ALL render passes of an iteration while the whole-frame
+ *   A/B "test mode" compare is in flight (false in normal play). Widgets with per-DRAW GPU
+ *   accumulators that are written and sampled within the same frame (e.g. render-to-texture
+ *   temporal blends) pause those writes while this is true, so every pass samples the
+ *   identical settled state and stays byte-identical.
  */
 int LuaUnsyncedRead::GetABCompareActive(lua_State* L)
 {
@@ -827,13 +828,28 @@ int LuaUnsyncedRead::GetABCompareActive(lua_State* L)
 
 /***
  * @function Spring.GetABDuplicatePass
- * @return boolean duplicate true only on the duplicate (2nd) pass of a whole-frame A/B
- *   "test mode" pair. Guard per-draw animation state advances with this so the duplicate
- *   redraws the reference pass's exact state (byte-identical). Always false in normal play.
+ * @return boolean duplicate true on every render pass of a whole-frame A/B "test mode"
+ *   iteration except the first. Guard per-draw animation state advances with this so the
+ *   repeat passes redraw the first pass's exact state (byte-identical). Always false in
+ *   normal play.
  */
 int LuaUnsyncedRead::GetABDuplicatePass(lua_State* L)
 {
-	lua_pushboolean(L, luaABDuplicatePass);
+	lua_pushboolean(L, luaABPassIndex > 0);
+	return 1;
+}
+
+/***
+ * @function Spring.GetABPassIndex
+ * @return number passIndex 0-based index of the current whole-frame A/B render pass
+ *   (0 = reference legacy, 1 = control legacy, 2 = modern). Always 0 in normal play.
+ *   Use this where per-pass work must be redone rather than frozen — e.g. a per-drawframe
+ *   dedup (screen copy) whose cached result must not leak from one backend's pass into
+ *   another's.
+ */
+int LuaUnsyncedRead::GetABPassIndex(lua_State* L)
+{
+	lua_pushnumber(L, luaABPassIndex);
 	return 1;
 }
 

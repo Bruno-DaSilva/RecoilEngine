@@ -242,9 +242,8 @@ void CWorldDrawer::Update(bool newSimFrame)
 
 
 
-void CWorldDrawer::GenerateIBLTextures() const
+void CWorldDrawer::CreateShadowTextures() const
 {
-
 	if (shadowHandler.ShadowsLoaded()) {
 		SCOPED_TIMER("Draw::World::CreateShadows");
 		SCOPED_GL_DEBUGGROUP("Draw::World::CreateShadows");
@@ -253,7 +252,10 @@ void CWorldDrawer::GenerateIBLTextures() const
 		shadowHandler.CreateShadows();
 		game->SetDrawMode(CGame::gameNormalDraw);
 	}
+}
 
+void CWorldDrawer::GenerateIBLTextures() const
+{
 	{
 		SCOPED_TIMER("Draw::World::UpdateReflTex");
 		SCOPED_GL_DEBUGGROUP("Draw::World::UpdateReflTex");
