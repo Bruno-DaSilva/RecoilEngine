@@ -117,6 +117,12 @@ CglShaderFontRenderer::CglShaderFontRenderer()
 	useMVPUniform = configHandler->GetBool("FontUseMVPUniform");
 	mvpCompare    = configHandler->GetBool("FontShaderMVPCompare");
 
+	// texel->UV texture-space matrix for the recordable (display-list) flush;
+	// recompiled on atlas resize in HandleTextureUpdate, like the no-shader renderer's
+	ffTextureSpaceMatrix = glGenLists(1);
+	glNewList(ffTextureSpaceMatrix, GL_COMPILE);
+	glEndList();
+
 	++fontShaderRefs;
 
 	if (fontShaderRefs > 1)
@@ -167,6 +173,8 @@ CglShaderFontRenderer::CglShaderFontRenderer()
 CglShaderFontRenderer::~CglShaderFontRenderer()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	glDeleteLists(ffTextureSpaceMatrix, 1);
+
 	--fontShaderRefs;
 	if (fontShaderRefs > 0)
 		return;
@@ -191,12 +199,60 @@ void CglShaderFontRenderer::DrawTraingleElements()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 
+	// inside a display-list compile the RenderBuffer flush is not list-safe
+	// (stream-VBO offset aliasing; glUseProgram/glUniform are executed, not
+	// recorded) -- emit recordable fixed-function immediate mode instead
+	GLint dl = 0;
+	glGetIntegerv(GL_LIST_INDEX, &dl);
+	if (dl != 0) {
+		DrawTraingleElementsRecordable();
+		return;
+	}
+
 	if (mvpCompare && boundFontShader != nullptr &&
 	    (primaryBufferTC.SumIndcs() + outlineBufferTC.SumIndcs()) > 0)
 		CompareMVPDraws();
 
 	outlineBufferTC.DrawElements(GL_TRIANGLES);
 	primaryBufferTC.DrawElements(GL_TRIANGLES);
+}
+
+void CglShaderFontRenderer::DrawTraingleElementsRecordable()
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+
+	// glyph verts store texel coords (the shader divides by textureSize()); scale
+	// through the shared texture-space-matrix list so atlas resizes keep working
+	glMatrixMode(GL_TEXTURE);
+	glPushMatrix();
+	glCallList(ffTextureSpaceMatrix);
+	glMatrixMode(GL_MODELVIEW);
+
+	// FF sampling; inside PushGLState's glPushAttrib(GL_ENABLE_BIT) bracket
+	glEnable(GL_TEXTURE_2D);
+
+	// AddQuadTriangles stores each quad as 4 consecutive verts {tl, tr, br, bl}
+	for (auto* buffer : { &outlineBufferTC, &primaryBufferTC }) {
+		const auto& verts = buffer->GetElems();
+
+		if (!verts.empty()) {
+			glBegin(GL_QUADS);
+			for (const auto& v : verts) {
+				glColor4ub(v.c.r, v.c.g, v.c.b, v.c.a);
+				glTexCoord2f(v.s, v.t);
+				glVertex3f(v.pos.x, v.pos.y, v.pos.z);
+			}
+			glEnd();
+		}
+
+		buffer->Clear();
+	}
+
+	glDisable(GL_TEXTURE_2D);
+
+	glMatrixMode(GL_TEXTURE);
+	glPopMatrix();
+	glMatrixMode(GL_MODELVIEW);
 }
 
 void CglShaderFontRenderer::HandleTextureUpdate(CFontTexture& fnt, bool onlyUpload)
@@ -209,6 +265,12 @@ void CglShaderFontRenderer::HandleTextureUpdate(CFontTexture& fnt, bool onlyUplo
 	glGetIntegerv(GL_LIST_INDEX, &dl);
 	if (dl == 0) {
 		fnt.UploadGlyphAtlasTextureImpl();
+
+		// keep the recordable-flush texture-space matrix in sync with the atlas size
+		// (this affects already compiled dlists too, like the no-shader renderer's)
+		glNewList(ffTextureSpaceMatrix, GL_COMPILE);
+		glScalef(1.0f / fnt.GetTextureWidth(), 1.0f / fnt.GetTextureHeight(), 1.0f);
+		glEndList();
 	}
 }
 

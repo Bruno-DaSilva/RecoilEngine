@@ -68,8 +68,24 @@ private:
 	// doc/bar-gl4-immediate-mode-inventory.md.
 	void CompareMVPDraws();
 
+	// Flush used while a display list is being COMPILED (gl.CreateList bodies with
+	// font:Print / gl.Text inside -- a common BAR widget pattern). The normal
+	// RenderBuffer flush is not list-safe on two counts: (1) the recorded
+	// glDrawElements aliases the streaming font VBO at fixed offsets, so the replay
+	// shows whatever glyph data occupies those offsets later; (2) glUseProgram /
+	// glUniform* execute immediately during compile and are NOT recorded, so the
+	// replayed draw runs with stale shader state (with the uMVP path this transforms
+	// the text by some other draw's matrix -> text vanishes). Instead emit plain
+	// fixed-function immediate mode, which the list captures by value and replays
+	// against the replay-time FF matrices -- the exact semantics widgets expect.
+	// Texel->UV scaling uses the same shared texture-space-matrix display list trick
+	// as CglNoShaderFontRenderer, so already-recorded lists survive atlas resizes.
+	void DrawTraingleElementsRecordable();
+
 	TypedRenderBuffer<VA_TYPE_TC> primaryBufferTC;
 	TypedRenderBuffer<VA_TYPE_TC> outlineBufferTC;
+
+	uint32_t ffTextureSpaceMatrix = 0u;
 
 	// the program Enabled by the last PushGLState (alpha vs color), needed by the
 	// MVP-compare path to set its uniforms on the active program.
