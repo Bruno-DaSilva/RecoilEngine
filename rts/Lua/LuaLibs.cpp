@@ -63,12 +63,16 @@ namespace LuaLibs {
 		// pass. When the pin is inactive (default / A/B off) it returns the real CPU clock,
 		// so there is no behavioural change for normal play. Widgets that cache
 		// `local osClock = os.clock` at load pick this up (unsynced libs open before them).
+		// Only the drawing builds provide OsClock (LuaUnsyncedRead.cpp is not linked into the
+		// dedicated server / unitsync), and only they render an A/B pair, so guard it out there.
+		#if (!defined(DEDICATED) && !defined(UNITSYNC))
 		lua_getglobal(L, "os");
 		if (lua_istable(L, -1)) {
 			lua_pushcfunction(L, LuaUnsyncedRead::OsClock);
 			lua_setfield(L, -2, "clock");
 		}
 		lua_pop(L, 1);
+		#endif
 	}
 
 } // namespace LuaLibs

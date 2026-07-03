@@ -118,6 +118,7 @@ bool LuaUnsyncedRead::PushEntries(lua_State* L)
 
 	REGISTER_LUA_CFUNC(GetDrawFrame);
 	REGISTER_LUA_CFUNC(GetABDuplicatePass);
+	REGISTER_LUA_CFUNC(GetABCompareActive);
 	REGISTER_LUA_CFUNC(GetFrameTimeOffset);
 	REGISTER_LUA_CFUNC(GetGameSecondsInterpolated);
 	REGISTER_LUA_CFUNC(GetLastUpdateSeconds);
@@ -803,8 +804,26 @@ int LuaUnsyncedRead::OsClock(lua_State* L)
 }
 
 static bool luaABDuplicatePass = false;
+static bool luaABCompareActive = false;
 
 void LuaUnsyncedRead::SetABDuplicatePass(bool v) { luaABDuplicatePass = v; }
+void LuaUnsyncedRead::SetABCompareActive(bool v) { luaABCompareActive = v; }
+bool LuaUnsyncedRead::IsABCompareActive() { return luaABCompareActive; }
+bool LuaUnsyncedRead::GetABDuplicatePassCpp() { return luaABDuplicatePass; }
+
+/***
+ * @function Spring.GetABCompareActive
+ * @return boolean active true for BOTH passes while a whole-frame A/B "test mode" compare
+ *   pair is in flight (false in normal play). Widgets with per-DRAW GPU accumulators that
+ *   are written and sampled within the same frame (e.g. render-to-texture temporal blends)
+ *   pause those writes while this is true, so the reference and duplicate passes sample the
+ *   identical settled state and stay byte-identical.
+ */
+int LuaUnsyncedRead::GetABCompareActive(lua_State* L)
+{
+	lua_pushboolean(L, luaABCompareActive);
+	return 1;
+}
 
 /***
  * @function Spring.GetABDuplicatePass

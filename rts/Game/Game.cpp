@@ -1227,6 +1227,7 @@ namespace {
 	std::vector<uint8_t> abSecondBuf;  // the modern (test) or legacy (control) duplicate
 	std::vector<uint8_t> abNoiseMask;  // 1 where the last control pair drifted (>1 LSB)
 	CGlobalUnsyncedRNG   abGuRNGSaved; // engine unsynced RNG snapshot (FX draw jitter)
+	CCamera              abPinCamera;  // reference-pass player camera (matrices+frustum), replayed on the duplicate
 
 	inline int abAbs(int v) { return (v < 0) ? -v : v; }
 	inline int abMaxRGB(const uint8_t* a, const uint8_t* b) {
@@ -1302,8 +1303,11 @@ namespace {
 		glDisable(GL_DEPTH_TEST);
 		glDisable(GL_BLEND);
 		glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+#ifndef HEADLESS
+		// glWindowPos2i/glDrawPixels are deprecated and absent from the headless GL stubs
 		glWindowPos2i(0, 0);
 		glDrawPixels(w, h, GL_RGBA, GL_UNSIGNED_BYTE, src);
+#endif
 	}
 }
 
@@ -1627,7 +1631,22 @@ bool CGame::UpdateUnsynced(const spring_time currentTime)
 		unitTracker.SetCam();
 
 	camera->Update();
+	// A/B "test mode": replay the reference pass's exact player-camera render state (frustum
+	// + matrices) on the duplicate pass so main-view frustum culling (InView) is byte-identical
+	// -> stops edge-of-screen particles (muzzle flashes) popping between the two frames.
+	const bool abCamActive = configHandler->GetBool("GLFrameABCompare");
+	if (abPhase == ABPhase::Second && abHavePin) {
+		*camera = abPinCamera;
+	} else if (abCamActive) {
+		abPinCamera = *camera;
+	}
 	shadowHandler.Update();
+	// shadowHandler.Update() re-derives the player frustum (GetShadowProjectionScales ->
+	// CalcShadowProjectionPos recomputes it via the same non-deterministic path), undoing the
+	// pin above; re-apply it here so the visibility cull in worldDrawer.Update() below uses the
+	// reference frustum. (The pin before shadowHandler.Update keeps the shadow fit consistent.)
+	if (abPhase == ABPhase::Second && abHavePin)
+		*camera = abPinCamera;
 	{
 		worldDrawer.Update(newSimFrame);
 		transformsUploader.Update();

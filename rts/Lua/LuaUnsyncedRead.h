@@ -26,6 +26,19 @@ class LuaUnsyncedRead {
 		// so they redraw the reference pass's exact state -> byte-identical frame.
 		static void SetABDuplicatePass(bool v);
 		static int  GetABDuplicatePass(lua_State* L);
+		static bool GetABDuplicatePassCpp();
+		// Whole-frame A/B "test mode": true for BOTH passes while a compare pair is in
+		// flight. Console-spamming warnings (e.g. deprecated-GL) query this to stay a
+		// no-op during the pair, so pass 1 cannot log/dedup a console line that pass 2
+		// would then skip (which would diverge the on-screen console between passes).
+		static void SetABCompareActive(bool v);
+		// C++ helper (used by CondWarnDeprecatedGL); Lua-callable variant below.
+		static bool IsABCompareActive();
+		// Lua: Spring.GetABCompareActive() -- true for BOTH passes of a compare pair.
+		// Stateful widgets whose per-DRAW GPU accumulators (e.g. render-to-texture blends
+		// sampled the same frame) would otherwise diverge between the two captured frames
+		// freeze those updates while this is true, so both passes sample identical state.
+		static int  GetABCompareActive(lua_State* L);
 
 	public:
 		static int IsReplay(lua_State* L);

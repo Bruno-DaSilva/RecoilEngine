@@ -33,6 +33,7 @@
 #include "LuaRBOs.h"
 #include "LuaShaders.h"
 #include "LuaTextures.h"
+#include "LuaUnsyncedRead.h"
 #include "LuaUtils.h"
 #include "LuaVAO.h"
 #include "LuaVBO.h"
@@ -1182,6 +1183,13 @@ inline void LuaOpenGL::CheckDrawingEnabled(lua_State* L, const char* caller)
 inline void LuaOpenGL::CondWarnDeprecatedGL(lua_State* L, const char* caller)
 {
 	if (deprecatedGLWarnLevel <= 0)
+		return;
+
+	// Whole-frame A/B "test mode": suppress entirely while a compare pair is in flight.
+	// This warning dedups per call site, so a first-time hit on pass 1 would log a console
+	// line (and insert into the dedup set) that pass 2 then skips -> the on-screen console
+	// differs between the two passes and breaks byte-identity. No-op keeps both passes equal.
+	if (LuaUnsyncedRead::IsABCompareActive())
 		return;
 
 	std::string luaCaller;
