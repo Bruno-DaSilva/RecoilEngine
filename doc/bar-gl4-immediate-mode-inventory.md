@@ -522,6 +522,15 @@ The same-frame L↔L control serves double duty: its >1-LSB pixels build the per
 
 Historical results from the paired-frame era (still-relevant conclusions): calm/settled frames byte-identical; combat residual was 94–99.8 % ±1–2 LSB and **backend-independent** (same under force-legacy) — GPU/driver-level, below the API; visible content divergence (delta>32) small and localized. The in-frame design eliminates the cross-iteration sources (different draw-prep paths, buffer re-upload vs reuse), so the [L,L,L] null gate must be re-measured — it is the new baseline for what "pixel-perfect" can reach.
 
+## Divergence-hunting plan (post-gate, 2026-07-03)
+
+The gate is byte-perfect and cheap; the loop for every step below is: run `GLFrameABCompare=1` → control must be 0 (a nonzero control is a per-pass widget/engine leak — fix via the three patterns: `GetABCompareActive` freeze / `GetABPassIndex` dedup key / `GetABDuplicatePass` advance guard) → any signal is a real modern-backend bug; localize via the dump PNGs → `LuaGLCompareMode` per-call attribution → apitrace pass-diff (segment on the per-pass `glReadPixels`, multiset-diff (prog,fn,count) per FBO).
+
+1. **Re-gate with modern `gl.BeginEnd` promoted** (env gate removed 2026-07-03 — pass 3 now exercises capture-then-render for non-textured BeginEnd for the first time in the whole-frame gate; the prior signal=0 runs validated Rect/TexRect + font-uMVP only, since `MODERN_BEGINEND_CAPTURE` was unset).
+2. **Coverage breadth** — run the gate over content exercising the in-game caller list beyond fightertest: a real full-game replay on a water map with a UI-heavy loadout (gui_pip open, ecostats, chat traffic, mapinfo — the top runtime callers), and an idle base-building start (buildmenu/gridmenu/pregame UI). Expect a small tail of new per-pass control leaks (same classes as fixed here); burn each to 0, then judge signal.
+3. **Daily-drive modern** — `LuaModernGLBackend=1` + `FontUseMVPUniform=1` in normal play (no compare cost); anything that looks off gets reproduced under the gate.
+4. **Expand the modern surface**, each increment closed by the same loop: textured `gl.BeginEnd` (texenv/multi-unit aware — currently exact legacy replay), `gl.Shape`/`gl.DrawGroundQuad`, group-B uMVP fed from `GLMatrixStateTracker` instead of the `glGetFloatv` bridge (Phase-0 prereq), then Phase 2 display lists (the font-in-list lesson: lists need real capture semantics, not stream aliasing), then the Phase-0 endgame (UBO MVP everywhere → remove `SetupScreenMatrices` FF + attrib stack + `ResetGLState` FF resets) → first RenderDoc capture attempt.
+
 ## Open questions / to-verify
 
 - Which LuaOpenGL helpers beyond the A/B/E set internally emit immediate mode? (`gl.DrawGroundQuad` confirmed; audit ground-circle, shape, unit/feature draw helpers.)

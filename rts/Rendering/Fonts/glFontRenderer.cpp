@@ -21,12 +21,6 @@ CONFIG(bool, FontUseMVPUniform).defaultValue(false).headlessValue(false).safemod
 	             "fixed-function matrix bridge instead of gl_ModelViewProjectionMatrix. "
 	             "Phase-1 modern-GL migration; off => legacy builtin path, byte-identical.");
 
-CONFIG(bool, FontShaderMVPCompare).defaultValue(false).headlessValue(false).safemodeValue(false)
-	.description("Validation: each font draw renders the glyph buffer both ways (uMVP vs "
-	             "gl_ModelViewProjectionMatrix) into two FBOs in the SAME frame and logs the max "
-	             "byte delta. Same-process A/B, immune to cross-run noise. Default off.");
-
-
 ////////////////////////////////////////
 // Vertex-shader sources (vsFont330 / vsFont130) live in glFontRendererShaders.h
 // so the modern-GL A/B test compiles the exact same source. The fragment shaders
@@ -115,7 +109,6 @@ CglShaderFontRenderer::CglShaderFontRenderer()
 	outlineBufferTC = TypedRenderBuffer<VA_TYPE_TC>(NUM_TRI_BUFFER_VERTS, NUM_TRI_BUFFER_ELEMS, IStreamBufferConcept::SB_BUFFERSUBDATA);
 
 	useMVPUniform = configHandler->GetBool("FontUseMVPUniform");
-	mvpCompare    = configHandler->GetBool("FontShaderMVPCompare");
 
 	// texel->UV texture-space matrix for the recordable (display-list) flush;
 	// recompiled on atlas resize in HandleTextureUpdate, like the no-shader renderer's
@@ -208,10 +201,6 @@ void CglShaderFontRenderer::DrawTraingleElements()
 		DrawTraingleElementsRecordable();
 		return;
 	}
-
-	if (mvpCompare && boundFontShader != nullptr &&
-	    (primaryBufferTC.SumIndcs() + outlineBufferTC.SumIndcs()) > 0)
-		CompareMVPDraws();
 
 	outlineBufferTC.DrawElements(GL_TRIANGLES);
 	primaryBufferTC.DrawElements(GL_TRIANGLES);
@@ -307,7 +296,6 @@ void CglShaderFontRenderer::PushGLState(const CglFont& fnt)
 
 	Shader::IProgramObject* shader = fnt.HasColor() ? fontShaderColor.get() : fontShader.get();
 	shader->Enable();
-	boundFontShader = shader;
 
 	// set the branch toggle every draw (not just at ctor) so useMVPUniform can be
 	// flipped at runtime, e.g. by the whole-frame A/B compare.
@@ -315,125 +303,6 @@ void CglShaderFontRenderer::PushGLState(const CglFont& fnt)
 	if (useMVPUniform) {
 		const CMatrix44f mvp = GetCurrentFixedFunctionFontMVP();
 		shader->SetUniformMatrix4x4("uMVP", false, static_cast<const float*>(mvp));
-	}
-}
-
-// Same-frame A/B (config FontShaderMVPCompare): render the accumulated glyph
-// buffers two ways IN ONE FRAME -- the legacy gl_ModelViewProjectionMatrix branch
-// vs the uMVP branch fed by the same bridge matrix -- into two FBOs and log the max
-// byte delta. Immune to the cross-run/temporal noise that defeats a screenshot A/B,
-// since only the shader branch differs. Verified: a builtin-vs-builtin control gives
-// the same (near-zero) result, so any reported delta is a real branch difference.
-//
-// Three things are required for a trustworthy result, each learned from a control
-// that diverged without them:
-//   1. Each branch draws through its OWN scratch buffer objects (cmpA*/cmpB*), filled
-//      fresh from the production glyph buffers -- drawing one engine streaming buffer
-//      twice per frame does not reproduce.
-//   2. Fresh FBOs per compare (not reused across the many font draws per frame).
-//   3. The FULL view size (not the current scissored viewport), so the full-screen
-//      glyph geometry isn't squished into heavy translucent overlap whose blend a
-//      threaded rasterizer renders non-deterministically.
-// The shader is already Enabled and the font texture bound by PushGLState.
-void CglShaderFontRenderer::CompareMVPDraws()
-{
-	RECOIL_DETAILED_TRACY_ZONE;
-
-	// Use the full view size, NOT the current (possibly scissored/clamped) GL
-	// viewport: the glyph geometry is in the MVP's full coordinate space, so a small
-	// viewport would squish all of it into a few rows -> heavy translucent overlap
-	// whose blended result a threaded rasterizer renders non-deterministically
-	// (a builtin-vs-builtin control diverged at viewport 893x29).
-	const int w = globalRendering->viewSizeX;
-	const int h = globalRendering->viewSizeY;
-	if (w <= 0 || h <= 0)
-		return;
-
-	const CMatrix44f mvp = GetCurrentFixedFunctionFontMVP();
-	Shader::IProgramObject* sh = boundFontShader;
-
-	// one outline + one primary scratch buffer PER branch, each drawn once per
-	// frame; sized like the real font buffers, lazily built on first use.
-	static TypedRenderBuffer<VA_TYPE_TC> cmpA_OL(NUM_TRI_BUFFER_VERTS, NUM_TRI_BUFFER_ELEMS, IStreamBufferConcept::SB_BUFFERSUBDATA);
-	static TypedRenderBuffer<VA_TYPE_TC> cmpA_PM(NUM_TRI_BUFFER_VERTS, NUM_TRI_BUFFER_ELEMS, IStreamBufferConcept::SB_BUFFERSUBDATA);
-	static TypedRenderBuffer<VA_TYPE_TC> cmpB_OL(NUM_TRI_BUFFER_VERTS, NUM_TRI_BUFFER_ELEMS, IStreamBufferConcept::SB_BUFFERSUBDATA);
-	static TypedRenderBuffer<VA_TYPE_TC> cmpB_PM(NUM_TRI_BUFFER_VERTS, NUM_TRI_BUFFER_ELEMS, IStreamBufferConcept::SB_BUFFERSUBDATA);
-
-	const auto drawBranch = [&](TypedRenderBuffer<VA_TYPE_TC>& ol, TypedRenderBuffer<VA_TYPE_TC>& pm, bool useMVP) {
-		ol.Clear();
-		ol.AddVertices(outlineBufferTC.GetElems());
-		ol.AddIndices(outlineBufferTC.GetIndcs());
-		pm.Clear();
-		pm.AddVertices(primaryBufferTC.GetElems());
-		pm.AddIndices(primaryBufferTC.GetIndcs());
-
-		sh->SetUniform("uUseMVP", useMVP ? 1 : 0);
-		if (useMVP)
-			sh->SetUniformMatrix4x4("uMVP", false, static_cast<const float*>(mvp));
-
-		ol.DrawElements(GL_TRIANGLES);
-		pm.DrawElements(GL_TRIANGLES);
-	};
-
-	// Render each branch into its OWN fresh FBO (created+destroyed per compare).
-	// Reusing static FBOs across the many font draws per frame gave false
-	// divergences here (a clean-FBO control showed the two branches byte-identical);
-	// fresh FBOs + glFinish are deterministic.
-	GLuint fbos[2] = {0, 0}, texs[2] = {0, 0}, drb = 0;
-	glGenRenderbuffers(1, &drb);
-	glBindRenderbuffer(GL_RENDERBUFFER, drb);
-	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, w, h);
-	for (int i = 0; i < 2; ++i) {
-		glGenTextures(1, &texs[i]);
-		glBindTexture(GL_TEXTURE_2D, texs[i]);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-		glGenFramebuffers(1, &fbos[i]);
-		glBindFramebuffer(GL_FRAMEBUFFER, fbos[i]);
-		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texs[i], 0);
-		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, drb);
-	}
-
-	int maxDelta = -1;
-	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
-		GLint prevFBO = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFBO);
-		GLint prevVP[4]; glGetIntegerv(GL_VIEWPORT, prevVP);
-		glViewport(0, 0, w, h);
-		glPixelStorei(GL_PACK_ALIGNMENT, 1);
-
-		std::vector<uint8_t> px[2] = { std::vector<uint8_t>(size_t(w) * h * 4), std::vector<uint8_t>(size_t(w) * h * 4) };
-		for (int i = 0; i < 2; ++i) {
-			glBindFramebuffer(GL_FRAMEBUFFER, fbos[i]);
-			glClearColor(0, 0, 0, 0);
-			glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-			drawBranch(i == 0 ? cmpA_OL : cmpB_OL, i == 0 ? cmpA_PM : cmpB_PM, i != 0);
-			glFinish();
-			glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px[i].data());
-		}
-		glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prevFBO));
-		glViewport(prevVP[0], prevVP[1], prevVP[2], prevVP[3]);
-
-		maxDelta = 0;
-		for (size_t k = 0; k < px[0].size(); ++k)
-			maxDelta = std::max(maxDelta, std::abs(int(px[0][k]) - int(px[1][k])));
-	}
-	glDeleteFramebuffers(2, fbos); glDeleteTextures(2, texs); glDeleteRenderbuffers(1, &drb);
-
-	// restore the uniform state the real (visible) draw expects
-	sh->SetUniform("uUseMVP", useMVPUniform ? 1 : 0);
-	if (useMVPUniform)
-		sh->SetUniformMatrix4x4("uMVP", false, static_cast<const float*>(mvp));
-
-	// log once on success; always on FBO failure or a real divergence (>1 LSB)
-	static int logged = 0;
-	if (maxDelta < 0) {
-		if (logged++ == 0)
-			LOG_L(L_WARNING, "[Font MVP compare] compare FBO unavailable");
-	} else if (maxDelta > 1) {
-		LOG_L(L_WARNING, "[Font MVP compare] uMVP path diverged from builtin: max byte delta = %d", maxDelta);
-	} else if (logged++ == 0) {
-		LOG("[Font MVP compare] uMVP path matches builtin: max byte delta = %d", maxDelta);
 	}
 }
 

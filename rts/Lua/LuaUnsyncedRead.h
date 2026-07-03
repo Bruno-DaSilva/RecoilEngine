@@ -30,7 +30,6 @@ class LuaUnsyncedRead {
 		static void SetABPassIndex(int v);
 		static int  GetABPassIndex(lua_State* L);
 		static int  GetABDuplicatePass(lua_State* L);
-		static bool GetABDuplicatePassCpp();
 		// Whole-frame A/B "test mode": true for ALL passes while the compare is in
 		// flight. Console-spamming warnings (e.g. deprecated-GL) query this to stay a
 		// no-op during the iteration, so pass 1 cannot log/dedup a console line that a

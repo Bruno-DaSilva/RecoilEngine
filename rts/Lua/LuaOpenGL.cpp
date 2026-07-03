@@ -1185,10 +1185,10 @@ inline void LuaOpenGL::CondWarnDeprecatedGL(lua_State* L, const char* caller)
 	if (deprecatedGLWarnLevel <= 0)
 		return;
 
-	// Whole-frame A/B "test mode": suppress entirely while a compare pair is in flight.
-	// This warning dedups per call site, so a first-time hit on pass 1 would log a console
-	// line (and insert into the dedup set) that pass 2 then skips -> the on-screen console
-	// differs between the two passes and breaks byte-identity. No-op keeps both passes equal.
+	// Whole-frame A/B "test mode": suppress entirely while a compare is active.
+	// This warning dedups per call site, so a first-time hit on one render pass would
+	// log a console line (and insert into the dedup set) that later passes then skip
+	// -> the on-screen console differs between passes and breaks byte-identity.
 	if (LuaUnsyncedRead::IsABCompareActive())
 		return;
 
@@ -2466,24 +2466,16 @@ int LuaOpenGL::BeginEnd(lua_State* L)
 		WorkaroundATIPointSizeBug();
 	}
 
-	// Modern gl.BeginEnd is DEFERRED to the legacy path. The modern backend
-	// captures the callback and replays it, which runs the callback OUTSIDE a real
-	// glBegin/glEnd. The captured no-shader gui_pip BeginEnd bodies leak GL state
-	// (isolated by the whole-frame A/B: the modern path brightens the gui_pip
-	// minimap ~1.4-2.4x by washing its shader-drawn terrain; per-call compare
-	// shows every individual draw identical, so it is a state-leak onto LATER
-	// draws, not a bad draw). Root cause not yet pinned -- it is NOT stray
-	// non-vertex calls, nested BeginEnd, or FF current color (all tested). Until
-	// it is understood, only glCompareMode (measurement) captures; production and
-	// the modern backend both use the legacy glBegin/glEnd path. gl.Rect/gl.TexRect
-	// stay modern (validated byte-identical). See
-	// doc/bar-gl4-immediate-mode-inventory.md.
-	// The modern gl.BeginEnd capture path (VA_TYPE_C, uMVP) is color-parity fixed and
-	// validated, but stays behind env MODERN_BEGINEND_CAPTURE=1 pending a decision to
-	// promote it to default; without it, BeginEnd defers to legacy glBegin/glEnd. Used
-	// by the whole-frame A/B "test mode" to exercise the modern path.
-	static const bool kTraceModernCapture = getenv("MODERN_BEGINEND_CAPTURE") != nullptr;
-	if (!(((modernImmediate && kTraceModernCapture) || glCompareMode) && NoShaderBound())) {
+	// Modern gl.BeginEnd: capture the callback's Vertex/Color/TexCoord stream into
+	// LuaImmediateBuffer (no FF calls) and flush it through the uMVP shader. The
+	// gui_pip color-inheritance leak that once made this untrustworthy is fixed
+	// (see the Color() seed below), and the path is validated byte-identical by the
+	// whole-frame A/B gate (control=0, signal=0 over the fightertest benchmark,
+	// 2026-07-03 -- see doc/bar-gl4-immediate-mode-inventory.md). Textured streams
+	// still flush via the exact legacy replay inside FlushModern (general textured
+	// BeginEnd is deferred: real widgets use texture-unit/texenv setups a single
+	// MODULATE shader can't reproduce).
+	if (!((modernImmediate || glCompareMode) && NoShaderBound())) {
 		glBegin(primMode);
 		const int error = lua_pcall(L, (args - 2), 0, 0);
 		glEnd();
@@ -2495,8 +2487,8 @@ int LuaOpenGL::BeginEnd(lua_State* L)
 		return 0;
 	}
 
-	// glCompareMode measurement path: capture the stream once and report the
-	// modern-vs-legacy delta, but render via the (correct) legacy replay.
+	// capture the stream once; render modern (or, under glCompareMode-only, report
+	// the modern-vs-legacy delta and render via the exact legacy replay)
 	luaImmBuffer.Begin(primMode);
 	// Seed the capture's current color with the inherited Lua/FF color. A
 	// BeginEnd body that never calls gl.Color inherits the color set OUTSIDE it
@@ -2524,7 +2516,7 @@ int LuaOpenGL::BeginEnd(lua_State* L)
 			[]() { luaImmBuffer.FlushModern(); }));
 	}
 
-	(modernImmediate && kTraceModernCapture) ? luaImmBuffer.FlushModern() : luaImmBuffer.FlushLegacy();
+	modernImmediate ? luaImmBuffer.FlushModern() : luaImmBuffer.FlushLegacy();
 	luaImmBuffer.Clear();
 	return 0;
 }
