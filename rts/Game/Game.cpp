@@ -147,12 +147,12 @@ CONFIG(bool, GameEndOnConnectionLoss).defaultValue(true);
 // CONFIG(bool, LuaCollectGarbageOnSimFrame).defaultValue(true);
 
 CONFIG(bool, GLFrameABCompare).defaultValue(false).headlessValue(false).safemodeValue(false)
-	.description("Validation \"test mode\": render each display frame three times within the same "
-	             "iteration [legacy, legacy, modern] with the draw clock and RNG replayed, and log "
-	             "the same-frame legacy<->legacy control delta (per-pass leaks; target 0) plus the "
-	             "noise-masked legacy<->modern signal. Sim and draw-prep run once per iteration, so "
-	             "the game keeps full sim speed at ~3x the GPU cost. The first legacy pass is held "
-	             "on screen (no flicker). Default off.");
+	.description("Validation \"test mode\": render each display frame four times within the same "
+	             "iteration [legacy settle, legacy, legacy, modern] with the draw clock and RNG "
+	             "replayed, and log the same-frame legacy<->legacy control delta over the settled "
+	             "passes (every-pass leaks; target 0) plus the noise-masked legacy<->modern signal. "
+	             "Sim and draw-prep run once per iteration, so the game keeps full sim speed at "
+	             "~4x the GPU cost. The first pass is held on screen (no flicker). Default off.");
 CONFIG(int, GLFrameABCompareInterval).defaultValue(1).minimumValue(1)
 	.description("With GLFrameABCompare, emit the summary log line (and consider a dump) at most "
 	             "once per N compared frames when there is no divergence. Default 1 (every frame).");
@@ -1184,27 +1184,37 @@ int CGame::TextEditing(const std::string& utf8Text, unsigned int start, unsigned
 // ---------------------------------------------------------------------------
 // Whole-frame A/B compare (config GLFrameABCompare) -- "test mode".
 //
-// Renders each display frame THREE times within the SAME iteration -- [legacy,
-// legacy, modern] -- then compares the readbacks in-frame and presents the first
-// legacy pass (steady image, no flicker). Sim and draw-prep (UpdateUnsynced:
+// Renders each display frame FOUR times within the SAME iteration -- [legacy,
+// legacy, legacy, modern] -- then compares the readbacks in-frame and presents
+// the first pass (steady image, no flicker). Sim and draw-prep (UpdateUnsynced:
 // drawFrame, timeOffset, camera, shadow fit, cull flags, particle draw-pos bake,
 // per-draw UBO) run ONCE per iteration, so every pass consumes byte-identical
 // inputs BY CONSTRUCTION -- no cross-iteration pins, no sim freeze, full sim
-// speed at ~3x the GPU cost. Only two things advance while a pass renders and
-// must therefore be snapshot before pass 0 and replayed before passes 1..2: the
+// speed at ~4x the GPU cost. Only two things advance while a pass renders and
+// must therefore be snapshot before pass 0 and replayed before passes 1..3: the
 // wall clock (Spring.GetTimer / os.clock, see LuaUnsyncedRead::PinDrawTime) and
 // the unsynced RNGs (guRNG + Lua math.random, save/restore below).
 //
 // The passes:
-//   pass 0 (legacy)  -- the reference; presented to the screen.
-//   pass 1 (legacy)  -- the same-frame CONTROL. Any L<->L delta is a real
-//                       per-pass state leak (stateful Lua draw callin, temporal
-//                       RTT accumulator, per-pass GL nondeterminism) with an
-//                       in-frame repro. Target: byte-identical (0 px).
+//   pass 0 (legacy)  -- the SETTLE pass; presented to the screen, NOT compared.
+//                       The first render of a draw frame performs all the
+//                       once-per-drawFrame lazy work (widget display-list
+//                       rebuilds -- which shift the font stream-buffer aliasing
+//                       recorded inside lists -- RTT cache refreshes, run-twice
+//                       widget workarounds, lazy shader recompiles, atlas
+//                       uploads). Trace analysis (2026-07-03) showed every
+//                       recurring L<->L divergence class lands here and is
+//                       settled by pass 1, so pass 0 absorbs them by design.
+//   pass 1 (legacy)  -- reference for the same-frame CONTROL.
+//   pass 2 (legacy)  -- the CONTROL. Any pass1<->pass2 delta is a real
+//                       every-pass state leak (stateful Lua draw callin,
+//                       temporal RTT accumulator, per-pass GL nondeterminism)
+//                       with an in-frame repro. Target: byte-identical (0 px).
 //                       Its diff also builds the noise mask for the signal.
-//   pass 2 (modern)  -- the test. The masked L<->M delta is pure backend signal.
-//                       AB_FORCE_LEGACY (env) makes this pass legacy too: the
-//                       [L,L,L] null test where everything must be zero.
+//   pass 3 (modern)  -- the test. The masked pass2<->pass3 delta is pure
+//                       backend signal. AB_FORCE_LEGACY (env) makes this pass
+//                       legacy too: the [L,L,L,L] null test where everything
+//                       must be zero.
 //
 // Per-pass work is redone FROM SCRATCH (own clear, DrawGenesis, shadow-map
 // render, world + screen) with the backend constant for the whole pass. Two
@@ -1224,7 +1234,7 @@ extern void spring_lua_unsynced_rand_restore_state();
 
 namespace {
 	bool abNoiseValid = false;
-	std::vector<uint8_t> abBuf[3];     // per-pass backbuffer readbacks [L, L, M]
+	std::vector<uint8_t> abBuf[4];     // per-pass backbuffer readbacks [settle-L, L, L, M]
 	std::vector<uint8_t> abNoiseMask;  // 1 where the same-frame control pair differed (>1 LSB)
 	CGlobalUnsyncedRNG   abGuRNGSaved; // engine unsynced RNG snapshot (FX draw jitter)
 
@@ -1244,15 +1254,19 @@ namespace {
 
 	// From the same-frame control (legacy<->legacy) pair, mark every pixel that differed
 	// >1 LSB so the test pass can exclude it. Returns the count of such pixels -- each is
-	// a real per-pass leak (the burn-down target is 0).
-	long ABBuildNoiseMask(int w, int h, const std::vector<uint8_t>& l, const std::vector<uint8_t>& c) {
+	// a real per-pass leak (the burn-down target is 0) -- and their peak byte delta.
+	long ABBuildNoiseMask(int w, int h, const std::vector<uint8_t>& l, const std::vector<uint8_t>& c, int& maxDelta) {
 		const size_t px = size_t(w) * h;
 		if (l.size() < px * 4 || c.size() < px * 4) return -1;
 		abNoiseMask.assign(px, 0);
-		long leaked = 0;
-		for (size_t p = 0; p < px; ++p)
-			leaked += (abNoiseMask[p] = (abMaxRGB(&l[p*4], &c[p*4]) > 1) ? 1 : 0);
+		long leaked = 0; int mx = 0;
+		for (size_t p = 0; p < px; ++p) {
+			const int d = abMaxRGB(&l[p*4], &c[p*4]);
+			if (d > mx) mx = d;
+			leaked += (abNoiseMask[p] = (d > 1) ? 1 : 0);
+		}
 		abNoiseValid = true;
+		maxDelta = mx;
 		return leaked;
 	}
 
@@ -1756,10 +1770,10 @@ bool CGame::Draw() {
 			CglShaderFontRenderer::SetUseMVPUniform(on);
 		};
 
-		for (int pass = 0; pass < 3; ++pass) {
+		for (int pass = 0; pass < 4; ++pass) {
 			LuaUnsyncedRead::SetABPassIndex(pass);
 			if (pass == 0) {
-				// snapshot the draw entropy + wall clock the reference pass consumes ...
+				// snapshot the draw entropy + wall clock the settle pass consumes ...
 				spring_lua_unsynced_rand_save_state();
 				abGuRNGSaved = guRNG;
 				LuaUnsyncedRead::PinDrawTime(false);
@@ -1771,8 +1785,8 @@ bool CGame::Draw() {
 				LuaUnsyncedRead::PinDrawTime(true);
 			}
 
-			// [L, L, M]; AB_FORCE_LEGACY (env) => [L, L, L], the null test
-			setModern(pass == 2 && !abForceLegacy);
+			// [L, L, L, M]; AB_FORCE_LEGACY (env) => [L, L, L, L], the null test
+			setModern(pass == 3 && !abForceLegacy);
 			drawOnePass();
 
 			if (w > 0 && h > 0)
@@ -1790,28 +1804,35 @@ bool CGame::Draw() {
 			static const int  logEvery = configHandler->GetInt("GLFrameABCompareInterval");
 			const int logStride = (logEvery > 1) ? logEvery : 1;
 
-			// same-frame control: any L<->L delta is a real per-pass leak (target 0);
-			// its pixels also mask the signal
-			const long ctl = ABBuildNoiseMask(w, h, abBuf[0], abBuf[1]);
+			// same-frame control over the SETTLED passes (pass 0 absorbed the lazy
+			// once-per-drawFrame work): any pass1<->pass2 delta is a real every-pass
+			// leak (target 0); its pixels also mask the signal
+			int ctlMaxDelta = 0;
+			const long ctl = ABBuildNoiseMask(w, h, abBuf[1], abBuf[2], ctlMaxDelta);
 			// signal: control-legacy vs modern (adjacent passes), noise-masked
 			int maxDelta = 0;
-			const long net = ABMaskedDiff(w, h, abBuf[1], abBuf[2], maxDelta);
+			const long net = ABMaskedDiff(w, h, abBuf[2], abBuf[3], maxDelta);
 
 			static int iter = 0;
 			if (net > 0 || ctl > 0 || (iter % logStride) == 0) {
-				LOG_L(L_WARNING, "[Frame A/B] control(L<->L)=%ld px, signal(L<->M)=%ld / %d px (masked), max byte delta %d",
-					ctl, net, w * h, maxDelta);
+				LOG_L(L_WARNING, "[Frame A/B] control(L<->L)=%ld px (max %d), signal(L<->M)=%ld / %d px (masked, max %d)",
+					ctl, ctlMaxDelta, net, w * h, maxDelta);
 			}
-			// capture the first several diverging frames (signal past the noise floor)
-			// as numbered legacy/modern/diff triplets for inspection.
+			// capture the first several diverging frames as numbered triplets for
+			// inspection: a leaking control pair takes precedence over the signal pair
+			// (during burn-down the control is the interesting diff).
 			static int dumpIdx = 0;
-			if (dump && net > 64 && dumpIdx < 8)
-				SaveFrameABImages(w, h, abBuf[1], abBuf[2], dumpIdx++);
+			if (dump && dumpIdx < 8) {
+				if (ctl > 64)
+					SaveFrameABImages(w, h, abBuf[1], abBuf[2], dumpIdx++);
+				else if (net > 64)
+					SaveFrameABImages(w, h, abBuf[2], abBuf[3], dumpIdx++);
+			}
 			iter++;
 
-			// hold the reference (legacy) pass on screen, optionally with the masked
+			// hold the settle (legacy) pass on screen, optionally with the masked
 			// modern-diff heatmap, so the display never flickers between backends
-			ABDisplayLegacy(w, h, abBuf[0], abBuf[2], heatmap);
+			ABDisplayLegacy(w, h, abBuf[0], abBuf[3], heatmap);
 		}
 	}
 

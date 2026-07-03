@@ -842,7 +842,7 @@ int LuaUnsyncedRead::GetABDuplicatePass(lua_State* L)
 /***
  * @function Spring.GetABPassIndex
  * @return number passIndex 0-based index of the current whole-frame A/B render pass
- *   (0 = reference legacy, 1 = control legacy, 2 = modern). Always 0 in normal play.
+ *   (0 = settle legacy, 1/2 = control legacy pair, 3 = modern). Always 0 in normal play.
  *   Use this where per-pass work must be redone rather than frozen — e.g. a per-drawframe
  *   dedup (screen copy) whose cached result must not leak from one backend's pass into
  *   another's.

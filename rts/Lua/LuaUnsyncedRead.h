@@ -22,10 +22,11 @@ class LuaUnsyncedRead {
 		// LuaLibs::OpenUnsynced so os.clock-driven widget animation freezes across passes.
 		static int OsClock(lua_State* L);
 		// Whole-frame A/B "test mode": 0-based index of the current render pass within
-		// the iteration (0 = reference legacy, 1 = control legacy, 2 = modern; always 0
-		// in normal play). Stateful widgets guard their per-draw animation advance with
-		// Spring.GetABDuplicatePass() (passIndex > 0) so repeat passes redraw the
-		// reference pass's exact state; per-pass dedups key on Spring.GetABPassIndex().
+		// the iteration (0 = settle legacy, 1/2 = control legacy pair, 3 = modern;
+		// always 0 in normal play). Stateful widgets guard their per-draw animation
+		// advance with Spring.GetABDuplicatePass() (passIndex > 0) so repeat passes
+		// redraw the settle pass's exact state; per-pass dedups key on
+		// Spring.GetABPassIndex().
 		static void SetABPassIndex(int v);
 		static int  GetABPassIndex(lua_State* L);
 		static int  GetABDuplicatePass(lua_State* L);
