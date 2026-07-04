@@ -2,6 +2,7 @@
 
 #include "Rendering/GL/myGL.h"
 #include "Rendering/GL/MatrixStateTracker.h" // GL::ffMirror (A/B shadow-compare toggle)
+#include "Rendering/GL/RenderBuffers.h" // RenderBuffer::SetUseMVPUniform (A/B pass toggle)
 
 #include <cstdlib> // getenv (AB_FORCE_LEGACY diagnostic)
 #include <Rml/Backends/RmlUi_Backend.h>
@@ -1772,6 +1773,7 @@ bool CGame::Draw() {
 		const auto setModern = [](bool on) {
 			LuaOpenGL::SetModernImmediate(on);
 			CglShaderFontRenderer::SetUseMVPUniform(on);
+			RenderBuffer::SetUseMVPUniform(on);
 		};
 
 		for (int pass = 0; pass < 4; ++pass) {
@@ -1830,10 +1832,14 @@ bool CGame::Draw() {
 			// pregame does not consume the dump budget before the frames of interest
 			static const char* dumpMinEnv = getenv("AB_DUMP_MIN_FRAME");
 			static const int dumpMinFrame = (dumpMinEnv != nullptr) ? atoi(dumpMinEnv) : INT_MIN;
+			// AB_DUMP_MIN_PIXELS (env): dump threshold in diff pixels (default 64);
+			// set 0 to capture single-pixel residual classes during burn-down
+			static const char* dumpPxEnv = getenv("AB_DUMP_MIN_PIXELS");
+			static const int dumpMinPx = (dumpPxEnv != nullptr) ? atoi(dumpPxEnv) : 64;
 			if (dump && dumpIdx < 8 && gs->frameNum >= dumpMinFrame) {
-				if (ctl > 64)
+				if (ctl > dumpMinPx)
 					SaveFrameABImages(w, h, abBuf[1], abBuf[2], dumpIdx++);
-				else if (net > 64)
+				else if (net > dumpMinPx)
 					SaveFrameABImages(w, h, abBuf[2], abBuf[3], dumpIdx++);
 			}
 			iter++;

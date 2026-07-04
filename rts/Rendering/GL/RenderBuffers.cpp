@@ -1,14 +1,19 @@
 #include "RenderBuffers.h"
 
+#include "System/Config/ConfigHandler.h"
 #include "System/Log/ILog.h"
 
 #include "System/Misc/TracyDefs.h"
+
+CONFIG(bool, RenderBufferUseMVPUniform).defaultValue(false).headlessValue(false).safemodeValue(false)
+	.description("Phase-1 modern-GL migration: default RenderBuffer shader transforms by a uniform MVP fed from the FF stack bridge instead of gl_ModelViewProjectionMatrix.");
 
 decltype(RenderBuffer::typedRenderBuffers) RenderBuffer::typedRenderBuffers;
 
 void RenderBuffer::InitStatic()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	useMVPUniform = configHandler->GetBool("RenderBufferUseMVPUniform");
 	RenderBuffer::typedRenderBuffers = {
 		std::make_unique<TypedRenderBuffer<VA_TYPE_0    >>(1 << 16, 1 << 17),
 		std::make_unique<TypedRenderBuffer<VA_TYPE_C    >>(1 << 20, 1 << 21),

@@ -7,6 +7,7 @@
 
 #include "System/TypeToStr.h"
 #include "System/ContainerUtil.h"
+#include "System/Matrix44f.h"
 #include "System/Log/ILog.h"
 #include "System/FileSystem/FileHandler.h"
 #include "Rendering/Shaders/Shader.h"
@@ -51,6 +52,14 @@ public:
 	template <typename T>
 	static TypedRenderBuffer<T>& GetTypedRenderBuffer();
 
+	// Phase-1 modern-GL migration: when set, draws through the default
+	// RenderBufferShader transform by the uMVP uniform (fed per-draw from the
+	// fixed-function stack bridge in ApplyMVPUniform) instead of the
+	// gl_ModelViewProjectionMatrix builtin. Default from config
+	// RenderBufferUseMVPUniform; toggled per-pass by the whole-frame A/B gate.
+	static void SetUseMVPUniform(bool b) { useMVPUniform = b; }
+	static bool GetUseMVPUniform() { return useMVPUniform; }
+
 	static void SwapRenderBuffers() {
 		for (auto* rb : allRenderBuffers) {
 			if (rb) {
@@ -80,6 +89,7 @@ protected:
 	// [0] := vertex, [1] := index
 	std::array<size_t, 2> initCapacity = { 0, 0 };
 private:
+	static inline bool useMVPUniform = false;
 	static inline std::vector<RenderBuffer*> allRenderBuffers;
 	static std::array<std::unique_ptr<RenderBuffer>, 15> typedRenderBuffers;
 public:
@@ -89,6 +99,13 @@ public:
 template <typename T>
 class RenderBufferShader {
 public:
+	// lookup WITHOUT lazy creation: GetShader()'s first call compiles, links
+	// and stray-Enables/Disables the program -- unbinding whatever program a
+	// call site has current. Probes (ApplyMVPUniform) must never trigger that.
+	static Shader::IProgramObject* TryGetShader() {
+		return shaderHandler->GetProgramObject(poClass, typeName);
+	}
+
 	static Shader::IProgramObject& GetShader() {
 
 		Shader::IProgramObject* shader = shaderHandler->GetProgramObject(poClass, typeName);
@@ -585,6 +602,7 @@ public:
 	void UploadEBO();
 
 	void AssertBoundShader() const;
+	static Shader::IProgramObject* ApplyMVPUniform();
 	void DrawArrays(uint32_t mode, bool rewind = true);
 	void DrawElements(uint32_t mode, bool rewind = true);
 	void DropCurrent();
@@ -868,6 +886,54 @@ inline void TypedRenderBuffer<T>::AssertBoundShader() const
 #endif
 }
 
+// Phase-1 modern-GL migration: when RenderBuffer::useMVPUniform is on and the
+// draw runs under this type's own default shader, feed the exact MVP the
+// gl_ModelViewProjectionMatrix builtin would use (the fixed-function stack
+// bridge: query P and MV, compose on the CPU -- byte-identical by construction,
+// same technique the font renderer validated under the whole-frame A/B gate)
+// through the uMVP uniform. Returns the shader so the caller can reset the
+// uUseMVP branch after the draw: a lingering uUseMVP=1 would leak a stale
+// matrix into display-list-recorded draws of the same program (the uniform-
+// cache/list-compile bug class), so the flag must never outlive the one draw.
+// Call sites with custom shaders (program mismatch) keep their own transform.
+template<typename T>
+inline Shader::IProgramObject* TypedRenderBuffer<T>::ApplyMVPUniform()
+{
+	if (!RenderBuffer::GetUseMVPUniform())
+		return nullptr;
+
+	GLint curProg = 0;
+	glGetIntegerv(GL_CURRENT_PROGRAM, &curProg);
+	if (curProg == 0)
+		return nullptr;
+
+	// non-creating lookup: if the type's default shader does not exist yet the
+	// bound program cannot be it; GetShader() here would lazily create it and
+	// stray-Enable/Disable, unbinding the call site's program mid-draw (seen as
+	// the water plane vanishing / unit icons drawing white under the A/B gate)
+	Shader::IProgramObject* sh = shader.TryGetShader();
+	if (sh == nullptr || static_cast<unsigned int>(curProg) != sh->GetObjID())
+		return nullptr;
+
+	// inside a display-list compile glUniform is RECORDED, not executed --
+	// setting it would desync the CPU-side uniform cache from the GPU (the
+	// font-renderer bug class); the recorded draw keeps the builtin path
+	GLint listIdx = 0;
+	glGetIntegerv(GL_LIST_INDEX, &listIdx);
+	if (listIdx != 0)
+		return nullptr;
+
+	CMatrix44f proj;
+	CMatrix44f modelView;
+	glGetFloatv(GL_PROJECTION_MATRIX, static_cast<float*>(proj));
+	glGetFloatv(GL_MODELVIEW_MATRIX, static_cast<float*>(modelView));
+	const CMatrix44f mvp = proj * modelView;
+
+	sh->SetUniformMatrix4x4("uMVP", false, static_cast<const float*>(mvp));
+	sh->SetUniform("uUseMVP", 1);
+	return sh;
+}
+
 template<typename T>
 inline void TypedRenderBuffer<T>::DrawArrays(uint32_t mode, bool rewind)
 {
@@ -882,9 +948,12 @@ inline void TypedRenderBuffer<T>::DrawArrays(uint32_t mode, bool rewind)
 #ifndef HEADLESS
 	assert(vao.GetIdRaw() > 0);
 #endif
+	Shader::IProgramObject* mvpShader = ApplyMVPUniform();
 	vao.Bind();
 	glDrawArrays(mode, static_cast<GLint>(vbo->BufferElemOffset() + vboStartIndex), static_cast<GLsizei>(vertsCount));
 	vao.Unbind();
+	if (mvpShader != nullptr)
+		mvpShader->SetUniform("uUseMVP", 0);
 
 	if (rewind && !readOnly)
 		vboStartIndex += vertsCount;
@@ -910,9 +979,12 @@ inline void TypedRenderBuffer<T>::DrawElements(uint32_t mode, bool rewind)
 #ifndef HEADLESS
 	assert(vao.GetIdRaw() > 0);
 #endif
+	Shader::IProgramObject* mvpShader = ApplyMVPUniform();
 	vao.Bind();
 	glDrawElements(mode, static_cast<GLsizei>(indcsCount), GL_UNSIGNED_INT, BUFFER_OFFSET(uint32_t, ebo->BufferElemOffset() + eboStartIndex));
 	vao.Unbind();
+	if (mvpShader != nullptr)
+		mvpShader->SetUniform("uUseMVP", 0);
 	#undef BUFFER_OFFSET
 
 	if (rewind && !readOnly) {

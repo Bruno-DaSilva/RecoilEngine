@@ -10,9 +10,16 @@ static constexpr const char* vsRenderBufferSrc = R"(
 // VS output attributes
 %s
 
+// Phase-1 modern-GL migration: when uUseMVP is set the transform comes from
+// the uMVP uniform (fed per-draw from the fixed-function stack bridge, see
+// TypedRenderBuffer::ApplyMVPUniform) instead of the compatibility-profile
+// builtin; byte-identical by construction, A/B-gate verified.
+uniform bool uUseMVP = false;
+uniform mat4 uMVP;
+
 void main() {
 %s
-	gl_Position = gl_ModelViewProjectionMatrix * %s;
+	gl_Position = (uUseMVP ? uMVP : gl_ModelViewProjectionMatrix) * %s;
 }
 )";
 
