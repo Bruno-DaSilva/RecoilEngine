@@ -7336,6 +7336,29 @@ int LuaOpenGL::CreateList(lua_State* L)
 		// the real GL list it fell back to (already glEndList-ed, or deleted
 		// on error)
 		cl = CmdListEndCapture(error == 0, list);
+
+		// perf guard: replaying a HUGE captured geometry list burns one CPU
+		// glVertex/glColor call per vertex per frame, and big world-space
+		// lists take the exact-legacy replay anyway (dense-MV composition
+		// law) -- BAR's reclaim-field hull gradients alone are ~120k verts a
+		// frame. Convert oversized captures into a real GL display list at
+		// creation: identical legacy rendering, driver-side replay. UI-scale
+		// lists (the modern-flushable content) stay far below the threshold.
+		constexpr size_t CMDLIST_MAX_CAPTURED_VERTS = 4096;
+		if (cl != nullptr) {
+			size_t totalVerts = 0;
+			for (const auto& s : cl->streams)
+				totalVerts += s.posUV.size() / 5;
+			if (totalVerts > CMDLIST_MAX_CAPTURED_VERTS) {
+				list = glGenLists(1);
+				if (list != 0) {
+					glNewList(list, GL_COMPILE);
+					CmdListEmitIntoCompile(*cl);
+					glEndList();
+					cl = nullptr;
+				}
+			}
+		}
 	} else {
 		glEndList();
 	}
