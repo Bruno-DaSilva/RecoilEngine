@@ -1826,7 +1826,11 @@ bool CGame::Draw() {
 			// inspection: a leaking control pair takes precedence over the signal pair
 			// (during burn-down the control is the interesting diff).
 			static int dumpIdx = 0;
-			if (dump && dumpIdx < 8) {
+			// AB_DUMP_MIN_FRAME (env): only dump at/after this sim frame, so a leaky
+			// pregame does not consume the dump budget before the frames of interest
+			static const char* dumpMinEnv = getenv("AB_DUMP_MIN_FRAME");
+			static const int dumpMinFrame = (dumpMinEnv != nullptr) ? atoi(dumpMinEnv) : INT_MIN;
+			if (dump && dumpIdx < 8 && gs->frameNum >= dumpMinFrame) {
 				if (ctl > 64)
 					SaveFrameABImages(w, h, abBuf[1], abBuf[2], dumpIdx++);
 				else if (net > 64)
