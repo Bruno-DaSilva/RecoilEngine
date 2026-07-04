@@ -803,6 +803,16 @@ inline void TypedRenderBuffer<T>::UploadVBO()
 		LOG_L(L_DEBUG, "[TypedRenderBuffer<%s>::%s] Increase the number of elements here!", vboTypeName, __func__);
 		vbo->Resize(static_cast<uint32_t>(verts.capacity()));
 		vertCount0 = verts.capacity();
+		// Resize() recreates the underlying buffer OBJECT (Kill + Init => new GL id
+		// with fresh storage); the VAO still references the old, now-deleted buffer
+		// (kept alive by the attachment), so uploads would go to the new buffer
+		// while draws keep sourcing the stale old one -- every draw after a
+		// mid-frame grow rendered garbage. Re-attach the VAO to the new buffer,
+		// and re-upload everything still referenced this frame (data before
+		// vboUploadIndex only exists in the orphaned old buffer).
+		InitVAO();
+		vboUploadIndex = 0;
+		elemsCount = verts.size();
 	}
 
 	//update on the GPU
@@ -829,6 +839,10 @@ inline void TypedRenderBuffer<T>::UploadEBO()
 		LOG_L(L_DEBUG, "[TypedRenderBuffer<%s>::%s] Increase the number of elements here!", vboTypeName, __func__);
 		ebo->Resize(static_cast<uint32_t>(indcs.capacity()));
 		elemCount0 = indcs.capacity();
+		// see UploadVBO: the resize orphaned the buffer the VAO references
+		InitVAO();
+		eboUploadIndex = 0;
+		elemsCount = indcs.size();
 	}
 
 	//update on the GPU
