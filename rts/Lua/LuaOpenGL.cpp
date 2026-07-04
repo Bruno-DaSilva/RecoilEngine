@@ -545,6 +545,54 @@ static void CmdListRestorePointers()
 }
 #undef CMDLIST_RESTORE
 
+// Execute a captured font call through the live font renderer. Outside a
+// compile this replays text through the CURRENT font path (per-backend, like
+// any live font:Print); inside an open glNewList compile the font renderer
+// detects the compile and takes its recordable legacy path, so materialize
+// replay keeps exact real-list semantics.
+static void CmdListExecFontCmd(const LuaCommandList::FontCmd& fc)
+{
+	CglFont* f = fc.font.get();
+	if (f == nullptr)
+		return;
+
+	using Kind = LuaCommandList::FontCmd::Kind;
+	switch (fc.kind) {
+		case Kind::Print: {
+			f->glPrint(fc.x, fc.y, fc.size, fc.options, fc.text);
+		} break;
+		case Kind::Begin: {
+			f->Begin(fc.flag);
+		} break;
+		case Kind::End: {
+			f->End();
+		} break;
+		case Kind::TextColor: {
+			const float4 c(fc.color[0], fc.color[1], fc.color[2], fc.color[3]);
+			f->SetTextColor(&c);
+		} break;
+		case Kind::OutlineColor: {
+			const float4 c(fc.color[0], fc.color[1], fc.color[2], fc.color[3]);
+			f->SetOutlineColor(&c);
+		} break;
+		case Kind::AutoOutlineColor: {
+			f->SetAutoOutlineColor(fc.flag);
+		} break;
+	}
+}
+
+bool LuaCmdListCapture::CapturingFonts()
+{
+	return CmdListCapturing();
+}
+
+void LuaCmdListCapture::RecordFont(LuaCommandList::FontCmd&& fc)
+{
+	CmdListCapture& cap = *cmdCapture;
+	cap.cl->fontCmds.push_back(std::move(fc));
+	CmdListNew(LuaCommandList::Op::Font).u0 = cap.cl->fontCmds.size() - 1;
+}
+
 // Emit a captured stream into an OPEN real glNewList compile as exact legacy
 // immediate mode. Seed-class vertices (before the list's first glColor /
 // the stream's first glTexCoord) are emitted WITHOUT a preceding color /
@@ -623,6 +671,7 @@ static void CmdListEmitIntoCompile(const LuaCommandList& cl)
 			case Op::Rect:              glRectf(c.f[0], c.f[1], c.f[2], c.f[3]); break;
 			case Op::CallGLList:        glCallList(c.u0); break;
 			case Op::ImmStream:         CmdListEmitStreamIntoCompile(cl.streams[c.u0], false, nullptr); break;
+			case Op::Font:              CmdListExecFontCmd(cl.fontCmds[c.u0]); break;
 		}
 	}
 }
@@ -705,6 +754,11 @@ static void CmdListInline(const LuaCommandList& src)
 			}
 			cap.cl->streams.push_back(std::move(s));
 			CmdListNew(LuaCommandList::Op::ImmStream).u0 = cap.cl->streams.size() - 1;
+			continue;
+		}
+		if (c.op == LuaCommandList::Op::Font) {
+			cap.cl->fontCmds.push_back(src.fontCmds[c.u0]);
+			CmdListNew(LuaCommandList::Op::Font).u0 = cap.cl->fontCmds.size() - 1;
 			continue;
 		}
 		if (c.op == LuaCommandList::Op::Color) {
@@ -873,6 +927,9 @@ static void CmdListReplayLive(const LuaCommandList& cl)
 			} break;
 			case Op::ImmStream:
 				CmdListReplayStream(cl.streams[c.u0]);
+				break;
+			case Op::Font:
+				CmdListExecFontCmd(cl.fontCmds[c.u0]);
 				break;
 		}
 	}
@@ -2295,6 +2352,40 @@ int LuaOpenGL::Text(lua_State* L)
 			}
 	  		c++;
 		}
+	}
+
+	// command-list capture: record the resolved call (colors captured at
+	// CREATE time, matching what a real display list would have baked) and
+	// replay it through the live font renderer at gl.CallList -- fonts hit
+	// glUseProgram/glPushAttrib at draw time, which would otherwise
+	// materialize every text-bearing list into a real GL display list
+	if (CmdListCapturing()) {
+		using FontCmd = LuaCommandList::FontCmd;
+		if (outline) {
+			FontCmd oc;
+			oc.font = font;
+			oc.kind = FontCmd::Kind::OutlineColor;
+			const float o = lightOut ? 0.95f : 0.15f;
+			oc.color[0] = o; oc.color[1] = o; oc.color[2] = o; oc.color[3] = 0.8f;
+			LuaCmdListCapture::RecordFont(std::move(oc));
+		}
+		FontCmd cc;
+		cc.font = font;
+		cc.kind = FontCmd::Kind::TextColor;
+		// exactly the live call's quantization: SetTextColor(SColor(...))
+		// converts through 8-bit before the float4 the font stores
+		const float4 qc = SColor(color.data());
+		cc.color[0] = qc.x; cc.color[1] = qc.y; cc.color[2] = qc.z; cc.color[3] = qc.w;
+		LuaCmdListCapture::RecordFont(std::move(cc));
+
+		FontCmd pc;
+		pc.font = font;
+		pc.kind = FontCmd::Kind::Print;
+		pc.text = text;
+		pc.x = x; pc.y = y; pc.size = size;
+		pc.options = options;
+		LuaCmdListCapture::RecordFont(std::move(pc));
+		return 0;
 	}
 
 	if (outline) {

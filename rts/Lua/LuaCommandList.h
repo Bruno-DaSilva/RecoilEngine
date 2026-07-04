@@ -3,7 +3,11 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
+#include <string>
 #include <vector>
+
+class CglFont;
 
 // Phase-2 modern-GL migration: a CAPTURED gl.CreateList body (config
 // LuaCommandLists). Instead of compiling a GL display list, the recordable GL
@@ -59,6 +63,7 @@ struct LuaCommandList {
 		Rect,              // f0..f3 (glRectf)
 		CallGLList,        // u0 = raw GL list id (nested real display list)
 		ImmStream,         // u0 = index into streams
+		Font,              // u0 = index into fontCmds
 	};
 
 	struct Cmd {
@@ -91,8 +96,42 @@ struct LuaCommandList {
 		float lastS = 0.0f, lastT = 0.0f;
 	};
 
+	// a captured font call (gl.Text / font:Print / font:Begin / ...): fonts
+	// hit glUseProgram or glPushAttrib at draw time, which would otherwise
+	// MATERIALIZE every text-bearing list (measured: ~180 real glNewList
+	// compiles per frame of BAR UI). Captured at the Lua-call level instead
+	// and replayed through the LIVE font renderer -- the shared_ptr keeps the
+	// font alive for the lifetime of the list. FONT_BUFFERED prints are NOT
+	// captured (their draw happens at SubmitBuffered time; they execute
+	// normally and take the materialize path).
+	struct FontCmd {
+		enum class Kind : uint8_t {
+			Print,            // text, x, y, size, options
+			Begin,            // flag = userDefinedBlending
+			End,
+			TextColor,        // color
+			OutlineColor,     // color
+			AutoOutlineColor, // flag
+		};
+		std::shared_ptr<CglFont> font;
+		Kind kind = Kind::Print;
+		std::string text;
+		float x = 0.0f, y = 0.0f, size = 0.0f;
+		int options = 0;
+		bool flag = false;
+		float color[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+	};
+
 	std::vector<Cmd> cmds;
 	std::vector<ImmStreamData> streams;
+	std::vector<FontCmd> fontCmds;
 
 	bool Empty() const { return cmds.empty(); }
 };
+
+// capture hooks for call sites outside LuaOpenGL.cpp (LuaFonts.cpp): active
+// only while a gl.CreateList command-list capture is running
+namespace LuaCmdListCapture {
+	bool CapturingFonts();
+	void RecordFont(LuaCommandList::FontCmd&& fc);
+}

@@ -9,6 +9,7 @@
 #include "LuaHashString.h"
 #include "LuaUtils.h"
 
+#include "LuaCommandList.h"
 #include "LuaOpenGL.h"
 
 #include "Rendering/GL/myGL.h"
@@ -97,6 +98,18 @@ inline CglFont* tofont(lua_State* L, int idx)
 		luaL_error(L, "attempt to use a deleted font");
 
 	return font->get();
+}
+
+// shared-ownership variant for command-list capture: the captured list keeps
+// the font alive for as long as it references it
+inline const std::shared_ptr<CglFont>& tofontShared(lua_State* L, int idx)
+{
+	auto font = static_cast<std::shared_ptr<CglFont>*>(luaL_checkudata(L, idx, "Font"));
+
+	if (*font == nullptr)
+		luaL_error(L, "attempt to use a deleted font");
+
+	return *font;
 }
 
 
@@ -305,6 +318,22 @@ int LuaFonts::Print(lua_State* L)
 		}
 	}
 
+	// command-list capture: record the resolved call and replay it through
+	// the live font renderer at gl.CallList (fonts hit glUseProgram or
+	// glPushAttrib at draw time, which would otherwise materialize every
+	// text-bearing list into a real GL display list). Buffered prints draw
+	// at SubmitBuffered time, not here -- they keep the normal path.
+	if (!(options & FONT_BUFFERED) && LuaCmdListCapture::CapturingFonts()) {
+		LuaCommandList::FontCmd fc;
+		fc.font = tofontShared(L, 1);
+		fc.kind = LuaCommandList::FontCmd::Kind::Print;
+		fc.text = text;
+		fc.x = x; fc.y = y; fc.size = size;
+		fc.options = options;
+		LuaCmdListCapture::RecordFont(std::move(fc));
+		return 0;
+	}
+
 	f->glPrint(x, y, size, options, text);
 	return 0;
 }
@@ -384,6 +413,16 @@ int LuaFonts::Begin(lua_State* L)
 	CheckDrawingEnabled(L, __func__);
 	auto f = tofont(L, 1);
 	auto userDefinedBlending = luaL_optboolean(L, 2, false);
+
+	if (LuaCmdListCapture::CapturingFonts()) {
+		LuaCommandList::FontCmd fc;
+		fc.font = tofontShared(L, 1);
+		fc.kind = LuaCommandList::FontCmd::Kind::Begin;
+		fc.flag = userDefinedBlending;
+		LuaCmdListCapture::RecordFont(std::move(fc));
+		return 0;
+	}
+
 	f->Begin(userDefinedBlending);
 	return 0;
 }
@@ -393,6 +432,15 @@ int LuaFonts::End(lua_State* L)
 	RECOIL_DETAILED_TRACY_ZONE;
 	CheckDrawingEnabled(L, __func__);
 	auto f = tofont(L, 1);
+
+	if (LuaCmdListCapture::CapturingFonts()) {
+		LuaCommandList::FontCmd fc;
+		fc.font = tofontShared(L, 1);
+		fc.kind = LuaCommandList::FontCmd::Kind::End;
+		LuaCmdListCapture::RecordFont(std::move(fc));
+		return 0;
+	}
+
 	f->End();
 	return 0;
 }
@@ -500,6 +548,16 @@ static int SetTextColorShared(lua_State* L, bool outline)
 		luaL_error(L, "[%s] incorrect arguments to font:SetText%sColor(font,table|number*)", __func__, outline? "Outline": "");
 	}
 
+	if (LuaCmdListCapture::CapturingFonts()) {
+		LuaCommandList::FontCmd fc;
+		fc.font = tofontShared(L, 1);
+		fc.kind = outline ? LuaCommandList::FontCmd::Kind::OutlineColor
+		                  : LuaCommandList::FontCmd::Kind::TextColor;
+		fc.color[0] = color.x; fc.color[1] = color.y; fc.color[2] = color.z; fc.color[3] = color.w;
+		LuaCmdListCapture::RecordFont(std::move(fc));
+		return 0;
+	}
+
 	if (outline)
 		f->SetOutlineColor(&color);
 	else
@@ -516,7 +574,18 @@ int LuaFonts::SetAutoOutlineColor(lua_State* L)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	auto f = tofont(L, 1);
-	f->SetAutoOutlineColor(luaL_checkboolean(L, 2));
+	const bool enable = luaL_checkboolean(L, 2);
+
+	if (LuaCmdListCapture::CapturingFonts()) {
+		LuaCommandList::FontCmd fc;
+		fc.font = tofontShared(L, 1);
+		fc.kind = LuaCommandList::FontCmd::Kind::AutoOutlineColor;
+		fc.flag = enable;
+		LuaCmdListCapture::RecordFont(std::move(fc));
+		return 0;
+	}
+
+	f->SetAutoOutlineColor(enable);
 	return 0;
 }
 
