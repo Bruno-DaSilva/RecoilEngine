@@ -111,32 +111,28 @@ static inline GLMatrixStateTracker* FFMirrorOps()
 	return compilingDisplayList ? nullptr : &GL::ffMirror.tracker;
 }
 
-// glGetFloatv bridge: read the current MVP straight off the fixed-function stack
-// (a query, not a deprecated set-call). Fallback while the mirror is tainted, and
-// the reference for the mirror shadow-compare.
-static CMatrix44f GetBridgeMVP()
+// Feed the modern immediate backend the CURRENT fixed-function P and MV,
+// SEPARATELY (the comparator for these draws is true glBegin FF, which
+// transforms P * (MV * v) through eye space -- the shaders replicate that
+// order; eye z also feeds the fog coordinate). While the legacy pipeline
+// coexists these ALWAYS come from the glGetFloatv bridge: the mirror
+// re-derives glRotatef trigonometry in CPU float and can differ from the
+// driver by final-bit ULPs, which flips edge pixels on rotated thin
+// primitives (the pregame loading-spinner class). The mirror keeps being
+// shadow-verified here so it is proven ready for the day the FF matrix
+// set-calls are deleted and it becomes the only source (pixel-exactness
+// against FF stops being a requirement the moment FF is gone).
+static void SetImmBufferFixedFunctionMatrices()
 {
 	CMatrix44f proj;
 	CMatrix44f modelView;
 	glGetFloatv(GL_PROJECTION_MATRIX, static_cast<float*>(proj));
 	glGetFloatv(GL_MODELVIEW_MATRIX, static_cast<float*>(modelView));
-	return proj * modelView;
-}
+	luaImmBuffer.SetMatrices(proj, modelView);
 
-// The MVP for the modern immediate backend: the CPU-side FF mirror when it is in
-// sync (the Phase-0 direction -- this value survives the eventual removal of the
-// FF matrix set-calls), the glGetFloatv bridge while the mirror is tainted by an
-// untracked display-list replay. Under the whole-frame A/B compare the mirror is
-// shadow-verified against the bridge on every read; a mismatch is a mirror bug.
-static CMatrix44f GetCurrentFixedFunctionMVP()
-{
-	if (!GL::ffMirror.Valid())
-		return GetBridgeMVP();
-
-	const CMatrix44f mvp = GL::ffMirror.GetMVP();
-
-	if (GL::ffMirror.shadowCompare) {
-		const CMatrix44f ref = GetBridgeMVP();
+	if (GL::ffMirror.Valid() && GL::ffMirror.shadowCompare) {
+		const CMatrix44f mvp = GL::ffMirror.GetMVP();
+		const CMatrix44f ref = proj * modelView;
 		// relative per-element compare: driver-side FF composition may differ from
 		// the CPU mirror by a few ULP, which on large elements (world translations)
 		// is far above any absolute epsilon
@@ -149,8 +145,6 @@ static CMatrix44f GetCurrentFixedFunctionMVP()
 				LOG_L(L_WARNING, "[FFMatrixMirror] mirror MVP diverged from FF stack: max rel delta %g", maxRelDelta);
 		}
 	}
-
-	return mvp;
 }
 
 // True only in fixed-function mode (no shader program bound) -- the only case
@@ -2591,7 +2585,7 @@ int LuaOpenGL::BeginEnd(lua_State* L)
 		glGetFloatv(GL_CURRENT_COLOR, cc);
 		luaImmBuffer.SeedColor(cc);
 	}
-	luaImmBuffer.SetMVP(GetCurrentFixedFunctionMVP());
+	SetImmBufferFixedFunctionMatrices();
 
 	inModernBeginEnd = true;
 	const int error = lua_pcall(L, (args - 2), 0, 0);
@@ -3060,7 +3054,7 @@ int LuaOpenGL::Rect(lua_State* L)
 		GLfloat cc[4];
 		glGetFloatv(GL_CURRENT_COLOR, cc);
 		luaImmBuffer.SetBackend(LuaImmediateBuffer::Backend::Modern);
-		luaImmBuffer.SetMVP(GetCurrentFixedFunctionMVP());
+		SetImmBufferFixedFunctionMatrices();
 		luaImmBuffer.Begin(GL_TRIANGLES);
 		luaImmBuffer.SeedColor(cc);
 		// glRectf fills the quad (x1,y1)-(x2,y2); emit it as two CCW triangles
@@ -3164,7 +3158,7 @@ int LuaOpenGL::TexRect(lua_State* L)
 		// modulation and restores the exact float state afterwards
 		GLfloat cc[4];
 		glGetFloatv(GL_CURRENT_COLOR, cc);
-		luaImmBuffer.SetMVP(GetCurrentFixedFunctionMVP());
+		SetImmBufferFixedFunctionMatrices();
 		luaImmBuffer.SetTexRect(x1, y1, x2, y2, s1, t1, s2, t2, cc);
 		luaImmBuffer.FlushTexRectModern();
 	};

@@ -927,6 +927,17 @@ inline Shader::IProgramObject* TypedRenderBuffer<T>::ApplyMVPUniform()
 	CMatrix44f modelView;
 	glGetFloatv(GL_PROJECTION_MATRIX, static_cast<float*>(proj));
 	glGetFloatv(GL_MODELVIEW_MATRIX, static_cast<float*>(modelView));
+
+	// only under a screen-aligned (no rotation/shear) modelview: on dense
+	// matrices the CPU float P*MV can differ from the driver's own builtin
+	// composition by final-bit ULPs, flipping edge pixels on thin primitives
+	// (world-view command lines under the A/B gate). Dense-MV draws keep the
+	// builtin until the FF matrix state is deleted outright.
+	if (modelView.m[1] != 0.0f || modelView.m[2] != 0.0f ||
+	    modelView.m[4] != 0.0f || modelView.m[6] != 0.0f ||
+	    modelView.m[8] != 0.0f || modelView.m[9] != 0.0f)
+		return nullptr;
+
 	const CMatrix44f mvp = proj * modelView;
 
 	sh->SetUniformMatrix4x4("uMVP", false, static_cast<const float*>(mvp));

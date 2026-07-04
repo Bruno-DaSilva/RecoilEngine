@@ -8,6 +8,7 @@
 #include "Rendering/Shaders/Shader.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <string>
@@ -22,22 +23,43 @@ namespace {
 	// exact values the legacy float pipeline interpolates -- an 8-bit color
 	// attribute rounds each component by up to 0.5 LSB, which stacked additive
 	// glow quads amplified to visible deltas under the whole-frame A/B gate.
-	const char* fsSrc =
-		"#version 150\n"
-		"in vec4 vcolor;\n"
-		"out vec4 outColor;\n"
-		"void main() { outColor = vcolor; }\n";
+	// Fog: legacy glBegin/glEnd draws get fixed-function fog applied; the
+	// modern shader must replicate it or distant world draws diverge by a few
+	// LSB (replay residual class: translucent ground quads, thin world lines).
+	// LINEAR mode only (the engine sets linear map fog; other modes take the
+	// legacy fallback), fog coordinate = |eye z| via uMV, exact state values
+	// from the compatibility gl_Fog builtin.
+	// FOUR program variants: {untextured, textured} x {fogless, fogged}. The
+	// fogless variants are the byte-parity-proven shaders and stay the default;
+	// the fogged ones (fog factor per vertex, classic FF semantics, exact state
+	// via the compatibility gl_Fog builtin) are selected ONLY when the FF fog
+	// state actually bites the stream (see FogIsEffective). Touching the proven
+	// shader source perturbed the compiled gl_Position math enough to shift
+	// thin-primitive edge pixels under the A/B gate, so fog lives in separate
+	// programs rather than a uniform branch.
+	std::string MakeFragmentSrc(bool textured, bool fogged)
+	{
+		std::string s = fogged ? "#version 150 compatibility\n" /* gl_Fog */ : "#version 150\n";
+		if (textured) {
+			s += "uniform sampler2D tex;\n";
+			s += "in vec2 vuv;\n";
+		}
+		s += "in vec4 vcolor;\n";
+		s += "out vec4 outColor;\n";
+		if (fogged)
+			s += "in float vFogF;\n";
 
-	// textured: MODULATE = texture * color
-	const char* fsTexSrc =
-		"#version 150\n"
-		"uniform sampler2D tex;\n"
-		"in vec2 vuv;\n"
-		"in vec4 vcolor;\n"
-		"out vec4 outColor;\n"
-		"void main() { outColor = texture(tex, vuv) * vcolor; }\n";
+		const char* base = textured ? "texture(tex, vuv) * vcolor" : "vcolor";
+		if (fogged) {
+			s += std::string("void main() { vec4 c = ") + base + "; "
+				 "outColor = vec4(mix(gl_Fog.color.rgb, c.rgb, clamp(vFogF, 0.0, 1.0)), c.a); }\n";
+		} else {
+			s += std::string("void main() { outColor = ") + base + "; }\n";
+		}
+		return s;
+	}
 
-	std::string MakeVertexSrc(bool explicitAttribLoc, bool textured)
+	std::string MakeVertexSrc(bool explicitAttribLoc, bool textured, bool fogged)
 	{
 		std::string s = "#version 150 compatibility\n";
 		if (explicitAttribLoc) {
@@ -50,18 +72,32 @@ namespace {
 			s += "in vec2 auv;\n";
 			s += "in vec4 acolor;\n";
 		}
+		// uMVP: CPU-composed float P*MV. Composition can differ from the
+		// driver's own by final-bit ULPs on DENSE matrices (no arithmetic
+		// recipe provably matches an undocumented driver ordering; measured:
+		// two-step P*(MV*v) and double-composed variants both flip pixels),
+		// so the flushes only go modern under screen-aligned MV, where the
+		// composition is measured exact across all gate content. uMV (fog
+		// variant only) feeds the eye-space fog coordinate.
 		s += "uniform mat4 uMVP;\n";
+		if (fogged)
+			s += "uniform mat4 uMV;\n";
 		if (textured)
 			s += "out vec2 vuv;\n";
 		s += "out vec4 vcolor;\n";
+		if (fogged)
+			s += "out float vFogF;\n";
 		s += "void main() { ";
 		if (textured)
 			s += "vuv = auv; ";
-		s += "vcolor = acolor; gl_Position = uMVP * vec4(apos, 1.0); }\n";
+		s += "vcolor = acolor; ";
+		if (fogged)
+			s += "vFogF = (gl_Fog.end - abs((uMV * vec4(apos, 1.0)).z)) * gl_Fog.scale; ";
+		s += "gl_Position = uMVP * vec4(apos, 1.0); }\n";
 		return s;
 	}
 
-	Shader::IProgramObject* GetModernShaderImpl(const char* poName, bool textured)
+	Shader::IProgramObject* GetModernShaderImpl(const char* poName, bool textured, bool fogged)
 	{
 		Shader::IProgramObject* shader = shaderHandler->GetProgramObject("[LuaImmediateBuffer]", poName);
 		if (shader != nullptr && shader->IsValid())
@@ -70,8 +106,8 @@ namespace {
 		const bool eal = globalRendering->supportExplicitAttribLoc;
 
 		shader = shaderHandler->CreateProgramObject("[LuaImmediateBuffer]", poName);
-		shader->AttachShaderObject(shaderHandler->CreateShaderObject(MakeVertexSrc(eal, textured), "", GL_VERTEX_SHADER));
-		shader->AttachShaderObject(shaderHandler->CreateShaderObject(textured ? fsTexSrc : fsSrc, "", GL_FRAGMENT_SHADER));
+		shader->AttachShaderObject(shaderHandler->CreateShaderObject(MakeVertexSrc(eal, textured, fogged), "", GL_VERTEX_SHADER));
+		shader->AttachShaderObject(shaderHandler->CreateShaderObject(MakeFragmentSrc(textured, fogged), "", GL_FRAGMENT_SHADER));
 
 		if (!eal) {
 			shader->BindAttribLocation("apos", 0);
@@ -83,8 +119,50 @@ namespace {
 		return shader;
 	}
 
-	Shader::IProgramObject* GetModernShader()    { return GetModernShaderImpl("IMM_F", false); }
-	Shader::IProgramObject* GetModernTexShader() { return GetModernShaderImpl("IMM_TEX_F", true); }
+	Shader::IProgramObject* GetModernShader(bool fogged = false) {
+		return fogged ? GetModernShaderImpl("IMM_F_FOG", false, true)
+		              : GetModernShaderImpl("IMM_F", false, false);
+	}
+	Shader::IProgramObject* GetModernTexShader(bool fogged = false) {
+		return fogged ? GetModernShaderImpl("IMM_TEX_F_FOG", true, true)
+		              : GetModernShaderImpl("IMM_TEX_F", true, false);
+	}
+
+	// True when the modelview has NO rotation/shear terms: a screen-aligned
+	// translate+scale transform. Only such draws go modern while the legacy
+	// pipeline coexists: composing P*MV on the CPU can differ from the
+	// driver's own composition by final-bit ULPs on dense matrices, which
+	// flips edge pixels on thin primitives (measured classes: gl.Rotate'd
+	// loading-spinner arcs, world-camera lines/quads in PiP and minimap
+	// views). Dense-MV draws keep the exact legacy replay until the FF
+	// pipeline is deleted and bit-parity against it stops being a
+	// requirement.
+	bool ScreenAlignedMV(const CMatrix44f& mv)
+	{
+		return mv.m[1] == 0.0f && mv.m[2] == 0.0f &&
+		       mv.m[4] == 0.0f && mv.m[6] == 0.0f &&
+		       mv.m[8] == 0.0f && mv.m[9] == 0.0f;
+	}
+
+	// True when the current FF LINEAR fog state can tint any vertex of the
+	// stream: the fog factor (end - |eye z|) * scale dips below 1 for the
+	// farthest vertex. When every factor saturates at 1 fog is inert and the
+	// byte-parity-proven fogless program handles the draw.
+	bool FogIsEffective(const CMatrix44f& mv, const std::vector<VA_TYPE_TC>& verts)
+	{
+		GLfloat fogStart = 0.0f;
+		GLfloat fogEnd = 0.0f;
+		glGetFloatv(GL_FOG_START, &fogStart);
+		glGetFloatv(GL_FOG_END, &fogEnd);
+		if (fogEnd <= fogStart)
+			return true; // degenerate scale; be conservative
+
+		float maxAbsZ = 0.0f;
+		for (const VA_TYPE_TC& v : verts)
+			maxAbsZ = std::max(maxAbsZ, std::fabs((mv * v.pos).z));
+
+		return ((fogEnd - maxAbsZ) / (fogEnd - fogStart)) < 1.0f;
+	}
 
 	// The emitter's own streaming VAO/VBO for the interleaved float vertex
 	// (pos3 uv2 color4 = 9 floats). Orphaned with glBufferData on EVERY draw so
@@ -281,6 +359,12 @@ void LuaImmediateBuffer::FlushModern() const
 	if (verts.empty())
 		return;
 
+	// dense (rotated/world) modelview -> exact legacy replay, see ScreenAlignedMV
+	if (!ScreenAlignedMV(mvMat)) {
+		FlushLegacy();
+		return;
+	}
+
 	// Textured streams flush through the MODULATE shader when the FF texture
 	// state is one it reproduces exactly (see PlainModulateTexturing); any
 	// other texture-unit/texenv setup falls back to the exact legacy replay
@@ -288,6 +372,21 @@ void LuaImmediateBuffer::FlushModern() const
 	if (textured && !PlainModulateTexturing()) {
 		FlushLegacy();
 		return;
+	}
+
+	// the fogged shader variant replicates LINEAR fog only (the engine's map
+	// fog); other modes keep the exact legacy replay. Fog that saturates at
+	// factor 1 for the whole stream is inert and stays on the proven fogless
+	// program.
+	bool fogged = (glIsEnabled(GL_FOG) == GL_TRUE);
+	if (fogged) {
+		GLint fogMode = GL_LINEAR;
+		glGetIntegerv(GL_FOG_MODE, &fogMode);
+		if (fogMode != GL_LINEAR) {
+			FlushLegacy();
+			return;
+		}
+		fogged = FogIsEffective(mvMat, verts);
 	}
 
 	assert(vertColorsF.size() == verts.size() * 4);
@@ -312,9 +411,13 @@ void LuaImmediateBuffer::FlushModern() const
 		});
 	}
 
-	Shader::IProgramObject* shader = textured ? GetModernTexShader() : GetModernShader();
+	const CMatrix44f mvp = projMat * mvMat;
+
+	Shader::IProgramObject* shader = textured ? GetModernTexShader(fogged) : GetModernShader(fogged);
 	shader->Enable();
 	shader->SetUniformMatrix4x4("uMVP", false, static_cast<const float*>(mvp));
+	if (fogged)
+		shader->SetUniformMatrix4x4("uMV", false, static_cast<const float*>(mvMat));
 	if (textured)
 		shader->SetUniform("tex", 0);
 	immStream.Draw(drawMode, data);
@@ -358,6 +461,30 @@ void LuaImmediateBuffer::FlushTexRectModern() const
 	if (!texRect.set)
 		return;
 
+	// dense (rotated/world) modelview -> exact legacy quad, see ScreenAlignedMV
+	if (!ScreenAlignedMV(mvMat)) {
+		FlushTexRectLegacy();
+		return;
+	}
+
+	// fogged shader variant for LINEAR fog only; other modes keep legacy (see
+	// FlushModern); saturated fog stays on the proven fogless program
+	bool fogged = (glIsEnabled(GL_FOG) == GL_TRUE);
+	if (fogged) {
+		GLint fogMode = GL_LINEAR;
+		glGetIntegerv(GL_FOG_MODE, &fogMode);
+		if (fogMode != GL_LINEAR) {
+			FlushTexRectLegacy();
+			return;
+		}
+		static constexpr SColor white = SColor(uint8_t(255), uint8_t(255), uint8_t(255), uint8_t(255));
+		const std::vector<VA_TYPE_TC> corners = {
+			{ {texRect.x0, texRect.y0, 0.0f}, 0.0f, 0.0f, white },
+			{ {texRect.x1, texRect.y1, 0.0f}, 0.0f, 0.0f, white },
+		};
+		fogged = FogIsEffective(mvMat, corners);
+	}
+
 	// caller has bound the texture to unit 0; the shader samples it (no
 	// GL_TEXTURE_2D enable needed). Quad as two CCW triangles; the exact float
 	// modulation color rides the float vertex-color attribute, clamped to
@@ -377,9 +504,13 @@ void LuaImmediateBuffer::FlushTexRectModern() const
 	for (const int k : {0, 1, 2, 0, 2, 3})
 		data.insert(data.end(), quad[k], quad[k] + 9);
 
-	Shader::IProgramObject* shader = GetModernTexShader();
+	const CMatrix44f mvp = projMat * mvMat;
+
+	Shader::IProgramObject* shader = GetModernTexShader(fogged);
 	shader->Enable();
 	shader->SetUniformMatrix4x4("uMVP", false, static_cast<const float*>(mvp));
+	if (fogged)
+		shader->SetUniformMatrix4x4("uMV", false, static_cast<const float*>(mvMat));
 	shader->SetUniform("tex", 0);
 	immStream.Draw(GL_TRIANGLES, data);
 	shader->Disable();

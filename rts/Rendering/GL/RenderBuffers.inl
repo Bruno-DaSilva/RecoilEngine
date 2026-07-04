@@ -13,7 +13,9 @@ static constexpr const char* vsRenderBufferSrc = R"(
 // Phase-1 modern-GL migration: when uUseMVP is set the transform comes from
 // the uMVP uniform (fed per-draw from the fixed-function stack bridge, see
 // TypedRenderBuffer::ApplyMVPUniform) instead of the compatibility-profile
-// builtin; byte-identical by construction, A/B-gate verified.
+// builtin. The CPU-composed float P*MV is measured bit-identical to the
+// builtin on the whole-frame A/B gate (double-composed and two-step variants
+// both flipped edge pixels).
 uniform bool uUseMVP = false;
 uniform mat4 uMVP;
 

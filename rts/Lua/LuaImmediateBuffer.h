@@ -38,9 +38,17 @@ public:
 	void SetBackend(Backend b) { backend = b; }
 	Backend GetBackend() const { return backend; }
 
-	// MVP used by the modern backend's uMVP uniform (ignored by the legacy
-	// backend, which reads the fixed-function matrix).
-	void SetMVP(const CMatrix44f& m) { mvp = m; }
+	// Projection and modelview for the modern backend's uP/uMV uniforms
+	// (ignored by the legacy backend, which reads the fixed-function matrix).
+	// Kept SEPARATE: the fixed-function pipeline transforms P * (MV * v) in two
+	// steps, which differs from a CPU-precomposed (P*MV) * v by final-bit ULPs
+	// on world-scale coordinates -- enough to flip pixels on thin primitives
+	// and polygon edges (apitrace-verified on the whole-frame A/B gate). The
+	// shaders replicate the exact FF operation order.
+	void SetMatrices(const CMatrix44f& p, const CMatrix44f& mv) { projMat = p; mvMat = mv; }
+	// single-matrix convenience (tests, callers with a premade transform):
+	// uP*(uMV*v) with MV=identity == m*v exactly
+	void SetMVP(const CMatrix44f& m) { projMat = m; mvMat = CMatrix44f{}; }
 
 	void Begin(uint32_t glMode) {
 		mode = glMode; verts.clear(); vertColorsF.clear();
@@ -131,7 +139,8 @@ private:
 	std::vector<float> vertColorsF;
 	float curS = 0.0f, curT = 0.0f;
 	bool textured = false; // any TexCoord seen this Begin()
-	CMatrix44f mvp;
+	CMatrix44f projMat;
+	CMatrix44f mvMat;
 	std::vector<VA_TYPE_TC> verts; // superset; s/t unused when !textured
 	TexRectData texRect;
 };
