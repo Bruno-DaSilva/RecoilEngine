@@ -9,6 +9,7 @@
 #include "Game/GlobalUnsynced.h"
 #include "Game/Players/Player.h"
 #include "Game/Players/PlayerHandler.h"
+#include "Lua/LuaUnsyncedRead.h"
 #include "Net/GameServer.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/TeamHandler.h"
@@ -74,8 +75,15 @@ void GameSetupDrawer::Draw()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (readyCountdown > spring_nulltime) {
-		readyCountdown -= (spring_gettime() - lastTick);
-		lastTick = spring_gettime();
+		// whole-frame A/B "test mode" (GLFrameABCompare): Draw runs once per render
+		// pass and spring_gettime() is the raw wall clock (not covered by the Lua
+		// draw-time pins), so advancing per pass can flip the displayed "Starting
+		// in n" second between compared passes of the same frame. Only advance on
+		// the first pass; no-op in normal play (pass index is always 0 there).
+		if (!LuaUnsyncedRead::IsABDuplicatePassRaw()) {
+			readyCountdown -= (spring_gettime() - lastTick);
+			lastTick = spring_gettime();
+		}
 
 		if (readyCountdown <= spring_nulltime) {
 			GameSetupDrawer::Disable();

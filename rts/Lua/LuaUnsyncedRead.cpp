@@ -810,6 +810,7 @@ static bool luaABCompareActive = false;
 void LuaUnsyncedRead::SetABPassIndex(int v) { luaABPassIndex = v; }
 void LuaUnsyncedRead::SetABCompareActive(bool v) { luaABCompareActive = v; }
 bool LuaUnsyncedRead::IsABCompareActive() { return luaABCompareActive; }
+bool LuaUnsyncedRead::IsABDuplicatePassRaw() { return luaABPassIndex > 0; }
 
 /***
  * @function Spring.GetABCompareActive

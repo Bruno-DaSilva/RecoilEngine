@@ -30,6 +30,10 @@ class LuaUnsyncedRead {
 		static void SetABPassIndex(int v);
 		static int  GetABPassIndex(lua_State* L);
 		static int  GetABDuplicatePass(lua_State* L);
+		// C++ helper for engine-side per-draw animation advances (e.g. the
+		// GameSetupDrawer ready countdown): true on the repeat passes of an A/B
+		// iteration, always false in normal play.
+		static bool IsABDuplicatePassRaw();
 		// Whole-frame A/B "test mode": true for ALL passes while the compare is in
 		// flight. Console-spamming warnings (e.g. deprecated-GL) query this to stay a
 		// no-op during the iteration, so pass 1 cannot log/dedup a console line that a
