@@ -256,10 +256,16 @@ void CglShaderFontRenderer::HandleTextureUpdate(CFontTexture& fnt, bool onlyUplo
 		fnt.UploadGlyphAtlasTextureImpl();
 
 		// keep the recordable-flush texture-space matrix in sync with the atlas size
-		// (this affects already compiled dlists too, like the no-shader renderer's)
-		glNewList(ffTextureSpaceMatrix, GL_COMPILE);
-		glScalef(1.0f / fnt.GetTextureWidth(), 1.0f / fnt.GetTextureHeight(), 1.0f);
-		glEndList();
+		// (this affects already compiled dlists too, like the no-shader renderer's);
+		// only recompile when the size actually changed -- unconditional recompiles
+		// were ~190 glNewList calls per frame of BAR UI
+		if (texMatListW != (int)fnt.GetTextureWidth() || texMatListH != (int)fnt.GetTextureHeight()) {
+			texMatListW = (int)fnt.GetTextureWidth();
+			texMatListH = (int)fnt.GetTextureHeight();
+			glNewList(ffTextureSpaceMatrix, GL_COMPILE);
+			glScalef(1.0f / fnt.GetTextureWidth(), 1.0f / fnt.GetTextureHeight(), 1.0f);
+			glEndList();
+		}
 	}
 }
 
@@ -441,10 +447,15 @@ void CglNoShaderFontRenderer::HandleTextureUpdate(CFontTexture& fnt, bool onlyUp
 	if (dl == 0) {
 		fnt.UploadGlyphAtlasTextureImpl();
 
-		// update texture space dlist (this affects already compiled dlists too!)
-		glNewList(textureSpaceMatrix, GL_COMPILE);
-		glScalef(1.0f / fnt.GetTextureWidth(), 1.0f / fnt.GetTextureHeight(), 1.0f);
-		glEndList();
+		// update texture space dlist (this affects already compiled dlists too!);
+		// only when the atlas size changed, see CglShaderFontRenderer
+		if (texMatListW != (int)fnt.GetTextureWidth() || texMatListH != (int)fnt.GetTextureHeight()) {
+			texMatListW = (int)fnt.GetTextureWidth();
+			texMatListH = (int)fnt.GetTextureHeight();
+			glNewList(textureSpaceMatrix, GL_COMPILE);
+			glScalef(1.0f / fnt.GetTextureWidth(), 1.0f / fnt.GetTextureHeight(), 1.0f);
+			glEndList();
+		}
 	}
 }
 

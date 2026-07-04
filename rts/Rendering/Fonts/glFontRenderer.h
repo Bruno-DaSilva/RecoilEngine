@@ -83,6 +83,9 @@ private:
 	TypedRenderBuffer<VA_TYPE_TC> outlineBufferTC;
 
 	uint32_t ffTextureSpaceMatrix = 0u;
+	// atlas size the list was last compiled for: recompiling it on EVERY
+	// HandleTextureUpdate was ~190 glNewList compiles per frame of BAR UI
+	int texMatListW = 0, texMatListH = 0;
 
 	static inline size_t fontShaderRefs = 0;
 	static inline std::unique_ptr<Shader::IProgramObject> fontShader = nullptr;
@@ -118,6 +121,8 @@ private:
 	std::array<std::vector<uint16_t  >, 2> indcs; // OL, PM
 
 	uint32_t textureSpaceMatrix = 0u;
+	// see CglShaderFontRenderer::texMatListW
+	int texMatListW = 0, texMatListH = 0;
 };
 
 class CglNullFontRenderer final : public CglFontRenderer {
