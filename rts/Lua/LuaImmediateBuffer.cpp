@@ -3,7 +3,6 @@
 #include "Lua/LuaImmediateBuffer.h"
 
 #include "Rendering/GL/myGL.h"
-#include "Rendering/GL/RenderBuffers.h"
 #include "Rendering/GlobalRendering.h"
 #include "Rendering/Shaders/ShaderHandler.h"
 #include "Rendering/Shaders/Shader.h"
@@ -16,110 +15,29 @@
 #include <vector>
 
 namespace {
-	// uniform-MVP shader for the modern backend: transforms by a uniform mat4,
+	// uniform-MVP shaders for the modern backend: transform by a uniform mat4,
 	// NOT gl_ModelViewProjectionMatrix, so the path makes no fixed-function
-	// matrix calls. Attribute locations match VA_TYPE_C::attributeDefs (pos=0,
-	// color=1) so it consumes the TypedRenderBuffer VAO directly.
-	// uColor: whole-draw color multiplier. For single-color streams the exact
-	// float color goes here (vertex colors white) so animated fade alphas match
-	// the legacy float pipeline bit-exactly instead of the 8-bit attribute
-	// quantization; multi-color streams use per-vertex colors with uColor=1.
+	// matrix calls. Vertex layout is the emitter's own interleaved FLOAT stream
+	// (pos=0 vec3, uv=1 vec2, color=2 vec4): float vertex colors carry the
+	// exact values the legacy float pipeline interpolates -- an 8-bit color
+	// attribute rounds each component by up to 0.5 LSB, which stacked additive
+	// glow quads amplified to visible deltas under the whole-frame A/B gate.
 	const char* fsSrc =
 		"#version 150\n"
 		"in vec4 vcolor;\n"
-		"uniform vec4 uColor;\n"
 		"out vec4 outColor;\n"
-		"void main() { outColor = vcolor * uColor; }\n";
+		"void main() { outColor = vcolor; }\n";
 
-	std::string MakeVertexSrc(bool explicitAttribLoc)
-	{
-		std::string s = "#version 150 compatibility\n";
-		if (explicitAttribLoc) {
-			s += "#extension GL_ARB_explicit_attrib_location : require\n";
-			s += "layout(location = 0) in vec3 apos;\n";
-			s += "layout(location = 1) in vec4 acolor;\n";
-		} else {
-			s += "in vec3 apos;\n";
-			s += "in vec4 acolor;\n";
-		}
-		s += "uniform mat4 uMVP;\n";
-		s += "out vec4 vcolor;\n";
-		s += "void main() { vcolor = acolor; gl_Position = uMVP * vec4(apos, 1.0); }\n";
-		return s;
-	}
-
-	// GL_QUADS / GL_QUAD_STRIP / GL_POLYGON are not in the core profile, so the
-	// modern path triangulates them; other modes pass through unchanged. For a
-	// planar convex quad/polygon the triangle union (hence coverage) is the same
-	// as the fixed-function decomposition, so flat-colored fills stay bit-exact;
-	// only smooth-shaded fills can differ by the diagonal choice.
-	template<typename V>
-	std::pair<std::vector<V>, uint32_t> TriangulateForModern(uint32_t mode, const std::vector<V>& in)
-	{
-		std::vector<V> out;
-
-		switch (mode) {
-			case GL_QUADS: {
-				out.reserve((in.size() / 4) * 6);
-				for (size_t i = 0; i + 3 < in.size(); i += 4) {
-					out.push_back(in[i + 0]); out.push_back(in[i + 1]); out.push_back(in[i + 2]);
-					out.push_back(in[i + 0]); out.push_back(in[i + 2]); out.push_back(in[i + 3]);
-				}
-				return {std::move(out), GL_TRIANGLES};
-			}
-			case GL_QUAD_STRIP: {
-				// quad k spans verts {2k, 2k+1, 2k+3, 2k+2}
-				for (size_t i = 0; i + 3 < in.size(); i += 2) {
-					out.push_back(in[i + 0]); out.push_back(in[i + 1]); out.push_back(in[i + 3]);
-					out.push_back(in[i + 0]); out.push_back(in[i + 3]); out.push_back(in[i + 2]);
-				}
-				return {std::move(out), GL_TRIANGLES};
-			}
-			case GL_POLYGON: {
-				// triangle fan from the first vertex (matches FF for convex polys)
-				for (size_t i = 1; i + 1 < in.size(); ++i) {
-					out.push_back(in[0]); out.push_back(in[i]); out.push_back(in[i + 1]);
-				}
-				return {std::move(out), GL_TRIANGLES};
-			}
-			default:
-				return {in, mode};
-		}
-	}
-
-	Shader::IProgramObject* GetModernShader()
-	{
-		Shader::IProgramObject* shader = shaderHandler->GetProgramObject("[LuaImmediateBuffer]", "VA_TYPE_C");
-		if (shader != nullptr && shader->IsValid())
-			return shader;
-
-		const bool eal = globalRendering->supportExplicitAttribLoc;
-
-		shader = shaderHandler->CreateProgramObject("[LuaImmediateBuffer]", "VA_TYPE_C");
-		shader->AttachShaderObject(shaderHandler->CreateShaderObject(MakeVertexSrc(eal), "", GL_VERTEX_SHADER));
-		shader->AttachShaderObject(shaderHandler->CreateShaderObject(fsSrc, "", GL_FRAGMENT_SHADER));
-
-		if (!eal) {
-			shader->BindAttribLocation("apos", 0);
-			shader->BindAttribLocation("acolor", 1);
-		}
-
-		shader->Link();
-		return shader;
-	}
-
-	// textured (VA_TYPE_TC) shader: MODULATE = texture * color (uColor as in
-	// the untextured shader: exact float whole-draw color, vertex colors white).
+	// textured: MODULATE = texture * color
 	const char* fsTexSrc =
 		"#version 150\n"
 		"uniform sampler2D tex;\n"
-		"uniform vec4 uColor;\n"
 		"in vec2 vuv;\n"
 		"in vec4 vcolor;\n"
 		"out vec4 outColor;\n"
-		"void main() { outColor = texture(tex, vuv) * vcolor * uColor; }\n";
+		"void main() { outColor = texture(tex, vuv) * vcolor; }\n";
 
-	std::string MakeTexVertexSrc(bool explicitAttribLoc)
+	std::string MakeVertexSrc(bool explicitAttribLoc, bool textured)
 	{
 		std::string s = "#version 150 compatibility\n";
 		if (explicitAttribLoc) {
@@ -133,23 +51,27 @@ namespace {
 			s += "in vec4 acolor;\n";
 		}
 		s += "uniform mat4 uMVP;\n";
-		s += "out vec2 vuv;\n";
+		if (textured)
+			s += "out vec2 vuv;\n";
 		s += "out vec4 vcolor;\n";
-		s += "void main() { vuv = auv; vcolor = acolor; gl_Position = uMVP * vec4(apos, 1.0); }\n";
+		s += "void main() { ";
+		if (textured)
+			s += "vuv = auv; ";
+		s += "vcolor = acolor; gl_Position = uMVP * vec4(apos, 1.0); }\n";
 		return s;
 	}
 
-	Shader::IProgramObject* GetModernTexShader()
+	Shader::IProgramObject* GetModernShaderImpl(const char* poName, bool textured)
 	{
-		Shader::IProgramObject* shader = shaderHandler->GetProgramObject("[LuaImmediateBuffer]", "VA_TYPE_TC");
+		Shader::IProgramObject* shader = shaderHandler->GetProgramObject("[LuaImmediateBuffer]", poName);
 		if (shader != nullptr && shader->IsValid())
 			return shader;
 
 		const bool eal = globalRendering->supportExplicitAttribLoc;
 
-		shader = shaderHandler->CreateProgramObject("[LuaImmediateBuffer]", "VA_TYPE_TC");
-		shader->AttachShaderObject(shaderHandler->CreateShaderObject(MakeTexVertexSrc(eal), "", GL_VERTEX_SHADER));
-		shader->AttachShaderObject(shaderHandler->CreateShaderObject(fsTexSrc, "", GL_FRAGMENT_SHADER));
+		shader = shaderHandler->CreateProgramObject("[LuaImmediateBuffer]", poName);
+		shader->AttachShaderObject(shaderHandler->CreateShaderObject(MakeVertexSrc(eal, textured), "", GL_VERTEX_SHADER));
+		shader->AttachShaderObject(shaderHandler->CreateShaderObject(textured ? fsTexSrc : fsSrc, "", GL_FRAGMENT_SHADER));
 
 		if (!eal) {
 			shader->BindAttribLocation("apos", 0);
@@ -159,6 +81,93 @@ namespace {
 
 		shader->Link();
 		return shader;
+	}
+
+	Shader::IProgramObject* GetModernShader()    { return GetModernShaderImpl("IMM_F", false); }
+	Shader::IProgramObject* GetModernTexShader() { return GetModernShaderImpl("IMM_TEX_F", true); }
+
+	// The emitter's own streaming VAO/VBO for the interleaved float vertex
+	// (pos3 uv2 color4 = 9 floats). Orphaned with glBufferData on EVERY draw so
+	// consecutive flushes within a frame never overwrite in-flight data; the
+	// buffer NAME stays stable, so the VAO's recorded attribute bindings remain
+	// valid (re-specifying the store is not TypedRenderBuffer's Resize, which
+	// creates a NEW buffer object and orphans the VAO -- that bug class).
+	struct ImmFloatStream {
+		static constexpr GLsizei STRIDE = 9 * sizeof(float);
+
+		GLuint vao = 0;
+		GLuint vbo = 0;
+
+		void Draw(uint32_t drawMode, const std::vector<float>& data) {
+			const size_t vertCount = data.size() / 9;
+			if (vertCount == 0)
+				return;
+
+			if (vao == 0) {
+				glGenVertexArrays(1, &vao);
+				glGenBuffers(1, &vbo);
+				glBindVertexArray(vao);
+				glBindBuffer(GL_ARRAY_BUFFER, vbo);
+				glEnableVertexAttribArray(0);
+				glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, STRIDE, reinterpret_cast<void*>( 0));
+				glEnableVertexAttribArray(1);
+				glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, STRIDE, reinterpret_cast<void*>(12));
+				glEnableVertexAttribArray(2);
+				glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, STRIDE, reinterpret_cast<void*>(20));
+				glBindVertexArray(0);
+				glBindBuffer(GL_ARRAY_BUFFER, 0);
+			}
+
+			glBindBuffer(GL_ARRAY_BUFFER, vbo);
+			glBufferData(GL_ARRAY_BUFFER, data.size() * sizeof(float), data.data(), GL_STREAM_DRAW);
+			glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+			glBindVertexArray(vao);
+			glDrawArrays(drawMode, 0, static_cast<GLsizei>(vertCount));
+			glBindVertexArray(0);
+		}
+	};
+
+	ImmFloatStream immStream;
+
+	// GL_QUADS / GL_QUAD_STRIP / GL_POLYGON are not in the core profile, so the
+	// modern path triangulates them (as an index remap into the captured
+	// stream); other modes pass through unchanged. For a planar convex
+	// quad/polygon the triangle union (hence coverage) is the same as the
+	// fixed-function decomposition, so flat-colored fills stay bit-exact; only
+	// smooth-shaded fills can differ by the diagonal choice.
+	std::pair<std::vector<uint32_t>, uint32_t> TriangulateIndicesForModern(uint32_t mode, size_t n)
+	{
+		std::vector<uint32_t> out;
+
+		switch (mode) {
+			case GL_QUADS: {
+				out.reserve((n / 4) * 6);
+				for (size_t i = 0; i + 3 < n; i += 4)
+					out.insert(out.end(), {uint32_t(i), uint32_t(i + 1), uint32_t(i + 2),
+					                       uint32_t(i), uint32_t(i + 2), uint32_t(i + 3)});
+				return {std::move(out), GL_TRIANGLES};
+			}
+			case GL_QUAD_STRIP: {
+				// quad k spans verts {2k, 2k+1, 2k+3, 2k+2}
+				for (size_t i = 0; i + 3 < n; i += 2)
+					out.insert(out.end(), {uint32_t(i), uint32_t(i + 1), uint32_t(i + 3),
+					                       uint32_t(i), uint32_t(i + 3), uint32_t(i + 2)});
+				return {std::move(out), GL_TRIANGLES};
+			}
+			case GL_POLYGON: {
+				// triangle fan from the first vertex (matches FF for convex polys)
+				for (size_t i = 1; i + 1 < n; ++i)
+					out.insert(out.end(), {uint32_t(0), uint32_t(i), uint32_t(i + 1)});
+				return {std::move(out), GL_TRIANGLES};
+			}
+			default: {
+				out.reserve(n);
+				for (size_t i = 0; i < n; ++i)
+					out.push_back(uint32_t(i));
+				return {std::move(out), mode};
+			}
+		}
 	}
 
 	// The FF texturing configurations the modern textured shader reproduces
@@ -272,82 +281,59 @@ void LuaImmediateBuffer::FlushModern() const
 	if (verts.empty())
 		return;
 
-	// single-color streams route the exact float color through uColor (vertex
-	// colors white) -- the 8-bit vertex attribute cannot represent animated
-	// fade alphas bit-exactly; multi-color streams keep per-vertex colors
-	static constexpr SColor white = SColor(uint8_t(255), uint8_t(255), uint8_t(255), uint8_t(255));
-	const auto c01 = [](float v) { return std::clamp(v, 0.0f, 1.0f); };
-
 	// Textured streams flush through the MODULATE shader when the FF texture
 	// state is one it reproduces exactly (see PlainModulateTexturing); any
 	// other texture-unit/texenv setup falls back to the exact legacy replay
 	// (which carries the texcoords).
-	if (textured) {
-		if (!PlainModulateTexturing()) {
-			FlushLegacy();
-			return;
-		}
-
-		std::vector<VA_TYPE_TC> tcVerts;
-		tcVerts.reserve(verts.size());
-		for (const VA_TYPE_TC& v : verts)
-			tcVerts.push_back(VA_TYPE_TC{v.pos, v.s, v.t, multiColor ? v.c : white});
-
-		auto [drawVerts, drawMode] = TriangulateForModern<VA_TYPE_TC>(mode, tcVerts);
-		if (drawVerts.empty())
-			return;
-
-		auto& rb = RenderBuffer::GetTypedRenderBuffer<VA_TYPE_TC>();
-		for (const VA_TYPE_TC& v : drawVerts)
-			rb.AddVertex(VA_TYPE_TC{v});
-
-		Shader::IProgramObject* shader = GetModernTexShader();
-		shader->Enable();
-		shader->SetUniformMatrix4x4("uMVP", false, static_cast<const float*>(mvp));
-		shader->SetUniform("tex", 0);
-		if (multiColor)
-			shader->SetUniform("uColor", 1.0f, 1.0f, 1.0f, 1.0f);
-		else // clamped as the FF pipeline does at rasterization
-			shader->SetUniform("uColor", c01(singleColorF[0]), c01(singleColorF[1]), c01(singleColorF[2]), c01(singleColorF[3]));
-		rb.DrawArrays(drawMode);
-		shader->Disable();
-
-		// same FF current-color end-state contract as the untextured flush below
-		glColor4fv(sawColor ? lastColorF : seedColorF);
+	if (textured && !PlainModulateTexturing()) {
+		FlushLegacy();
 		return;
 	}
 
-	std::vector<VA_TYPE_C> colorVerts;
-	colorVerts.reserve(verts.size());
-	for (const VA_TYPE_TC& v : verts)
-		colorVerts.push_back(VA_TYPE_C{v.pos, multiColor ? v.c : white});
+	assert(vertColorsF.size() == verts.size() * 4);
 
-	auto [drawVerts, drawMode] = TriangulateForModern<VA_TYPE_C>(mode, colorVerts);
-	if (drawVerts.empty())
+	auto [idx, drawMode] = TriangulateIndicesForModern(mode, verts.size());
+	if (idx.empty())
 		return;
 
-	auto& rb = RenderBuffer::GetTypedRenderBuffer<VA_TYPE_C>();
-	for (const VA_TYPE_C& v : drawVerts)
-		rb.AddVertex(VA_TYPE_C{v});
+	// interleaved float stream: exact positions/uvs, and the exact float
+	// colors legacy interpolates -- clamped to [0,1] per component as the FF
+	// pipeline does before interpolation (overbright current colors stay
+	// unclamped only in the CURRENT-color state, restored below)
+	const auto c01 = [](float v) { return std::clamp(v, 0.0f, 1.0f); };
+	std::vector<float> data;
+	data.reserve(idx.size() * 9);
+	for (const uint32_t k : idx) {
+		const VA_TYPE_TC& v = verts[k];
+		data.insert(data.end(), {
+			v.pos.x, v.pos.y, v.pos.z, v.s, v.t,
+			c01(vertColorsF[k * 4 + 0]), c01(vertColorsF[k * 4 + 1]),
+			c01(vertColorsF[k * 4 + 2]), c01(vertColorsF[k * 4 + 3]),
+		});
+	}
 
-	Shader::IProgramObject* shader = GetModernShader();
+	Shader::IProgramObject* shader = textured ? GetModernTexShader() : GetModernShader();
 	shader->Enable();
 	shader->SetUniformMatrix4x4("uMVP", false, static_cast<const float*>(mvp));
-	if (multiColor)
-		shader->SetUniform("uColor", 1.0f, 1.0f, 1.0f, 1.0f);
-	else // clamped as the FF pipeline does at rasterization
-		shader->SetUniform("uColor", c01(singleColorF[0]), c01(singleColorF[1]), c01(singleColorF[2]), c01(singleColorF[3]));
-	rb.DrawArrays(drawMode);
+	if (textured)
+		shader->SetUniform("tex", 0);
+	immStream.Draw(drawMode, data);
 	shader->Disable();
 
-	// Legacy glBegin/glEnd leaves the FF current color at the body's last glColor
-	// (or UNCHANGED when the body issued none), and the compatibility profile
-	// exposes that as gl_Color to LATER shader draws -- BAR's gui_pip minimap
-	// shader reads its alpha, display-list replays without recorded glColor
-	// inherit it. FlushModern draws via a shader and never touches glColor, so
-	// replicate the exact legacy side effect (apitrace-confirmed classes: the
-	// gui_pip minimap wash, the minimap camera-box blue-channel divergence).
-	// Float precision so unclamped/overbright current colors round-trip.
+	// Exact legacy end-state. glBegin/glEnd leaves the FF current color at the
+	// body's last glColor (or UNCHANGED when the body issued none), and the
+	// compatibility profile exposes that as gl_Color to LATER shader draws --
+	// BAR's gui_pip minimap shader reads its alpha, display-list replays
+	// without recorded glColor inherit it. FlushModern draws via a shader and
+	// never touches glColor, so replicate the exact legacy side effect
+	// (apitrace-confirmed classes: the gui_pip minimap wash, the minimap
+	// camera-box blue-channel divergence). Float precision so unclamped/
+	// overbright current colors round-trip. Ditto the FF current texcoord for
+	// textured streams: FlushLegacy's per-vertex glTexCoord replay leaves it at
+	// the LAST vertex's coords, consumed by later inheriting draws
+	// (display-list replays with no leading glTexCoord).
+	if (textured)
+		glTexCoord2f(verts.back().s, verts.back().t);
 	glColor4fv(sawColor ? lastColorF : seedColorF);
 }
 
@@ -374,33 +360,37 @@ void LuaImmediateBuffer::FlushTexRectModern() const
 
 	// caller has bound the texture to unit 0; the shader samples it (no
 	// GL_TEXTURE_2D enable needed). Quad as two CCW triangles; the exact float
-	// modulation color goes through uColor (vertex colors white).
-	static constexpr SColor white = SColor(uint8_t(255), uint8_t(255), uint8_t(255), uint8_t(255));
-	const VA_TYPE_TC bl{ {texRect.x0, texRect.y0, 0.0f}, texRect.s0, texRect.t0, white };
-	const VA_TYPE_TC br{ {texRect.x1, texRect.y0, 0.0f}, texRect.s1, texRect.t0, white };
-	const VA_TYPE_TC tr{ {texRect.x1, texRect.y1, 0.0f}, texRect.s1, texRect.t1, white };
-	const VA_TYPE_TC tl{ {texRect.x0, texRect.y1, 0.0f}, texRect.s0, texRect.t1, white };
-
-	auto& rb = RenderBuffer::GetTypedRenderBuffer<VA_TYPE_TC>();
-	rb.AddVertex(VA_TYPE_TC{bl}); rb.AddVertex(VA_TYPE_TC{br}); rb.AddVertex(VA_TYPE_TC{tr});
-	rb.AddVertex(VA_TYPE_TC{bl}); rb.AddVertex(VA_TYPE_TC{tr}); rb.AddVertex(VA_TYPE_TC{tl});
-
+	// modulation color rides the float vertex-color attribute, clamped to
+	// [0,1] per component as the FF pipeline does before interpolation.
 	const auto c01 = [](float v) { return std::clamp(v, 0.0f, 1.0f); };
+	const float r = c01(texRect.cf[0]), g = c01(texRect.cf[1]), b = c01(texRect.cf[2]), a = c01(texRect.cf[3]);
+
+	const float quad[4][9] = {
+		{ texRect.x0, texRect.y0, 0.0f, texRect.s0, texRect.t0, r, g, b, a }, // bl
+		{ texRect.x1, texRect.y0, 0.0f, texRect.s1, texRect.t0, r, g, b, a }, // br
+		{ texRect.x1, texRect.y1, 0.0f, texRect.s1, texRect.t1, r, g, b, a }, // tr
+		{ texRect.x0, texRect.y1, 0.0f, texRect.s0, texRect.t1, r, g, b, a }, // tl
+	};
+
+	std::vector<float> data;
+	data.reserve(6 * 9);
+	for (const int k : {0, 1, 2, 0, 2, 3})
+		data.insert(data.end(), quad[k], quad[k] + 9);
 
 	Shader::IProgramObject* shader = GetModernTexShader();
 	shader->Enable();
 	shader->SetUniformMatrix4x4("uMVP", false, static_cast<const float*>(mvp));
 	shader->SetUniform("tex", 0);
-	// clamped as the FF pipeline does at rasterization
-	shader->SetUniform("uColor", c01(texRect.cf[0]), c01(texRect.cf[1]), c01(texRect.cf[2]), c01(texRect.cf[3]));
-	rb.DrawArrays(GL_TRIANGLES);
+	immStream.Draw(GL_TRIANGLES, data);
 	shader->Disable();
 
 	// FlushTexRectLegacy sets glColor(texRect.cf); the compatibility profile
 	// carries that FF current color into LATER draws (gl_Color). Replicate it so a
 	// modern gl.TexRect is state-identical to legacy -- otherwise a following text
 	// draw inherits a stale color (apitrace class: the minimap wash, here on the
-	// countdown text).
+	// countdown text). Ditto the FF current texcoord: the legacy quad's last
+	// glTexCoord is (s0, t1).
+	glTexCoord2f(texRect.s0, texRect.t1);
 	glColor4fv(texRect.cf);
 }
 

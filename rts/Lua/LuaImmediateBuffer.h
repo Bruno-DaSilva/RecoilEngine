@@ -45,7 +45,7 @@ public:
 	void Begin(uint32_t glMode) {
 		mode = glMode; verts.clear(); vertColorsF.clear();
 		textured = false; curS = curT = 0.0f;
-		sawColor = false; multiColor = false;
+		sawColor = false;
 	}
 	// The FF pipeline clamps vertex colors to [0,1] at rasterization while the
 	// CURRENT-color state stays unclamped (glGetFloatv returns e.g. 1.15 -- BAR
@@ -64,19 +64,11 @@ public:
 	// exactly that (see the trailing glColor4fv -- kept in FLOAT precision so
 	// unclamped/unquantizable current colors survive the round-trip).
 	void SeedColor(const float* rgba) {
-		for (int i = 0; i < 4; ++i) { curColorF[i] = rgba[i]; seedColorF[i] = rgba[i]; singleColorF[i] = rgba[i]; }
+		for (int i = 0; i < 4; ++i) { curColorF[i] = rgba[i]; seedColorF[i] = rgba[i]; }
 	}
 	void Color(float r, float g, float b, float a) {
 		curColorF[0] = r; curColorF[1] = g; curColorF[2] = b; curColorF[3] = a;
 		lastColorF[0] = r; lastColorF[1] = g; lastColorF[2] = b; lastColorF[3] = a;
-		if (verts.empty()) {
-			// color set before any vertex replaces the seed as the (potential)
-			// whole-stream color
-			for (int i = 0; i < 4; ++i) singleColorF[i] = curColorF[i];
-		} else if (curColorF[0] != singleColorF[0] || curColorF[1] != singleColorF[1] ||
-		           curColorF[2] != singleColorF[2] || curColorF[3] != singleColorF[3]) {
-			multiColor = true;
-		}
 		sawColor = true;
 	}
 	void Color(const SColor& c) { Color(c.r / 255.0f, c.g / 255.0f, c.b / 255.0f, c.a / 255.0f); }
@@ -98,8 +90,8 @@ public:
 
 	// textured quad (gl.TexRect). The texture is bound by the caller (as in
 	// gl.Texture); the shading is MODULATE = texture * color (exact float via
-	// the uColor uniform). As with BeginEnd, one SetTexRect can be flushed
-	// either backend for an A/B compare.
+	// the float vertex-color attribute). As with BeginEnd, one SetTexRect can
+	// be flushed either backend for an A/B compare.
 	void SetTexRect(float x0, float y0, float x1, float y1,
 	                float s0, float t0, float s1, float t1, const float* rgba) {
 		texRect = TexRectData{x0, y0, x1, y1, s0, t0, s1, t1,
@@ -128,14 +120,15 @@ private:
 	float curColorF[4]    = { 1.0f, 1.0f, 1.0f, 1.0f };
 	float seedColorF[4]   = { 1.0f, 1.0f, 1.0f, 1.0f };
 	float lastColorF[4]   = { 1.0f, 1.0f, 1.0f, 1.0f };
-	// the single color the whole stream uses (exact float) -- valid while
-	// !multiColor; lets the modern flush route the color through a float
-	// uniform instead of the quantized 8-bit vertex attribute, which keeps
-	// animated fade alphas bit-exact vs the legacy float pipeline
-	float singleColorF[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
-	bool multiColor = false;
 	bool sawColor = false; // any Color() (as opposed to SeedColor) since Begin()
-	std::vector<float> vertColorsF; // 4 floats per vertex; exact legacy replay colors
+	// 4 floats per vertex: the EXACT colors the legacy pipeline sees. Both
+	// flushes consume these -- the modern flush streams them as a float vertex
+	// attribute (clamped to [0,1] as FF does pre-interpolation), so vertex
+	// colors are bit-exact by construction; the quantized 8-bit VA_TYPE_TC
+	// color is kept only for GetVerts() introspection. (8-bit vertex colors
+	// were the last quantization class: per-quad-colored glow stacks under
+	// additive blending amplified the +-0.5 LSB rounding to visible deltas.)
+	std::vector<float> vertColorsF;
 	float curS = 0.0f, curT = 0.0f;
 	bool textured = false; // any TexCoord seen this Begin()
 	CMatrix44f mvp;
