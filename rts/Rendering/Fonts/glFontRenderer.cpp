@@ -193,8 +193,8 @@ void CglShaderFontRenderer::DrawTraingleElements()
 	RECOIL_DETAILED_TRACY_ZONE;
 
 	// inside a display-list compile the RenderBuffer flush is not list-safe
-	// (stream-VBO offset aliasing; glUseProgram/glUniform are executed, not
-	// recorded) -- emit recordable fixed-function immediate mode instead
+	// (stream-VBO offset aliasing; glUseProgram/glUniform get recorded into the
+	// list instead of executing) -- emit recordable fixed-function immediate mode
 	GLint dl = 0;
 	glGetIntegerv(GL_LIST_INDEX, &dl);
 	if (dl != 0) {
@@ -292,6 +292,21 @@ void CglShaderFontRenderer::PushGLState(const CglFont& fnt)
 
 	glBindTexture(GL_TEXTURE_2D, fnt.GetTexture());
 
+	// inside a display-list compile glUseProgram/glUniform* are RECORDED into the
+	// list, not executed. Issuing them here would (a) stomp shader state whenever
+	// the list is replayed and (b) desync the program's CPU-side uniform cache from
+	// the GPU: the cache updates but the GL call never executes, so later
+	// "redundant" uUseMVP writes are silently skipped and direct legacy text draws
+	// run the stale uMVP branch with another draw's matrix (text vanishes; found by
+	// the whole-frame A/B gate on a BAR replay pregame). The list-compile flush is
+	// recordable fixed-function (DrawTraingleElementsRecordable) and needs no
+	// shader at all, so skip the entire program path.
+	GLint dl = 0;
+	glGetIntegerv(GL_LIST_INDEX, &dl);
+	inListCompile = (dl != 0);
+	if (inListCompile)
+		return;
+
 	glGetIntegerv(GL_CURRENT_PROGRAM, &currProgID);
 
 	Shader::IProgramObject* shader = fnt.HasColor() ? fontShaderColor.get() : fontShader.get();
@@ -309,13 +324,16 @@ void CglShaderFontRenderer::PushGLState(const CglFont& fnt)
 void CglShaderFontRenderer::PopGLState(const CglFont& fnt)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	if (fnt.HasColor())
-		fontShaderColor->Disable();
-	else
-		fontShader->Disable();
+	if (!inListCompile) {
+		if (fnt.HasColor())
+			fontShaderColor->Disable();
+		else
+			fontShader->Disable();
 
-	if (currProgID > 0)
-		glUseProgram(currProgID);
+		if (currProgID > 0)
+			glUseProgram(currProgID);
+	}
+	inListCompile = false;
 
 	glBindTexture(GL_TEXTURE_2D, 0);
 

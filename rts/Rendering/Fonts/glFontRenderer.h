@@ -66,14 +66,18 @@ private:
 	// RenderBuffer flush is not list-safe on two counts: (1) the recorded
 	// glDrawElements aliases the streaming font VBO at fixed offsets, so the replay
 	// shows whatever glyph data occupies those offsets later; (2) glUseProgram /
-	// glUniform* execute immediately during compile and are NOT recorded, so the
-	// replayed draw runs with stale shader state (with the uMVP path this transforms
-	// the text by some other draw's matrix -> text vanishes). Instead emit plain
-	// fixed-function immediate mode, which the list captures by value and replays
-	// against the replay-time FF matrices -- the exact semantics widgets expect.
-	// Texel->UV scaling uses the same shared texture-space-matrix display list trick
-	// as CglNoShaderFontRenderer, so already-recorded lists survive atlas resizes.
+	// glUniform* get RECORDED into the list instead of executing, so they stomp
+	// shader state at replay time and desync the program's CPU-side uniform cache
+	// from the GPU (PushGLState therefore skips the whole program path during a
+	// compile). Instead emit plain fixed-function immediate mode, which the list
+	// captures by value and replays against the replay-time FF matrices -- the
+	// exact semantics widgets expect. Texel->UV scaling uses the same shared
+	// texture-space-matrix display list trick as CglNoShaderFontRenderer, so
+	// already-recorded lists survive atlas resizes.
 	void DrawTraingleElementsRecordable();
+	// set by PushGLState when called during a display-list compile; PopGLState
+	// then skips the (never-executed) shader disable/restore as well
+	bool inListCompile = false;
 
 	TypedRenderBuffer<VA_TYPE_TC> primaryBufferTC;
 	TypedRenderBuffer<VA_TYPE_TC> outlineBufferTC;
