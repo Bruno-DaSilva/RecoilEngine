@@ -165,6 +165,17 @@ static bool NoShaderBound()
 	return prog == 0;
 }
 
+// glRectf/glBegin-quads honor glPolygonMode (widgets draw outline rects via
+// GL_LINE + gl.Rect, e.g. unit_share_tracker's minimap highlight); the modern
+// triangulated flush rasterizes different edges under non-FILL modes, so those
+// draws must stay on the legacy path. Found by the whole-frame A/B gate.
+static bool PolygonModeFill()
+{
+	GLint mode[2] = { GL_FILL, GL_FILL };
+	glGetIntegerv(GL_POLYGON_MODE, mode);
+	return (mode[0] == GL_FILL) && (mode[1] == GL_FILL);
+}
+
 // per-Lua-caller dedup of LuaGLCompareMode results so the log isn't spammed.
 static std::unordered_set<std::string> glCompareLogged;
 
@@ -2548,7 +2559,12 @@ int LuaOpenGL::BeginEnd(lua_State* L)
 	// still flush via the exact legacy replay inside FlushModern (general textured
 	// BeginEnd is deferred: real widgets use texture-unit/texenv setups a single
 	// MODULATE shader can't reproduce).
-	if (!((modernImmediate || glCompareMode) && NoShaderBound())) {
+	// compilingDisplayList: the modern flush is not list-safe (recorded glDrawElements
+	// aliases the stream VBO; glUseProgram/glUniform get recorded and desync the uniform
+	// cache -- the font-renderer bug class, seen as vanishing/phantom geometry from
+	// gl.CreateList bodies under the A/B gate). Legacy glBegin/glEnd IS the recordable
+	// representation, so always compile that.
+	if (!((modernImmediate || glCompareMode) && NoShaderBound() && PolygonModeFill()) || compilingDisplayList) {
 		glBegin(primMode);
 		const int error = lua_pcall(L, (args - 2), 0, 0);
 		glEnd();
@@ -2563,13 +2579,17 @@ int LuaOpenGL::BeginEnd(lua_State* L)
 	// capture the stream once; render modern (or, under glCompareMode-only, report
 	// the modern-vs-legacy delta and render via the exact legacy replay)
 	luaImmBuffer.Begin(primMode);
-	// Seed the capture's current color with the inherited Lua/FF color. A
-	// BeginEnd body that never calls gl.Color inherits the color set OUTSIDE it
-	// (as legacy glBegin/glEnd does); without this the capture would reuse the
-	// buffer's stale color from a previous BeginEnd. apitrace-confirmed: gui_pip's
-	// minimap background quads are drawn color-less after an outside gl.Color, and
-	// the stale alpha (0.09 vs 1.0) leaked into gl_Color and washed the minimap.
-	luaImmBuffer.Color(SColor(color[0], color[1], color[2], color[3]));
+	// Seed the capture's current color with the inherited FF current color -- what
+	// legacy glBegin/glEnd picks up implicitly for a body that never calls
+	// gl.Color. Read the REAL GL current color (not LuaOpenGL's tracked color[]):
+	// display-list replays, recordable font flushes and engine draws all move the
+	// FF current color without going through gl.Color, and the divergence shows
+	// up as whole-element tints under the A/B gate (gui_pip wash class).
+	{
+		GLfloat cc[4];
+		glGetFloatv(GL_CURRENT_COLOR, cc);
+		luaImmBuffer.SeedColor(SColor(cc[0], cc[1], cc[2], cc[3]));
+	}
 	luaImmBuffer.SetMVP(GetCurrentFixedFunctionMVP());
 
 	inModernBeginEnd = true;
@@ -3033,23 +3053,35 @@ int LuaOpenGL::Rect(lua_State* L)
 
 	const auto drawLegacy = [&]() { glRectf(x1, y1, x2, y2); };
 	const auto drawModern = [&]() {
-		const SColor col(color[0], color[1], color[2], color[3]);
+		// glRectf fills with the FF CURRENT color (which dlist replays/fonts can
+		// move without gl.Color) and leaves it untouched; seed-not-Color gives the
+		// flush the same fill and the same (unchanged) end-state
+		GLfloat cc[4];
+		glGetFloatv(GL_CURRENT_COLOR, cc);
 		luaImmBuffer.SetBackend(LuaImmediateBuffer::Backend::Modern);
 		luaImmBuffer.SetMVP(GetCurrentFixedFunctionMVP());
 		luaImmBuffer.Begin(GL_TRIANGLES);
-		luaImmBuffer.Color(col);
+		luaImmBuffer.SeedColor(SColor(cc[0], cc[1], cc[2], cc[3]));
 		// glRectf fills the quad (x1,y1)-(x2,y2); emit it as two CCW triangles
 		luaImmBuffer.Vertex(x1, y1, 0.0f); luaImmBuffer.Vertex(x2, y1, 0.0f); luaImmBuffer.Vertex(x2, y2, 0.0f);
 		luaImmBuffer.Vertex(x1, y1, 0.0f); luaImmBuffer.Vertex(x2, y2, 0.0f); luaImmBuffer.Vertex(x1, y2, 0.0f);
 		luaImmBuffer.End();
 	};
 
-	if (glCompareMode && noShader) {
+	// inside a display-list compile the modern flush is not list-safe (the recorded
+	// glDrawElements aliases the stream VBO, glUseProgram/glUniform get recorded and
+	// desync the uniform cache -- the font-renderer bug class); legacy immediate mode
+	// is exactly the recordable representation, so always compile that. Non-FILL
+	// polygon mode draws (outline rects) also stay legacy, see PolygonModeFill.
+	const bool modernOK = (modernImmediate || glCompareMode)
+			&& noShader && !compilingDisplayList && PolygonModeFill();
+
+	if (glCompareMode && modernOK) {
 		GLint vp[4]; glGetIntegerv(GL_VIEWPORT, vp);
 		LogGLCompare(L, __func__, LuaGLCompare::CompareDraws(vp[2], vp[3], drawLegacy, drawModern));
 	}
 
-	(modernImmediate && noShader) ? drawModern() : drawLegacy();
+	(modernImmediate && modernOK) ? drawModern() : drawLegacy();
 	return 0;
 }
 
@@ -3125,18 +3157,27 @@ int LuaOpenGL::TexRect(lua_State* L)
 		glEnd();
 	};
 	const auto drawModern = [&]() {
-		const SColor col(color[0], color[1], color[2], color[3]);
+		// the legacy quad modulates by the FF CURRENT color (no glColor emitted)
+		// and leaves it unchanged; pass the real current color so the modern quad
+		// matches and its trailing state write is a no-op
+		GLfloat cc[4];
+		glGetFloatv(GL_CURRENT_COLOR, cc);
+		const SColor col(cc[0], cc[1], cc[2], cc[3]);
 		luaImmBuffer.SetMVP(GetCurrentFixedFunctionMVP());
 		luaImmBuffer.SetTexRect(x1, y1, x2, y2, s1, t1, s2, t2, col);
 		luaImmBuffer.FlushTexRectModern();
 	};
 
-	if (glCompareMode && noShader) {
+	// see gl.Rect: modern flush is neither list-safe nor polygon-mode-aware
+	const bool modernOK = (modernImmediate || glCompareMode)
+			&& noShader && !compilingDisplayList && PolygonModeFill();
+
+	if (glCompareMode && modernOK) {
 		GLint vp[4]; glGetIntegerv(GL_VIEWPORT, vp);
 		LogGLCompare(L, __func__, LuaGLCompare::CompareDraws(vp[2], vp[3], drawLegacy, drawModern));
 	}
 
-	(modernImmediate && noShader) ? drawModern() : drawLegacy();
+	(modernImmediate && modernOK) ? drawModern() : drawLegacy();
 	return 0;
 }
 

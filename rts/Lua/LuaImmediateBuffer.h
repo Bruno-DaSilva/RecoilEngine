@@ -41,9 +41,15 @@ public:
 	// backend, which reads the fixed-function matrix).
 	void SetMVP(const CMatrix44f& m) { mvp = m; }
 
-	void Begin(uint32_t glMode) { mode = glMode; verts.clear(); textured = false; curS = curT = 0.0f; }
-	void Color(float r, float g, float b, float a) { curColor = SColor(r, g, b, a); }
-	void Color(const SColor& c) { curColor = c; }
+	void Begin(uint32_t glMode) { mode = glMode; verts.clear(); textured = false; curS = curT = 0.0f; sawColor = false; }
+	// the color the stream INHERITS from outside the Begin/End body (the FF
+	// current color, which legacy glBegin picks up implicitly). Unlike Color()
+	// this does not count as a body color: legacy leaves the FF current color
+	// UNCHANGED when the body never calls glColor, and the flushes replicate
+	// exactly that (see FlushModern's trailing glColor).
+	void SeedColor(const SColor& c) { curColor = c; seedColor = c; }
+	void Color(float r, float g, float b, float a) { Color(SColor(r, g, b, a)); }
+	void Color(const SColor& c) { curColor = c; lastColor = c; sawColor = true; }
 	void TexCoord(float s, float t) { curS = s; curT = t; textured = true; }
 	void Vertex(float x, float y, float z) { verts.push_back(VA_TYPE_TC{float3{x, y, z}, curS, curT, curColor}); }
 
@@ -84,6 +90,9 @@ private:
 	Backend backend = Backend::Legacy;
 	uint32_t mode = 0;
 	SColor curColor = SColor(uint8_t(255), uint8_t(255), uint8_t(255), uint8_t(255));
+	SColor seedColor = SColor(uint8_t(255), uint8_t(255), uint8_t(255), uint8_t(255));
+	SColor lastColor = SColor(uint8_t(255), uint8_t(255), uint8_t(255), uint8_t(255));
+	bool sawColor = false; // any Color() (as opposed to SeedColor) since Begin()
 	float curS = 0.0f, curT = 0.0f;
 	bool textured = false; // any TexCoord seen this Begin()
 	CMatrix44f mvp;

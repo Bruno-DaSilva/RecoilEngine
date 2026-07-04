@@ -171,6 +171,12 @@ void LuaImmediateBuffer::FlushLegacy() const
 		glVertex3f(v.pos.x, v.pos.y, v.pos.z);
 	}
 	glEnd();
+
+	// exact legacy end-state: current color = last body glColor, or UNCHANGED
+	// (= the inherited seed) when the body never called one -- the per-vertex
+	// glColor replay above would otherwise leave the last vertex's color
+	glColor4ub(sawColor ? lastColor.r : seedColor.r, sawColor ? lastColor.g : seedColor.g,
+	           sawColor ? lastColor.b : seedColor.b, sawColor ? lastColor.a : seedColor.a);
 }
 
 void LuaImmediateBuffer::FlushModern() const
@@ -208,14 +214,14 @@ void LuaImmediateBuffer::FlushModern() const
 	rb.DrawArrays(drawMode);
 	shader->Disable();
 
-	// Legacy glBegin/glEnd leaves the FF current color at the body's last vertex
-	// color, and the compatibility profile exposes that as gl_Color to LATER
-	// shader draws -- BAR's gui_pip minimap shader reads its alpha. FlushModern
-	// draws via a shader and never touches glColor, so without this the stale
-	// current color leaks and washes the minimap (apitrace-confirmed: gl_Color.a
-	// 0.09 vs 1.0). Replicate the side effect so a modern BeginEnd is GL-state-
-	// identical to legacy for downstream draws.
-	const SColor& lc = verts.back().c;
+	// Legacy glBegin/glEnd leaves the FF current color at the body's last glColor
+	// (or UNCHANGED when the body issued none), and the compatibility profile
+	// exposes that as gl_Color to LATER shader draws -- BAR's gui_pip minimap
+	// shader reads its alpha, display-list replays without recorded glColor
+	// inherit it. FlushModern draws via a shader and never touches glColor, so
+	// replicate the exact legacy side effect (apitrace-confirmed classes: the
+	// gui_pip minimap wash, the minimap camera-box blue-channel divergence).
+	const SColor& lc = sawColor ? lastColor : seedColor;
 	glColor4ub(lc.r, lc.g, lc.b, lc.a);
 }
 
