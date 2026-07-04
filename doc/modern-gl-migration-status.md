@@ -1,6 +1,29 @@
-# Modern-GL migration — status & handoff (updated 2026-07-04 EOD, textured-BeginEnd + fog + uMVP session)
+# Modern-GL migration — status & handoff (updated 2026-07-04 night, Phase-2 command lists LANDED)
 
 The living document is `doc/bar-gl4-immediate-mode-inventory.md` (changelog + "Divergence-hunting plan"); memory `project_ab_test_combat_shimmer.md` has the condensed harness state. This file is the session-level status + next steps.
+
+## Session 2026-07-04c: Phase-2 Lua command lists IMPLEMENTED and byte-perfect
+
+`9415529616` — gl.CreateList capture/replay behind config `LuaCommandLists` (default off). The design committed in the previous session is now code, validated at the 0-pixel bar: **watertest 0 imperfect, idletest 0/406, fightertest 0/293, Supreme Isthmus replay signal(L<->M)=0 on ALL 4,623 compared frames** (remaining nonzero lines are the known control-only pinned-archive gadget per-pass counters).
+
+Mechanism (all in `rts/Lua/LuaOpenGL.cpp` + `rts/Lua/LuaCommandList.h` + `rts/Lua/LuaDisplayLists.h`):
+
+- **Capture = glad pointer swap.** During the gl.CreateList body, ~50 recordable GL entry points are swapped for recorder functions (X-macro `CMDLIST_RECORDERS`) — exact glNewList record semantics at GL-call granularity, no Lua-level parsing duplication, engine-helper GL captured too. glBegin..glEnd runs become `ImmStreamData` (posUV + exact float colors + seed-vertex counts); everything else becomes typed `Cmd`s. `compilingDisplayList` stays true so the Lua dispatch takes the (captured) legacy branches and the FF mirror is suppressed; the per-context glMatrixTracker bookkeeping (matData) is unchanged.
+- **Replay through the live backend.** gl.CallList on a captured list executes state cmds as real GL, feeds matrix cmds to BOTH GL and the FF mirror (captured lists no longer Taint the mirror — that was the mirror's only taint source), and flushes streams through LuaImmediateBuffer under exactly the live gl.BeginEnd dispatch conditions (modern uMVP shader when the gates allow, exact legacy replay otherwise). Seed-class vertices (before the list's first glColor) get the REPLAY-time current color, matching real display-list inherit semantics; end-state current color/texcoord follow the live flushes.
+- **Materialize fallback.** Recordable-but-unsupported calls (glUseProgram, glPushAttrib, glNormal3f, glTexImage2D, ... — X-macro `CMDLIST_MATERIALIZERS`) convert the capture into a real GL display list mid-body: open glNewList, replay captured cmds into the compile (seed vertices emitted color-less to preserve inherit), restore pointers, body continues recording natively. Per-list hybrid — unsupported lists behave exactly as today. Measured BAR coverage: only glNormal3f, glPush/PopAttrib, glTexParameteri, glTexImage2D materialize (fonts/unit shapes), logged once per function.
+- Nested cases: gl.CreateList inside a capture → real list with the capture suspended (pointer restore/re-swap); gl.CallList of a captured list inside a capture → command splice with seed-color rebasing; inside a real compile → records the exact legacy replay; nested real lists → recorded `CallGLList`, replayed with glCallList + mirror Taint.
+
+### Two NEW parity laws the command-list gate exposed (both now legacy-fallback gates in LuaImmediateBuffer)
+
+1. **Ortho-only composition (`OrthoProjection`)**: the screen-aligned-MV composition-exactness measurement only holds under an ortho-like projection (w row {0,0,0,*}). BAR's tilted top-bar UI draws through a PERSPECTIVE projection inside lists; the perspective divide amplifies CPU-vs-driver P*MV composition ULPs into subpixel shifts, which LINEAR-sampled high-frequency textures (glyph caches, icons) turn into whole-shade deltas (~4-7k px/frame, max ~200) while flat fills stay byte-exact. Bisected with a temporary `AB_CMDLIST_MODERN=off|untex|tex` knob: mechanics green, untextured green, textured diverged → matrices.
+2. **Texture completeness (`MipIncompleteTexture2D`)**: FF samples an INCOMPLETE texture as if texturing were disabled (flat vertex color); GLSL `texture()` returns (0,0,0,1). The replay's draft-spot octagons (a LIVE gl.BeginEnd path, never exposed by local-gate content) bind a mip-filtered texture with no mip chain — legacy drew white fills, modern black. Gate detects: mipmapping min filter + MAX_LEVEL≠0 + no level-1 image. Applied to stream AND TexRect flushes.
+
+### What this unlocks (next steps, in dependency order)
+
+1. Soak `LuaCommandLists=1` + `LuaModernGLBackend=1` in normal play; then consider default-on for the branch.
+2. Task #6: with captured lists replaying through the live backend, the FF-interop bridges (glGetFloatv matrices, glColor4fv/glTexCoord2f end-state restores) remain the modern flushes' only legacy calls — replaceable by tracked state once FF consumers die.
+3. Task #5: mirror-fed MVP (drop gl_ModelViewProjectionMatrix from RenderBuffers.inl/font) — still blocked by dense-MV/perspective composition parity while the FF comparator exists; becomes possible after FF matrix set-call deletion (post-#6).
+4. Task #8: apitrace scan of a LuaCommandLists+modern frame for residual legacy calls from modern paths; first RenderDoc capture attempt.
 
 ## Session 2026-07-04b: modern surface EXPANDED, replay signal ZERO
 
