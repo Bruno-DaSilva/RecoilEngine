@@ -1,10 +1,38 @@
-# Modern-GL migration — status & handoff (updated 2026-07-04, coverage-breadth session COMPLETE)
+# Modern-GL migration — status & handoff (updated 2026-07-04 EOD, textured-BeginEnd + fog + uMVP session)
 
 The living document is `doc/bar-gl4-immediate-mode-inventory.md` (changelog + "Divergence-hunting plan"); memory `project_ab_test_combat_shimmer.md` has the condensed harness state. This file is the session-level status + next steps.
 
-## Where things stand: EVERY gate is byte-perfect
+## Session 2026-07-04b: modern surface EXPANDED, replay signal ZERO
 
-Divergence-plan step 2 (coverage breadth) is done, at the 0-pixel bar, with the modern surface live (gl.Rect, gl.TexRect, non-textured gl.BeginEnd, font uMVP, mirror-fed MVP):
+New increments, all byte-perfect on every gate (watertest 0/642, idletest 0/408, fightertest 0/275, Supreme Isthmus replay signal 0 on ALL ~4700 compared frames):
+
+- `2c1ded416e` — textured gl.BeginEnd modern behind an exact-parity texenv gate (unit-0 GL_TEXTURE_2D, MODULATE, no texgen, identity texmat, no other units, non-GL_ALPHA format; else exact legacy replay). Watertest coverage: 1025+ textured flushes modern, 1 fallback.
+- `0d23b66f45` — modern flushes moved off the 8-bit color attribute onto the emitter's own interleaved float stream (pos3/uv2/color4, orphaned stream VBO + persistent VAO): vertex colors bit-exact by construction (stacked additive glow quads amplified 8-bit rounding to visible deltas); FF current-texcoord end-state restored after textured flushes.
+- `0ae5745b62` — the TypedRenderBuffer default shader takes uMVP per draw (config RenderBufferUseMVPUniform, per-pass toggled by the gate) via a non-creating probe in DrawArrays/DrawElements: every engine call site covered with zero per-site changes. AB_DUMP_MIN_PIXELS env knob; glGetTexEnviv headless stub.
+- `a1aff837a0` — FF fog parity via SEPARATE program variants ({untex,tex} x {fogless,fogged}; per-vertex LINEAR fog factor, gl_Fog state, engaged only when the factor dips below 1) + the SCREEN-ALIGNED-MV gate (below).
+
+## HARD-WON LESSON: dense-matrix composition is not reproducible
+
+No CPU/GPU recipe provably bit-matches the driver's own P*MV composition on dense (rotated/world) matrices: float-composed, double-composed and two-step P*(MV*v) variants each flip DIFFERENT thin-primitive edge pixels (measured classes: gl.Rotate'd loading-spinner arcs, world-camera lines/quads in PiP/minimap views; the driver's ordering is undocumented, and prints hide last-ULP differences). ALSO measured: merely touching proven shader source perturbs compiled gl_Position math enough to flip edge pixels — never restructure a parity-proven shader; add program VARIANTS.
+
+Resolution: modern immediate flushes and the RenderBuffer uMVP hook engage only under a screen-aligned modelview (no rotation/shear terms — covers virtually all BAR UI); dense-MV draws keep the exact legacy path until Phase 2 deletes the FF pipeline and bit-parity against it stops being a requirement. The immediate backend's matrices come from the glGetFloatv bridge (the mirror re-derives glRotatef trig, ULP-differs); the mirror stays shadow-verified for Phase 2.
+
+Debug-loop additions: `test/gl-ab-compare/`-adjacent write-dir widget `ab_fogprobe.lua` (config ABFogProbe=1, local-only — REPLAY-GATED, a harness widget without the replay gate contaminated several replay measurements) draws fogged world quads/lines out to 43k elmos so fog parity is exercised by the 1-minute gates.
+
+## FINAL 2026-07-04b RESULT: replay signal ZERO on all 4667 compared frames
+
+Modern-vs-legacy is byte-perfect on every gate: watertest 0/642, idletest 0/408, fightertest 0/275, Supreme Isthmus replay signal(L<->M)=0 on ALL 4667 compares. The replay's only 2 nonzero lines are CONTROL (legacy-vs-legacy) noise, fully root-caused:
+
+- apitrace pass-diff of a null-test run ([L,L,L,L]) showed pass2 containing a 126-call block absent from pass1: the lazy `muzzleside.tga` load + first instanced flameVBO draw of BAR's `gfx_missile_thruster_gl4.lua` GADGET. Its `idleSkipCounter` ticks once per DrawWorld CALL, so under the 4-pass gate a missile launched after an idle period pops into existence mid-pass-sequence.
+- Fix landed on BAR branch `bruno/ab-compare-widget-guards` (`60eeae158f`): guard the decrement with `Spring.GetABDuplicatePass`. Local content (BAR.sdd) is clean; the 2026-06-13 replay's PINNED release archive cannot be patched (gadgets are synced-loaded from the archive; write-dir shadows only work for LuaUI widgets), so those 2 control frames are a permanent measurement artifact of old replays — engine-independent, masked out of signal by harness design.
+
+---
+
+# Previous session (2026-07-04a): coverage breadth COMPLETE
+
+## Where things stood: EVERY gate byte-perfect
+
+Divergence-plan step 2 (coverage breadth) done, at the 0-pixel bar, with the modern surface live (gl.Rect, gl.TexRect, non-textured gl.BeginEnd, font uMVP, mirror-fed MVP):
 
 - **Supreme Isthmus multiplayer replay** (24 players, draft mode, reflections, chat/playerlist churn, PiP profile): control=0 AND signal=0 on ALL 3871 pregame + 1071 in-game compared frames (to f=30000).
 - fightertest (650-fighter mass combat): 0/271.
