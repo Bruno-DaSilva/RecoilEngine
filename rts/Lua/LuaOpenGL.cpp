@@ -2556,9 +2556,10 @@ int LuaOpenGL::BeginEnd(lua_State* L)
 	// (see the Color() seed below), and the path is validated byte-identical by the
 	// whole-frame A/B gate (control=0, signal=0 over the fightertest benchmark,
 	// 2026-07-03 -- see doc/bar-gl4-immediate-mode-inventory.md). Textured streams
-	// still flush via the exact legacy replay inside FlushModern (general textured
-	// BeginEnd is deferred: real widgets use texture-unit/texenv setups a single
-	// MODULATE shader can't reproduce).
+	// flush modern when the FF texture state is the plain unit-0/MODULATE
+	// configuration the shader reproduces exactly (PlainModulateTexturing in
+	// LuaImmediateBuffer.cpp); other texture-unit/texenv setups fall back to the
+	// exact legacy replay inside FlushModern.
 	// compilingDisplayList: the modern flush is not list-safe (recorded glDrawElements
 	// aliases the stream VBO; glUseProgram/glUniform get recorded and desync the uniform
 	// cache -- the font-renderer bug class, seen as vanishing/phantom geometry from

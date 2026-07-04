@@ -160,6 +160,84 @@ namespace {
 		shader->Link();
 		return shader;
 	}
+
+	// The FF texturing configurations the modern textured shader reproduces
+	// EXACTLY: active unit 0 with plain GL_TEXTURE_2D sampling (no
+	// higher-priority target enabled, no texgen, no other enabled units),
+	// MODULATE env, identity texture matrix, and a texture whose base format
+	// modulates like GLSL sampling does. Anything else falls back to the exact
+	// legacy replay: legacy is the parity oracle, so unsupported state costs
+	// only modern coverage, never correctness. This gate is why the earlier
+	// ungated attempt diverged on gui_pip's textured overlays (255-class).
+	bool PlainModulateTexturing()
+	{
+		GLint activeUnit = 0;
+		glGetIntegerv(GL_ACTIVE_TEXTURE, &activeUnit);
+		if (activeUnit != GL_TEXTURE0)
+			return false;
+
+		if (glIsEnabled(GL_TEXTURE_2D) != GL_TRUE)
+			return false;
+
+		// FF target priority: an enabled cube/rect/3D target overrides 2D
+		// (1D is BELOW 2D, so an enabled 1D loses and is fine)
+		if (glIsEnabled(GL_TEXTURE_CUBE_MAP) == GL_TRUE ||
+		    glIsEnabled(GL_TEXTURE_RECTANGLE) == GL_TRUE ||
+		    glIsEnabled(GL_TEXTURE_3D) == GL_TRUE)
+			return false;
+
+		// texgen replaces the captured per-vertex texcoords
+		if (glIsEnabled(GL_TEXTURE_GEN_S) == GL_TRUE || glIsEnabled(GL_TEXTURE_GEN_T) == GL_TRUE ||
+		    glIsEnabled(GL_TEXTURE_GEN_R) == GL_TRUE || glIsEnabled(GL_TEXTURE_GEN_Q) == GL_TRUE)
+			return false;
+
+		GLint envMode = 0;
+		glGetTexEnviv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, &envMode);
+		if (envMode != GL_MODULATE)
+			return false;
+
+		// FF transforms texcoords by the texture matrix; the shader does not
+		static const CMatrix44f identity;
+		CMatrix44f texMat;
+		glGetFloatv(GL_TEXTURE_MATRIX, static_cast<float*>(texMat));
+		for (int i = 0; i < 16; ++i) {
+			if (texMat.m[i] != identity.m[i])
+				return false;
+		}
+
+		// GL_ALPHA-format MODULATE passes the fragment RGB through untouched,
+		// while GLSL texture() samples (0,0,0,A) and would zero it
+		GLint intFormat = 0;
+		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &intFormat);
+		switch (intFormat) {
+			case GL_ALPHA: case GL_ALPHA4: case GL_ALPHA8:
+			case GL_ALPHA12: case GL_ALPHA16: case GL_COMPRESSED_ALPHA:
+				return false;
+			default:
+				break;
+		}
+
+		// any other enabled unit engages FF multitexture combining that the
+		// single-sampler shader does not implement (GL_MAX_TEXTURE_UNITS is the
+		// FF unit count, typically 4)
+		GLint maxFFUnits = 0;
+		glGetIntegerv(GL_MAX_TEXTURE_UNITS, &maxFFUnits);
+		maxFFUnits = std::min(maxFFUnits, GLint(8));
+
+		bool otherUnitEnabled = false;
+		for (GLint u = 1; u < maxFFUnits; ++u) {
+			glActiveTexture(GL_TEXTURE0 + u);
+			otherUnitEnabled = otherUnitEnabled ||
+				(glIsEnabled(GL_TEXTURE_2D) == GL_TRUE) ||
+				(glIsEnabled(GL_TEXTURE_1D) == GL_TRUE) ||
+				(glIsEnabled(GL_TEXTURE_3D) == GL_TRUE) ||
+				(glIsEnabled(GL_TEXTURE_CUBE_MAP) == GL_TRUE) ||
+				(glIsEnabled(GL_TEXTURE_RECTANGLE) == GL_TRUE);
+		}
+		glActiveTexture(GL_TEXTURE0);
+
+		return !otherUnitEnabled;
+	}
 }
 
 void LuaImmediateBuffer::FlushLegacy() const
@@ -194,21 +272,50 @@ void LuaImmediateBuffer::FlushModern() const
 	if (verts.empty())
 		return;
 
-	// Textured BeginEnd streams fall back to the exact legacy replay (which
-	// carries the texcoords). A single MODULATE/unit-0 shader can't reproduce
-	// the per-widget texture-unit / texenv variety real widgets use -- the
-	// in-engine compare caught gui_pip's textured overlays diverging (255) when
-	// this path used a modern shader. General textured BeginEnd is deferred;
-	// gl.TexRect (a controlled single MODULATE quad) is modernized separately.
-	if (textured) {
-		FlushLegacy();
-		return;
-	}
-
 	// single-color streams route the exact float color through uColor (vertex
 	// colors white) -- the 8-bit vertex attribute cannot represent animated
 	// fade alphas bit-exactly; multi-color streams keep per-vertex colors
 	static constexpr SColor white = SColor(uint8_t(255), uint8_t(255), uint8_t(255), uint8_t(255));
+	const auto c01 = [](float v) { return std::clamp(v, 0.0f, 1.0f); };
+
+	// Textured streams flush through the MODULATE shader when the FF texture
+	// state is one it reproduces exactly (see PlainModulateTexturing); any
+	// other texture-unit/texenv setup falls back to the exact legacy replay
+	// (which carries the texcoords).
+	if (textured) {
+		if (!PlainModulateTexturing()) {
+			FlushLegacy();
+			return;
+		}
+
+		std::vector<VA_TYPE_TC> tcVerts;
+		tcVerts.reserve(verts.size());
+		for (const VA_TYPE_TC& v : verts)
+			tcVerts.push_back(VA_TYPE_TC{v.pos, v.s, v.t, multiColor ? v.c : white});
+
+		auto [drawVerts, drawMode] = TriangulateForModern<VA_TYPE_TC>(mode, tcVerts);
+		if (drawVerts.empty())
+			return;
+
+		auto& rb = RenderBuffer::GetTypedRenderBuffer<VA_TYPE_TC>();
+		for (const VA_TYPE_TC& v : drawVerts)
+			rb.AddVertex(VA_TYPE_TC{v});
+
+		Shader::IProgramObject* shader = GetModernTexShader();
+		shader->Enable();
+		shader->SetUniformMatrix4x4("uMVP", false, static_cast<const float*>(mvp));
+		shader->SetUniform("tex", 0);
+		if (multiColor)
+			shader->SetUniform("uColor", 1.0f, 1.0f, 1.0f, 1.0f);
+		else // clamped as the FF pipeline does at rasterization
+			shader->SetUniform("uColor", c01(singleColorF[0]), c01(singleColorF[1]), c01(singleColorF[2]), c01(singleColorF[3]));
+		rb.DrawArrays(drawMode);
+		shader->Disable();
+
+		// same FF current-color end-state contract as the untextured flush below
+		glColor4fv(sawColor ? lastColorF : seedColorF);
+		return;
+	}
 
 	std::vector<VA_TYPE_C> colorVerts;
 	colorVerts.reserve(verts.size());
@@ -222,8 +329,6 @@ void LuaImmediateBuffer::FlushModern() const
 	auto& rb = RenderBuffer::GetTypedRenderBuffer<VA_TYPE_C>();
 	for (const VA_TYPE_C& v : drawVerts)
 		rb.AddVertex(VA_TYPE_C{v});
-
-	const auto c01 = [](float v) { return std::clamp(v, 0.0f, 1.0f); };
 
 	Shader::IProgramObject* shader = GetModernShader();
 	shader->Enable();
