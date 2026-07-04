@@ -115,6 +115,34 @@ public:
 	uint32_t GetMode() const { return mode; }
 	const std::vector<VA_TYPE_TC>& GetVerts() const { return verts; }
 
+	// command-list capture support (gl.CreateList body baking): expose the
+	// exact state a later LoadCaptured must restore for the flushes to behave
+	// identically to a live End().
+	bool GetSawColor() const { return sawColor; }
+	const float* GetSeedColorF() const { return seedColorF; }
+	const float* GetLastColorF() const { return lastColorF; }
+	const std::vector<float>& GetVertColorsF() const { return vertColorsF; }
+
+	// rebuild the accumulated stream from baked data (posUV = 5 floats/vertex
+	// pos3+st2, colors = 4 floats/vertex); after this a Flush(backend) renders
+	// exactly what the captured body accumulated
+	void LoadCaptured(uint32_t glMode, bool tex, size_t n,
+	                  const float* posUV, const float* colors,
+	                  bool saw, const float* seed, const float* last) {
+		Begin(glMode);
+		textured = tex;
+		sawColor = saw;
+		for (int i = 0; i < 4; ++i) { seedColorF[i] = seed[i]; lastColorF[i] = last[i]; }
+		verts.reserve(n);
+		vertColorsF.assign(colors, colors + n * 4);
+		for (size_t i = 0; i < n; ++i) {
+			const float* v = posUV + i * 5;
+			const float* c = colors + i * 4;
+			verts.push_back(VA_TYPE_TC{float3{v[0], v[1], v[2]}, v[3], v[4],
+			                ClampedColor(c[0], c[1], c[2], c[3])});
+		}
+	}
+
 private:
 	struct TexRectData {
 		float x0, y0, x1, y1;

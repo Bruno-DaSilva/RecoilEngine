@@ -3,8 +3,10 @@
 #ifndef LUA_DISPLAY_LISTS_H
 #define LUA_DISPLAY_LISTS_H
 
+#include <memory>
 #include <vector>
 
+#include "Lua/LuaCommandList.h"
 #include "Rendering/GL/MatrixStateTracker.h"
 
 class CLuaDisplayLists {
@@ -59,10 +61,38 @@ class CLuaDisplayLists {
 			active.push_back(DLdata(dlist, m));
 			return active.size() - 1;
 		}
-				
+
+		// a captured gl.CreateList body (LuaCommandLists config): no GL list id,
+		// the commands are replayed through live GL at gl.CallList time
+		unsigned int NewCmdList(const std::shared_ptr<LuaCommandList>& p, SMatrixStateData& m)
+		{
+			if (p == nullptr)
+				return 0;
+
+			DLdata data(0, m);
+			data.cl = p;
+
+			if (!unused.empty()) {
+				const unsigned int index = unused[unused.size() - 1];
+				active[index] = std::move(data);
+				unused.pop_back();
+				return index;
+			}
+			active.push_back(std::move(data));
+			return active.size() - 1;
+		}
+
+		const LuaCommandList* GetCmdList(unsigned int index) const
+		{
+			if (index < active.size())
+				return active[index].cl.get();
+
+			return nullptr;
+		}
+
 		void FreeDList(unsigned int index)
 		{
-			if ((index < active.size()) && (active[index].id != 0)) {
+			if ((index < active.size()) && (active[index].id != 0 || active[index].cl != nullptr)) {
 				active[index] = DLdata(0);
 				unused.push_back(index);
 			}
@@ -74,6 +104,7 @@ class CLuaDisplayLists {
 			DLdata(int i, SMatrixStateData &m): id(i), matData(m) {}
 			GLuint id;
 			SMatrixStateData matData;
+			std::shared_ptr<LuaCommandList> cl;
 		};
 		std::vector<DLdata> active;
 		std::vector<unsigned int> unused; // references slots in active

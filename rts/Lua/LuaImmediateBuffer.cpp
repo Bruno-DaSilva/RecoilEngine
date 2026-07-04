@@ -144,6 +144,20 @@ namespace {
 		       mv.m[8] == 0.0f && mv.m[9] == 0.0f;
 	}
 
+	// The screen-aligned composition-exactness measurement (see ScreenAlignedMV)
+	// only holds under an ORTHO-like projection (w row = {0,0,0,*}). Under a
+	// PERSPECTIVE projection (BAR's tilted top-bar UI draws through one inside
+	// display lists) the CPU-composed P*MV can ULP-differ from the driver's own
+	// composition, and the perspective divide amplifies that into subpixel
+	// vertex shifts -- invisible on flat fills, but LINEAR-sampled
+	// high-frequency textures (glyph caches, icons) diverge by whole shades
+	// (command-list gate, 2026-07-04: ~4-7k px/frame, max delta ~200, textured
+	// streams only). Perspective draws take the exact legacy replay.
+	bool OrthoProjection(const CMatrix44f& p)
+	{
+		return p.m[3] == 0.0f && p.m[7] == 0.0f && p.m[11] == 0.0f;
+	}
+
 	// True when the current FF LINEAR fog state can tint any vertex of the
 	// stream: the fog factor (end - |eye z|) * scale dips below 1 for the
 	// farthest vertex. When every factor saturates at 1 fog is inert and the
@@ -248,6 +262,32 @@ namespace {
 		}
 	}
 
+	// FF samples an INCOMPLETE texture as if texturing were disabled while a
+	// GLSL sampler2D returns (0,0,0,1); any modern textured draw must fall
+	// back to legacy for such textures. Detects the practical case on the
+	// unit-0 GL_TEXTURE_2D binding: mipmapping min filter, MAX_LEVEL not
+	// clamped to 0, and no level-1 image (or no base image at all).
+	bool MipIncompleteTexture2D()
+	{
+		GLint minFilter = 0;
+		glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, &minFilter);
+		const bool mipFilter =
+			(minFilter == GL_NEAREST_MIPMAP_NEAREST) || (minFilter == GL_LINEAR_MIPMAP_NEAREST) ||
+			(minFilter == GL_NEAREST_MIPMAP_LINEAR)  || (minFilter == GL_LINEAR_MIPMAP_LINEAR);
+		if (!mipFilter)
+			return false;
+
+		GLint maxLevel = 1000;
+		glGetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, &maxLevel);
+		GLint w0 = 0, h0 = 0, w1 = 0;
+		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH,  &w0);
+		glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &h0);
+		glGetTexLevelParameteriv(GL_TEXTURE_2D, 1, GL_TEXTURE_WIDTH,  &w1);
+		if (w0 == 0)
+			return true; // no base image
+		return (maxLevel != 0) && (w0 > 1 || h0 > 1) && (w1 == 0);
+	}
+
 	// The FF texturing configurations the modern textured shader reproduces
 	// EXACTLY: active unit 0 with plain GL_TEXTURE_2D sampling (no
 	// higher-priority target enabled, no texgen, no other enabled units),
@@ -291,6 +331,14 @@ namespace {
 			if (texMat.m[i] != identity.m[i])
 				return false;
 		}
+
+		// FF treats an INCOMPLETE texture as texturing DISABLED (fragment =
+		// plain vertex color) while GLSL texture() returns (0,0,0,1) -- the
+		// draft-spot octagons in the Supreme Isthmus replay bind a texture
+		// with a mipmapping min filter but no mip chain, so legacy drew white
+		// fills and the modern shader drew black.
+		if (MipIncompleteTexture2D())
+			return false;
 
 		// GL_ALPHA-format MODULATE passes the fragment RGB through untouched,
 		// while GLSL texture() samples (0,0,0,A) and would zero it
@@ -359,8 +407,9 @@ void LuaImmediateBuffer::FlushModern() const
 	if (verts.empty())
 		return;
 
-	// dense (rotated/world) modelview -> exact legacy replay, see ScreenAlignedMV
-	if (!ScreenAlignedMV(mvMat)) {
+	// dense (rotated/world) modelview or perspective projection -> exact legacy
+	// replay, see ScreenAlignedMV / OrthoProjection
+	if (!ScreenAlignedMV(mvMat) || !OrthoProjection(projMat)) {
 		FlushLegacy();
 		return;
 	}
@@ -461,8 +510,16 @@ void LuaImmediateBuffer::FlushTexRectModern() const
 	if (!texRect.set)
 		return;
 
-	// dense (rotated/world) modelview -> exact legacy quad, see ScreenAlignedMV
-	if (!ScreenAlignedMV(mvMat)) {
+	// dense (rotated/world) modelview or perspective projection -> exact legacy
+	// quad, see ScreenAlignedMV / OrthoProjection
+	if (!ScreenAlignedMV(mvMat) || !OrthoProjection(projMat)) {
+		FlushTexRectLegacy();
+		return;
+	}
+
+	// incomplete texture: FF draws the flat current color, the shader would
+	// sample black -- see MipIncompleteTexture2D
+	if (MipIncompleteTexture2D()) {
 		FlushTexRectLegacy();
 		return;
 	}

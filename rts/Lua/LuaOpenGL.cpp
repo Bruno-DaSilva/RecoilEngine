@@ -82,7 +82,10 @@
 #include "System/Config/ConfigHandler.h"
 #include "System/Log/ILog.h"
 #include "System/Matrix44f.h"
+#include "Lua/LuaCommandList.h"
 #include "Lua/LuaImmediateBuffer.h"
+
+#include <memory>
 
 CONFIG(bool, LuaShaders).defaultValue(true).headlessValue(false).safemodeValue(false);
 CONFIG(int, DeprecatedGLWarnLevel).defaultValue(0).headlessValue(0).safemodeValue(0);
@@ -92,6 +95,8 @@ CONFIG(bool, LuaModernGLBackend).defaultValue(false).headlessValue(false).safemo
 	.description("Draw self-contained Lua immediate-mode primitives (gl.Rect/gl.TexRect) via the modern LuaImmediateBuffer backend (no glBegin/glRectf). Experimental; off => legacy path unchanged.");
 CONFIG(bool, LuaGLCompareMode).defaultValue(false).headlessValue(false).safemodeValue(false)
 	.description("Validation: draw wired Lua primitives (gl.Rect/gl.TexRect) both ways (legacy + modern) into offscreen FBOs and log per-caller pixel deltas. Debug only; the frame still renders normally.");
+CONFIG(bool, LuaCommandLists).defaultValue(false).headlessValue(false).safemodeValue(false)
+	.description("Capture gl.CreateList bodies as replayable command lists instead of compiling GL display lists, so list content renders through the live (optionally modern) backend at gl.CallList. Phase 2 of the modern-GL migration; off => legacy display lists unchanged.");
 
 // transient accumulator for the modern immediate-mode backend; reused across
 // calls (Lua GL calls are serial on the render thread).
@@ -168,6 +173,709 @@ static bool PolygonModeFill()
 	GLint mode[2] = { GL_FILL, GL_FILL };
 	glGetIntegerv(GL_POLYGON_MODE, mode);
 	return (mode[0] == GL_FILL) && (mode[1] == GL_FILL);
+}
+
+/******************************************************************************
+ * Lua command lists (Phase-2 modern-GL migration, config LuaCommandLists).
+ *
+ * gl.CreateList normally compiles a GL display list -- the single biggest
+ * legacy-GL surface left in a modern frame (glNewList/glCallList plus every
+ * recorded FF call, replayed opaquely by the driver where no modern backend
+ * can reach it). With LuaCommandLists enabled the body is CAPTURED instead:
+ * the recordable GL entry points are POINTER-SWAPPED (glad function pointers)
+ * for recorder functions while the body executes once, which reproduces
+ * glNewList record semantics exactly at GL-call granularity with zero
+ * Lua-level parsing duplication -- everything the body emits, including GL
+ * calls from engine helpers it reaches, is captured or intentionally
+ * materialized. gl.CallList then replays the captured commands through live
+ * GL, the FF matrix mirror, and the modern immediate backend:
+ *   - matrix ops keep the mirror in sync (no more Taint on captured lists),
+ *   - glBegin..glEnd geometry flushes through the CURRENT backend (the modern
+ *     uMVP shader when the live dispatch gates allow, the exact legacy replay
+ *     otherwise), so list content finally exercises the modern path,
+ *   - glNewList/glCallList disappear for captured lists (the RenderDoc path).
+ *
+ * A body that emits a recordable call the replay does NOT support
+ * (glUseProgram, glPushAttrib, glNormal3f, texture uploads, ...) is
+ * MATERIALIZED mid-capture: a real GL list is opened, the already-captured
+ * commands are replayed into the compile, the original pointers are restored
+ * and the rest of the body records legacy-style. Single body execution,
+ * per-list hybrid fallback -- unsupported lists behave exactly as today.
+ *
+ * Scoped by measurement (doc/modern-gl-migration-status.md): 57k list
+ * compiles across a full BAR run record only ~27 distinct GL functions, all
+ * covered by the recorders below except glNormal3f and glPush/PopAttrib
+ * (which materialize).
+ ******************************************************************************/
+
+static bool cmdListsEnabled = false;
+
+namespace {
+
+struct CmdListCapture {
+	std::shared_ptr<LuaCommandList> cl = std::make_shared<LuaCommandList>();
+
+	// in-progress glBegin..glEnd stream
+	bool inBegin = false;
+	LuaCommandList::ImmStreamData stream;
+
+	// list-scoped current state, exactly glNewList record semantics: vertices
+	// recorded before the list's first glColor are seed-class (they inherit
+	// the CALL-time current color)
+	float curColor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+	bool sawColorInList = false;
+	float curS = 0.0f, curT = 0.0f;
+	bool sawTexInStream = false;
+
+	// materialize fallback state
+	bool materialized = false;
+	GLuint materializeList = 0;
+	// >0 while a nested legacy gl.CreateList compile runs inside the capture
+	// (original pointers restored for its duration)
+	int suspendDepth = 0;
+};
+
+} // anonymous namespace
+
+static CmdListCapture* cmdCapture = nullptr;
+
+// true while gl.* calls are being captured (as opposed to executed, recorded
+// into a real compile, or replayed)
+static inline bool CmdListCapturing()
+{
+	return cmdCapture != nullptr && !cmdCapture->materialized && cmdCapture->suspendDepth == 0;
+}
+
+// RECORDERS: supported entry points, captured as commands.
+// X(gladName, recorderFunction)
+#define CMDLIST_RECORDERS(X) \
+	X(glBegin,             CmdRec_Begin) \
+	X(glEnd,               CmdRec_End) \
+	X(glVertex2f,          CmdRec_Vertex2f) \
+	X(glVertex3f,          CmdRec_Vertex3f) \
+	X(glVertex2fv,         CmdRec_Vertex2fv) \
+	X(glVertex3fv,         CmdRec_Vertex3fv) \
+	X(glColor3f,           CmdRec_Color3f) \
+	X(glColor4f,           CmdRec_Color4f) \
+	X(glColor3fv,          CmdRec_Color3fv) \
+	X(glColor4fv,          CmdRec_Color4fv) \
+	X(glColor3ub,          CmdRec_Color3ub) \
+	X(glColor4ub,          CmdRec_Color4ub) \
+	X(glColor4ubv,         CmdRec_Color4ubv) \
+	X(glTexCoord2f,        CmdRec_TexCoord2f) \
+	X(glTexCoord2fv,       CmdRec_TexCoord2fv) \
+	X(glEnable,            CmdRec_Enable) \
+	X(glDisable,           CmdRec_Disable) \
+	X(glBlendFunc,         CmdRec_BlendFunc) \
+	X(glBlendFuncSeparate, CmdRec_BlendFuncSeparate) \
+	X(glBlendEquation,     CmdRec_BlendEquation) \
+	X(glBlendColor,        CmdRec_BlendColor) \
+	X(glBindTexture,       CmdRec_BindTexture) \
+	X(glActiveTexture,     CmdRec_ActiveTexture) \
+	X(glLineWidth,         CmdRec_LineWidth) \
+	X(glPointSize,         CmdRec_PointSize) \
+	X(glLineStipple,       CmdRec_LineStipple) \
+	X(glDepthMask,         CmdRec_DepthMask) \
+	X(glDepthFunc,         CmdRec_DepthFunc) \
+	X(glCullFace,          CmdRec_CullFace) \
+	X(glAlphaFunc,         CmdRec_AlphaFunc) \
+	X(glPolygonMode,       CmdRec_PolygonMode) \
+	X(glPolygonOffset,     CmdRec_PolygonOffset) \
+	X(glColorMask,         CmdRec_ColorMask) \
+	X(glScissor,           CmdRec_Scissor) \
+	X(glShadeModel,        CmdRec_ShadeModel) \
+	X(glFogf,              CmdRec_Fogf) \
+	X(glFogi,              CmdRec_Fogi) \
+	X(glFogfv,             CmdRec_Fogfv) \
+	X(glMatrixMode,        CmdRec_MatrixMode) \
+	X(glPushMatrix,        CmdRec_PushMatrix) \
+	X(glPopMatrix,         CmdRec_PopMatrix) \
+	X(glLoadIdentity,      CmdRec_LoadIdentity) \
+	X(glTranslatef,        CmdRec_Translatef) \
+	X(glScalef,            CmdRec_Scalef) \
+	X(glRotatef,           CmdRec_Rotatef) \
+	X(glMultMatrixf,       CmdRec_MultMatrixf) \
+	X(glLoadMatrixf,       CmdRec_LoadMatrixf) \
+	X(glRectf,             CmdRec_Rectf) \
+	X(glCallList,          CmdRec_CallList)
+
+// MATERIALIZERS: recordable by glNewList but not replayable by the executor;
+// hitting one converts the capture into a real GL display list mid-body.
+// Client-state calls (glBindBuffer, glVertexAttribPointer, glPush/Pop-
+// ClientAttrib, glGen*/glGet*) execute immediately under glNewList and are
+// deliberately NOT wrapped. X(gladName, (params), (args))
+#define CMDLIST_MATERIALIZERS(X) \
+	X(glNormal3f,          (GLfloat x, GLfloat y, GLfloat z), (x, y, z)) \
+	X(glNormal3fv,         (const GLfloat* v), (v)) \
+	X(glVertex4f,          (GLfloat x, GLfloat y, GLfloat z, GLfloat w), (x, y, z, w)) \
+	X(glTexCoord1f,        (GLfloat s), (s)) \
+	X(glTexCoord3f,        (GLfloat s, GLfloat t, GLfloat r), (s, t, r)) \
+	X(glTexCoord4f,        (GLfloat s, GLfloat t, GLfloat r, GLfloat q), (s, t, r, q)) \
+	X(glMultiTexCoord2f,   (GLenum tgt, GLfloat s, GLfloat t), (tgt, s, t)) \
+	X(glEdgeFlag,          (GLboolean flag), (flag)) \
+	X(glUseProgram,        (GLuint program), (program)) \
+	X(glUniform1i,         (GLint loc, GLint v0), (loc, v0)) \
+	X(glUniform1f,         (GLint loc, GLfloat v0), (loc, v0)) \
+	X(glUniform2f,         (GLint loc, GLfloat v0, GLfloat v1), (loc, v0, v1)) \
+	X(glUniform3f,         (GLint loc, GLfloat v0, GLfloat v1, GLfloat v2), (loc, v0, v1, v2)) \
+	X(glUniform4f,         (GLint loc, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3), (loc, v0, v1, v2, v3)) \
+	X(glUniform1fv,        (GLint loc, GLsizei count, const GLfloat* v), (loc, count, v)) \
+	X(glUniform2fv,        (GLint loc, GLsizei count, const GLfloat* v), (loc, count, v)) \
+	X(glUniform3fv,        (GLint loc, GLsizei count, const GLfloat* v), (loc, count, v)) \
+	X(glUniform4fv,        (GLint loc, GLsizei count, const GLfloat* v), (loc, count, v)) \
+	X(glUniformMatrix2fv,  (GLint loc, GLsizei count, GLboolean tr, const GLfloat* v), (loc, count, tr, v)) \
+	X(glUniformMatrix3fv,  (GLint loc, GLsizei count, GLboolean tr, const GLfloat* v), (loc, count, tr, v)) \
+	X(glUniformMatrix4fv,  (GLint loc, GLsizei count, GLboolean tr, const GLfloat* v), (loc, count, tr, v)) \
+	X(glPushAttrib,        (GLbitfield mask), (mask)) \
+	X(glPopAttrib,         (), ()) \
+	X(glTexEnvi,           (GLenum tgt, GLenum pn, GLint p), (tgt, pn, p)) \
+	X(glTexEnvf,           (GLenum tgt, GLenum pn, GLfloat p), (tgt, pn, p)) \
+	X(glTexEnvfv,          (GLenum tgt, GLenum pn, const GLfloat* p), (tgt, pn, p)) \
+	X(glTexGeni,           (GLenum coord, GLenum pn, GLint p), (coord, pn, p)) \
+	X(glTexGenf,           (GLenum coord, GLenum pn, GLfloat p), (coord, pn, p)) \
+	X(glTexGenfv,          (GLenum coord, GLenum pn, const GLfloat* p), (coord, pn, p)) \
+	X(glTexParameteri,     (GLenum tgt, GLenum pn, GLint p), (tgt, pn, p)) \
+	X(glTexParameterf,     (GLenum tgt, GLenum pn, GLfloat p), (tgt, pn, p)) \
+	X(glTexParameterfv,    (GLenum tgt, GLenum pn, const GLfloat* p), (tgt, pn, p)) \
+	X(glTexImage2D,        (GLenum tgt, GLint lvl, GLint ifmt, GLsizei w, GLsizei h, GLint b, GLenum fmt, GLenum type, const void* px), (tgt, lvl, ifmt, w, h, b, fmt, type, px)) \
+	X(glTexSubImage2D,     (GLenum tgt, GLint lvl, GLint x, GLint y, GLsizei w, GLsizei h, GLenum fmt, GLenum type, const void* px), (tgt, lvl, x, y, w, h, fmt, type, px)) \
+	X(glDrawArrays,        (GLenum mode, GLint first, GLsizei count), (mode, first, count)) \
+	X(glDrawElements,      (GLenum mode, GLsizei count, GLenum type, const void* idx), (mode, count, type, idx)) \
+	X(glDrawRangeElements, (GLenum mode, GLuint s, GLuint e, GLsizei count, GLenum type, const void* idx), (mode, s, e, count, type, idx)) \
+	X(glCallLists,         (GLsizei n, GLenum type, const void* lists), (n, type, lists)) \
+	X(glClear,             (GLbitfield mask), (mask)) \
+	X(glClearColor,        (GLclampf r, GLclampf g, GLclampf b, GLclampf a), (r, g, b, a)) \
+	X(glViewport,          (GLint x, GLint y, GLsizei w, GLsizei h), (x, y, w, h)) \
+	X(glDepthRange,        (GLdouble zn, GLdouble zf), (zn, zf)) \
+	X(glLightf,            (GLenum light, GLenum pn, GLfloat p), (light, pn, p)) \
+	X(glLightfv,           (GLenum light, GLenum pn, const GLfloat* p), (light, pn, p)) \
+	X(glLightModelf,       (GLenum pn, GLfloat p), (pn, p)) \
+	X(glLightModeli,       (GLenum pn, GLint p), (pn, p)) \
+	X(glLightModelfv,      (GLenum pn, const GLfloat* p), (pn, p)) \
+	X(glMaterialf,         (GLenum face, GLenum pn, GLfloat p), (face, pn, p)) \
+	X(glMaterialfv,        (GLenum face, GLenum pn, const GLfloat* p), (face, pn, p)) \
+	X(glStencilFunc,       (GLenum func, GLint ref, GLuint mask), (func, ref, mask)) \
+	X(glStencilOp,         (GLenum sfail, GLenum dpfail, GLenum dppass), (sfail, dpfail, dppass)) \
+	X(glStencilMask,       (GLuint mask), (mask)) \
+	X(glClipPlane,         (GLenum plane, const GLdouble* eq), (plane, eq)) \
+	X(glLogicOp,           (GLenum opcode), (opcode)) \
+	X(glRasterPos2f,       (GLfloat x, GLfloat y), (x, y)) \
+	X(glRasterPos3f,       (GLfloat x, GLfloat y, GLfloat z), (x, y, z)) \
+	X(glBitmap,            (GLsizei w, GLsizei h, GLfloat xo, GLfloat yo, GLfloat xm, GLfloat ym, const GLubyte* bm), (w, h, xo, yo, xm, ym, bm)) \
+	X(glDrawPixels,        (GLsizei w, GLsizei h, GLenum fmt, GLenum type, const void* px), (w, h, fmt, type, px)) \
+	X(glTranslated,        (GLdouble x, GLdouble y, GLdouble z), (x, y, z)) \
+	X(glScaled,            (GLdouble x, GLdouble y, GLdouble z), (x, y, z)) \
+	X(glRotated,           (GLdouble a, GLdouble x, GLdouble y, GLdouble z), (a, x, y, z)) \
+	X(glMultMatrixd,       (const GLdouble* m), (m)) \
+	X(glLoadMatrixd,       (const GLdouble* m), (m))
+
+// saved original glad pointers, valid while a capture is active. Member names
+// are ##-pasted (orig_...) so the glad object-like macros (#define glBegin
+// glad_glBegin) cannot rewrite them.
+#define CMDLIST_DECL_ORIG(name, ...) decltype(glad_##name) orig_##name = nullptr;
+static struct CmdListOrigPtrs {
+	CMDLIST_RECORDERS(CMDLIST_DECL_ORIG)
+	CMDLIST_MATERIALIZERS(CMDLIST_DECL_ORIG)
+} cmdOrig;
+#undef CMDLIST_DECL_ORIG
+
+static void CmdListSwapInRecorders();
+static void CmdListRestorePointers();
+static void CmdListMaterialize(const char* fnName);
+
+static inline LuaCommandList::Cmd& CmdListNew(LuaCommandList::Op op)
+{
+	LuaCommandList::Cmd& c = cmdCapture->cl->cmds.emplace_back();
+	c.op = op;
+	return c;
+}
+
+/* recorder implementations */
+
+static void APIENTRY CmdRec_Begin(GLenum mode)
+{
+	CmdListCapture& cap = *cmdCapture;
+	cap.inBegin = true;
+	cap.stream = {};
+	cap.stream.mode = mode;
+	// no texcoord inheritance across streams, exactly like the live modern
+	// gl.BeginEnd capture (gate-proven)
+	cap.curS = 0.0f;
+	cap.curT = 0.0f;
+	cap.sawTexInStream = false;
+}
+
+static void APIENTRY CmdRec_End()
+{
+	CmdListCapture& cap = *cmdCapture;
+	if (!cap.inBegin)
+		return;
+	cap.stream.textured = cap.sawTexInStream;
+	if (cap.stream.sawColor)
+		std::copy(cap.curColor, cap.curColor + 4, cap.stream.lastColorF);
+	cap.stream.lastS = cap.curS;
+	cap.stream.lastT = cap.curT;
+	cap.cl->streams.push_back(std::move(cap.stream));
+	cap.inBegin = false;
+	CmdListNew(LuaCommandList::Op::ImmStream).u0 = cap.cl->streams.size() - 1;
+}
+
+static inline void CmdRecVertex(float x, float y, float z)
+{
+	CmdListCapture& cap = *cmdCapture;
+	if (!cap.inBegin)
+		return; // GL_INVALID_OPERATION on the real pipeline; drop
+	cap.stream.posUV.insert(cap.stream.posUV.end(), { x, y, z, cap.curS, cap.curT });
+	cap.stream.colorsF.insert(cap.stream.colorsF.end(),
+		{ cap.curColor[0], cap.curColor[1], cap.curColor[2], cap.curColor[3] });
+	if (!cap.sawColorInList)
+		cap.stream.seedVertCount++;
+	if (!cap.sawTexInStream)
+		cap.stream.texSeedVertCount++;
+}
+
+static void APIENTRY CmdRec_Vertex2f(GLfloat x, GLfloat y) { CmdRecVertex(x, y, 0.0f); }
+static void APIENTRY CmdRec_Vertex3f(GLfloat x, GLfloat y, GLfloat z) { CmdRecVertex(x, y, z); }
+static void APIENTRY CmdRec_Vertex2fv(const GLfloat* v) { CmdRecVertex(v[0], v[1], 0.0f); }
+static void APIENTRY CmdRec_Vertex3fv(const GLfloat* v) { CmdRecVertex(v[0], v[1], v[2]); }
+
+static inline void CmdRecColor(float r, float g, float b, float a)
+{
+	CmdListCapture& cap = *cmdCapture;
+	cap.curColor[0] = r; cap.curColor[1] = g; cap.curColor[2] = b; cap.curColor[3] = a;
+	cap.sawColorInList = true;
+	if (cap.inBegin) {
+		cap.stream.sawColor = true;
+	} else {
+		LuaCommandList::Cmd& c = CmdListNew(LuaCommandList::Op::Color);
+		c.f[0] = r; c.f[1] = g; c.f[2] = b; c.f[3] = a;
+	}
+}
+
+static void APIENTRY CmdRec_Color3f(GLfloat r, GLfloat g, GLfloat b) { CmdRecColor(r, g, b, 1.0f); }
+static void APIENTRY CmdRec_Color4f(GLfloat r, GLfloat g, GLfloat b, GLfloat a) { CmdRecColor(r, g, b, a); }
+static void APIENTRY CmdRec_Color3fv(const GLfloat* v) { CmdRecColor(v[0], v[1], v[2], 1.0f); }
+static void APIENTRY CmdRec_Color4fv(const GLfloat* v) { CmdRecColor(v[0], v[1], v[2], v[3]); }
+static void APIENTRY CmdRec_Color3ub(GLubyte r, GLubyte g, GLubyte b) { CmdRecColor(r / 255.0f, g / 255.0f, b / 255.0f, 1.0f); }
+static void APIENTRY CmdRec_Color4ub(GLubyte r, GLubyte g, GLubyte b, GLubyte a) { CmdRecColor(r / 255.0f, g / 255.0f, b / 255.0f, a / 255.0f); }
+static void APIENTRY CmdRec_Color4ubv(const GLubyte* v) { CmdRecColor(v[0] / 255.0f, v[1] / 255.0f, v[2] / 255.0f, v[3] / 255.0f); }
+
+static inline void CmdRecTexCoord(float s, float t)
+{
+	CmdListCapture& cap = *cmdCapture;
+	if (cap.inBegin) {
+		cap.curS = s;
+		cap.curT = t;
+		cap.sawTexInStream = true;
+	} else {
+		// current-texcoord set outside Begin/End: recorded verbatim
+		LuaCommandList::Cmd& c = CmdListNew(LuaCommandList::Op::TexCoord);
+		c.f[0] = s; c.f[1] = t;
+	}
+}
+
+static void APIENTRY CmdRec_TexCoord2f(GLfloat s, GLfloat t) { CmdRecTexCoord(s, t); }
+static void APIENTRY CmdRec_TexCoord2fv(const GLfloat* v) { CmdRecTexCoord(v[0], v[1]); }
+
+static void APIENTRY CmdRec_Enable(GLenum e) { CmdListNew(LuaCommandList::Op::Enable).u0 = e; }
+static void APIENTRY CmdRec_Disable(GLenum e) { CmdListNew(LuaCommandList::Op::Disable).u0 = e; }
+static void APIENTRY CmdRec_BlendFunc(GLenum s, GLenum d) { auto& c = CmdListNew(LuaCommandList::Op::BlendFunc); c.u0 = s; c.u1 = d; }
+static void APIENTRY CmdRec_BlendFuncSeparate(GLenum sc, GLenum dc, GLenum sa, GLenum da) { auto& c = CmdListNew(LuaCommandList::Op::BlendFuncSeparate); c.u0 = sc; c.u1 = dc; c.u2 = sa; c.u3 = da; }
+static void APIENTRY CmdRec_BlendEquation(GLenum m) { CmdListNew(LuaCommandList::Op::BlendEquation).u0 = m; }
+static void APIENTRY CmdRec_BlendColor(GLclampf r, GLclampf g, GLclampf b, GLclampf a) { auto& c = CmdListNew(LuaCommandList::Op::BlendColor); c.f[0] = r; c.f[1] = g; c.f[2] = b; c.f[3] = a; }
+static void APIENTRY CmdRec_BindTexture(GLenum t, GLuint id) { auto& c = CmdListNew(LuaCommandList::Op::BindTexture); c.u0 = t; c.u1 = id; }
+static void APIENTRY CmdRec_ActiveTexture(GLenum u) { CmdListNew(LuaCommandList::Op::ActiveTexture).u0 = u; }
+static void APIENTRY CmdRec_LineWidth(GLfloat w) { CmdListNew(LuaCommandList::Op::LineWidth).f[0] = w; }
+static void APIENTRY CmdRec_PointSize(GLfloat s) { CmdListNew(LuaCommandList::Op::PointSize).f[0] = s; }
+static void APIENTRY CmdRec_LineStipple(GLint f, GLushort p) { auto& c = CmdListNew(LuaCommandList::Op::LineStipple); c.u0 = (uint32_t)f; c.u1 = p; }
+static void APIENTRY CmdRec_DepthMask(GLboolean f) { CmdListNew(LuaCommandList::Op::DepthMask).u0 = f; }
+static void APIENTRY CmdRec_DepthFunc(GLenum f) { CmdListNew(LuaCommandList::Op::DepthFunc).u0 = f; }
+static void APIENTRY CmdRec_CullFace(GLenum f) { CmdListNew(LuaCommandList::Op::CullFace).u0 = f; }
+static void APIENTRY CmdRec_AlphaFunc(GLenum f, GLclampf ref) { auto& c = CmdListNew(LuaCommandList::Op::AlphaFunc); c.u0 = f; c.f[0] = ref; }
+static void APIENTRY CmdRec_PolygonMode(GLenum face, GLenum mode) { auto& c = CmdListNew(LuaCommandList::Op::PolygonMode); c.u0 = face; c.u1 = mode; }
+static void APIENTRY CmdRec_PolygonOffset(GLfloat f, GLfloat u) { auto& c = CmdListNew(LuaCommandList::Op::PolygonOffset); c.f[0] = f; c.f[1] = u; }
+static void APIENTRY CmdRec_ColorMask(GLboolean r, GLboolean g, GLboolean b, GLboolean a) { auto& c = CmdListNew(LuaCommandList::Op::ColorMask); c.u0 = r; c.u1 = g; c.u2 = b; c.u3 = a; }
+static void APIENTRY CmdRec_Scissor(GLint x, GLint y, GLsizei w, GLsizei h) { auto& c = CmdListNew(LuaCommandList::Op::Scissor); c.u0 = (uint32_t)x; c.u1 = (uint32_t)y; c.u2 = (uint32_t)w; c.u3 = (uint32_t)h; }
+static void APIENTRY CmdRec_ShadeModel(GLenum m) { CmdListNew(LuaCommandList::Op::ShadeModel).u0 = m; }
+static void APIENTRY CmdRec_Fogf(GLenum pn, GLfloat p) { auto& c = CmdListNew(LuaCommandList::Op::Fogf); c.u0 = pn; c.f[0] = p; }
+static void APIENTRY CmdRec_Fogi(GLenum pn, GLint p) { auto& c = CmdListNew(LuaCommandList::Op::Fogi); c.u0 = pn; c.u1 = (uint32_t)p; }
+static void APIENTRY CmdRec_Fogfv(GLenum pn, const GLfloat* p)
+{
+	auto& c = CmdListNew(LuaCommandList::Op::Fogfv);
+	c.u0 = pn;
+	const int cnt = (pn == GL_FOG_COLOR) ? 4 : 1;
+	for (int i = 0; i < cnt; ++i)
+		c.f[i] = p[i];
+}
+
+static void APIENTRY CmdRec_MatrixMode(GLenum m) { CmdListNew(LuaCommandList::Op::MatrixMode).u0 = m; }
+static void APIENTRY CmdRec_PushMatrix() { CmdListNew(LuaCommandList::Op::PushMatrix); }
+static void APIENTRY CmdRec_PopMatrix() { CmdListNew(LuaCommandList::Op::PopMatrix); }
+static void APIENTRY CmdRec_LoadIdentity() { CmdListNew(LuaCommandList::Op::LoadIdentity); }
+static void APIENTRY CmdRec_Translatef(GLfloat x, GLfloat y, GLfloat z) { auto& c = CmdListNew(LuaCommandList::Op::Translate); c.f[0] = x; c.f[1] = y; c.f[2] = z; }
+static void APIENTRY CmdRec_Scalef(GLfloat x, GLfloat y, GLfloat z) { auto& c = CmdListNew(LuaCommandList::Op::Scale); c.f[0] = x; c.f[1] = y; c.f[2] = z; }
+static void APIENTRY CmdRec_Rotatef(GLfloat a, GLfloat x, GLfloat y, GLfloat z) { auto& c = CmdListNew(LuaCommandList::Op::Rotate); c.f[0] = a; c.f[1] = x; c.f[2] = y; c.f[3] = z; }
+static void APIENTRY CmdRec_MultMatrixf(const GLfloat* m) { CmdListNew(LuaCommandList::Op::MultMatrix).ext.assign(m, m + 16); }
+static void APIENTRY CmdRec_LoadMatrixf(const GLfloat* m) { CmdListNew(LuaCommandList::Op::LoadMatrix).ext.assign(m, m + 16); }
+static void APIENTRY CmdRec_Rectf(GLfloat x1, GLfloat y1, GLfloat x2, GLfloat y2) { auto& c = CmdListNew(LuaCommandList::Op::Rect); c.f[0] = x1; c.f[1] = y1; c.f[2] = x2; c.f[3] = y2; }
+static void APIENTRY CmdRec_CallList(GLuint list) { CmdListNew(LuaCommandList::Op::CallGLList).u0 = list; }
+
+/* materialize-and-forward wrappers: convert the capture into a real GL list,
+ * then forward the call so it records natively (pointers restored first) */
+#define CMDLIST_DEF_MAT(name, params, args) \
+	static void APIENTRY CmdMat_##name params { CmdListMaterialize(#name); name args; }
+CMDLIST_MATERIALIZERS(CMDLIST_DEF_MAT)
+#undef CMDLIST_DEF_MAT
+
+#define CMDLIST_SWAP_REC(name, rec) cmdOrig.orig_##name = glad_##name; glad_##name = rec;
+#define CMDLIST_SWAP_MAT(name, ...) cmdOrig.orig_##name = glad_##name; glad_##name = CmdMat_##name;
+static void CmdListSwapInRecorders()
+{
+	CMDLIST_RECORDERS(CMDLIST_SWAP_REC)
+	CMDLIST_MATERIALIZERS(CMDLIST_SWAP_MAT)
+}
+#undef CMDLIST_SWAP_REC
+#undef CMDLIST_SWAP_MAT
+
+#define CMDLIST_RESTORE(name, ...) glad_##name = cmdOrig.orig_##name;
+static void CmdListRestorePointers()
+{
+	CMDLIST_RECORDERS(CMDLIST_RESTORE)
+	CMDLIST_MATERIALIZERS(CMDLIST_RESTORE)
+}
+#undef CMDLIST_RESTORE
+
+// Emit a captured stream into an OPEN real glNewList compile as exact legacy
+// immediate mode. Seed-class vertices (before the list's first glColor /
+// the stream's first glTexCoord) are emitted WITHOUT a preceding color /
+// texcoord so the real list keeps call-time inherit semantics. leaveOpen
+// (materialize triggered inside glBegin..glEnd): the glBegin is left open for
+// the continuing body, with the capture-current color/texcoord re-established.
+static void CmdListEmitStreamIntoCompile(const LuaCommandList::ImmStreamData& s, bool leaveOpen, const CmdListCapture* cap)
+{
+	const size_t n = s.posUV.size() / 5;
+	glBegin(s.mode);
+	for (size_t i = 0; i < n; ++i) {
+		const float* v = &s.posUV[i * 5];
+		if (i >= s.texSeedVertCount)
+			glTexCoord2f(v[3], v[4]);
+		if (i >= s.seedVertCount)
+			glColor4fv(&s.colorsF[i * 4]);
+		glVertex3f(v[0], v[1], v[2]);
+	}
+	if (leaveOpen) {
+		if (cap->sawColorInList)
+			glColor4fv(cap->curColor);
+		if (cap->sawTexInStream)
+			glTexCoord2f(cap->curS, cap->curT);
+		return;
+	}
+	glEnd();
+	// exact end-state inside the compile: a body color/texcoord after the last
+	// vertex must still be the recorded current state
+	if (s.sawColor)
+		glColor4fv(s.lastColorF);
+	if (s.textured)
+		glTexCoord2f(s.lastS, s.lastT);
+}
+
+// replay captured commands into an OPEN real glNewList compile (materialize,
+// or gl.CallList of a captured list inside a real list compile)
+static void CmdListEmitIntoCompile(const LuaCommandList& cl)
+{
+	using Op = LuaCommandList::Op;
+	for (const LuaCommandList::Cmd& c : cl.cmds) {
+		switch (c.op) {
+			case Op::Enable:            glEnable(c.u0); break;
+			case Op::Disable:           glDisable(c.u0); break;
+			case Op::BlendFunc:         glBlendFunc(c.u0, c.u1); break;
+			case Op::BlendFuncSeparate: glBlendFuncSeparate(c.u0, c.u1, c.u2, c.u3); break;
+			case Op::BlendEquation:     glBlendEquation(c.u0); break;
+			case Op::BlendColor:        glBlendColor(c.f[0], c.f[1], c.f[2], c.f[3]); break;
+			case Op::BindTexture:       glBindTexture(c.u0, c.u1); break;
+			case Op::ActiveTexture:     glActiveTexture(c.u0); break;
+			case Op::LineWidth:         glLineWidth(c.f[0]); break;
+			case Op::PointSize:         glPointSize(c.f[0]); break;
+			case Op::LineStipple:       glLineStipple((GLint)c.u0, (GLushort)c.u1); break;
+			case Op::DepthMask:         glDepthMask((GLboolean)c.u0); break;
+			case Op::DepthFunc:         glDepthFunc(c.u0); break;
+			case Op::CullFace:          glCullFace(c.u0); break;
+			case Op::AlphaFunc:         glAlphaFunc(c.u0, c.f[0]); break;
+			case Op::PolygonMode:       glPolygonMode(c.u0, c.u1); break;
+			case Op::PolygonOffset:     glPolygonOffset(c.f[0], c.f[1]); break;
+			case Op::ColorMask:         glColorMask((GLboolean)c.u0, (GLboolean)c.u1, (GLboolean)c.u2, (GLboolean)c.u3); break;
+			case Op::Scissor:           glScissor((GLint)c.u0, (GLint)c.u1, (GLsizei)c.u2, (GLsizei)c.u3); break;
+			case Op::ShadeModel:        glShadeModel(c.u0); break;
+			case Op::Fogf:              glFogf(c.u0, c.f[0]); break;
+			case Op::Fogi:              glFogi(c.u0, (GLint)c.u1); break;
+			case Op::Fogfv:             glFogfv(c.u0, c.f); break;
+			case Op::Color:             glColor4fv(c.f); break;
+			case Op::TexCoord:          glTexCoord2f(c.f[0], c.f[1]); break;
+			case Op::MatrixMode:        glMatrixMode(c.u0); break;
+			case Op::PushMatrix:        glPushMatrix(); break;
+			case Op::PopMatrix:         glPopMatrix(); break;
+			case Op::LoadIdentity:      glLoadIdentity(); break;
+			case Op::Translate:         glTranslatef(c.f[0], c.f[1], c.f[2]); break;
+			case Op::Scale:             glScalef(c.f[0], c.f[1], c.f[2]); break;
+			case Op::Rotate:            glRotatef(c.f[0], c.f[1], c.f[2], c.f[3]); break;
+			case Op::MultMatrix:        glMultMatrixf(c.ext.data()); break;
+			case Op::LoadMatrix:        glLoadMatrixf(c.ext.data()); break;
+			case Op::Rect:              glRectf(c.f[0], c.f[1], c.f[2], c.f[3]); break;
+			case Op::CallGLList:        glCallList(c.u0); break;
+			case Op::ImmStream:         CmdListEmitStreamIntoCompile(cl.streams[c.u0], false, nullptr); break;
+		}
+	}
+}
+
+static void CmdListMaterialize(const char* fnName)
+{
+	CmdListCapture& cap = *cmdCapture;
+	assert(!cap.materialized);
+	CmdListRestorePointers();
+
+	static std::unordered_set<std::string> cmdMatWarned;
+	if (cmdMatWarned.insert(fnName).second)
+		LOG_L(L_INFO, "gl.CreateList: %s is not command-list capturable; materializing as a GL display list", fnName);
+
+	cap.materializeList = glGenLists(1);
+	glNewList(cap.materializeList, GL_COMPILE);
+	CmdListEmitIntoCompile(*cap.cl);
+	if (cap.inBegin)
+		CmdListEmitStreamIntoCompile(cap.stream, true, &cap);
+
+	cap.cl->cmds.clear();
+	cap.cl->streams.clear();
+	cap.materialized = true;
+}
+
+// start capturing (false if a capture is already active: no nesting)
+static bool CmdListBeginCapture()
+{
+	if (cmdCapture != nullptr)
+		return false;
+	cmdCapture = new CmdListCapture();
+	CmdListSwapInRecorders();
+	return true;
+}
+
+// finish the capture: restores pointers; when the capture materialized the
+// open compile is closed and its real list id returned via realListOut.
+// keep=false (body error) discards everything.
+static std::shared_ptr<LuaCommandList> CmdListEndCapture(bool keep, GLuint& realListOut)
+{
+	CmdListCapture* cap = cmdCapture;
+	realListOut = 0;
+	std::shared_ptr<LuaCommandList> result;
+
+	if (cap->materialized) {
+		glEndList(); // pointers were restored at materialize time
+		if (keep) {
+			realListOut = cap->materializeList;
+		} else {
+			glDeleteLists(cap->materializeList, 1);
+		}
+	} else {
+		CmdListRestorePointers();
+		if (keep)
+			result = cap->cl;
+	}
+
+	delete cap;
+	cmdCapture = nullptr;
+	return result;
+}
+
+// splice a previously captured list into the ACTIVE capture
+// (gl.CallList of a captured list inside a capturing gl.CreateList body)
+static void CmdListInline(const LuaCommandList& src)
+{
+	CmdListCapture& cap = *cmdCapture;
+	for (const LuaCommandList::Cmd& c : src.cmds) {
+		if (c.op == LuaCommandList::Op::ImmStream) {
+			LuaCommandList::ImmStreamData s = src.streams[c.u0];
+			if (cap.sawColorInList && s.seedVertCount > 0) {
+				// the nested list's seed vertices inherit the capture-current color
+				for (uint32_t i = 0; i < s.seedVertCount; ++i)
+					std::copy(cap.curColor, cap.curColor + 4, &s.colorsF[i * 4]);
+				s.seedVertCount = 0;
+			}
+			if (s.sawColor) {
+				std::copy(s.lastColorF, s.lastColorF + 4, cap.curColor);
+				cap.sawColorInList = true;
+			}
+			cap.cl->streams.push_back(std::move(s));
+			CmdListNew(LuaCommandList::Op::ImmStream).u0 = cap.cl->streams.size() - 1;
+			continue;
+		}
+		if (c.op == LuaCommandList::Op::Color) {
+			std::copy(c.f, c.f + 4, cap.curColor);
+			cap.sawColorInList = true;
+		}
+		cap.cl->cmds.push_back(c);
+	}
+}
+
+// the modern gl.Rect draw, shared verbatim by LuaOpenGL::Rect and the
+// command-list replay (see Rect for the semantics comments)
+static void DrawRectModern(float x1, float y1, float x2, float y2)
+{
+	GLfloat cc[4];
+	glGetFloatv(GL_CURRENT_COLOR, cc);
+	luaImmBuffer.SetBackend(LuaImmediateBuffer::Backend::Modern);
+	SetImmBufferFixedFunctionMatrices();
+	luaImmBuffer.Begin(GL_TRIANGLES);
+	luaImmBuffer.SeedColor(cc);
+	luaImmBuffer.Vertex(x1, y1, 0.0f); luaImmBuffer.Vertex(x2, y1, 0.0f); luaImmBuffer.Vertex(x2, y2, 0.0f);
+	luaImmBuffer.Vertex(x1, y1, 0.0f); luaImmBuffer.Vertex(x2, y2, 0.0f); luaImmBuffer.Vertex(x1, y2, 0.0f);
+	luaImmBuffer.End();
+}
+
+// replay a captured stream through the live backend dispatch -- exactly the
+// live gl.BeginEnd path: modern when the gates allow, exact legacy otherwise
+static void CmdListReplayStream(const LuaCommandList::ImmStreamData& s)
+{
+	if (s.posUV.empty())
+		return;
+
+	// seed-class vertices (and the stream's inherited color) take the
+	// REPLAY-time current color: real display lists give pre-first-glColor
+	// vertices the call-time color
+	GLfloat cc[4];
+	glGetFloatv(GL_CURRENT_COLOR, cc);
+
+	const size_t n = s.posUV.size() / 5;
+	const float* colors = s.colorsF.data();
+	std::vector<float> patched;
+	if (s.seedVertCount > 0) {
+		patched = s.colorsF;
+		for (uint32_t i = 0; i < s.seedVertCount; ++i)
+			std::copy(cc, cc + 4, &patched[i * 4]);
+		colors = patched.data();
+	}
+
+	luaImmBuffer.LoadCaptured(s.mode, s.textured, n, s.posUV.data(), colors,
+	                          s.sawColor, cc, s.sawColor ? s.lastColorF : cc);
+
+	if (s.mode == GL_POINTS)
+		WorkaroundATIPointSizeBug();
+
+	const bool modernOK = LuaOpenGL::GetModernImmediate() && NoShaderBound() && PolygonModeFill();
+	if (modernOK) {
+		SetImmBufferFixedFunctionMatrices();
+		luaImmBuffer.FlushModern(); // internal gates (dense MV, texenv, fog) fall back to the exact legacy replay
+	} else {
+		luaImmBuffer.FlushLegacy();
+	}
+	luaImmBuffer.Clear();
+}
+
+// replay a captured list LIVE (gl.CallList outside any list compile): real GL
+// for state, matrix ops mirrored into the FF matrix mirror (this is what
+// kills the mirror Taint for captured lists), geometry through the live
+// backend dispatch
+static void CmdListReplayLive(const LuaCommandList& cl)
+{
+	using Op = LuaCommandList::Op;
+	GLMatrixStateTracker* mirror = FFMirrorOps(); // non-null: replay never runs while compiling
+
+	for (const LuaCommandList::Cmd& c : cl.cmds) {
+		switch (c.op) {
+			case Op::Enable:            glEnable(c.u0); break;
+			case Op::Disable:           glDisable(c.u0); break;
+			case Op::BlendFunc:         glBlendFunc(c.u0, c.u1); break;
+			case Op::BlendFuncSeparate: glBlendFuncSeparate(c.u0, c.u1, c.u2, c.u3); break;
+			case Op::BlendEquation:     glBlendEquation(c.u0); break;
+			case Op::BlendColor:        glBlendColor(c.f[0], c.f[1], c.f[2], c.f[3]); break;
+			case Op::BindTexture:       glBindTexture(c.u0, c.u1); break;
+			case Op::ActiveTexture:     glActiveTexture(c.u0); break;
+			case Op::LineWidth:         glLineWidth(c.f[0]); break;
+			case Op::PointSize:         glPointSize(c.f[0]); break;
+			case Op::LineStipple:       glLineStipple((GLint)c.u0, (GLushort)c.u1); break;
+			case Op::DepthMask:         glDepthMask((GLboolean)c.u0); break;
+			case Op::DepthFunc:         glDepthFunc(c.u0); break;
+			case Op::CullFace:          glCullFace(c.u0); break;
+			case Op::AlphaFunc:         glAlphaFunc(c.u0, c.f[0]); break;
+			case Op::PolygonMode:       glPolygonMode(c.u0, c.u1); break;
+			case Op::PolygonOffset:     glPolygonOffset(c.f[0], c.f[1]); break;
+			case Op::ColorMask:         glColorMask((GLboolean)c.u0, (GLboolean)c.u1, (GLboolean)c.u2, (GLboolean)c.u3); break;
+			case Op::Scissor:           glScissor((GLint)c.u0, (GLint)c.u1, (GLsizei)c.u2, (GLsizei)c.u3); break;
+			case Op::ShadeModel:        glShadeModel(c.u0); break;
+			case Op::Fogf:              glFogf(c.u0, c.f[0]); break;
+			case Op::Fogi:              glFogi(c.u0, (GLint)c.u1); break;
+			case Op::Fogfv:             glFogfv(c.u0, c.f); break;
+			case Op::Color:             glColor4fv(c.f); break;
+			case Op::TexCoord:          glTexCoord2f(c.f[0], c.f[1]); break;
+			case Op::MatrixMode: {
+				glMatrixMode(c.u0);
+				if (mirror != nullptr)
+					mirror->SetMatrixMode(c.u0);
+			} break;
+			case Op::PushMatrix: {
+				glPushMatrix();
+				if (mirror != nullptr)
+					mirror->PushMatrix();
+			} break;
+			case Op::PopMatrix: {
+				glPopMatrix();
+				if (mirror != nullptr)
+					mirror->PopMatrix();
+			} break;
+			case Op::LoadIdentity: {
+				glLoadIdentity();
+				if (mirror != nullptr)
+					mirror->LoadIdentity();
+			} break;
+			case Op::Translate: {
+				glTranslatef(c.f[0], c.f[1], c.f[2]);
+				if (mirror != nullptr)
+					mirror->Translate(c.f[0], c.f[1], c.f[2]);
+			} break;
+			case Op::Scale: {
+				glScalef(c.f[0], c.f[1], c.f[2]);
+				if (mirror != nullptr)
+					mirror->Scale(c.f[0], c.f[1], c.f[2]);
+			} break;
+			case Op::Rotate: {
+				glRotatef(c.f[0], c.f[1], c.f[2], c.f[3]);
+				if (mirror != nullptr)
+					mirror->Rotate(c.f[0], c.f[1], c.f[2], c.f[3]);
+			} break;
+			case Op::MultMatrix: {
+				glMultMatrixf(c.ext.data());
+				if (mirror != nullptr) {
+					CMatrix44f m;
+					std::copy(c.ext.begin(), c.ext.end(), m.m);
+					mirror->MultMatrix(m);
+				}
+			} break;
+			case Op::LoadMatrix: {
+				glLoadMatrixf(c.ext.data());
+				if (mirror != nullptr) {
+					CMatrix44f m;
+					std::copy(c.ext.begin(), c.ext.end(), m.m);
+					mirror->LoadMatrix(m);
+				}
+			} break;
+			case Op::Rect: {
+				// exactly the live gl.Rect dispatch
+				const bool modernOK = LuaOpenGL::GetModernImmediate() && NoShaderBound() && PolygonModeFill();
+				if (modernOK) {
+					DrawRectModern(c.f[0], c.f[1], c.f[2], c.f[3]);
+				} else {
+					glRectf(c.f[0], c.f[1], c.f[2], c.f[3]);
+				}
+			} break;
+			case Op::CallGLList: {
+				// nested REAL display list (materialized or legacy-compiled):
+				// its recorded matrix ops are invisible to the mirror
+				glCallList(c.u0);
+				GL::ffMirror.Taint();
+			} break;
+			case Op::ImmStream:
+				CmdListReplayStream(cl.streams[c.u0]);
+				break;
+		}
+	}
 }
 
 // per-Lua-caller dedup of LuaGLCompareMode results so the log isn't spammed.
@@ -379,6 +1087,7 @@ void LuaOpenGL::Init()
 
 	modernImmediate = configHandler->GetBool("LuaModernGLBackend");
 	glCompareMode = configHandler->GetBool("LuaGLCompareMode");
+	cmdListsEnabled = configHandler->GetBool("LuaCommandLists");
 	// the modern backend needs a CPU-side MVP; force matrix tracking on with it.
 	trackMatrices = configHandler->GetBool("LuaMatrixTracking") || modernImmediate;
 }
@@ -3047,21 +3756,11 @@ int LuaOpenGL::Rect(lua_State* L)
 	const bool noShader = NoShaderBound();
 
 	const auto drawLegacy = [&]() { glRectf(x1, y1, x2, y2); };
-	const auto drawModern = [&]() {
-		// glRectf fills with the FF CURRENT color (which dlist replays/fonts can
-		// move without gl.Color) and leaves it untouched; seed-not-Color gives the
-		// flush the same fill and the same (unchanged) end-state
-		GLfloat cc[4];
-		glGetFloatv(GL_CURRENT_COLOR, cc);
-		luaImmBuffer.SetBackend(LuaImmediateBuffer::Backend::Modern);
-		SetImmBufferFixedFunctionMatrices();
-		luaImmBuffer.Begin(GL_TRIANGLES);
-		luaImmBuffer.SeedColor(cc);
-		// glRectf fills the quad (x1,y1)-(x2,y2); emit it as two CCW triangles
-		luaImmBuffer.Vertex(x1, y1, 0.0f); luaImmBuffer.Vertex(x2, y1, 0.0f); luaImmBuffer.Vertex(x2, y2, 0.0f);
-		luaImmBuffer.Vertex(x1, y1, 0.0f); luaImmBuffer.Vertex(x2, y2, 0.0f); luaImmBuffer.Vertex(x1, y2, 0.0f);
-		luaImmBuffer.End();
-	};
+	// glRectf fills with the FF CURRENT color (which dlist replays/fonts can
+	// move without gl.Color) and leaves it untouched; DrawRectModern's
+	// seed-not-Color gives the flush the same fill and the same (unchanged)
+	// end-state, emitting the quad as two CCW triangles
+	const auto drawModern = [&]() { DrawRectModern(x1, y1, x2, y2); };
 
 	// inside a display-list compile the modern flush is not list-safe (the recorded
 	// glDrawElements aliases the stream VBO, glUseProgram/glUniform get recorded and
@@ -6500,11 +7199,29 @@ int LuaOpenGL::CreateList(lua_State* L)
 			"Incorrect arguments to gl.CreateList(func [, arg1, arg2, etc ...])");
 	}
 
-	// generate the list id
-	const GLuint list = glGenLists(1);
-	if (list == 0) {
-		lua_pushnumber(L, 0);
-		return 1;
+	// LuaCommandLists: capture the body instead of compiling a GL list (no
+	// nesting -- an inner gl.CreateList inside an active capture compiles a
+	// REAL list below, with the capture suspended for its duration)
+	const bool capture = cmdListsEnabled && (cmdCapture == nullptr) && CmdListBeginCapture();
+	const bool suspend = !capture && (cmdCapture != nullptr) && !cmdCapture->materialized;
+	if (suspend && (cmdCapture->suspendDepth++ == 0))
+		CmdListRestorePointers();
+
+	const auto resumeSuspended = []() {
+		if (cmdCapture != nullptr && !cmdCapture->materialized && (--cmdCapture->suspendDepth == 0))
+			CmdListSwapInRecorders();
+	};
+
+	GLuint list = 0;
+	if (!capture) {
+		// generate the list id
+		list = glGenLists(1);
+		if (list == 0) {
+			if (suspend)
+				resumeSuspended();
+			lua_pushnumber(L, 0);
+			return 1;
+		}
 	}
 
 	// save the current state
@@ -6512,7 +7229,8 @@ int LuaOpenGL::CreateList(lua_State* L)
 	SetDrawingEnabled(L, true);
 
 	// build the list with the specified lua call/args
-	glNewList(list, GL_COMPILE);
+	if (!capture)
+		glNewList(list, GL_COMPILE);
 	SMatrixStateData prevMSD = GetLuaContextData(L)->glMatrixTracker.PushMatrixState(true);
 	const bool prevCompiling = compilingDisplayList;
 	compilingDisplayList = true; // recorded gl.* matrix ops must not reach the FF mirror
@@ -6520,21 +7238,35 @@ int LuaOpenGL::CreateList(lua_State* L)
 	compilingDisplayList = prevCompiling;
 	SMatrixStateData matData = GetLuaContextData(L)->glMatrixTracker.GetMatrixState();
 	GetLuaContextData(L)->glMatrixTracker.PopMatrixState(prevMSD, false);
-	glEndList();
+
+	std::shared_ptr<LuaCommandList> cl;
+	if (capture) {
+		// list stays 0 for a pure capture; a materialized capture hands back
+		// the real GL list it fell back to (already glEndList-ed, or deleted
+		// on error)
+		cl = CmdListEndCapture(error == 0, list);
+	} else {
+		glEndList();
+	}
 
 	if (error != 0) {
-		glDeleteLists(list, 1);
+		if (list != 0)
+			glDeleteLists(list, 1);
 		LOG_L(L_ERROR, "gl.CreateList: error(%i) = %s",
 				error, lua_tostring(L, -1));
 		lua_pushnumber(L, 0);
 	}
 	else {
 		CLuaDisplayLists& displayLists = CLuaHandle::GetActiveDisplayLists(L);
-		const unsigned int index = displayLists.NewDList(list, matData);
+		const unsigned int index = (cl != nullptr)
+				? displayLists.NewCmdList(cl, matData)
+				: displayLists.NewDList(list, matData);
 		lua_pushnumber(L, index);
 	}
 
 	// restore the state
+	if (suspend)
+		resumeSuspended();
 	SetDrawingEnabled(L, origDrawingEnabled);
 
 	return 1;
@@ -6552,18 +7284,36 @@ int LuaOpenGL::CallList(lua_State* L)
 	const unsigned int listIndex = luaL_checkint(L, 1);
 	const CLuaDisplayLists& displayLists = CLuaHandle::GetActiveDisplayLists(L);
 	const unsigned int dlist = displayLists.GetDList(listIndex);
-	if (dlist) {
-		SMatrixStateData matrixStateData = displayLists.GetMatrixState(listIndex);
-		int error = GetLuaContextData(L)->glMatrixTracker.ApplyMatrixState(matrixStateData);
-		if (error == 0) {
-			glCallList(dlist);
-			// the list may replay recorded matrix ops the FF mirror cannot see;
-			// consumers fall back to the glGetFloatv bridge until the next
-			// per-callin scaffolding reseed
-			GL::ffMirror.Taint();
-			return 0;
-		}
+	const LuaCommandList* cl = displayLists.GetCmdList(listIndex);
+	if (dlist == 0 && cl == nullptr)
+		return 0;
+
+	SMatrixStateData matrixStateData = displayLists.GetMatrixState(listIndex);
+	const int error = GetLuaContextData(L)->glMatrixTracker.ApplyMatrixState(matrixStateData);
+	if (error != 0)
 		luaL_error(L, "Matrix stack %sflow in gl.CallList", (error > 0) ? "over" : "under");
+
+	if (dlist != 0) {
+		// real display list (legacy-compiled, or a materialized capture). While
+		// a capture is active glCallList is pointer-swapped and RECORDS a
+		// CallGLList command instead of executing.
+		glCallList(dlist);
+		// the list may replay recorded matrix ops the FF mirror cannot see;
+		// consumers fall back to the glGetFloatv bridge until the next
+		// per-callin scaffolding reseed
+		GL::ffMirror.Taint();
+		return 0;
+	}
+
+	if (CmdListCapturing()) {
+		// captured list called inside a capturing gl.CreateList body: splice
+		CmdListInline(*cl);
+	} else if (compilingDisplayList) {
+		// a real GL compile is open (materialized capture, or a nested legacy
+		// compile inside a suspended capture): record the exact legacy replay
+		CmdListEmitIntoCompile(*cl);
+	} else {
+		CmdListReplayLive(*cl);
 	}
 	return 0;
 }
