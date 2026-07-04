@@ -84,6 +84,8 @@ public:
 	const CMatrix44f& GetProjMat(unsigned int idx) const { return projMats[idx]; }
 
 	void ApplyConstraintsMatrix() const;
+	// CPU-side value of ApplyConstraintsMatrix, for the FF matrix mirror
+	CMatrix44f GetConstraintsMatrix() const;
 
 protected:
 	enum MINIMAP_POSITION { MINIMAP_POSITION_LEFT, MINIMAP_POSITION_RIGHT, MINIMAP_POSITION_CENTER };

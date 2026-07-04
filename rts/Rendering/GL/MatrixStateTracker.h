@@ -160,14 +160,41 @@ public:
 		CurStack().current = CurStack().current * rot;
 	}
 
-	void Ortho(double l, double r, double b, double t, double n, double f) {
-		CurStack().current = CurStack().current * CMatrix44f::OrthoProj(
-			float(l), float(r), float(b), float(t), float(n), float(f));
+	// The engine's glOrtho/glFrustum macros route through __spring_glOrtho /
+	// __spring_glFrustum (myGL.h), which under clip-space control PRE-apply
+	// Translate(0,0,0.5)*Scale(1,1,0.5) before the projection -- mirror that
+	// composition exactly so the tracked value matches what lands in GL.
+	static CMatrix44f ComposeSpringOrtho(bool clipSpaceControl, double l, double r, double b, double t, double n, double f) {
+		CMatrix44f m;
+		if (clipSpaceControl) {
+			m.Translate(0.0f, 0.0f, 0.5f);
+			m.Scale(float3(1.0f, 1.0f, 0.5f));
+		}
+		return m * CMatrix44f::OrthoProj(float(l), float(r), float(b), float(t), float(n), float(f));
 	}
 
-	void Frustum(double l, double r, double b, double t, double n, double f) {
-		CurStack().current = CurStack().current * CMatrix44f::PerspProj(
-			float(l), float(r), float(b), float(t), float(n), float(f));
+	static CMatrix44f ComposeSpringFrustum(bool clipSpaceControl, double l, double r, double b, double t, double n, double f) {
+		CMatrix44f m;
+		if (clipSpaceControl) {
+			m.Translate(0.0f, 0.0f, 0.5f);
+			m.Scale(float3(1.0f, 1.0f, 0.5f));
+		}
+		return m * CMatrix44f::PerspProj(float(l), float(r), float(b), float(t), float(n), float(f));
+	}
+
+	void Ortho(double l, double r, double b, double t, double n, double f, bool clipSpaceControl = false) {
+		CurStack().current = CurStack().current * ComposeSpringOrtho(clipSpaceControl, l, r, b, t, n, f);
+	}
+
+	void Frustum(double l, double r, double b, double t, double n, double f, bool clipSpaceControl = false) {
+		CurStack().current = CurStack().current * ComposeSpringFrustum(clipSpaceControl, l, r, b, t, n, f);
+	}
+
+	// Seed one mode's current value from an absolute engine-side load (the
+	// LuaOpenGL per-callin scaffolding's glLoadMatrixf/glLoadIdentity sequences).
+	// Leaves stacks/depths untouched -- glLoadMatrixf does not pop either.
+	void SeedMatrix(unsigned int mode, const CMatrix44f& m) {
+		modeStacks[ModeToIndex(mode)].current = m;
 	}
 
 
@@ -250,5 +277,42 @@ private:
 		}
 	}
 };
+
+
+namespace GL {
+	// Global CPU mirror of the fixed-function matrix state (Phase-0 prerequisite of
+	// the modern-GL migration): the LuaOpenGL per-callin scaffolding seeds it with
+	// the exact matrices it loads, the tracked gl.* matrix callouts replay their ops
+	// into it, and the modern immediate backend reads its MVP from here instead of
+	// the glGetFloatv bridge -- the step that lets the FF matrix SET-calls disappear
+	// later without the modern paths losing their transform.
+	//
+	// `tainted`: gl.CallList can replay RECORDED matrix ops the mirror cannot see.
+	// A balanced push/mutate/pop inside the list nets out, but an absolute load or
+	// unbalanced transform desyncs the mirror -- so CallList taints it and consumers
+	// fall back to the glGetFloatv bridge until the next per-callin reseed.
+	//
+	// `shadowCompare`: set by the whole-frame A/B compare; consumers then verify the
+	// mirror against glGetFloatv on every read and log divergences (the enforcement
+	// tool for the mirror's correctness, alongside the pixel gate itself).
+	struct FFMatrixMirror {
+		GLMatrixStateTracker tracker;
+		bool tainted = true; // until the first scaffolding reseed
+		bool shadowCompare = false;
+
+		bool Valid() const { return !tainted; }
+		void Taint() { tainted = true; }
+		void FinishSeed(unsigned int mode /*= GL_MODELVIEW*/) {
+			tracker.SetMatrixMode(mode);
+			tainted = false;
+		}
+
+		CMatrix44f GetMVP() const {
+			return tracker.GetMatrix(GL_PROJECTION) * tracker.GetMatrix(GL_MODELVIEW);
+		}
+	};
+
+	inline FFMatrixMirror ffMirror;
+}
 
 #endif

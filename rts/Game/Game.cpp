@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "Rendering/GL/myGL.h"
+#include "Rendering/GL/MatrixStateTracker.h" // GL::ffMirror (A/B shadow-compare toggle)
 
 #include <cstdlib> // getenv (AB_FORCE_LEGACY diagnostic)
 #include <Rml/Backends/RmlUi_Backend.h>
@@ -1647,6 +1648,9 @@ bool CGame::Draw() {
 	static int abDrawCount = 0;
 	const bool abActive = abCompare && !skipping && (++abDrawCount > abWarmup);
 	LuaUnsyncedRead::SetABCompareActive(abActive);
+	// shadow-verify the FF matrix mirror against glGetFloatv on every modern read
+	// while comparing (see GetCurrentFixedFunctionMVP in LuaOpenGL.cpp)
+	GL::ffMirror.shadowCompare = abActive;
 
 	if (UpdateUnsynced(currentTimePreUpdate))
 		return false;

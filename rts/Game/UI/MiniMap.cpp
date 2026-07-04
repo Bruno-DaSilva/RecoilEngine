@@ -1074,6 +1074,22 @@ void CMiniMap::ApplyConstraintsMatrix() const
 	}
 }
 
+// CPU-side value of ApplyConstraintsMatrix (same branches, composed T*S) for the
+// fixed-function matrix mirror (GL::ffMirror) -- must stay in sync with the above.
+CMatrix44f CMiniMap::GetConstraintsMatrix() const
+{
+	CMatrix44f m;
+	if (!renderToTexture) {
+		if (globalRendering->dualScreenMode) {
+			m.Translate(curPos.x, curPos.y, 0.0f);
+		} else {
+			m.Translate(curPos.x * globalRendering->pixelX, curPos.y * globalRendering->pixelY, 0.0f);
+		}
+		m.Scale(float3(curDim.x * globalRendering->pixelX, curDim.y * globalRendering->pixelY, 1.0f));
+	}
+	return m;
+}
+
 /******************************************************************************/
 
 void CMiniMap::Update()

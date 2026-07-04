@@ -100,16 +100,57 @@ static LuaImmediateBuffer luaImmBuffer;
 // route into luaImmBuffer instead of emitting fixed-function calls.
 static bool inModernBeginEnd = false;
 
-// bridge until Phase 0: read the current MVP straight off the fixed-function
-// stack (a query, not a deprecated set-call) so the modern shader gets the same
-// transform the engine scaffolding established.
-static CMatrix44f GetCurrentFixedFunctionMVP()
+// While gl.CreateList compiles, gl.* matrix ops are RECORDED, not executed --
+// replaying them into the FF mirror would desync it from the real FF state.
+static bool compilingDisplayList = false;
+
+// The global FF-matrix mirror target for a tracked gl.* matrix op, or null while
+// a display list is being compiled (see above).
+static inline GLMatrixStateTracker* FFMirrorOps()
+{
+	return compilingDisplayList ? nullptr : &GL::ffMirror.tracker;
+}
+
+// glGetFloatv bridge: read the current MVP straight off the fixed-function stack
+// (a query, not a deprecated set-call). Fallback while the mirror is tainted, and
+// the reference for the mirror shadow-compare.
+static CMatrix44f GetBridgeMVP()
 {
 	CMatrix44f proj;
 	CMatrix44f modelView;
 	glGetFloatv(GL_PROJECTION_MATRIX, static_cast<float*>(proj));
 	glGetFloatv(GL_MODELVIEW_MATRIX, static_cast<float*>(modelView));
 	return proj * modelView;
+}
+
+// The MVP for the modern immediate backend: the CPU-side FF mirror when it is in
+// sync (the Phase-0 direction -- this value survives the eventual removal of the
+// FF matrix set-calls), the glGetFloatv bridge while the mirror is tainted by an
+// untracked display-list replay. Under the whole-frame A/B compare the mirror is
+// shadow-verified against the bridge on every read; a mismatch is a mirror bug.
+static CMatrix44f GetCurrentFixedFunctionMVP()
+{
+	if (!GL::ffMirror.Valid())
+		return GetBridgeMVP();
+
+	const CMatrix44f mvp = GL::ffMirror.GetMVP();
+
+	if (GL::ffMirror.shadowCompare) {
+		const CMatrix44f ref = GetBridgeMVP();
+		// relative per-element compare: driver-side FF composition may differ from
+		// the CPU mirror by a few ULP, which on large elements (world translations)
+		// is far above any absolute epsilon
+		float maxRelDelta = 0.0f;
+		for (int i = 0; i < 16; ++i)
+			maxRelDelta = std::max(maxRelDelta, math::fabs(mvp.m[i] - ref.m[i]) / std::max(1.0f, math::fabs(ref.m[i])));
+		if (maxRelDelta > 1e-4f) {
+			static int logged = 0;
+			if (logged++ < 16)
+				LOG_L(L_WARNING, "[FFMatrixMirror] mirror MVP diverged from FF stack: max rel delta %g", maxRelDelta);
+		}
+	}
+
+	return mvp;
 }
 
 // True only in fixed-function mode (no shader program bound) -- the only case
@@ -1059,6 +1100,10 @@ void LuaOpenGL::SetupScreenMatrices()
 
 	glMatrixMode(GL_MODELVIEW);
 	glLoadMatrixf(&globalRendering->screenViewMatrix.m[0]);
+
+	GL::ffMirror.tracker.SeedMatrix(GL_PROJECTION, globalRendering->screenProjMatrix);
+	GL::ffMirror.tracker.SeedMatrix(GL_MODELVIEW,  globalRendering->screenViewMatrix);
+	GL::ffMirror.FinishSeed(GL_MODELVIEW);
 }
 
 void LuaOpenGL::RevertScreenMatrices()
@@ -1066,6 +1111,11 @@ void LuaOpenGL::RevertScreenMatrices()
 	glMatrixMode(GL_TEXTURE   ); glLoadIdentity();
 	glMatrixMode(GL_PROJECTION); glLoadIdentity(); gluOrtho2D(0.0f, 1.0f, 0.0f, 1.0f);
 	glMatrixMode(GL_MODELVIEW ); glLoadIdentity();
+
+	GL::ffMirror.tracker.SeedMatrix(GL_TEXTURE,    CMatrix44f::Identity());
+	GL::ffMirror.tracker.SeedMatrix(GL_PROJECTION, GLMatrixStateTracker::ComposeSpringOrtho(globalRendering->supportClipSpaceControl, 0.0, 1.0, 0.0, 1.0, -1.0, 1.0));
+	GL::ffMirror.tracker.SeedMatrix(GL_MODELVIEW,  CMatrix44f::Identity());
+	GL::ffMirror.FinishSeed(GL_MODELVIEW);
 }
 
 
@@ -1129,6 +1179,11 @@ void LuaOpenGL::ResetGenesisMatrices()
 	glMatrixMode(GL_TEXTURE   ); glLoadIdentity();
 	glMatrixMode(GL_PROJECTION); glLoadIdentity();
 	glMatrixMode(GL_MODELVIEW ); glLoadIdentity();
+
+	GL::ffMirror.tracker.SeedMatrix(GL_TEXTURE,    CMatrix44f::Identity());
+	GL::ffMirror.tracker.SeedMatrix(GL_PROJECTION, CMatrix44f::Identity());
+	GL::ffMirror.tracker.SeedMatrix(GL_MODELVIEW,  CMatrix44f::Identity());
+	GL::ffMirror.FinishSeed(GL_MODELVIEW);
 }
 
 
@@ -1137,6 +1192,11 @@ void LuaOpenGL::ResetWorldMatrices()
 	glMatrixMode(GL_TEXTURE   ); glLoadIdentity();
 	glMatrixMode(GL_PROJECTION); glLoadMatrixf(camera->GetProjectionMatrix());
 	glMatrixMode(GL_MODELVIEW ); glLoadMatrixf(camera->GetViewMatrix());
+
+	GL::ffMirror.tracker.SeedMatrix(GL_TEXTURE,    CMatrix44f::Identity());
+	GL::ffMirror.tracker.SeedMatrix(GL_PROJECTION, camera->GetProjectionMatrix());
+	GL::ffMirror.tracker.SeedMatrix(GL_MODELVIEW,  camera->GetViewMatrix());
+	GL::ffMirror.FinishSeed(GL_MODELVIEW);
 }
 
 void LuaOpenGL::ResetWorldShadowMatrices()
@@ -1144,6 +1204,11 @@ void LuaOpenGL::ResetWorldShadowMatrices()
 	glMatrixMode(GL_TEXTURE   ); glLoadIdentity();
 	glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0.0f, 1.0f, 0.0f, 1.0f, 0.0f, -1.0f);
 	glMatrixMode(GL_MODELVIEW ); glLoadMatrixf(shadowHandler.GetShadowMatrixRaw());
+
+	GL::ffMirror.tracker.SeedMatrix(GL_TEXTURE,    CMatrix44f::Identity());
+	GL::ffMirror.tracker.SeedMatrix(GL_PROJECTION, GLMatrixStateTracker::ComposeSpringOrtho(globalRendering->supportClipSpaceControl, 0.0, 1.0, 0.0, 1.0, 0.0, -1.0));
+	GL::ffMirror.tracker.SeedMatrix(GL_MODELVIEW,  shadowHandler.GetShadowMatrix());
+	GL::ffMirror.FinishSeed(GL_MODELVIEW);
 }
 
 
@@ -1153,7 +1218,8 @@ void LuaOpenGL::ResetScreenMatrices()
 	glMatrixMode(GL_PROJECTION); glLoadIdentity();
 	glMatrixMode(GL_MODELVIEW ); glLoadIdentity();
 
-	SetupScreenMatrices();
+	GL::ffMirror.tracker.SeedMatrix(GL_TEXTURE, CMatrix44f::Identity());
+	SetupScreenMatrices(); // seeds projection/modelview + FinishSeed
 }
 
 
@@ -1165,6 +1231,13 @@ void LuaOpenGL::ResetMiniMapMatrices()
 	glMatrixMode(GL_TEXTURE   ); glLoadIdentity();
 	glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(0.0f, 1.0f, 0.0f, 1.0f, 0.0f, -1.0f); minimap->ApplyConstraintsMatrix();
 	glMatrixMode(GL_MODELVIEW ); glLoadIdentity(); glScalef(1.0f / minimap->GetSizeX(), 1.0f / minimap->GetSizeY(), 1.0f);
+
+	CMatrix44f mmView;
+	mmView.Scale(float3(1.0f / minimap->GetSizeX(), 1.0f / minimap->GetSizeY(), 1.0f));
+	GL::ffMirror.tracker.SeedMatrix(GL_TEXTURE,    CMatrix44f::Identity());
+	GL::ffMirror.tracker.SeedMatrix(GL_PROJECTION, GLMatrixStateTracker::ComposeSpringOrtho(globalRendering->supportClipSpaceControl, 0.0, 1.0, 0.0, 1.0, 0.0, -1.0) * minimap->GetConstraintsMatrix());
+	GL::ffMirror.tracker.SeedMatrix(GL_MODELVIEW,  mmView);
+	GL::ffMirror.FinishSeed(GL_MODELVIEW);
 }
 
 
@@ -4584,12 +4657,20 @@ int LuaOpenGL::RenderToTexture(lua_State* L)
 	glViewport(0, 0, tex->xsize, tex->ysize);
 	glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity();
 	glMatrixMode(GL_MODELVIEW);  glPushMatrix(); glLoadIdentity();
+	if (auto* mirror = FFMirrorOps()) {
+		mirror->SetMatrixMode(GL_PROJECTION); mirror->PushMatrix(); mirror->LoadIdentity();
+		mirror->SetMatrixMode(GL_MODELVIEW);  mirror->PushMatrix(); mirror->LoadIdentity();
+	}
 
 	const int error = lua_pcall(L, lua_gettop(L) - 2, 0, 0);
 
 	glMatrixMode(GL_PROJECTION); glPopMatrix();
 	glMatrixMode(GL_MODELVIEW);  glPopMatrix();
 	glPopAttrib();
+	if (auto* mirror = FFMirrorOps()) {
+		mirror->SetMatrixMode(GL_PROJECTION); mirror->PopMatrix();
+		mirror->SetMatrixMode(GL_MODELVIEW);  mirror->PopMatrix();
+	}
 
 	glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, currentFBO);
 
@@ -5330,6 +5411,8 @@ int LuaOpenGL::Translate(lua_State* L)
 	glTranslatef(x, y, z);
 	if (trackMatrices)
 		GetLuaContextData(L)->glMatrixTracker.Translate(x, y, z);
+	if (auto* mirror = FFMirrorOps())
+		mirror->Translate(x, y, z);
 	return 0;
 }
 
@@ -5350,6 +5433,8 @@ int LuaOpenGL::Scale(lua_State* L)
 	glScalef(x, y, z);
 	if (trackMatrices)
 		GetLuaContextData(L)->glMatrixTracker.Scale(x, y, z);
+	if (auto* mirror = FFMirrorOps())
+		mirror->Scale(x, y, z);
 	return 0;
 }
 
@@ -5372,6 +5457,8 @@ int LuaOpenGL::Rotate(lua_State* L)
 	glRotatef(r, x, y, z);
 	if (trackMatrices)
 		GetLuaContextData(L)->glMatrixTracker.Rotate(r, x, y, z);
+	if (auto* mirror = FFMirrorOps())
+		mirror->Rotate(r, x, y, z);
 	return 0;
 }
 
@@ -5396,8 +5483,12 @@ int LuaOpenGL::Ortho(lua_State* L)
 	const float _near  = luaL_checknumber(L, 5);
 	const float _far   = luaL_checknumber(L, 6);
 	glOrtho(left, right, bottom, top, _near, _far);
+	// the engine glOrtho macro composes the clip-space-control pre-transform;
+	// track the same value (fixes the tracker's plain-OrthoProj limitation)
 	if (trackMatrices)
-		GetLuaContextData(L)->glMatrixTracker.Ortho(left, right, bottom, top, _near, _far);
+		GetLuaContextData(L)->glMatrixTracker.Ortho(left, right, bottom, top, _near, _far, globalRendering->supportClipSpaceControl);
+	if (auto* mirror = FFMirrorOps())
+		mirror->Ortho(left, right, bottom, top, _near, _far, globalRendering->supportClipSpaceControl);
 	return 0;
 }
 
@@ -5423,7 +5514,9 @@ int LuaOpenGL::Frustum(lua_State* L)
 	const float _far   = luaL_checknumber(L, 6);
 	glFrustum(left, right, bottom, top, _near, _far);
 	if (trackMatrices)
-		GetLuaContextData(L)->glMatrixTracker.Frustum(left, right, bottom, top, _near, _far);
+		GetLuaContextData(L)->glMatrixTracker.Frustum(left, right, bottom, top, _near, _far, globalRendering->supportClipSpaceControl);
+	if (auto* mirror = FFMirrorOps())
+		mirror->Frustum(left, right, bottom, top, _near, _far, globalRendering->supportClipSpaceControl);
 	return 0;
 }
 
@@ -5438,6 +5531,8 @@ int LuaOpenGL::Billboard(lua_State* L)
 	glMultMatrixf(camera->GetBillBoardMatrix());
 	if (trackMatrices)
 		GetLuaContextData(L)->glMatrixTracker.MultMatrix(camera->GetBillBoardMatrix());
+	if (auto* mirror = FFMirrorOps())
+		mirror->MultMatrix(camera->GetBillBoardMatrix());
 	return 0;
 }
 
@@ -5601,6 +5696,8 @@ int LuaOpenGL::MatrixMode(lua_State* L)
 	if (!GetLuaContextData(L)->glMatrixTracker.SetMatrixMode(mode))
 		luaL_error(L, "Incorrect value to gl.MatrixMode");
 	glMatrixMode(mode);
+	if (auto* mirror = FFMirrorOps())
+		mirror->SetMatrixMode(mode);
 	return 0;
 }
 
@@ -5620,6 +5717,8 @@ int LuaOpenGL::LoadIdentity(lua_State* L)
 	glLoadIdentity();
 	if (trackMatrices)
 		GetLuaContextData(L)->glMatrixTracker.LoadIdentity();
+	if (auto* mirror = FFMirrorOps())
+		mirror->LoadIdentity();
 	return 0;
 }
 
@@ -5684,6 +5783,8 @@ int LuaOpenGL::LoadMatrix(lua_State* L)
 			glLoadMatrixf(*matptr);
 			if (trackMatrices)
 				GetLuaContextData(L)->glMatrixTracker.LoadMatrix(*matptr);
+			if (auto* mirror = FFMirrorOps())
+				mirror->LoadMatrix(*matptr);
 		} else {
 			luaL_error(L, "Incorrect arguments to gl.LoadMatrix()");
 		}
@@ -5701,10 +5802,13 @@ int LuaOpenGL::LoadMatrix(lua_State* L)
 			}
 		}
 		glLoadMatrixf(matrix);
-		if (trackMatrices) {
+		{
 			CMatrix44f m44;
 			std::copy(matrix, matrix + 16, m44.m);
-			GetLuaContextData(L)->glMatrixTracker.LoadMatrix(m44);
+			if (trackMatrices)
+				GetLuaContextData(L)->glMatrixTracker.LoadMatrix(m44);
+			if (auto* mirror = FFMirrorOps())
+				mirror->LoadMatrix(m44);
 		}
 	}
 	return 0;
@@ -5750,6 +5854,8 @@ int LuaOpenGL::MultMatrix(lua_State* L)
 			glMultMatrixf(*matptr);
 			if (trackMatrices)
 				GetLuaContextData(L)->glMatrixTracker.MultMatrix(*matptr);
+			if (auto* mirror = FFMirrorOps())
+				mirror->MultMatrix(*matptr);
 		} else {
 			luaL_error(L, "Incorrect arguments to gl.MultMatrix()");
 		}
@@ -5767,10 +5873,13 @@ int LuaOpenGL::MultMatrix(lua_State* L)
 			}
 		}
 		glMultMatrixf(matrix);
-		if (trackMatrices) {
+		{
 			CMatrix44f m44;
 			std::copy(matrix, matrix + 16, m44.m);
-			GetLuaContextData(L)->glMatrixTracker.MultMatrix(m44);
+			if (trackMatrices)
+				GetLuaContextData(L)->glMatrixTracker.MultMatrix(m44);
+			if (auto* mirror = FFMirrorOps())
+				mirror->MultMatrix(m44);
 		}
 	}
 	return 0;
@@ -5793,6 +5902,8 @@ int LuaOpenGL::PushMatrix(lua_State* L)
 	if (!GetLuaContextData(L)->glMatrixTracker.PushMatrix())
 		luaL_error(L, "Matrix stack overflow");
 	glPushMatrix();
+	if (auto* mirror = FFMirrorOps())
+		mirror->PushMatrix();
 
 	return 0;
 }
@@ -5814,6 +5925,8 @@ int LuaOpenGL::PopMatrix(lua_State* L)
 	if (!GetLuaContextData(L)->glMatrixTracker.PopMatrix())
 		luaL_error(L, "Matrix stack underflow");
 	glPopMatrix();
+	if (auto* mirror = FFMirrorOps())
+		mirror->PopMatrix();
 
 	return 0;
 }
@@ -5847,10 +5960,16 @@ int LuaOpenGL::PushPopMatrix(lua_State* L)
 
 	if (arg == 1) {
 		glPushMatrix();
+		if (auto* mirror = FFMirrorOps())
+			mirror->PushMatrix();
 	} else {
 		for (int i = 0; i < (int)matModes.size(); i++) {
 			glMatrixMode(matModes[i]);
 			glPushMatrix();
+			if (auto* mirror = FFMirrorOps()) {
+				mirror->SetMatrixMode(matModes[i]);
+				mirror->PushMatrix();
+			}
 		}
 	}
 
@@ -5859,10 +5978,16 @@ int LuaOpenGL::PushPopMatrix(lua_State* L)
 
 	if (arg == 1) {
 		glPopMatrix();
+		if (auto* mirror = FFMirrorOps())
+			mirror->PopMatrix();
 	} else {
 		for (int i = 0; i < (int)matModes.size(); i++) {
 			glMatrixMode(matModes[i]);
 			glPopMatrix();
+			if (auto* mirror = FFMirrorOps()) {
+				mirror->SetMatrixMode(matModes[i]);
+				mirror->PopMatrix();
+			}
 		}
 	}
 
@@ -6346,7 +6471,10 @@ int LuaOpenGL::CreateList(lua_State* L)
 	// build the list with the specified lua call/args
 	glNewList(list, GL_COMPILE);
 	SMatrixStateData prevMSD = GetLuaContextData(L)->glMatrixTracker.PushMatrixState(true);
+	const bool prevCompiling = compilingDisplayList;
+	compilingDisplayList = true; // recorded gl.* matrix ops must not reach the FF mirror
 	const int error = lua_pcall(L, (args - 1), 0, 0);
+	compilingDisplayList = prevCompiling;
 	SMatrixStateData matData = GetLuaContextData(L)->glMatrixTracker.GetMatrixState();
 	GetLuaContextData(L)->glMatrixTracker.PopMatrixState(prevMSD, false);
 	glEndList();
@@ -6386,6 +6514,10 @@ int LuaOpenGL::CallList(lua_State* L)
 		int error = GetLuaContextData(L)->glMatrixTracker.ApplyMatrixState(matrixStateData);
 		if (error == 0) {
 			glCallList(dlist);
+			// the list may replay recorded matrix ops the FF mirror cannot see;
+			// consumers fall back to the glGetFloatv bridge until the next
+			// per-callin scaffolding reseed
+			GL::ffMirror.Taint();
 			return 0;
 		}
 		luaL_error(L, "Matrix stack %sflow in gl.CallList", (error > 0) ? "over" : "under");
