@@ -2588,7 +2588,7 @@ int LuaOpenGL::BeginEnd(lua_State* L)
 	{
 		GLfloat cc[4];
 		glGetFloatv(GL_CURRENT_COLOR, cc);
-		luaImmBuffer.SeedColor(SColor(cc[0], cc[1], cc[2], cc[3]));
+		luaImmBuffer.SeedColor(cc);
 	}
 	luaImmBuffer.SetMVP(GetCurrentFixedFunctionMVP());
 
@@ -3061,7 +3061,7 @@ int LuaOpenGL::Rect(lua_State* L)
 		luaImmBuffer.SetBackend(LuaImmediateBuffer::Backend::Modern);
 		luaImmBuffer.SetMVP(GetCurrentFixedFunctionMVP());
 		luaImmBuffer.Begin(GL_TRIANGLES);
-		luaImmBuffer.SeedColor(SColor(cc[0], cc[1], cc[2], cc[3]));
+		luaImmBuffer.SeedColor(cc);
 		// glRectf fills the quad (x1,y1)-(x2,y2); emit it as two CCW triangles
 		luaImmBuffer.Vertex(x1, y1, 0.0f); luaImmBuffer.Vertex(x2, y1, 0.0f); luaImmBuffer.Vertex(x2, y2, 0.0f);
 		luaImmBuffer.Vertex(x1, y1, 0.0f); luaImmBuffer.Vertex(x2, y2, 0.0f); luaImmBuffer.Vertex(x1, y2, 0.0f);
@@ -3157,14 +3157,14 @@ int LuaOpenGL::TexRect(lua_State* L)
 		glEnd();
 	};
 	const auto drawModern = [&]() {
-		// the legacy quad modulates by the FF CURRENT color (no glColor emitted)
-		// and leaves it unchanged; pass the real current color so the modern quad
-		// matches and its trailing state write is a no-op
+		// the legacy quad modulates by the FF CURRENT color (no glColor emitted,
+		// clamped to [0,1] at rasterization) and leaves the -- possibly unclamped/
+		// overbright -- current color state untouched; the flush clamps for the
+		// modulation and restores the exact float state afterwards
 		GLfloat cc[4];
 		glGetFloatv(GL_CURRENT_COLOR, cc);
-		const SColor col(cc[0], cc[1], cc[2], cc[3]);
 		luaImmBuffer.SetMVP(GetCurrentFixedFunctionMVP());
-		luaImmBuffer.SetTexRect(x1, y1, x2, y2, s1, t1, s2, t2, col);
+		luaImmBuffer.SetTexRect(x1, y1, x2, y2, s1, t1, s2, t2, cc);
 		luaImmBuffer.FlushTexRectModern();
 	};
 
@@ -3294,7 +3294,9 @@ int LuaOpenGL::Color(lua_State* L)
 	}
 
 	if (inModernBeginEnd) {
-		luaImmBuffer.Color(SColor(color[0], color[1], color[2], color[3]));
+		// float precision end-to-end: SColor here would wrap overbright
+		// components and quantize fade alphas (see LuaImmediateBuffer)
+		luaImmBuffer.Color(color[0], color[1], color[2], color[3]);
 		return 0;
 	}
 

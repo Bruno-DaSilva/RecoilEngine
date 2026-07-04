@@ -3,6 +3,7 @@
 #ifndef LUA_IMMEDIATE_BUFFER_H
 #define LUA_IMMEDIATE_BUFFER_H
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <vector>
@@ -41,17 +42,50 @@ public:
 	// backend, which reads the fixed-function matrix).
 	void SetMVP(const CMatrix44f& m) { mvp = m; }
 
-	void Begin(uint32_t glMode) { mode = glMode; verts.clear(); textured = false; curS = curT = 0.0f; sawColor = false; }
+	void Begin(uint32_t glMode) {
+		mode = glMode; verts.clear(); vertColorsF.clear();
+		textured = false; curS = curT = 0.0f;
+		sawColor = false; multiColor = false;
+	}
+	// The FF pipeline clamps vertex colors to [0,1] at rasterization while the
+	// CURRENT-color state stays unclamped (glGetFloatv returns e.g. 1.15 -- BAR
+	// widgets use overbright line colors); SColor's raw float->uint8 conversion
+	// would WRAP such components (1.15*255 = 293 -> 37, seen as the minimap
+	// camera-box blue-channel divergence under the A/B gate). Always quantize
+	// vertex colors through this clamp, rounding to nearest as FF does.
+	static SColor ClampedColor(float r, float g, float b, float a) {
+		const auto c = [](float v) { return uint8_t(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f); };
+		return SColor(c(r), c(g), c(b), c(a));
+	}
 	// the color the stream INHERITS from outside the Begin/End body (the FF
 	// current color, which legacy glBegin picks up implicitly). Unlike Color()
 	// this does not count as a body color: legacy leaves the FF current color
 	// UNCHANGED when the body never calls glColor, and the flushes replicate
-	// exactly that (see FlushModern's trailing glColor).
-	void SeedColor(const SColor& c) { curColor = c; seedColor = c; }
-	void Color(float r, float g, float b, float a) { Color(SColor(r, g, b, a)); }
-	void Color(const SColor& c) { curColor = c; lastColor = c; sawColor = true; }
+	// exactly that (see the trailing glColor4fv -- kept in FLOAT precision so
+	// unclamped/unquantizable current colors survive the round-trip).
+	void SeedColor(const float* rgba) {
+		for (int i = 0; i < 4; ++i) { curColorF[i] = rgba[i]; seedColorF[i] = rgba[i]; singleColorF[i] = rgba[i]; }
+	}
+	void Color(float r, float g, float b, float a) {
+		curColorF[0] = r; curColorF[1] = g; curColorF[2] = b; curColorF[3] = a;
+		lastColorF[0] = r; lastColorF[1] = g; lastColorF[2] = b; lastColorF[3] = a;
+		if (verts.empty()) {
+			// color set before any vertex replaces the seed as the (potential)
+			// whole-stream color
+			for (int i = 0; i < 4; ++i) singleColorF[i] = curColorF[i];
+		} else if (curColorF[0] != singleColorF[0] || curColorF[1] != singleColorF[1] ||
+		           curColorF[2] != singleColorF[2] || curColorF[3] != singleColorF[3]) {
+			multiColor = true;
+		}
+		sawColor = true;
+	}
+	void Color(const SColor& c) { Color(c.r / 255.0f, c.g / 255.0f, c.b / 255.0f, c.a / 255.0f); }
 	void TexCoord(float s, float t) { curS = s; curT = t; textured = true; }
-	void Vertex(float x, float y, float z) { verts.push_back(VA_TYPE_TC{float3{x, y, z}, curS, curT, curColor}); }
+	void Vertex(float x, float y, float z) {
+		verts.push_back(VA_TYPE_TC{float3{x, y, z}, curS, curT,
+		                ClampedColor(curColorF[0], curColorF[1], curColorF[2], curColorF[3])});
+		vertColorsF.insert(vertColorsF.end(), {curColorF[0], curColorF[1], curColorF[2], curColorF[3]});
+	}
 
 	// flush via the active backend and reset the vertex list.
 	void End() { Flush(backend); verts.clear(); }
@@ -63,17 +97,19 @@ public:
 	void FlushModern() const;
 
 	// textured quad (gl.TexRect). The texture is bound by the caller (as in
-	// gl.Texture); the shading is MODULATE = texture * color. As with BeginEnd,
-	// one SetTexRect can be flushed either backend for an A/B compare.
+	// gl.Texture); the shading is MODULATE = texture * color (exact float via
+	// the uColor uniform). As with BeginEnd, one SetTexRect can be flushed
+	// either backend for an A/B compare.
 	void SetTexRect(float x0, float y0, float x1, float y1,
-	                float s0, float t0, float s1, float t1, const SColor& c) {
-		texRect = TexRectData{x0, y0, x1, y1, s0, t0, s1, t1, c, true};
+	                float s0, float t0, float s1, float t1, const float* rgba) {
+		texRect = TexRectData{x0, y0, x1, y1, s0, t0, s1, t1,
+		                      {rgba[0], rgba[1], rgba[2], rgba[3]}, true};
 	}
 	void FlushTexRect(Backend b) const { (b == Backend::Legacy) ? FlushTexRectLegacy() : FlushTexRectModern(); }
 	void FlushTexRectLegacy() const;
 	void FlushTexRectModern() const;
 
-	void Clear() { verts.clear(); }
+	void Clear() { verts.clear(); vertColorsF.clear(); }
 	bool Empty() const { return verts.empty(); }
 	bool IsTextured() const { return textured; }
 	uint32_t GetMode() const { return mode; }
@@ -83,16 +119,23 @@ private:
 	struct TexRectData {
 		float x0, y0, x1, y1;
 		float s0, t0, s1, t1;
-		SColor c;
+		float cf[4];
 		bool set = false;
 	};
 
 	Backend backend = Backend::Legacy;
 	uint32_t mode = 0;
-	SColor curColor = SColor(uint8_t(255), uint8_t(255), uint8_t(255), uint8_t(255));
-	SColor seedColor = SColor(uint8_t(255), uint8_t(255), uint8_t(255), uint8_t(255));
-	SColor lastColor = SColor(uint8_t(255), uint8_t(255), uint8_t(255), uint8_t(255));
+	float curColorF[4]    = { 1.0f, 1.0f, 1.0f, 1.0f };
+	float seedColorF[4]   = { 1.0f, 1.0f, 1.0f, 1.0f };
+	float lastColorF[4]   = { 1.0f, 1.0f, 1.0f, 1.0f };
+	// the single color the whole stream uses (exact float) -- valid while
+	// !multiColor; lets the modern flush route the color through a float
+	// uniform instead of the quantized 8-bit vertex attribute, which keeps
+	// animated fade alphas bit-exact vs the legacy float pipeline
+	float singleColorF[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+	bool multiColor = false;
 	bool sawColor = false; // any Color() (as opposed to SeedColor) since Begin()
+	std::vector<float> vertColorsF; // 4 floats per vertex; exact legacy replay colors
 	float curS = 0.0f, curT = 0.0f;
 	bool textured = false; // any TexCoord seen this Begin()
 	CMatrix44f mvp;

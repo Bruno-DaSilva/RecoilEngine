@@ -212,8 +212,8 @@ TEST_CASE("GLImmediateEmitter: TexRect (textured, MODULATE) matches legacy")
 	LuaImmediateBuffer buf;
 	buf.SetMVP(mvp);
 	// white color -> MODULATE shows the texture directly; full 0..1 texcoords
-	buf.SetTexRect(40, 40, 200, 160, 0.0f, 0.0f, 1.0f, 1.0f,
-		SColor(uint8_t(255), uint8_t(255), uint8_t(255), uint8_t(255)));
+	const float texRectWhite[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+	buf.SetTexRect(40, 40, 200, 160, 0.0f, 0.0f, 1.0f, 1.0f, texRectWhite);
 
 	const auto legacy = RenderToBuffer([&] {
 		ClearTo(0.0f, 0.0f, 0.0f, 1.0f);

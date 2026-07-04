@@ -20,11 +20,16 @@ namespace {
 	// NOT gl_ModelViewProjectionMatrix, so the path makes no fixed-function
 	// matrix calls. Attribute locations match VA_TYPE_C::attributeDefs (pos=0,
 	// color=1) so it consumes the TypedRenderBuffer VAO directly.
+	// uColor: whole-draw color multiplier. For single-color streams the exact
+	// float color goes here (vertex colors white) so animated fade alphas match
+	// the legacy float pipeline bit-exactly instead of the 8-bit attribute
+	// quantization; multi-color streams use per-vertex colors with uColor=1.
 	const char* fsSrc =
 		"#version 150\n"
 		"in vec4 vcolor;\n"
+		"uniform vec4 uColor;\n"
 		"out vec4 outColor;\n"
-		"void main() { outColor = vcolor; }\n";
+		"void main() { outColor = vcolor * uColor; }\n";
 
 	std::string MakeVertexSrc(bool explicitAttribLoc)
 	{
@@ -103,14 +108,16 @@ namespace {
 		return shader;
 	}
 
-	// textured (VA_TYPE_TC) shader: MODULATE = texture * vertex color.
+	// textured (VA_TYPE_TC) shader: MODULATE = texture * color (uColor as in
+	// the untextured shader: exact float whole-draw color, vertex colors white).
 	const char* fsTexSrc =
 		"#version 150\n"
 		"uniform sampler2D tex;\n"
+		"uniform vec4 uColor;\n"
 		"in vec2 vuv;\n"
 		"in vec4 vcolor;\n"
 		"out vec4 outColor;\n"
-		"void main() { outColor = texture(tex, vuv) * vcolor; }\n";
+		"void main() { outColor = texture(tex, vuv) * vcolor * uColor; }\n";
 
 	std::string MakeTexVertexSrc(bool explicitAttribLoc)
 	{
@@ -161,22 +168,25 @@ void LuaImmediateBuffer::FlushLegacy() const
 		return;
 
 	// transforms via the fixed-function matrix the caller has already set;
-	// replays texcoords when the stream was textured so it is an exact legacy
-	// equivalent either way.
+	// replays texcoords when the stream was textured, and the ORIGINAL float
+	// colors (not the quantized SColor), so it is an exact legacy equivalent
+	// either way.
+	assert(vertColorsF.size() == verts.size() * 4);
 	glBegin(mode);
-	for (const VA_TYPE_TC& v : verts) {
+	for (size_t i = 0; i < verts.size(); ++i) {
+		const VA_TYPE_TC& v = verts[i];
 		if (textured)
 			glTexCoord2f(v.s, v.t);
-		glColor4ub(v.c.r, v.c.g, v.c.b, v.c.a);
+		glColor4fv(&vertColorsF[i * 4]);
 		glVertex3f(v.pos.x, v.pos.y, v.pos.z);
 	}
 	glEnd();
 
 	// exact legacy end-state: current color = last body glColor, or UNCHANGED
 	// (= the inherited seed) when the body never called one -- the per-vertex
-	// glColor replay above would otherwise leave the last vertex's color
-	glColor4ub(sawColor ? lastColor.r : seedColor.r, sawColor ? lastColor.g : seedColor.g,
-	           sawColor ? lastColor.b : seedColor.b, sawColor ? lastColor.a : seedColor.a);
+	// glColor replay above would otherwise leave the last vertex's quantized
+	// color. Float precision so unclamped/overbright current colors round-trip.
+	glColor4fv(sawColor ? lastColorF : seedColorF);
 }
 
 void LuaImmediateBuffer::FlushModern() const
@@ -195,10 +205,15 @@ void LuaImmediateBuffer::FlushModern() const
 		return;
 	}
 
+	// single-color streams route the exact float color through uColor (vertex
+	// colors white) -- the 8-bit vertex attribute cannot represent animated
+	// fade alphas bit-exactly; multi-color streams keep per-vertex colors
+	static constexpr SColor white = SColor(uint8_t(255), uint8_t(255), uint8_t(255), uint8_t(255));
+
 	std::vector<VA_TYPE_C> colorVerts;
 	colorVerts.reserve(verts.size());
 	for (const VA_TYPE_TC& v : verts)
-		colorVerts.push_back(VA_TYPE_C{v.pos, v.c});
+		colorVerts.push_back(VA_TYPE_C{v.pos, multiColor ? v.c : white});
 
 	auto [drawVerts, drawMode] = TriangulateForModern<VA_TYPE_C>(mode, colorVerts);
 	if (drawVerts.empty())
@@ -208,9 +223,15 @@ void LuaImmediateBuffer::FlushModern() const
 	for (const VA_TYPE_C& v : drawVerts)
 		rb.AddVertex(VA_TYPE_C{v});
 
+	const auto c01 = [](float v) { return std::clamp(v, 0.0f, 1.0f); };
+
 	Shader::IProgramObject* shader = GetModernShader();
 	shader->Enable();
 	shader->SetUniformMatrix4x4("uMVP", false, static_cast<const float*>(mvp));
+	if (multiColor)
+		shader->SetUniform("uColor", 1.0f, 1.0f, 1.0f, 1.0f);
+	else // clamped as the FF pipeline does at rasterization
+		shader->SetUniform("uColor", c01(singleColorF[0]), c01(singleColorF[1]), c01(singleColorF[2]), c01(singleColorF[3]));
 	rb.DrawArrays(drawMode);
 	shader->Disable();
 
@@ -221,8 +242,8 @@ void LuaImmediateBuffer::FlushModern() const
 	// inherit it. FlushModern draws via a shader and never touches glColor, so
 	// replicate the exact legacy side effect (apitrace-confirmed classes: the
 	// gui_pip minimap wash, the minimap camera-box blue-channel divergence).
-	const SColor& lc = sawColor ? lastColor : seedColor;
-	glColor4ub(lc.r, lc.g, lc.b, lc.a);
+	// Float precision so unclamped/overbright current colors round-trip.
+	glColor4fv(sawColor ? lastColorF : seedColorF);
 }
 
 void LuaImmediateBuffer::FlushTexRectLegacy() const
@@ -231,8 +252,8 @@ void LuaImmediateBuffer::FlushTexRectLegacy() const
 		return;
 
 	// caller has bound the texture and enabled GL_TEXTURE_2D; FF MODULATE
-	// gives texture * glColor.
-	glColor4ub(texRect.c.r, texRect.c.g, texRect.c.b, texRect.c.a);
+	// gives texture * glColor (exact float color).
+	glColor4fv(texRect.cf);
 	glBegin(GL_QUADS);
 		glTexCoord2f(texRect.s0, texRect.t0); glVertex2f(texRect.x0, texRect.y0);
 		glTexCoord2f(texRect.s1, texRect.t0); glVertex2f(texRect.x1, texRect.y0);
@@ -247,30 +268,35 @@ void LuaImmediateBuffer::FlushTexRectModern() const
 		return;
 
 	// caller has bound the texture to unit 0; the shader samples it (no
-	// GL_TEXTURE_2D enable needed). Quad as two CCW triangles.
-	const SColor c = texRect.c;
-	const VA_TYPE_TC bl{ {texRect.x0, texRect.y0, 0.0f}, texRect.s0, texRect.t0, c };
-	const VA_TYPE_TC br{ {texRect.x1, texRect.y0, 0.0f}, texRect.s1, texRect.t0, c };
-	const VA_TYPE_TC tr{ {texRect.x1, texRect.y1, 0.0f}, texRect.s1, texRect.t1, c };
-	const VA_TYPE_TC tl{ {texRect.x0, texRect.y1, 0.0f}, texRect.s0, texRect.t1, c };
+	// GL_TEXTURE_2D enable needed). Quad as two CCW triangles; the exact float
+	// modulation color goes through uColor (vertex colors white).
+	static constexpr SColor white = SColor(uint8_t(255), uint8_t(255), uint8_t(255), uint8_t(255));
+	const VA_TYPE_TC bl{ {texRect.x0, texRect.y0, 0.0f}, texRect.s0, texRect.t0, white };
+	const VA_TYPE_TC br{ {texRect.x1, texRect.y0, 0.0f}, texRect.s1, texRect.t0, white };
+	const VA_TYPE_TC tr{ {texRect.x1, texRect.y1, 0.0f}, texRect.s1, texRect.t1, white };
+	const VA_TYPE_TC tl{ {texRect.x0, texRect.y1, 0.0f}, texRect.s0, texRect.t1, white };
 
 	auto& rb = RenderBuffer::GetTypedRenderBuffer<VA_TYPE_TC>();
 	rb.AddVertex(VA_TYPE_TC{bl}); rb.AddVertex(VA_TYPE_TC{br}); rb.AddVertex(VA_TYPE_TC{tr});
 	rb.AddVertex(VA_TYPE_TC{bl}); rb.AddVertex(VA_TYPE_TC{tr}); rb.AddVertex(VA_TYPE_TC{tl});
 
+	const auto c01 = [](float v) { return std::clamp(v, 0.0f, 1.0f); };
+
 	Shader::IProgramObject* shader = GetModernTexShader();
 	shader->Enable();
 	shader->SetUniformMatrix4x4("uMVP", false, static_cast<const float*>(mvp));
 	shader->SetUniform("tex", 0);
+	// clamped as the FF pipeline does at rasterization
+	shader->SetUniform("uColor", c01(texRect.cf[0]), c01(texRect.cf[1]), c01(texRect.cf[2]), c01(texRect.cf[3]));
 	rb.DrawArrays(GL_TRIANGLES);
 	shader->Disable();
 
-	// FlushTexRectLegacy sets glColor4ub(texRect.c); the compatibility profile
+	// FlushTexRectLegacy sets glColor(texRect.cf); the compatibility profile
 	// carries that FF current color into LATER draws (gl_Color). Replicate it so a
 	// modern gl.TexRect is state-identical to legacy -- otherwise a following text
 	// draw inherits a stale color (apitrace class: the minimap wash, here on the
 	// countdown text).
-	glColor4ub(c.r, c.g, c.b, c.a);
+	glColor4fv(texRect.cf);
 }
 
 
