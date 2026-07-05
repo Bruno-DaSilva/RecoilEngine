@@ -546,8 +546,35 @@ void CUnit::SetLeavesGhost(bool newLeavesGhost, bool leaveDeadGhost)
 	bool prevValue = leavesGhost;
 	leavesGhost = newLeavesGhost;
 
-	if (prevValue != newLeavesGhost)
-		unitDrawer->UnitLeavesGhostChanged(this, leaveDeadGhost);
+	if (prevValue == newLeavesGhost)
+		return;
+
+	// the drawer's ghost bookkeeping reads losStatus before the clears below
+	unitDrawer->UnitLeavesGhostChanged(this, leaveDeadGhost);
+
+	// LOS_PREVLOS is synced state (read by weapon targeting, GetErrorVector and
+	// synced Lua), so the ghost accounting that clears it must run here; draw
+	// code never writes losStatus
+	if (newLeavesGhost) {
+		// reinstating leavesGhost: disable PREVLOS where contact was lost, else
+		// specs would see the unit after going in and out of player mode
+		for (int at = 0; at < teamHandler.ActiveAllyTeams(); ++at) {
+			if ((losStatus[at] & (LOS_INLOS | LOS_CONTRADAR)) == 0)
+				losStatus[at] &= ~LOS_PREVLOS;
+		}
+		return;
+	}
+
+	if (!leaveDeadGhost || !gameSetup->ghostedBuildings)
+		return;
+
+	// a dead ghost now stands in for this unit: allyteams that received one
+	// treat the unit as not previously seen
+	for (int at = 0; at < teamHandler.ActiveAllyTeams(); ++at) {
+		const auto ls = losStatus[at];
+		if ((ls & (LOS_INLOS | LOS_CONTRADAR | LOS_INRADAR)) == 0 && (ls & LOS_PREVLOS) != 0)
+			losStatus[at] &= ~LOS_PREVLOS;
+	}
 }
 
 

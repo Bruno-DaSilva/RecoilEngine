@@ -625,7 +625,6 @@ bool CUnitDrawerData::UpdateUnitGhosts(const CUnit* unit, const bool addNewGhost
 			savedData.deadGhostBuildings[allyTeam][gsoModel->type].push_back(gso);
 			gso->IncRef();
 
-			u->losStatus[allyTeam] &= ~LOS_PREVLOS;
 			if (allyTeam == gu->myAllyTeam)
 				addedOwnAllyTeam = true;
 
@@ -689,27 +688,14 @@ void CUnitDrawerData::UnitLeftLos(const CUnit* unit, int allyTeam)
 
 void CUnitDrawerData::UnitLeavesGhostChanged(const CUnit* unit, const bool leaveDeadGhost)
 {
-	if (unit->leavesGhost) {
-		ReviewPrevLos(unit);
+	// LOS_PREVLOS accounting for the leavesGhost=true transition is synced
+	// state and handled by CUnit::SetLeavesGhost before this notification
+	if (unit->leavesGhost)
 		return;
-	}
 
 	if (UpdateUnitGhosts(unit, leaveDeadGhost)) {
 		// left decoy dead ghost for own team
 		UpdateCurrentUnitIcon(unit);
-	}
-}
-
-void CUnitDrawerData::ReviewPrevLos(const CUnit* unit)
-{
-	// When reinstating leavesGhost, we need to check whether the unit is still in los or
-	// contradar, and otherwise disable PREVLOS, otherwise specs will see it after going in and
-	// out of player mode.
-	for (int allyTeam = 0; allyTeam < savedData.liveGhostBuildings.size(); ++allyTeam) {
-		if (!(unit->losStatus[allyTeam] & (LOS_INLOS | LOS_CONTRADAR))) {
-			CUnit* u = const_cast<CUnit*>(unit);
-			u->losStatus[allyTeam] &= ~LOS_PREVLOS;
-		}
 	}
 }
 

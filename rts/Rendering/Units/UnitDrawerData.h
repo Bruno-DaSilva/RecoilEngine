@@ -66,7 +66,6 @@ public:
 
 	bool UpdateUnitGhosts(const CUnit* unit, const bool addNewGhost);
 	void UnitLeavesGhostChanged(const CUnit* unit, const bool leaveDeadGhost);
-	void ReviewPrevLos(const CUnit* unit);
 public:
 	class TempDrawUnit {
 		CR_DECLARE_STRUCT(TempDrawUnit)
