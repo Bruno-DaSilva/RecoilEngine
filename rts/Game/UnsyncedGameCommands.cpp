@@ -54,6 +54,7 @@
 
 #include "Lua/LuaOpenGL.h"
 #include "Lua/LuaUI.h"
+#include "Lua/LuaUtils.h"
 #include "Lua/LuaMenu.h"
 
 #include "Map/Ground.h"
@@ -1546,6 +1547,56 @@ public:
 	}
 };
 
+
+class CalloutCensusActionExecutor : public IUnsyncedActionExecutor {
+public:
+	CalloutCensusActionExecutor() : IUnsyncedActionExecutor(
+		"CalloutCensus",
+		"Write the cumulative per-callout call-count census (total / from Draw* callins / from the sim phase) "
+		"to a CSV: /calloutcensus [outPath]. Needs LuaTrackCalloutCounts >= 1 at launch."
+	) {}
+
+	bool Execute(const UnsyncedAction& action) const final {
+		const auto args = CSimpleParser::Tokenize(action.GetArgs());
+
+		std::string path = (!args.empty()) ? args[0] : "calloutcensus.csv";
+
+		// resolve a relative path against the write data-dir (see /profiledump)
+		if (!FileSystem::IsAbsolutePath(path))
+			path = dataDirLocater.GetWriteDirPath() + path;
+
+		std::vector<LuaCalloutCounters::CensusRow> rows;
+		LuaCalloutCounters::GetCensus(rows);
+
+		if (rows.empty()) {
+			LOG_L(L_WARNING, "[/calloutcensus] no callout counts recorded; set LuaTrackCalloutCounts >= 1 before launch");
+			return true;
+		}
+
+		// draw-context demand first: this is the priority order for
+		// snapshot-serving callouts across the sim|draw boundary
+		std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) {
+			return (a.countDraw != b.countDraw) ? (a.countDraw > b.countDraw) : (a.count > b.count);
+		});
+
+		std::ofstream f(path);
+		if (!f.good()) {
+			LOG_L(L_ERROR, "[/calloutcensus] cannot open %s for writing", path.c_str());
+			return true;
+		}
+
+		// frame totals let downstream analysis normalize counts per sim/draw frame
+		f << "# simFrames=" << gs->frameNum << " drawFrames=" << globalRendering->drawFrame << '\n';
+		f << "name,count,count_draw,count_sim,count_other\n";
+		for (const auto& r: rows) {
+			f << r.name << ',' << r.count << ',' << r.countDraw << ',' << r.countSim
+			  << ',' << (r.count - r.countDraw - r.countSim) << '\n';
+		}
+
+		LOG("[/calloutcensus] wrote %u callout rows to %s", unsigned(rows.size()), path.c_str());
+		return true;
+	}
+};
 
 
 class DebugActionExecutor : public IUnsyncedActionExecutor {
@@ -4157,6 +4208,7 @@ void UnsyncedGameCommands::AddDefaultActionExecutors()
 	AddActionExecutor(AllocActionExecutor<DebugActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<ProfileDumpActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<BoundaryDumpActionExecutor>());
+	AddActionExecutor(AllocActionExecutor<CalloutCensusActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<DebugCubeMapActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<DebugQuadFieldActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<DrawSkyActionExecutor>());

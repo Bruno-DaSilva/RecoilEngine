@@ -10,13 +10,14 @@ In-game / via `Spring.SendCommands`: `/profiledump <startFrame> <endFrame> [outP
 
 ## CSV schema
 
-Header: `frame,name,self_ms,incl_ms,self_sim_ms,incl_sim_ms,count`
+Header: `frame,name,self_ms,incl_ms,self_sim_ms,incl_sim_ms,count,count_draw,count_sim`
 
 - `frame` — the sim frame this sample was taken at.
 - `name` — zone/timer/callout name. **Can contain commas** (e.g. `Update::WorldDrawer::{Sky,Water}`), so parse fields from the right, not by naive comma split.
 - `self_ms` / `incl_ms` — self (exclusive) vs inclusive (subtree) time for this name, as a **delta since the previous sampled frame**.
 - `self_sim_ms` / `incl_sim_ms` — the portion that ran inside `CGame::SimFrame` (the sim phase). `self_ms - self_sim_ms` is the draw/update portion.
 - `count` — `0` for zones/timers; `>0` for **callout rows** (number of calls that frame).
+- `count_draw` / `count_sim` — context split of `count` (callout rows only): calls fired from inside a `Draw*` callin (DrawWorld/DrawScreen/DrawUnit/...) vs calls fired during `CGame::SimFrame` (synced gadgets + unsynced event handlers dispatched inline from the sim frame). The remainder (`count - count_draw - count_sim`) is other unsynced contexts (widget `Update`, input handlers, net events). Under a sim|draw thread split, `count_draw` (plus the "other" tail) is the demand that must be snapshot-served on the draw side.
 
 Each row is a per-sim-frame **delta of cumulative totals**. For per-frame averages, sum a name's column over all rows and divide by the frame count. Draw-side numbers aggregate *all* render frames that occurred in that sim interval (sim is ~30 Hz, draw is uncapped) — so "Draw 40 ms/frame" is draw work per sim tick, not one DrawWorld call.
 
@@ -32,6 +33,10 @@ Each row is a per-sim-frame **delta of cumulative totals**. For per-frame averag
 
 ### Callout rows (count>0, deep mode only)
 `self_ms` = body time **excluding nested callouts**; `incl_ms` = body **including** nested callouts. For **leaf** callouts `self==incl`. For **higher-order** callouts (`RenderToTexture`, `BeginEnd`, `ActiveTexture`, and event-triggering ones like `CreateUnit`/`DestroyUnit`/`GiveOrderToUnit`) `incl > self`, because they run nested callouts / Lua / event cascades. **Sum the `self` column for an honest callout total** — summing `incl` double-counts (higher-order rows contain the leaves).
+
+## `/calloutcensus` (full-game draw-context census)
+
+`/calloutcensus [out.csv]` writes the **cumulative** per-callout counts since process start as `name,count,count_draw,count_sim,count_other`, sorted by draw-context demand. Unlike `/profiledump` it has no frame range and no per-frame rows, so it is cheap enough to cover an entire game: run the game/replay to the end (or as far as wanted), then invoke once. Needs `LuaTrackCalloutCounts >= 1` at launch; level `1` (counts only) is enough and has far lower overhead than deep mode. This is the classification dataset for the sim|draw boundary contract: rows with high `count_draw` are the callouts the boundary snapshot must serve first.
 
 ## `/boundarydump` (sim|draw boundary sizes)
 
@@ -63,9 +68,10 @@ def load(path):
         next(fh)
         for line in fh:
             p = line.rstrip('\n').split(',')
-            if len(p) < 7: continue
-            fr=p[0]; count=int(p[-1]); incl_sim=float(p[-2]); self_sim=float(p[-3])
-            incl=float(p[-4]); self=float(p[-5]); name=','.join(p[1:-5])
+            if len(p) < 9: continue
+            fr=p[0]; count_sim=int(p[-1]); count_draw=int(p[-2]); count=int(p[-3])
+            incl_sim=float(p[-4]); self_sim=float(p[-5])
+            incl=float(p[-6]); self=float(p[-7]); name=','.join(p[1:-7])
             frames.add(int(fr)); a=agg[name]
             a[0]+=self; a[1]+=incl; a[2]+=self_sim; a[3]+=incl_sim; a[4]+=count
     return agg, len(frames)   # divide by len(frames) for per-frame averages

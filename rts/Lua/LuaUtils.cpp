@@ -63,6 +63,8 @@ namespace LuaCalloutCounters {
 	static std::vector<std::string> idToName;
 	static std::vector<unsigned> idToHash;             // counterId -> hashString(name), for folded paths
 	static std::vector<std::uint64_t> counts;
+	static std::vector<std::uint64_t> countsDraw;      // ... from inside a Draw* callin
+	static std::vector<std::uint64_t> countsSim;       // ... during the sim phase (SimFrame)
 	static std::vector<spring_time> bodySelfTimes;    // deep: body wall-time, nested callouts excluded
 	static std::vector<spring_time> bodyInclTimes;    // deep: body wall-time, nested callouts included
 	static std::vector<spring_time> bodySelfSimTimes; // sim-phase portion of bodySelfTimes
@@ -91,7 +93,7 @@ namespace LuaCalloutCounters {
 	static void DumpSnapshot(std::vector<CTimeProfiler::CalloutStat>& out) {
 		out.reserve(idToName.size());
 		for (size_t i = 0; i < idToName.size(); ++i)
-			out.push_back({hashString(idToName[i].c_str()), counts[i], bodySelfTimes[i], bodyInclTimes[i], bodySelfSimTimes[i], bodyInclSimTimes[i]});
+			out.push_back({hashString(idToName[i].c_str()), counts[i], countsDraw[i], countsSim[i], bodySelfTimes[i], bodyInclTimes[i], bodySelfSimTimes[i], bodyInclSimTimes[i]});
 	}
 
 	static bool Enabled() {
@@ -117,6 +119,8 @@ namespace LuaCalloutCounters {
 		idToName.emplace_back(name);
 		idToHash.push_back(h);
 		counts.push_back(0);
+		countsDraw.push_back(0);
+		countsSim.push_back(0);
 		bodySelfTimes.push_back(spring_notime);
 		bodyInclTimes.push_back(spring_notime);
 		bodySelfSimTimes.push_back(spring_notime);
@@ -130,6 +134,12 @@ namespace LuaCalloutCounters {
 		const int counterId = int(lua_tointeger(L, lua_upvalueindex(1)));
 		const int funcSlot  = int(lua_tointeger(L, lua_upvalueindex(2)));
 		counts[counterId]++;
+		// context attribution for the boundary-contract census: a callout fired
+		// inside a Draw* callin must be snapshot-served on the draw side of a
+		// sim|draw split; one fired during SimFrame runs on the sim side (synced
+		// gadgets + unsynced event handlers dispatched inline from the sim frame)
+		countsDraw[counterId] += ScopedDrawCallinContext::InDrawCallin();
+		countsSim[counterId]  += ScopedSimFramePhase::InSimFrame();
 
 		if (!deep)
 			return funcs[funcSlot](L);
@@ -198,6 +208,14 @@ namespace LuaCalloutCounters {
 		out.reserve(idToName.size());
 		for (size_t i = 0; i < idToName.size(); ++i)
 			out.emplace_back(idToName[i], counts[i]);
+#endif
+	}
+
+	void GetCensus(std::vector<CensusRow>& out) {
+#ifdef CALLOUT_COUNTERS
+		out.reserve(idToName.size());
+		for (size_t i = 0; i < idToName.size(); ++i)
+			out.push_back({idToName[i], counts[i], countsDraw[i], countsSim[i]});
 #endif
 	}
 }

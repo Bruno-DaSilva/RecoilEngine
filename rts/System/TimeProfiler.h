@@ -252,6 +252,8 @@ public:
 	struct CalloutStat {
 		unsigned nameHash;
 		uint64_t count;
+		uint64_t countDraw;      // ... of which from inside a Draw* callin
+		uint64_t countSim;       // ... of which during the sim phase (SimFrame)
 		spring_time bodySelf;    // cumulative body wall-time, nested callouts excluded
 		spring_time bodyIncl;    // cumulative body wall-time, nested callouts included
 		spring_time bodySelfSim; // sim-phase portion of bodySelf
@@ -305,6 +307,8 @@ private:
 		float selfSimMs; // sim-phase portion of selfMs (rest is draw/update)
 		float inclSimMs; // sim-phase portion of inclMs
 		uint64_t count;
+		uint64_t countDraw; // callout rows: counts from inside Draw* callins
+		uint64_t countSim;  // callout rows: counts during the sim phase
 	};
 	struct DumpPrev {
 		spring_time total, self, totalSim, selfSim;
@@ -319,7 +323,7 @@ private:
 	spring::unordered_map<unsigned, DumpPrev> dumpPrevTimes;
 	// per-callout-name cumulative stats at the previous sampled frame, to delta
 	struct DumpPrevCallout {
-		uint64_t count;
+		uint64_t count, countDraw, countSim;
 		spring_time bodySelf, bodyIncl, bodySelfSim, bodyInclSim;
 	};
 	spring::unordered_map<unsigned, DumpPrevCallout> dumpPrevCounts;
@@ -348,6 +352,31 @@ public:
 	explicit CallinTimerNames(const char* callin);
 	unsigned syncedHash;
 	unsigned unsyncedHash;
+	// callin name starts with "Draw" (DrawWorld, DrawScreen, DrawUnit, ...);
+	// used to attribute callout counts to draw-side callins (see census below)
+	bool isDrawCallin;
+};
+
+
+/**
+ * RAII bracket marking the calling (main) thread as running inside a Lua draw
+ * callin (DrawWorld/DrawScreen/...), so the callout-count trampoline can split
+ * per-callout counts into draw-callin vs sim-phase vs other contexts — the
+ * classification dataset for the sim|draw boundary contract (which callouts
+ * must be snapshot-served on the draw side). Constructed unconditionally by
+ * LUA_CALL_IN_CHECK (a TLS int bump when the callin is a draw one), so the
+ * split is valid whenever callout counting is on, independent of the profiler
+ * timers being enabled.
+ */
+class ScopedDrawCallinContext : public spring::noncopyable
+{
+public:
+	explicit ScopedDrawCallinContext(bool isDrawCallin);
+	~ScopedDrawCallinContext();
+
+	static bool InDrawCallin();
+private:
+	const bool counted;
 };
 
 

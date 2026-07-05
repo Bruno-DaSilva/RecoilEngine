@@ -113,12 +113,31 @@ ScopedSimFramePhase::ScopedSimFramePhase(): prev(tlInSimFrame) { tlInSimFrame = 
 ScopedSimFramePhase::~ScopedSimFramePhase() { tlInSimFrame = prev; }
 bool ScopedSimFramePhase::InSimFrame() { return tlInSimFrame; }
 
+namespace {
+	// depth of currently-open Draw* callins on this thread (nested draw callins
+	// can happen, e.g. DrawUnit fired while DrawWorld is drawing the world)
+	thread_local int tlDrawCallinDepth = 0;
+}
+
+ScopedDrawCallinContext::ScopedDrawCallinContext(bool isDrawCallin): counted(isDrawCallin)
+{
+	tlDrawCallinDepth += counted;
+}
+
+ScopedDrawCallinContext::~ScopedDrawCallinContext()
+{
+	tlDrawCallinDepth -= counted;
+}
+
+bool ScopedDrawCallinContext::InDrawCallin() { return (tlDrawCallinDepth > 0); }
+
 CallinTimerNames::CallinTimerNames(const char* callin)
 {
 	const std::string s = std::string("Lua::Callins::Synced::") + callin;
 	const std::string u = std::string("Lua::Callins::Unsynced::") + callin;
 	syncedHash   = hashString(s.c_str());
 	unsyncedHash = hashString(u.c_str());
+	isDrawCallin = (strncmp(callin, "Draw", 4) == 0);
 	// RegisterTimer copies the name into hashToName, so the locals can go away
 	CTimeProfiler::RegisterTimer(s.c_str());
 	CTimeProfiler::RegisterTimer(u.c_str());
@@ -693,7 +712,7 @@ void CTimeProfiler::DumpFrame(int frameNum)
 			if (inclMs <= 0.0f && selfMs <= 0.0f)
 				continue;
 
-			dumpRows.push_back({frameNum, nameHash, selfMs, inclMs, selfSimMs, inclSimMs, uint64_t(0)});
+			dumpRows.push_back({frameNum, nameHash, selfMs, inclMs, selfSimMs, inclSimMs, uint64_t(0), uint64_t(0), uint64_t(0)});
 		}
 	}
 
@@ -710,21 +729,23 @@ void CTimeProfiler::DumpFrame(int frameNum)
 		for (const CalloutStat& s: snap) {
 			auto it = dumpPrevCounts.find(s.nameHash);
 			if (it == dumpPrevCounts.end()) {
-				dumpPrevCounts.emplace(s.nameHash, DumpPrevCallout{s.count, s.bodySelf, s.bodyIncl, s.bodySelfSim, s.bodyInclSim});
+				dumpPrevCounts.emplace(s.nameHash, DumpPrevCallout{s.count, s.countDraw, s.countSim, s.bodySelf, s.bodyIncl, s.bodySelfSim, s.bodyInclSim});
 				continue;
 			}
 
-			const uint64_t dCount  = s.count - it->second.count;
+			const uint64_t dCount     = s.count     - it->second.count;
+			const uint64_t dCountDraw = s.countDraw - it->second.countDraw;
+			const uint64_t dCountSim  = s.countSim  - it->second.countSim;
 			const float selfMs     = (s.bodySelf    - it->second.bodySelf   ).toMilliSecsf();
 			const float inclMs     = (s.bodyIncl    - it->second.bodyIncl   ).toMilliSecsf();
 			const float selfSimMs  = (s.bodySelfSim - it->second.bodySelfSim).toMilliSecsf();
 			const float inclSimMs  = (s.bodyInclSim - it->second.bodyInclSim).toMilliSecsf();
-			it->second = DumpPrevCallout{s.count, s.bodySelf, s.bodyIncl, s.bodySelfSim, s.bodyInclSim};
+			it->second = DumpPrevCallout{s.count, s.countDraw, s.countSim, s.bodySelf, s.bodyIncl, s.bodySelfSim, s.bodyInclSim};
 
 			if (dCount == 0 && inclMs <= 0.0f)
 				continue;
 
-			dumpRows.push_back({frameNum, s.nameHash, selfMs, inclMs, selfSimMs, inclSimMs, dCount});
+			dumpRows.push_back({frameNum, s.nameHash, selfMs, inclMs, selfSimMs, inclSimMs, dCount, dCountDraw, dCountSim});
 		}
 	}
 
@@ -749,14 +770,15 @@ void CTimeProfiler::StopDump()
 		return;
 	}
 
-	f << "frame,name,self_ms,incl_ms,self_sim_ms,incl_sim_ms,count\n";
+	f << "frame,name,self_ms,incl_ms,self_sim_ms,incl_sim_ms,count,count_draw,count_sim\n";
 	{
 		std::lock_guard<HashNamMutexType> lock(hashToNameMutex);
 		for (const DumpRow& r: dumpRows) {
 			const auto it = hashToName.find(r.nameHash);
 			const char* nm = (it != hashToName.end()) ? it->second.c_str() : "???";
 			f << r.frame << ',' << nm << ',' << r.selfMs << ',' << r.inclMs
-			  << ',' << r.selfSimMs << ',' << r.inclSimMs << ',' << r.count << '\n';
+			  << ',' << r.selfSimMs << ',' << r.inclSimMs << ',' << r.count
+			  << ',' << r.countDraw << ',' << r.countSim << '\n';
 		}
 	}
 

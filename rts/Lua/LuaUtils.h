@@ -306,6 +306,19 @@ namespace LuaCalloutCounters {
 	void PushMaybeCounted(lua_State* L, const char* name, lua_CFunction func);
 	// cumulative per-callout-name counts since process start, for queries/dumps
 	void GetCounts(std::vector<std::pair<std::string, std::uint64_t>>& out);
+
+	// cumulative per-callout counts split by execution context — the draw-time
+	// callout census (/calloutcensus): countDraw = fired inside a Draw* callin
+	// (must be snapshot-served on the draw side of a sim|draw split), countSim =
+	// fired during SimFrame (sim-side), remainder = other unsynced contexts
+	// (Update/input/net; also draw-thread-side under a split)
+	struct CensusRow {
+		std::string name;
+		std::uint64_t count;
+		std::uint64_t countDraw;
+		std::uint64_t countSim;
+	};
+	void GetCensus(std::vector<CensusRow>& out);
 }
 
 static inline void LuaPushRawNamedCFunc(lua_State* L, const char* key, lua_CFunction func)
