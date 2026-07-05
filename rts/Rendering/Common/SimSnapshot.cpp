@@ -2,6 +2,7 @@
 
 #include "SimSnapshot.h"
 
+#include "SnapshotHash.h"
 #include "Game/GlobalUnsynced.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Units/Unit.h"
@@ -36,6 +37,19 @@ void SimSnapshot::Update()
 	maxExtractMs = std::max(maxExtractMs, dt);
 	numExtractions += 1;
 	peakAliveCount = std::max(peakAliveCount, front->aliveCount);
+}
+
+void SimSnapshot::HashCompletedFrame(int frameNum)
+{
+	if (!SnapshotHash::Armed())
+		return;
+
+	// Extract a private copy of the same v1 rows the published buffer holds, but
+	// from the just-completed sim frame's live state (Extract stamps
+	// gs->frameNum, which equals frameNum here). front/back and generation are
+	// untouched, so nothing draw-side observes this.
+	Extract(hashScratch);
+	SnapshotHash::HashFrame(frameNum, hashScratch);
 }
 
 void SimSnapshot::Clear()

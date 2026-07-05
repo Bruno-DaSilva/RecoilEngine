@@ -36,6 +36,7 @@
 #include "Rendering/WorldDrawer.h"
 #include "Rendering/Common/RenderEventQueue.h"
 #include "Rendering/Common/SimSnapshot.h"
+#include "Rendering/Common/SnapshotHash.h"
 #include "Rendering/Env/IWater.h"
 #include "Rendering/Env/WaterRendering.h"
 #include "Rendering/Env/MapRendering.h"
@@ -295,6 +296,9 @@ CGame::~CGame()
 
 	// write out a partial /boundarydump if the game ends before its end frame
 	BoundaryStats::FlushPartial();
+	// flush the /snaphashdump file; runs on every rewind reload too, and the
+	// dump deliberately survives the reload so forward + resim passes accumulate
+	SnapshotHash::FlushPartial();
 
 	RmlGui::Shutdown();
 	helper->Kill();
@@ -1868,6 +1872,9 @@ void CGame::SimFrame() {
 	CTimeProfiler::GetInstance().DumpFrame(gs->frameNum);
 	// sample per-sim-frame boundary-size stats for an active /boundarydump
 	BoundaryStats::SampleFrame(gs->frameNum);
+	// hash this completed sim frame's SimSnapshot for an active /snaphashdump
+	// (per sim frame, not per draw frame, so fast-forward doesn't skip frames)
+	simSnapshot.HashCompletedFrame(gs->frameNum);
 
 	#ifdef HEADLESS
 	{

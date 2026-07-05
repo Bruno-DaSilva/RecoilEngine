@@ -90,6 +90,7 @@
 #include "Rendering/Fonts/glFont.h"
 #include "Rendering/Map/InfoTexture/IInfoTextureHandler.h"
 #include "Rendering/Map/InfoTexture/Modern/Path.h"
+#include "Rendering/Common/SnapshotHash.h"
 #include "Rendering/Shaders/ShaderHandler.h"
 #include "Rendering/Textures/NamedTextures.h"
 #include "Rendering/Textures/S3OTextureHandler.h"
@@ -1543,6 +1544,52 @@ public:
 
 		// one fixed-width row per sim frame; sampled from CGame::SimFrame
 		BoundaryStats::StartDump(f0, f1, path);
+		return true;
+	}
+};
+
+
+class SnapHashDumpActionExecutor : public IUnsyncedActionExecutor {
+public:
+	SnapHashDumpActionExecutor() : IUnsyncedActionExecutor(
+		"SnapHashDump",
+		"Dump hierarchical (root/bucket/unit) SimSnapshot hashes per sim frame for spatial divergence "
+		"localization: /snaphashdump <startFrame> <endFrame> [outPath] [root|bucket|unit]. "
+		"'/snaphashdump stop' writes+disarms. Default detail=root (cheap, whole-game safe); "
+		"'unit' emits a line per valid unit per frame (bounded windows only)."
+	) {}
+
+	bool Execute(const UnsyncedAction& action) const final {
+		const auto args = CSimpleParser::Tokenize(action.GetArgs());
+
+		if (!args.empty() && (args[0] == "stop" || args[0] == "off")) {
+			SnapshotHash::StopDump();
+			return true;
+		}
+
+		if (args.size() < 2) {
+			LOG_L(L_WARNING, "[/snaphashdump] usage: /snaphashdump <startFrame> <endFrame> [outPath] [root|bucket|unit] (or /snaphashdump stop)");
+			return true;
+		}
+
+		const int f0 = StringToInt(args[0]);
+		const int f1 = StringToInt(args[1]);
+		std::string path = (args.size() > 2) ? args[2] : "snaphashdump.tsv";
+
+		SnapshotHash::Detail detail = SnapshotHash::DETAIL_ROOT;
+		if (args.size() > 3) {
+			if      (args[3] == "unit")   detail = SnapshotHash::DETAIL_UNIT;
+			else if (args[3] == "bucket") detail = SnapshotHash::DETAIL_BUCKET;
+			else if (args[3] == "root")   detail = SnapshotHash::DETAIL_ROOT;
+			else LOG_L(L_WARNING, "[/snaphashdump] unknown detail '%s'; using root", args[3].c_str());
+		}
+
+		// resolve a relative path against the write data-dir (see /profiledump)
+		if (!FileSystem::IsAbsolutePath(path))
+			path = dataDirLocater.GetWriteDirPath() + path;
+
+		// hashed once per sim frame from CGame::SimFrame; survives rewind reloads
+		SnapshotHash::StartDump(f0, f1, path, detail);
 		return true;
 	}
 };
@@ -4208,6 +4255,7 @@ void UnsyncedGameCommands::AddDefaultActionExecutors()
 	AddActionExecutor(AllocActionExecutor<DebugActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<ProfileDumpActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<BoundaryDumpActionExecutor>());
+	AddActionExecutor(AllocActionExecutor<SnapHashDumpActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<CalloutCensusActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<DebugCubeMapActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<DebugQuadFieldActionExecutor>());

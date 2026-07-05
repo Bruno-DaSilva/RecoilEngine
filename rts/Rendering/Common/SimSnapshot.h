@@ -144,6 +144,14 @@ public:
 	/// game's first Update() extracts, and logs the extraction-cost stats
 	void Clear();
 
+	/// PR 16: while a SnapshotHash dump is armed, hash this completed sim frame.
+	/// Called once per sim frame from CGame::SimFrame (NOT draw time) so every
+	/// sim frame is hashed regardless of the draw/catch-up rate. Extracts into a
+	/// private scratch buffer and hands it to SnapshotHash without touching the
+	/// published front/back buffers or the generation, so draw-side behavior is
+	/// unchanged. No-op (single relaxed bool load) unless armed.
+	void HashCompletedFrame(int frameNum);
+
 	const UnitRows& Read() const { return *front; }
 	uint32_t Generation() const { return generation; }
 private:
@@ -153,6 +161,10 @@ private:
 	UnitRows buffers[2];
 	UnitRows* front = &buffers[0];
 	UnitRows* back = &buffers[1];
+
+	// PR 16: scratch rows for per-sim-frame hashing; never published, kept only
+	// to avoid reallocating its arrays every armed frame
+	UnitRows hashScratch;
 
 	uint32_t generation = 0;
 
