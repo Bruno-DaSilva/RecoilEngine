@@ -122,7 +122,6 @@ public:
 	bool deleteMe = false;
 	bool alphaFade = true; // unsynced
 
-	float drawAlpha = 1.0f; // unsynced
 	float resurrectProgress = 0.0f;
 	float reclaimTime = 0.0f;
 	float reclaimLeft = 1.0f;

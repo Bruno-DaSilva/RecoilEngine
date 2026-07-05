@@ -36,6 +36,11 @@ void CFeatureDrawerData::RenderFeaturePreCreated(const CFeature* feature)
 		unsyncedTransforms.resize(feature->id + 1);
 
 	unsyncedTransforms[feature->id] = CMatrix44f{}; // identity until first drawn, as the old member was
+
+	if (feature->id >= drawAlphas.size())
+		drawAlphas.resize(feature->id + 1, 1.0f);
+
+	drawAlphas[feature->id] = 1.0f; // as the old member init was
 }
 
 //TODO remove
@@ -53,6 +58,12 @@ void CFeatureDrawerData::RenderFeatureDestroyed(const CFeature* feature)
 	RECOIL_DETAILED_TRACY_ZONE;
 	DelObject(feature, feature->def->drawType == DRAWTYPE_MODEL);
 	LuaObjectDrawer::SetObjectLOD(const_cast<CFeature*>(feature), LUAOBJ_FEATURE, 0);
+
+	// unlike the other id-keyed slots this one is read for arbitrary features
+	// (decal fading), so reset it: a non-model feature reusing the id would
+	// otherwise read the previous owner's fade instead of the fresh-member 1.0f
+	if (feature->id < drawAlphas.size())
+		drawAlphas[feature->id] = 1.0f;
 }
 
 CFeatureDrawerData::CFeatureDrawerData(bool& mtModelDrawer_)
@@ -119,7 +130,7 @@ void CFeatureDrawerData::Update()
 bool CFeatureDrawerData::IsAlpha(const CFeature* co) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	return (co->drawAlpha < 1.0f);
+	return (GetDrawAlpha(co) < 1.0f);
 }
 
 void CFeatureDrawerData::UpdateObjectDrawFlags(CSolidObject* o)
@@ -128,6 +139,8 @@ void CFeatureDrawerData::UpdateObjectDrawFlags(CSolidObject* o)
 
 	CFeature* f = static_cast<CFeature*>(o);
 	ResetDrawFlag(f);
+
+	float& drawAlpha = drawAlphas[f->id]; // slot exists for every registered object
 
 	for (uint32_t camType = CCamera::CAMTYPE_PLAYER; camType < CCamera::CAMTYPE_ENVMAP; ++camType) {
 		if (camType == CCamera::CAMTYPE_UWREFL && !IWater::GetWater()->CanDrawReflectionPass())
@@ -158,19 +171,19 @@ void CFeatureDrawerData::UpdateObjectDrawFlags(CSolidObject* o)
 				// special case for non-fading features
 				if (!f->alphaFade) {
 					SetDrawFlag(f, DrawFlags::SO_OPAQUE_FLAG);
-					f->drawAlpha = 1.0f;
+					drawAlpha = 1.0f;
 					continue;
 				}
 
 				// too far, don't draw at all
 				if (camDist > featureDrawDistance) {
-					f->drawAlpha = 0.0f;
+					drawAlpha = 0.0f;
 					continue;
 				}
 
 				// close enough to draw solid
 				if (camDist < featureFadeDistance) {
-					f->drawAlpha = 1.0f;
+					drawAlpha = 1.0f;
 					SetDrawFlag(f, DrawFlags::SO_OPAQUE_FLAG);
 					if (f->IsInWater())
 						AddDrawFlag(f, DrawFlags::SO_REFRAC_FLAG);
@@ -180,18 +193,18 @@ void CFeatureDrawerData::UpdateObjectDrawFlags(CSolidObject* o)
 
 				// fading is disabled, just don't draw
 				if (featureDrawDistance == featureFadeDistance) {
-					f->drawAlpha = 0.0f;
+					drawAlpha = 0.0f;
 					continue;
 				}
 
-				f->drawAlpha = std::max(0.0f, 1.0f - (camDist - featureFadeDistance) / (featureDrawDistance - featureFadeDistance));
+				drawAlpha = std::max(0.0f, 1.0f - (camDist - featureFadeDistance) / (featureDrawDistance - featureFadeDistance));
 				SetDrawFlag(f, DrawFlags::SO_ALPHAF_FLAG);
 				if (f->IsInWater())
 					AddDrawFlag(f, DrawFlags::SO_REFRAC_FLAG);
 			} break;
 
 			case CCamera::CAMTYPE_UWREFL: {
-				if (f->drawAlpha <= 0.0f)
+				if (drawAlpha <= 0.0f)
 					continue;
 
 				if (!HasDrawFlag(f, DrawFlags::SO_OPAQUE_FLAG) && !HasDrawFlag(f, DrawFlags::SO_ALPHAF_FLAG))
@@ -202,7 +215,7 @@ void CFeatureDrawerData::UpdateObjectDrawFlags(CSolidObject* o)
 			} break;
 
 			case CCamera::CAMTYPE_SHADOW: {
-				if (f->drawAlpha <= 0.0f)
+				if (drawAlpha <= 0.0f)
 					continue;
 
 				if unlikely(IsAlpha(f))
@@ -221,6 +234,11 @@ const CMatrix44f& CFeatureDrawerData::GetUnsyncedTransformMatrix(const CFeature*
 {
 	static const CMatrix44f identity;
 	return (f->id < unsyncedTransforms.size()) ? unsyncedTransforms[f->id] : identity;
+}
+
+float CFeatureDrawerData::GetDrawAlpha(const CFeature* f) const
+{
+	return (f->id < drawAlphas.size()) ? drawAlphas[f->id] : 1.0f;
 }
 
 void CFeatureDrawerData::UpdateUnsyncedTransform(const CFeature* f)

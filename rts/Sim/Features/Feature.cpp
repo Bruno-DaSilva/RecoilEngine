@@ -42,7 +42,6 @@ CR_REG_METADATA(CFeature, (
 	CR_MEMBER(deleteMe),
 	CR_MEMBER(alphaFade),
 
-	CR_MEMBER(drawAlpha),
 	CR_MEMBER(resurrectProgress),
 	CR_MEMBER(reclaimTime),
 	CR_MEMBER(reclaimLeft),

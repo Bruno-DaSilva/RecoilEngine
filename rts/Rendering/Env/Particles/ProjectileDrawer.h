@@ -83,6 +83,16 @@ public:
 	}
 	bool HasDrawFlag(const CProjectile* p, DrawFlags f) const { return (GetDrawFlag(p) & f) == f; }
 
+	// drawer-owned per-camera z-sort keys, parallel to renderProjectiles (sim/draw §A
+	// sortDist eviction; was a CProjectile field). Written by UpdateDrawFlags for the
+	// cameras a projectile is in view of (stale slots keep their last value, as the
+	// old member did); zero for projectiles not (yet) registered, as the old member
+	// default was. Includes the sim-authored p->sortDistOffset, like the old setter.
+	float GetSortDist(const CProjectile* p, uint32_t camType) const {
+		const uint32_t ri = p->GetRenderIndex();
+		return (ri < sortDists.size()) ? sortDists[ri][camType] : 0.0f;
+	}
+
 	unsigned int NumSmokeTextures() const { return (smokeTextures.size()); }
 
 	void IncPerlinTexObjectCount() { perlinTexObjects++; }
@@ -189,6 +199,9 @@ private:
 
 	/// draw-visibility flags, parallel to renderProjectiles (see GetDrawFlag)
 	std::vector<uint8_t> drawFlags;
+
+	/// per-camera z-sort keys, parallel to renderProjectiles (see GetSortDist)
+	std::vector<std::array<float, 3>> sortDists;
 
 	/// projectiles container
 	std::vector<CProjectile*> renderProjectiles;

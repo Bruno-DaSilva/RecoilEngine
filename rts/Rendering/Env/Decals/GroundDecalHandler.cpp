@@ -19,6 +19,7 @@
 #include "Rendering/GlobalRendering.h"
 #include "Rendering/ShadowHandler.h"
 #include "Rendering/Units/UnitDrawer.h"
+#include "Rendering/Features/FeatureDrawer.h"
 #include "Rendering/Env/ISky.h"
 #include "Rendering/Env/SunLighting.h"
 #include "Rendering/Env/WaterRendering.h"
@@ -1585,7 +1586,7 @@ void CGroundDecalHandler::UpdateDecalsVisibility()
 				if (!feature->IsInLosForAllyTeam(gu->myAllyTeam))
 					wantedMult = 0.0f;
 
-				wantedMult = std::min(wantedMult, std::max(0.0f, feature->drawAlpha));
+				wantedMult = std::min(wantedMult, std::max(0.0f, CFeatureDrawer::GetDrawAlpha(feature)));
 			}
 
 			if (math::fabs(wantedMult - decal.visMult) > 0.05f) {

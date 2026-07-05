@@ -44,7 +44,6 @@ CR_REG_METADATA(CProjectile,
 
 	CR_MEMBER(myrange),
 	CR_MEMBER(mygravity),
-	CR_IGNORED(sortDist),
 	CR_MEMBER(sortDistOffset),
 
 	CR_MEMBER(validTextures),

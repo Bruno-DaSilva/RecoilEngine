@@ -31,6 +31,13 @@ public:
 	// replaced the unsynced half of CFeature::transMatrix). Identity until the
 	// feature first passes the draw-flag gate below, as the old member was.
 	const CMatrix44f& GetUnsyncedTransformMatrix(const CFeature* f) const;
+
+	// distance-fade alpha, written by UpdateObjectDrawFlags each draw frame
+	// (drawer-owned since the §A drawAlpha eviction; was a CFeature field).
+	// 1.0f until first written, for features never registered here (non-model
+	// features) and again after the owning feature's slot is released — each
+	// matching the old member's construction-time init.
+	float GetDrawAlpha(const CFeature* f) const;
 protected:
 	void UpdateObjectDrawFlags(CSolidObject* o) override;
 private:
@@ -41,4 +48,5 @@ public:
 	float featureFadeDistance;
 private:
 	std::vector<CMatrix44f> unsyncedTransforms; // indexed by feature id
+	std::vector<float> drawAlphas; // indexed by feature id (see GetDrawAlpha)
 };

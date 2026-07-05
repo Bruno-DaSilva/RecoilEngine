@@ -462,7 +462,7 @@ void LuaObjectDrawer::DrawBinObject(
 
 			const CFeature* feat = static_cast<const CFeature*>(obj);
 
-			tcFunc(feat, luaMat, feat->drawAlpha, deferredPass);
+			tcFunc(feat, luaMat, CFeatureDrawer::GetDrawAlpha(feat), deferredPass);
 			soFunc(feat, luaMat, objType, deferredPass);
 			CALL_FUNC_VA(featureDrawer, fdFunc, feat, preList, postList, true, noLuaCall);
 		} break;

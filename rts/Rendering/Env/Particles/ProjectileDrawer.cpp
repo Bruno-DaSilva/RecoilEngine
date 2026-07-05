@@ -48,11 +48,11 @@ CONFIG(int, SoftParticles).defaultValue(1).safemodeValue(0).description("Soften 
 
 static uint32_t sortCamType = 0;
 static bool CProjectileDrawOrderSortingPredicate(const CProjectile* p1, const CProjectile* p2) noexcept {
-	return std::forward_as_tuple(p2->drawOrder, p1->GetSortDist(sortCamType), p1) > std::forward_as_tuple(p1->drawOrder, p2->GetSortDist(sortCamType), p2);
+	return std::forward_as_tuple(p2->drawOrder, projectileDrawer->GetSortDist(p1, sortCamType), p1) > std::forward_as_tuple(p1->drawOrder, projectileDrawer->GetSortDist(p2, sortCamType), p2);
 }
 
 static bool CProjectileSortingPredicate(const CProjectile* p1, const CProjectile* p2) noexcept {
-	return std::forward_as_tuple(p1->GetSortDist(sortCamType), p1) > std::forward_as_tuple(p2->GetSortDist(sortCamType), p2);
+	return std::forward_as_tuple(projectileDrawer->GetSortDist(p1, sortCamType), p1) > std::forward_as_tuple(projectileDrawer->GetSortDist(p2, sortCamType), p2);
 };
 
 CProjectileDrawer* projectileDrawer = nullptr;
@@ -351,6 +351,7 @@ void CProjectileDrawer::Kill() {
 	renderProjectiles.clear();
 	drawPositions.clear();
 	drawFlags.clear();
+	sortDists.clear();
 
 	for (auto& dp : drawParticles)
 		dp.clear();
@@ -402,7 +403,7 @@ void CProjectileDrawer::UpdateDrawFlags()
 			if (!cam->InView(drawPos, p->GetDrawRadius()))
 				continue;
 
-			p->SetSortDist(camType, cam->ProjectedDistance(drawPos));
+			sortDists[i][camType] = cam->ProjectedDistance(drawPos) + p->sortDistOffset;
 
 			switch (camType)
 			{
@@ -1218,6 +1219,7 @@ void CProjectileDrawer::RenderProjectileCreated(const CProjectile* p)
 		renderProjectiles.push_back(const_cast<CProjectile*>(p));
 		drawPositions.emplace_back(); // zero until the first UpdateDrawFlags, as the old member was
 		drawFlags.emplace_back(DrawFlags::SO_NODRAW_FLAG); // as the old member default was
+		sortDists.emplace_back(); // zero until first in view, as the old member default was
 	}
 
 	if (p->model != nullptr)
@@ -1242,6 +1244,9 @@ void CProjectileDrawer::RenderProjectileDestroyed(const CProjectile* p)
 
 	drawFlags[ri] = drawFlags.back();
 	drawFlags.pop_back();
+
+	sortDists[ri] = sortDists.back();
+	sortDists.pop_back();
 
 	if (p->model != nullptr)
 		modelRenderers[MDL_TYPE(p)].DelObject(p);

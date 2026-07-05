@@ -96,9 +96,6 @@ public:
 
 	void SetCustomExpGenID(uint32_t id) { cegID = id; }
 	void SetRenderIndex(uint32_t idx) { renderIndex = idx; }
-
-	float GetSortDist(uint32_t camType) const { return sortDist[camType]; }
-	void SetSortDist(uint32_t camType, float d) { sortDist[camType] = d + sortDistOffset; }
 public:
 	bool synced = false;           // is this projectile part of the simulation?
 	bool weapon = false;           // is this a weapon projectile? (true implies synced true)
@@ -123,8 +120,9 @@ public:
 	float myrange = 0.0f;          // used by WeaponProjectile::TraveledRange
 	float mygravity = 0.0f;
 
-	std::array<float, 3> sortDist = {}; // distance used for z-sorting when rendering
-	float sortDistOffset = 0.0f;        // an offset used for z-sorting
+	// offset added by CProjectileDrawer when it computes this projectile's
+	// z-sort key (the key array itself is drawer-owned, sim/draw §A eviction)
+	float sortDistOffset = 0.0f;
 
 	int drawOrder = 0;
 
