@@ -458,7 +458,7 @@ float GuiTraceRay(
 			// volume is a sphere of radius <unit->IconRadius>
 			// (count radar blips as such too)
 			if (CUnitDrawer::GetIsIcon(u) || (!unitInSight && unitOnRadar && unitIsEnemy))
-				cv.InitSphere(u->iconRadius);
+				cv.InitSphere(CUnitDrawer::GetUnitIconRadius(u));
 
 			if (CCollisionHandler::MouseHit(u, CUnitDrawer::GetUnsyncedTransformMatrix(u), start, start + dir * guiRayLength, &cv, &cq)) {
 				// get the distance to the ray-volume ingress point

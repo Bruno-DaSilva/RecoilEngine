@@ -102,7 +102,7 @@ public:
 	}
 
 	static inline float GetUnitIconScale(const CUnit* unit) {
-		const auto& iconData = icon::iconHandler.GetIconData(unit->currentIconIndex);
+		const auto& iconData = icon::iconHandler.GetIconData(CUnitDrawer::GetUnitIconIndex(unit));
 		float scale = iconData.GetSize();
 
 		if (!minimap->UseUnitIcons())
@@ -404,7 +404,7 @@ void CUnitDrawerGLSL::DrawUnitMiniMapIcons() const
 	const auto& snapshot = simSnapshot.Read();
 
 	for (auto* unit : modelDrawerData->GetUnsortedObjects()) {
-		const size_t iconIndex = minimap->UseUnitIcons() ? unit->currentIconIndex : defIconIdx;
+		const size_t iconIndex = minimap->UseUnitIcons() ? modelDrawerData->GetUnitIconIndex(unit) : defIconIdx;
 
 		if (iconIndex == icon::INVALID_ICON_INDEX)
 			continue;
@@ -412,7 +412,7 @@ void CUnitDrawerGLSL::DrawUnitMiniMapIcons() const
 		if (unit->noMinimap)
 			continue;
 
-		if (!unit->drawIcon)
+		if (!modelDrawerData->GetUnitDrawIcon(unit))
 			continue;
 
 		if (unit->IsInVoid())
@@ -505,7 +505,7 @@ void CUnitDrawerGLSL::DrawUnitMiniMapIcons() const
 	glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, 0);
 }
 
-float CUnitDrawerGLSL::DrawUnitIcon(TypedRenderBuffer<VA_TYPE_TC3>& rb, size_t iconIdx, const float iconRadius, const float unitRadius, float3 pos, const SColor& color) const
+float CUnitDrawerGLSL::DrawUnitIcon(TypedRenderBuffer<VA_TYPE_TC3>& rb, size_t iconIdx, const float unitRadius, float3 pos, const SColor& color) const
 {
 	const auto& iconData = icon::iconHandler.GetIconData(iconIdx);
 
@@ -562,16 +562,16 @@ void CUnitDrawerGLSL::DrawUnitIcons() const
 	rb.AssertSubmission();
 
 	for (auto* unit : modelDrawerData->GetUnsortedObjects()) {
-		if (unit->currentIconIndex == icon::INVALID_ICON_INDEX)
+		const size_t iconIndex = modelDrawerData->GetUnitIconIndex(unit);
+
+		if (iconIndex == icon::INVALID_ICON_INDEX)
 			continue;
 
 		if (!GetIsIcon(unit))
 			continue;
 
-		if (!unit->drawIcon)
+		if (!modelDrawerData->GetUnitDrawIcon(unit))
 			continue;
-
-		const auto& iconData = icon::iconHandler.GetIconData(unit->currentIconIndex);
 
 		// drawMidPos is auto-calculated now; can wobble on its own as pieces move
 		float3 pos = (!gu->spectatingFullView) ?
@@ -581,7 +581,7 @@ void CUnitDrawerGLSL::DrawUnitIcons() const
 		// use white for selected units
 		const auto& iconColor = unit->isSelected ? color4::white : teamHandler.Team(unit->team)->color;
 
-		unit->iconRadius = DrawUnitIcon(rb, unit->currentIconIndex, unit->iconRadius, unit->radius, pos, iconColor);
+		modelDrawerData->SetUnitIconRadius(unit, DrawUnitIcon(rb, iconIndex, unit->radius, pos, iconColor));
 	}
 
 	if (!rb.ShouldSubmit())
@@ -672,10 +672,12 @@ void CUnitDrawerGLSL::DrawUnitIconsScreen() const
 	const float ghostIconDimming = modelDrawerData->ghostIconDimming;
 
 	for (auto* unit : modelDrawerData->GetUnsortedObjects()) {
-		if (unit->currentIconIndex == icon::INVALID_ICON_INDEX)
+		const size_t iconIndex = modelDrawerData->GetUnitIconIndex(unit);
+
+		if (iconIndex == icon::INVALID_ICON_INDEX)
 			continue;
 
-		if (!unit->drawIcon)
+		if (!modelDrawerData->GetUnitDrawIcon(unit))
 			continue;
 
 		// needed?
@@ -710,7 +712,7 @@ void CUnitDrawerGLSL::DrawUnitIconsScreen() const
 			}
 		}
 
-		DrawUnitIconScreen(rb, unit->currentIconIndex, pos, currentColor, unit->radius, GetIsIcon(unit));
+		DrawUnitIconScreen(rb, iconIndex, pos, currentColor, unit->radius, GetIsIcon(unit));
 	}
 	
 	if (!isFullView && ghostIconDimming > 0.0f) {

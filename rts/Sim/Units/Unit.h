@@ -258,15 +258,15 @@ public: // unsynced methods
 	      CGroup* GetGroup();
 
 	// GetIsIcon()/SetIsIcon() evicted to the drawer (CUnitDrawer::GetIsIcon,
-	// CUnitDrawerData::SetUnitIsIcon) with the drawFlag storage (sim/draw §A, PR 4)
+	// CUnitDrawerData::SetUnitIsIcon) with the drawFlag storage (sim/draw §A, PR 4);
+	// the remaining icon state (icon indices/name, iconRadius, drawIcon) followed
+	// in PR 5 (CUnitDrawerData::UnitIconState, CUnitDrawer::GetUnitIcon* statics)
 public:
 	static float ExperienceScale(float limExperience, float experienceWeight) {
 		// limExperience ranges from 0.0 to 0.9999...
 		return std::max(0.0f, 1.0f - (limExperience * experienceWeight));
 	}
-private:
-	void UpdateRenderParams();
-public:
+
 	const UnitDef* unitDef = nullptr;
 
 	// Our shield weapon, NULL if we have none
@@ -533,14 +533,6 @@ public:
 	bool isSelected = false;
 	// if true, unit can not be added to groups by a player (UNSYNCED)
 	bool noGroup = false;
-
-	float iconRadius = 0.0f;
-
-	mutable std::string definedIconName;
-	mutable size_t currentIconIndex = size_t(-1); // icon::INVALID_ICON_INDEX;
-	mutable size_t customIconIndex = size_t(-1); // icon::INVALID_ICON_INDEX;
-
-	bool drawIcon = true;
 private:
 	// if we are stunned by a weapon or for other reason, access via IsStunned/SetStunned(bool)
 	bool stunned = false;

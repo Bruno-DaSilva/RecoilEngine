@@ -2565,7 +2565,7 @@ int LuaUnsyncedCtrl::SetUnitIconDraw(lua_State* L)
 	if (unit == nullptr)
 		return 0;
 
-	unit->drawIcon = luaL_checkboolean(L, 2);
+	CUnitDrawer::SetUnitDrawIcon(unit, luaL_checkboolean(L, 2));
 	return 0;
 }
 
@@ -2584,7 +2584,7 @@ int LuaUnsyncedCtrl::SetUnitIcon(lua_State* L)
 		return 0;
 
 	if (lua_isnoneornil(L, 2)) {
-	    unit->customIconIndex = icon::INVALID_ICON_INDEX;
+		CUnitDrawer::SetUnitCustomIcon(unit, icon::INVALID_ICON_INDEX);
 		unitDrawer->UpdateCurrentUnitIcon(unit);
 		return 0;
 	}
@@ -2597,7 +2597,7 @@ int LuaUnsyncedCtrl::SetUnitIcon(lua_State* L)
 		return 0;
 	}
 
-	unit->customIconIndex = iconIdx;
+	CUnitDrawer::SetUnitCustomIcon(unit, iconIdx);
 	unitDrawer->UpdateCurrentUnitIcon(unit);
 
 	return 0;

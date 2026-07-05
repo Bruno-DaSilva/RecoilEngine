@@ -174,6 +174,35 @@ public:
 		else
 			DelDrawFlag(u, DrawFlags::SO_DRICON_FLAG);
 	}
+
+	// render-owned per-unit icon state (sim/draw §A, PR 5: these were CUnit
+	// members authored by draw code and unsynced Lua — evicted to drawer
+	// storage). Keyed by unit id; slots are default-initialized at the
+	// RenderUnitPreCreated drain (definedIconName captured from the unitDef
+	// there, matching the old CUnit::UpdateRenderParams creation-time freeze),
+	// stale after death until id reuse, and unregistered ids read the defaults
+	// below — each matching the old member semantics. iconRadius stays
+	// picking-visible through GetUnitIconRadius (TraceRay reads it via the
+	// CUnitDrawer static).
+	struct UnitIconState {
+		std::string definedIconName;             // unitDef->iconName frozen at registration
+		size_t currentIconIndex = size_t(-1);    // icon::INVALID_ICON_INDEX
+		size_t customIconIndex = size_t(-1);     // icon::INVALID_ICON_INDEX
+		float iconRadius = 0.0f;                 // world-space click radius while iconified
+		bool drawIcon = true;                    // Lua Spring.SetUnitIconDraw
+	};
+
+	size_t GetUnitIconIndex(const CUnit* u) const { return GetIconState(u).currentIconIndex; }
+	float GetUnitIconRadius(const CUnit* u) const { return GetIconState(u).iconRadius; }
+	bool GetUnitDrawIcon(const CUnit* u) const { return GetIconState(u).drawIcon; }
+
+	// writes resize on demand: unsynced Lua can address a unit in the window
+	// between its sim-side creation and the boundary drain that registers it
+	// (such writes are then reset by the slot init at the drain; see the
+	// enumerated deviation in the PR-5 commit message)
+	void SetUnitCustomIcon(const CUnit* u, size_t iconIdx) { IconStateRef(u).customIconIndex = iconIdx; }
+	void SetUnitDrawIcon(const CUnit* u, bool b) { IconStateRef(u).drawIcon = b; }
+	void SetUnitIconRadius(const CUnit* u, float r) { IconStateRef(u).iconRadius = r; }
 private:
 	void UpdateTempDrawUnits(std::vector<TempDrawUnit>& tempDrawUnits);
 
@@ -210,7 +239,12 @@ public:
 
 	void ConfigNotify(const std::string& key, const std::string& value);
 private:
+	const UnitIconState& GetIconState(const CUnit* u) const;
+	UnitIconState& IconStateRef(const CUnit* u);
+
 	SavedData savedData;
+
+	std::vector<UnitIconState> iconStates; // indexed by unit id
 
 	std::vector<UnitDefImage> unitDefImages;
 

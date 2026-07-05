@@ -391,7 +391,6 @@ void CUnit::PostInit(const CUnit* builder)
 		commandAI->GiveCommand(Command(CMD_FIRE_STATE, 0, fireState));
 	}
 
-	UpdateRenderParams();
 	renderEventQueue.RenderUnitPreCreated(this);
 
 	// Lua might call SetUnitHealth within UnitCreated
@@ -413,7 +412,6 @@ void CUnit::PostInit(const CUnit* builder)
 void CUnit::PostLoad()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	UpdateRenderParams();
 	renderEventQueue.RenderUnitPreCreated(this);
 	renderEventQueue.RenderUnitCreated(this, isCloaked);
 }
@@ -1997,11 +1995,6 @@ bool CUnit::SetGroup(CGroup* newGroup, bool fromFactory, bool autoSelect)
 const CGroup* CUnit::GetGroup() const { return uiGroupHandlers[team].GetUnitGroup(id); }
       CGroup* CUnit::GetGroup()       { return uiGroupHandlers[team].GetUnitGroup(id); }
 
-void CUnit::UpdateRenderParams()
-{
-	definedIconName = unitDef->iconName;
-}
-
 
 /******************************************************************************/
 /******************************************************************************/
@@ -3090,11 +3083,6 @@ CR_REG_METADATA(CUnit, (
 
 	CR_MEMBER(selfDCountdown),
 
-	CR_MEMBER(definedIconName),
-	CR_MEMBER_UN(currentIconIndex),
-	CR_MEMBER(customIconIndex),
-	CR_MEMBER_UN(drawIcon),
-
 	CR_MEMBER(transportedUnits),
 	CR_MEMBER(incomingMissiles),
 
@@ -3104,7 +3092,6 @@ CR_REG_METADATA(CUnit, (
 	CR_MEMBER_UN(leaveTracks),
 
 	CR_MEMBER_UN(isSelected),
-	CR_MEMBER(iconRadius),
 
 	CR_MEMBER(stunned),
 	CR_MEMBER_UN(noGroup),

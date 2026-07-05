@@ -280,15 +280,17 @@ void CUnitDrawerData::UpdateCurrentUnitIcon(const CUnit* unit)
 
 	const bool typedIcon = (unitVisible || gu->spectatingFullView);
 
+	auto& iconState = IconStateRef(unit);
+
 	if (typedIcon) {
-		unit->currentIconIndex =
-			(unit->customIconIndex != icon::INVALID_ICON_INDEX) ? unit->customIconIndex : icon::iconHandler.GetIconIdxOrDefault(unit->definedIconName);
+		iconState.currentIconIndex =
+			(iconState.customIconIndex != icon::INVALID_ICON_INDEX) ? iconState.customIconIndex : icon::iconHandler.GetIconIdxOrDefault(iconState.definedIconName);
 	}
 	else if ((losStatus & LOS_INRADAR) != 0) {
-		unit->currentIconIndex = icon::iconHandler.GetDefaultIconIdx();
+		iconState.currentIconIndex = icon::iconHandler.GetDefaultIconIdx();
 	}
 	else {
-		unit->currentIconIndex = icon::INVALID_ICON_INDEX;
+		iconState.currentIconIndex = icon::INVALID_ICON_INDEX;
 	}
 }
 
@@ -322,7 +324,7 @@ void CUnitDrawerData::UpdateUnitIconStateScreen(CUnit* unit)
 		return;
 	}
 
-	if (unit->currentIconIndex == icon::INVALID_ICON_INDEX || unit->health <= 0 || unit->beingBuilt || unit->noDraw || unit->IsInVoid())
+	if (GetUnitIconIndex(unit) == icon::INVALID_ICON_INDEX || unit->health <= 0 || unit->beingBuilt || unit->noDraw || unit->IsInVoid())
 	{
 		SetUnitIsIcon(unit, false);
 		return;
@@ -330,7 +332,7 @@ void CUnitDrawerData::UpdateUnitIconStateScreen(CUnit* unit)
 
 	const unsigned short losStatus = unit->losStatus[gu->myAllyTeam];
 
-	const auto& iconData = icon::iconHandler.GetIconData(unit->currentIconIndex);
+	const auto& iconData = icon::iconHandler.GetIconData(GetUnitIconIndex(unit));
 
 	float iconSizeMult = iconData.GetSize();
 	if (iconData.GetRadiusAdjust())
@@ -346,7 +348,7 @@ void CUnitDrawerData::UpdateUnitIconStateScreen(CUnit* unit)
 	pos = camera->CalcViewPortCoordinates(pos);
 	radiusPos = camera->CalcViewPortCoordinates(radiusPos);
 
-	unit->iconRadius = unit->radius * ((limit * 0.9) / std::abs(pos.x - radiusPos.x)); // used for clicking on iconified units (world space!!!)
+	SetUnitIconRadius(unit, unit->radius * ((limit * 0.9) / std::abs(pos.x - radiusPos.x))); // used for clicking on iconified units (world space!!!)
 
 	if (!(losStatus & LOS_INLOS) && !gu->spectatingFullView) // no LOS on unit
 	{
@@ -465,7 +467,7 @@ void CUnitDrawerData::UpdateObjectDrawFlags(CSolidObject* o)
 bool CUnitDrawerData::DrawAsIconByDistance(const CUnit* unit, const float sqUnitCamDist) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	const auto& sqIconDistMult = icon::iconHandler.GetIconData(unit->currentIconIndex).GetDistanceSq();
+	const auto& sqIconDistMult = icon::iconHandler.GetIconData(GetUnitIconIndex(unit)).GetDistanceSq();
 	const float realIconLength = iconLength * sqIconDistMult;
 
 	if (useDistToGroundForIcons)
@@ -579,10 +581,31 @@ void CUnitDrawerData::UpdateTempDrawUnits(std::vector<TempDrawUnit>& tempDrawUni
 	}
 }
 
+const CUnitDrawerData::UnitIconState& CUnitDrawerData::GetIconState(const CUnit* u) const
+{
+	static const UnitIconState def = {};
+	return (u->id < iconStates.size()) ? iconStates[u->id] : def;
+}
+
+CUnitDrawerData::UnitIconState& CUnitDrawerData::IconStateRef(const CUnit* u)
+{
+	if (u->id >= iconStates.size())
+		iconStates.resize(u->id + 1);
+
+	return iconStates[u->id];
+}
+
 void CUnitDrawerData::RenderUnitPreCreated(const CUnit* unit)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	UpdateObject(unit, true);
+
+	// fresh slot for a fresh unit (the id may be recycled); definedIconName
+	// freezes the unitDef's icon at registration time, replacing the old
+	// creation-time CUnit::UpdateRenderParams copy
+	auto& iconState = IconStateRef(unit);
+	iconState = {};
+	iconState.definedIconName = unit->unitDef->iconName;
 }
 
 void CUnitDrawerData::RenderUnitCreated(const CUnit* unit, int cloaked)
@@ -652,10 +675,10 @@ bool CUnitDrawerData::UpdateUnitGhosts(const CUnit* unit, const GhostAllyMask& d
 				gso->radius = u->radius;
 				gso->GetModel();
 
-				// gso is a shared object, we can't rely on the u->currentIconIndex being representative in case the team changes
-				gso->currentIconIndex = icon::iconHandler.GetIconIdxOrDefault(unit->definedIconName);
+				// gso is a shared object, we can't rely on the unit's currentIconIndex being representative in case the team changes
+				gso->currentIconIndex = icon::iconHandler.GetIconIdxOrDefault(GetIconState(unit).definedIconName);
 
-				gso->iconRadius = u->iconRadius;
+				gso->iconRadius = GetUnitIconRadius(u);
 
 				groundDecals->GhostCreated(u, gso);
 
@@ -687,7 +710,7 @@ void CUnitDrawerData::RenderUnitDestroyed(const CUnit* unit)
 	// the old synchronous dispatch saw
 	UpdateUnitGhosts(unit, unit->leavesGhost ? CalcDeadGhostAllyMask(unit) : GhostAllyMask{});
 	// must happen after UpdateUnitGhosts()
-	u->currentIconIndex = icon::INVALID_ICON_INDEX;
+	IconStateRef(u).currentIconIndex = icon::INVALID_ICON_INDEX;
 
 	DelObject(unit, true);	
 

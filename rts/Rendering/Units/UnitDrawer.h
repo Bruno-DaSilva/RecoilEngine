@@ -77,6 +77,14 @@ public:
 	static void ApplyUnitLeavesGhostChanged(const CUnit* unit, const GhostAllyMask& deadGhostAllyMask) { modelDrawerData->ApplyUnitLeavesGhostChanged(unit, deadGhostAllyMask); }
 
 	static void UpdateCurrentUnitIcon(const CUnit* unit) { modelDrawerData->UpdateCurrentUnitIcon(unit); }
+
+	// drawer-owned per-unit icon state (sim/draw §A icon-state eviction, PR 5);
+	// GetUnitIconRadius also serves draw-side picking (TraceRay)
+	static size_t GetUnitIconIndex(const CUnit* unit) { return modelDrawerData->GetUnitIconIndex(unit); }
+	static float GetUnitIconRadius(const CUnit* unit) { return modelDrawerData->GetUnitIconRadius(unit); }
+	static bool GetUnitDrawIcon(const CUnit* unit) { return modelDrawerData->GetUnitDrawIcon(unit); }
+	static void SetUnitDrawIcon(const CUnit* unit, bool b) { modelDrawerData->SetUnitDrawIcon(unit, b); }
+	static void SetUnitCustomIcon(const CUnit* unit, size_t iconIdx) { modelDrawerData->SetUnitCustomIcon(unit, iconIdx); }
 public:
 	// DrawUnit*
 	virtual void DrawUnitNoTrans(const CUnit* unit, uint32_t preList, uint32_t postList, bool lodCall, bool noLuaCall) const = 0;
@@ -208,7 +216,7 @@ protected:
 	void PopIndividualAlphaState(const S3DModel* model, int teamID, bool deferredPass) const;
 
 	void DrawUnitMiniMapIcon(TypedRenderBuffer<VA_TYPE_2DTC3>& rb, size_t iconIdx, const float iconScale, const float3& pos, const SColor& color) const;
-	float DrawUnitIcon(TypedRenderBuffer<VA_TYPE_TC3>& rb, size_t iconIdx, const float iconRadius, const float unitRadius, float3 pos, const SColor& color) const;
+	float DrawUnitIcon(TypedRenderBuffer<VA_TYPE_TC3>& rb, size_t iconIdx, const float unitRadius, float3 pos, const SColor& color) const;
 	void DrawUnitIconScreen(TypedRenderBuffer<VA_TYPE_2DTC3>& rb, size_t iconIdx, const float3& pos, SColor& color, float unitRadius, bool isIcon) const;
 };
 

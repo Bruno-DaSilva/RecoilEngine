@@ -1437,7 +1437,7 @@ int LuaUnsyncedRead::UnitIconGetDraw(lua_State* L) {
 	if (unit == nullptr)
 		return 0;
 
-	lua_pushboolean(L, unit->drawIcon);
+	lua_pushboolean(L, CUnitDrawer::GetUnitDrawIcon(unit));
 	return 1;
 }
 
@@ -1532,9 +1532,9 @@ int LuaUnsyncedRead::GetUnitIconData(lua_State* L)
 		return 0;
 
 	if (fullData)
-		return Impl::GetIconDataImpl<true >(L, unit->currentIconIndex);
+		return Impl::GetIconDataImpl<true >(L, CUnitDrawer::GetUnitIconIndex(unit));
 	else
-		return Impl::GetIconDataImpl<false>(L, unit->currentIconIndex);
+		return Impl::GetIconDataImpl<false>(L, CUnitDrawer::GetUnitIconIndex(unit));
 }
 
 /*** Get unit icon name
@@ -1546,7 +1546,11 @@ int LuaUnsyncedRead::GetUnitIconData(lua_State* L)
 int LuaUnsyncedRead::GetUnitIcon(lua_State* L)
 {
 	const CUnit* unit = ParseUnit(L, __func__, 1);
-	const auto iconIdx = unit->currentIconIndex;
+
+	if (unit == nullptr)
+		return 0;
+
+	const auto iconIdx = CUnitDrawer::GetUnitIconIndex(unit);
 
 	if (iconIdx == icon::INVALID_ICON_INDEX) {
 		lua_pushstring(L, "");
