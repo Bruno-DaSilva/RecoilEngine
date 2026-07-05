@@ -41,7 +41,7 @@ struct LocalModelPiece
 
 	void Draw() const;
 	void DrawLOD(uint32_t lod) const;
-	void SetLODCount(uint32_t count);
+	void SetLODCount(uint32_t count) const;
 
 
 	// on-demand functions
@@ -127,7 +127,9 @@ public:
 	std::vector<LocalModelPiece*> children;
 	LocalModelPiece* parent;
 
-	std::vector<uint32_t> lodDispLists;
+	// mutable: render-owned per-LOD display lists (Lua-assigned), same class
+	// as luaMaterialData on LocalModel (sim/draw PR 10)
+	mutable std::vector<uint32_t> lodDispLists;
 	const S3DModelPiece* original;
 
 	LocalModel* localModel;

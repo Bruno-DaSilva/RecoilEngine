@@ -28,8 +28,10 @@ struct LocalModel
 	const LocalModelPiece* GetRoot() const { return (GetPiece(0)); }
 	const CollisionVolume* GetBoundingVolume() const { return &boundingVolume; }
 
-	const LuaObjectMaterialData* GetLuaMaterialData() const { return &luaMaterialData; }
-	      LuaObjectMaterialData* GetLuaMaterialData()       { return &luaMaterialData; }
+	// non-const result on purpose: luaMaterialData is render-owned state (see
+	// the member comment) that draw passes legitimately author while the sim
+	// object itself is const (sim/draw PR 10)
+	LuaObjectMaterialData* GetLuaMaterialData() const { return &luaMaterialData; }
 
 	const float3 GetRelMidPos() const { return (boundingVolume.GetOffsets()); }
 
@@ -50,7 +52,7 @@ struct LocalModel
 	}
 
 	void SetModel(const S3DModel* model, bool initialize = true);
-	void SetLODCount(unsigned int lodCount);
+	void SetLODCount(unsigned int lodCount) const;
 	void UpdateBoundingVolume();
 
 	void GetBoundingBoxVerts(std::vector<float3>& verts) const {
@@ -91,8 +93,12 @@ private:
 	// object-oriented box; accounts for piece movement
 	CollisionVolume boundingVolume;
 
-	// custom Lua-set material this model should be rendered with
-	LuaObjectMaterialData luaMaterialData;
+	// custom Lua-set material this model should be rendered with.
+	// mutable: render-owned (CR_IGNORED, authored only by draw passes and
+	// unsynced Lua — LOD selection, material-bin backrefs), physically resident
+	// on the sim object; discovered-and-deferred eviction candidate (sim/draw
+	// PR 10, same class as the LocalModelPiece transform caches)
+	mutable LuaObjectMaterialData luaMaterialData;
 
 	bool needsBoundariesRecalc = true;
 };

@@ -94,7 +94,7 @@ void CLargeBeamLaserProjectile::Update()
 	UpdateInterception();
 }
 
-void CLargeBeamLaserProjectile::Draw()
+void CLargeBeamLaserProjectile::Draw() const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (!validTextures[0])

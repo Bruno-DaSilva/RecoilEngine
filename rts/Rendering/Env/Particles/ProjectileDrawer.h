@@ -204,13 +204,13 @@ private:
 	std::vector<std::array<float, 3>> sortDists;
 
 	/// projectiles container
-	std::vector<CProjectile*> renderProjectiles;
+	std::vector<const CProjectile*> renderProjectiles;
 
 	/// projectiles with a model, binned by model type and textures
 	std::array<ModelRenderContainer<CProjectile>, MODELTYPE_CNT> modelRenderers;
 
 	/// used to render particle effects in back-to-front order. {unsorted, sorted}
-	std::array<std::vector<CProjectile*>, 2> drawParticles;
+	std::array<std::vector<const CProjectile*>, 2> drawParticles;
 
 	bool drawSorted = true;
 

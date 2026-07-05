@@ -332,7 +332,7 @@ void ShieldSegmentProjectile::Update()
 
 }
 
-void ShieldSegmentProjectile::Draw()
+void ShieldSegmentProjectile::Draw() const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (collection == nullptr)

@@ -42,8 +42,10 @@ public:
 	virtual ~CWorldObject() {}
 
 	// NOTE: used only by projectiles, SolidObject's override this!
+	// setter const: for projectiles drawRadius is draw-authored cull state
+	// (see the member comment); BitmapMuzzleFlame grows it per draw frame
 	virtual float GetDrawRadius() const { return drawRadius; }
-	virtual void  SetDrawRadius(float r) { drawRadius = r; }
+	virtual void  SetDrawRadius(float r) const { drawRadius = r; }
 
 	virtual void SetPosition(const float3& p) {   pos = p; }
 	virtual void SetVelocity(const float3& v) { speed = v; }
@@ -108,7 +110,10 @@ public:
 
 	S3DModel* model = nullptr;
 protected:
-	float drawRadius = 0.0f;    ///< unsynced, used for projectile visibility culling
+	// mutable: unsynced, used for projectile visibility culling; authored at
+	// draw rate by BitmapMuzzleFlame::Draw (sim/draw PR 10 — deferred eviction,
+	// same class as the ExpGenSpawnable anim state)
+	mutable float drawRadius = 0.0f;
 public:
 	std::array<int, ThreadPool::MAX_THREADS> mtTempNum = {};
 };

@@ -861,7 +861,7 @@ LuaMatRef& LuaMatRef::operator=(const LuaMatRef& mr)
 }
 
 
-void LuaMatRef::AddUnit(CSolidObject* o)
+void LuaMatRef::AddUnit(const CSolidObject* o)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (bin == nullptr)
@@ -869,7 +869,7 @@ void LuaMatRef::AddUnit(CSolidObject* o)
 	bin->AddUnit(o);
 }
 
-void LuaMatRef::AddFeature(CSolidObject* o)
+void LuaMatRef::AddFeature(const CSolidObject* o)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (bin == nullptr)

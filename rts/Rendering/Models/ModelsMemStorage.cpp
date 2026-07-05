@@ -29,7 +29,7 @@ size_t ModelUniformsStorage::AddObject(const CWorldObject* o)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	const size_t idx = storage.Add(ModelUniformData());
-	objectsMap[const_cast<CWorldObject*>(o)] = idx;
+	objectsMap[o] = idx;
 
 	if (storage.size() > updateList.Size()) {
 		//new item got added to the end of storage
@@ -46,7 +46,7 @@ size_t ModelUniformsStorage::AddObject(const CWorldObject* o)
 void ModelUniformsStorage::DelObject(const CWorldObject* o)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	const auto it = objectsMap.find(const_cast<CWorldObject*>(o));
+	const auto it = objectsMap.find(o);
 
 	if (it == objectsMap.end())
 		return;
@@ -69,7 +69,7 @@ void ModelUniformsStorage::DelObject(const CWorldObject* o)
 size_t ModelUniformsStorage::GetObjOffset(const CWorldObject* o)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	const auto it = objectsMap.find(const_cast<CWorldObject*>(o));
+	const auto it = objectsMap.find(o);
 	if (it != objectsMap.end())
 		return it->second;
 
@@ -80,7 +80,7 @@ size_t ModelUniformsStorage::GetObjOffset(const CWorldObject* o)
 size_t ModelUniformsStorage::GetObjOffset(const CWorldObject* o) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	const auto it = objectsMap.find(const_cast<CWorldObject*>(o));
+	const auto it = objectsMap.find(o);
 	if (it != objectsMap.end())
 		return it->second;
 

@@ -79,7 +79,7 @@ void CExplosiveProjectile::Update()
 	UpdateInterception();
 }
 
-void CExplosiveProjectile::Draw()
+void CExplosiveProjectile::Draw() const
 {
 	const float3 drawPos = projectileDrawer->GetDrawPos(this);
 	RECOIL_DETAILED_TRACY_ZONE;

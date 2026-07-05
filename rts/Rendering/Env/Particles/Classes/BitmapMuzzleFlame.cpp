@@ -78,7 +78,7 @@ void CBitmapMuzzleFlame::Serialize(creg::ISerializer* s)
 	}
 }
 
-void CBitmapMuzzleFlame::Draw()
+void CBitmapMuzzleFlame::Draw() const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (!UpdateAnimParams())

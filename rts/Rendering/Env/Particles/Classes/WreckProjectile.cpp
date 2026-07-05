@@ -48,7 +48,7 @@ void CWreckProjectile::Update()
 	deleteMe |= (pos.y + 0.3f < CGround::GetApproximateHeight(pos.x, pos.z));
 }
 
-void CWreckProjectile::Draw()
+void CWreckProjectile::Draw() const
 {
 	const float3 drawPos = projectileDrawer->GetDrawPos(this);
 	RECOIL_DETAILED_TRACY_ZONE;

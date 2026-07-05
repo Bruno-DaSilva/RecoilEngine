@@ -67,7 +67,7 @@ void CLightningProjectile::Update()
 	UpdateInterception();
 }
 
-void CLightningProjectile::Draw()
+void CLightningProjectile::Draw() const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (!validTextures[0])

@@ -84,7 +84,7 @@ void CFlameProjectile::Update()
 	);
 }
 
-void CFlameProjectile::Draw()
+void CFlameProjectile::Draw() const
 {
 	const float3 drawPos = projectileDrawer->GetDrawPos(this);
 	RECOIL_DETAILED_TRACY_ZONE;

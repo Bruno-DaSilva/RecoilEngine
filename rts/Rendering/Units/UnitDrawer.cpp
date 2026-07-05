@@ -177,7 +177,7 @@ void CUnitDrawer::KillStatic(bool reload)
 	icons3DShader = nullptr;
 }
 
-bool CUnitDrawer::ShouldDrawOpaqueUnit(CUnit* u, uint8_t thisPassMask)
+bool CUnitDrawer::ShouldDrawOpaqueUnit(const CUnit* u, uint8_t thisPassMask)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (u == ((thisPassMask == DrawFlags::SO_REFLEC_FLAG) ? nullptr : (gu->GetMyPlayer())->fpsController.GetControllee()))
@@ -213,7 +213,7 @@ bool CUnitDrawer::ShouldDrawOpaqueUnit(CUnit* u, uint8_t thisPassMask)
 	return true;
 }
 
-bool CUnitDrawer::ShouldDrawAlphaUnit(CUnit* u, uint8_t thisPassMask)
+bool CUnitDrawer::ShouldDrawAlphaUnit(const CUnit* u, uint8_t thisPassMask)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(u);
@@ -246,7 +246,7 @@ bool CUnitDrawer::ShouldDrawAlphaUnit(CUnit* u, uint8_t thisPassMask)
 	return true;
 }
 
-bool CUnitDrawer::ShouldDrawUnitShadow(CUnit* u)
+bool CUnitDrawer::ShouldDrawUnitShadow(const CUnit* u)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(u);
@@ -887,12 +887,12 @@ void CUnitDrawerGLSL::DrawGhostedBuildings(int modelType) const
 		}
 	}
 
-	for (CUnit* lgb : liveGhostedBuildings) {
+	for (const CUnit* lgb : liveGhostedBuildings) {
 		DrawAlphaUnit(lgb, modelType, DrawFlags::SO_ALPHAF_FLAG, true);
 	}
 }
 
-void CUnitDrawerGLSL::DrawOpaqueUnit(CUnit* unit, uint8_t thisPassMask) const
+void CUnitDrawerGLSL::DrawOpaqueUnit(const CUnit* unit, uint8_t thisPassMask) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (!ShouldDrawOpaqueUnit(unit, thisPassMask))
@@ -903,14 +903,14 @@ void CUnitDrawerGLSL::DrawOpaqueUnit(CUnit* unit, uint8_t thisPassMask) const
 	DrawUnitTrans(unit, 0, 0, false, false);
 }
 
-void CUnitDrawerGLSL::DrawUnitShadow(CUnit* unit) const
+void CUnitDrawerGLSL::DrawUnitShadow(const CUnit* unit) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (ShouldDrawUnitShadow(unit))
 		DrawUnitTrans(unit, 0, 0, false, false);
 }
 
-void CUnitDrawerGLSL::DrawAlphaUnit(CUnit* unit, int modelType, uint8_t thisPassMask, bool drawGhostBuildingsPass) const
+void CUnitDrawerGLSL::DrawAlphaUnit(const CUnit* unit, int modelType, uint8_t thisPassMask, bool drawGhostBuildingsPass) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (!drawGhostBuildingsPass && !ShouldDrawAlphaUnit(unit, thisPassMask))

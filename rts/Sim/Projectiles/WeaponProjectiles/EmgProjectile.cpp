@@ -74,7 +74,7 @@ void CEmgProjectile::Update()
 	--ttl;
 }
 
-void CEmgProjectile::Draw()
+void CEmgProjectile::Draw() const
 {
 	const float3 drawPos = projectileDrawer->GetDrawPos(this);
 	RECOIL_DETAILED_TRACY_ZONE;

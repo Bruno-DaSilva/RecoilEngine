@@ -51,8 +51,8 @@ public:
 
 	void Reset();
 
-	void AddUnit(CSolidObject*);
-	void AddFeature(CSolidObject*);
+	void AddUnit(const CSolidObject*);
+	void AddFeature(const CSolidObject*);
 
 	bool IsActive() const { return (bin != nullptr); }
 
@@ -73,8 +73,8 @@ class LuaObjectLODMaterial {
 	public:
 		inline bool IsActive() const { return matref.IsActive(); }
 
-		inline void AddUnit(CSolidObject* o) { matref.AddUnit(o); }
-		inline void AddFeature(CSolidObject* o) { matref.AddFeature(o); }
+		inline void AddUnit(const CSolidObject* o) { matref.AddUnit(o); }
+		inline void AddFeature(const CSolidObject* o) { matref.AddFeature(o); }
 
 	public:
 		GLuint preDisplayList = 0;
@@ -196,7 +196,7 @@ public:
 	}
 
 
-	bool AddObjectForLOD(CSolidObject* o, LuaObjType objType, LuaMatType matType, float lodDist) {
+	bool AddObjectForLOD(const CSolidObject* o, LuaObjType objType, LuaMatType matType, float lodDist) {
 		if (!Enabled())
 			return false;
 

@@ -78,7 +78,7 @@ void CBubbleProjectile::Update()
 	}
 }
 
-void CBubbleProjectile::Draw()
+void CBubbleProjectile::Draw() const
 {
 	const float3 drawPos = projectileDrawer->GetDrawPos(this);
 	RECOIL_DETAILED_TRACY_ZONE;

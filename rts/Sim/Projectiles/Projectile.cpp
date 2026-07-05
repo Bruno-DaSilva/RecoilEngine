@@ -183,7 +183,7 @@ void CProjectile::DrawOnMinimap() const
 	AddMiniMapVertices({ pos        , color4::whiteA }, { pos + speed, color4::whiteA });
 }
 
-bool CProjectile::UpdateAnimParams()
+bool CProjectile::UpdateAnimParams() const
 {
 	if (!validTextures[0])
 		return false;

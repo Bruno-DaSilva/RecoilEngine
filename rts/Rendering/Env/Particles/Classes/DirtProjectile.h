@@ -25,7 +25,7 @@ public:
 
 	void Serialize(creg::ISerializer* s);
 
-	void Draw() override;
+	void Draw() const override;
 	void Update() override;
 
 	int GetProjectilesCount() const override;

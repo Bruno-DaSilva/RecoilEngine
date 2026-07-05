@@ -49,7 +49,7 @@ void CFeatureDrawer::InitStatic()
 	SelectImplementation();
 }
 
-bool CFeatureDrawer::ShouldDrawOpaqueFeature(CFeature* f, uint8_t thisPassMask)
+bool CFeatureDrawer::ShouldDrawOpaqueFeature(const CFeature* f, uint8_t thisPassMask)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(f);
@@ -79,7 +79,7 @@ bool CFeatureDrawer::ShouldDrawOpaqueFeature(CFeature* f, uint8_t thisPassMask)
 	return true;
 }
 
-bool CFeatureDrawer::ShouldDrawAlphaFeature(CFeature* f, uint8_t thisPassMask)
+bool CFeatureDrawer::ShouldDrawAlphaFeature(const CFeature* f, uint8_t thisPassMask)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(f);
@@ -109,7 +109,7 @@ bool CFeatureDrawer::ShouldDrawAlphaFeature(CFeature* f, uint8_t thisPassMask)
 	return true;
 }
 
-bool CFeatureDrawer::ShouldDrawFeatureShadow(CFeature* f)
+bool CFeatureDrawer::ShouldDrawFeatureShadow(const CFeature* f)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(f);
@@ -266,7 +266,7 @@ void CFeatureDrawerLegacy::DrawAlphaObjects(int modelType, bool drawReflection, 
 	}
 }
 
-void CFeatureDrawerLegacy::DrawOpaqueFeature(CFeature* f, uint8_t thisPassMask) const
+void CFeatureDrawerLegacy::DrawOpaqueFeature(const CFeature* f, uint8_t thisPassMask) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (!ShouldDrawOpaqueFeature(f, thisPassMask))
@@ -277,7 +277,7 @@ void CFeatureDrawerLegacy::DrawOpaqueFeature(CFeature* f, uint8_t thisPassMask) 
 	DrawFeatureTrans(f, 0, 0, false, false);
 }
 
-void CFeatureDrawerLegacy::DrawAlphaFeature(CFeature* f, uint8_t thisPassMask) const
+void CFeatureDrawerLegacy::DrawAlphaFeature(const CFeature* f, uint8_t thisPassMask) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (!ShouldDrawAlphaFeature(f, thisPassMask))
@@ -287,7 +287,7 @@ void CFeatureDrawerLegacy::DrawAlphaFeature(CFeature* f, uint8_t thisPassMask) c
 	DrawFeatureTrans(f, 0, 0, false, false);
 }
 
-void CFeatureDrawerLegacy::DrawFeatureShadow(CFeature* f) const
+void CFeatureDrawerLegacy::DrawFeatureShadow(const CFeature* f) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (ShouldDrawFeatureShadow(f))

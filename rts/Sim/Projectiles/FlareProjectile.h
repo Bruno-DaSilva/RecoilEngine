@@ -14,7 +14,7 @@ public:
 	CFlareProjectile(const float3& pos, const float3& speed, CUnit* owner, int activateFrame);
 
 	void Update() override;
-	void Draw() override;
+	void Draw() const override;
 
 	int GetProjectilesCount() const override { return (subProjPos.size()); }
 

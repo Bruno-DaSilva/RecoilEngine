@@ -82,7 +82,7 @@ void CExploSpikeProjectile::Update()
 	deleteMe |= (alpha <= 0.0f);
 }
 
-void CExploSpikeProjectile::Draw()
+void CExploSpikeProjectile::Draw() const
 {
 	const float3 drawPos = projectileDrawer->GetDrawPos(this);
 	RECOIL_DETAILED_TRACY_ZONE;

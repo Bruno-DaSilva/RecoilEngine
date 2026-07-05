@@ -52,7 +52,7 @@ void CMuzzleFlame::Update()
 	pos += speed;
 }
 
-void CMuzzleFlame::Draw()
+void CMuzzleFlame::Draw() const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	unsigned char col[4];

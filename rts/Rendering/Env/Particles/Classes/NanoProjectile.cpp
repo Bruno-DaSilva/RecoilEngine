@@ -85,7 +85,7 @@ void CNanoProjectile::Update()
 	deleteMe |= (gs->frameNum >= deathFrame);
 }
 
-void CNanoProjectile::Draw()
+void CNanoProjectile::Draw() const
 {
 	const float3 drawPos = projectileDrawer->GetDrawPos(this);
 	RECOIL_DETAILED_TRACY_ZONE;

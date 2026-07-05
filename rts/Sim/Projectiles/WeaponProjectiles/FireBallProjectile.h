@@ -16,7 +16,7 @@ public:
 	CFireBallProjectile() { }
 	CFireBallProjectile(const ProjectileParams& params);
 
-	void Draw() override;
+	void Draw() const override;
 	void Update() override;
 	void Collision() override;
 

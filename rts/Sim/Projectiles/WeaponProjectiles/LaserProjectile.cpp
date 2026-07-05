@@ -185,7 +185,7 @@ void CLaserProjectile::Collision()
 
 
 
-void CLaserProjectile::Draw()
+void CLaserProjectile::Draw() const
 {
 	const float3 drawPos = projectileDrawer->GetDrawPos(this);
 	RECOIL_DETAILED_TRACY_ZONE;

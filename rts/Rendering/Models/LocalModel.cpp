@@ -37,7 +37,7 @@ void LocalModel::DrawPiecesLOD(uint32_t lod) const
 	}
 }
 
-void LocalModel::SetLODCount(uint32_t lodCount)
+void LocalModel::SetLODCount(uint32_t lodCount) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(Initialized());

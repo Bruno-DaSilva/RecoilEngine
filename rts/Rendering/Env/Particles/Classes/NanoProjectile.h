@@ -18,7 +18,7 @@ public:
 	void PreDestruct() override;
 
 	void Update() override;
-	void Draw() override;
+	void Draw() const override;
 	void DrawOnMinimap() const override;
 
 	int GetProjectilesCount() const override;

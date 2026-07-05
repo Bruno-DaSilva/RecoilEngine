@@ -23,7 +23,7 @@ class ModelRenderContainer {
 private:
 	// note: there can be no more texture-types than S3DModel instances
 	std::array< int, MAX_MODEL_OBJECTS > keys;
-	std::vector< std::vector<TObject*> > bins;
+	std::vector< std::vector<const TObject*> > bins;
 
 	size_t numObjs = 0;
 	size_t numBins = 0;
@@ -78,8 +78,7 @@ public:
 			bin.reserve(256);
 
 		// numBins += (ki == ke);
-		// cast since updating an object's draw-position requires mutability
-		numObjs += spring::VectorInsertUnique(bin, const_cast<TObject*>(o));
+		numObjs += spring::VectorInsertUnique(bin, o);
 	}
 
 	void DelObject(const TObject* o) {
@@ -97,7 +96,7 @@ public:
 		// and alpha containers (since it does not know the
 		// cloaked state) which also means the tex-type key
 		// might not exist here
-		numObjs -= spring::VectorErase(bin, const_cast<TObject*>(o));
+		numObjs -= spring::VectorErase(bin, o);
 		numBins -= (bin.empty());
 
 		if (!bin.empty())

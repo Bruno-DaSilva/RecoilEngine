@@ -195,7 +195,7 @@ public:
 private:
 	inline static MyType dummy = {};
 
-	spring::unordered_map<CWorldObject*, size_t> objectsMap;
+	spring::unordered_map<const CWorldObject*, size_t> objectsMap;
 	spring::FreeListMap<MyType> storage;
 };
 

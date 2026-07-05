@@ -88,7 +88,7 @@ CGroundFlash::CGroundFlash(const float3& _pos) : CGroundFlash()
 	pos = _pos;
 }
 
-bool CGroundFlash::UpdateAnimParams() {
+bool CGroundFlash::UpdateAnimParams() const {
 	UpdateAnimParamsImpl(animParams1, animProgress1);
 	return true;
 }

@@ -53,10 +53,10 @@ public:
 	virtual void Update();
 	virtual void Init(const CUnit* owner, const float3& offset) override;
 
-	virtual void Draw() {}
+	virtual void Draw() const {}
 	virtual void DrawOnMinimap() const;
 
-	bool UpdateAnimParams() override;
+	bool UpdateAnimParams() const override;
 
 	virtual int GetProjectilesCount() const = 0;
 
@@ -95,7 +95,8 @@ public:
 	uint32_t GetRenderIndex() const { return renderIndex; }
 
 	void SetCustomExpGenID(uint32_t id) { cegID = id; }
-	void SetRenderIndex(uint32_t idx) { renderIndex = idx; }
+	// const: renderIndex is drawer-owned (see the member comment)
+	void SetRenderIndex(uint32_t idx) const { renderIndex = idx; }
 public:
 	bool synced = false;           // is this projectile part of the simulation?
 	bool weapon = false;           // is this a weapon projectile? (true implies synced true)
@@ -136,7 +137,10 @@ protected:
 
 	uint32_t projectileType = -1u;
 	uint32_t collisionFlags = 0;
-	uint32_t renderIndex = -1u;
+	// mutable: CProjectileDrawer's backref into its renderIndex-parallel storage
+	// (drawer-owned bookkeeping on the sim object; goes away when PR 14 keys the
+	// drawer containers by id instead of pointer+index)
+	mutable uint32_t renderIndex = -1u;
 
 	static bool GetMemberInfo(SExpGenSpawnableMemberInfo& memberInfo);
 	static bool IsValidTexture(const AtlasedTexture* tex);

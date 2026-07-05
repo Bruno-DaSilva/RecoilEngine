@@ -376,7 +376,7 @@ void CProjectileDrawer::UpdateDrawFlags()
 	ZoneScopedN("ProjectileDrawer::UpdateDrawFlags");
 
 	for_mt(0, renderProjectiles.size(), [this](int i) {
-		CProjectile* p = renderProjectiles[i];
+		const CProjectile* p = renderProjectiles[i];
 		const bool hasModel = (p->model != nullptr);
 
 		const float3& drawPos = (drawPositions[i] = p->GetDrawPos(globalRendering->timeOffset));
@@ -603,7 +603,7 @@ void CProjectileDrawer::DrawProjectilesMiniMap()
 	ZoneScopedN("ProjectileDrawer::DrawMiniMap");
 
 	// draw opaque first
-	for (CProjectile* p : renderProjectiles) {
+	for (const CProjectile* p : renderProjectiles) {
 		if (!p->model)
 			continue;
 
@@ -614,7 +614,7 @@ void CProjectileDrawer::DrawProjectilesMiniMap()
 	}
 
 	// draw alpha second
-	for (CProjectile* p : renderProjectiles) {
+	for (const CProjectile* p : renderProjectiles) {
 		if (p->model)
 			continue;
 
@@ -709,7 +709,7 @@ void CProjectileDrawer::DrawOpaque(bool drawReflection, bool drawRefraction)
 
 			CModelDrawerHelper::BindModelTypeTexture(modelType, mdlRenderer.GetObjectBinKey(i));
 
-			for (CProjectile* p : mdlRenderer.GetObjectBin(i)) {
+			for (const CProjectile* p : mdlRenderer.GetObjectBin(i)) {
 				if (!ShouldDrawProjectile(p, thisPassMask))
 					continue;
 
@@ -750,7 +750,7 @@ void CProjectileDrawer::DrawAlpha(bool drawAboveWater, bool drawBelowWater, bool
 
 	{
 		ZoneScopedN("ProjectileDrawer::DrawAlpha(DP)");
-		for (CProjectile* p : renderProjectiles) {
+		for (const CProjectile* p : renderProjectiles) {
 			if (!ShouldDrawProjectile(p, thisPassMask))
 				continue;
 
@@ -852,7 +852,7 @@ void CProjectileDrawer::DrawShadowOpaque()
 
 			CModelDrawerHelper::BindModelTypeTexture(modelType, mdlRenderer.GetObjectBinKey(i));
 
-			for (CProjectile* p : mdlRenderer.GetObjectBin(i)) {
+			for (const CProjectile* p : mdlRenderer.GetObjectBin(i)) {
 				if (!ShouldDrawProjectile(p, DrawFlags::SO_SHOPAQ_FLAG))
 					continue;
 
@@ -878,7 +878,7 @@ void CProjectileDrawer::DrawShadowTransparent()
 	// 1) Render opaque objects into depth stencil texture from light's point of view - done elsewhere
 
 	// draw the model-less projectiles
-	for (CProjectile* p : renderProjectiles) {
+	for (const CProjectile* p : renderProjectiles) {
 		if (!ShouldDrawProjectile(p, DrawFlags::SO_SHTRAN_FLAG))
 			continue;
 
@@ -1215,8 +1215,8 @@ void CProjectileDrawer::RenderProjectileCreated(const CProjectile* p)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	{
-		const_cast<CProjectile*>(p)->SetRenderIndex(renderProjectiles.size());
-		renderProjectiles.push_back(const_cast<CProjectile*>(p));
+		p->SetRenderIndex(renderProjectiles.size());
+		renderProjectiles.push_back(p);
 		drawPositions.emplace_back(); // zero until the first UpdateDrawFlags, as the old member was
 		drawFlags.emplace_back(DrawFlags::SO_NODRAW_FLAG); // as the old member default was
 		sortDists.emplace_back(); // zero until first in view, as the old member default was

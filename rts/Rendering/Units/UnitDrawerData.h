@@ -106,7 +106,7 @@ public:
 		std::vector<std::array<std::vector<GhostSolidObject*>, MODELTYPE_CNT>> deadGhostBuildings;
 
 		/// buildings that left LOS but are still alive
-		std::vector<std::array<std::vector<CUnit*>, MODELTYPE_CNT>> liveGhostBuildings;
+		std::vector<std::array<std::vector<const CUnit*>, MODELTYPE_CNT>> liveGhostBuildings;
 	};
 public:
 	CUnitDrawerData(bool& mtModelDrawer_);
@@ -163,7 +163,7 @@ public:
 	auto*       GetSavedData()       { return &savedData; }
 	const auto* GetSavedData() const { return &savedData; }
 protected:
-	void UpdateObjectDrawFlags(CSolidObject* o) override;
+	void UpdateObjectDrawFlags(const CSolidObject* o) override;
 public:
 	// icon state lives in the drawFlag storage (SO_DRICON_FLAG); moved off CUnit
 	// with the flags (sim/draw §A, PR 4). Read via CUnitDrawer::GetIsIcon.
@@ -206,9 +206,9 @@ public:
 private:
 	void UpdateTempDrawUnits(std::vector<TempDrawUnit>& tempDrawUnits);
 
-	void UpdateUnitIconState(CUnit* unit);
-	void UpdateUnitIconStateScreen(CUnit* unit);
-	void UpdateDrawPos(CUnit* unit);
+	void UpdateUnitIconState(const CUnit* unit);
+	void UpdateUnitIconStateScreen(const CUnit* unit);
+	void UpdateDrawPos(const CUnit* unit);
 public:
 	// draw-time positions/transforms with radar error applied (drawer-owned since
 	// the §A drawPos eviction; these replaced CUnit::GetObjDrawErrorPos and the

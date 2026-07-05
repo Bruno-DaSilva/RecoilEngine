@@ -33,12 +33,12 @@ public:
 	static void Init();
 	static void Kill();
 
-	static void SetObjectLOD(CSolidObject* obj, LuaObjType objType, unsigned int lodCount);
-	static bool AddObjectForLOD(CSolidObject* obj, LuaObjType objType, bool useAlphaMat, bool useShadowMat);
+	static void SetObjectLOD(const CSolidObject* obj, LuaObjType objType, unsigned int lodCount);
+	static bool AddObjectForLOD(const CSolidObject* obj, LuaObjType objType, bool useAlphaMat, bool useShadowMat);
 
-	static bool AddOpaqueMaterialObject(CSolidObject* obj, LuaObjType objType);
-	static bool AddAlphaMaterialObject(CSolidObject* obj, LuaObjType objType);
-	static bool AddShadowMaterialObject(CSolidObject* obj, LuaObjType objType);
+	static bool AddOpaqueMaterialObject(const CSolidObject* obj, LuaObjType objType);
+	static bool AddAlphaMaterialObject(const CSolidObject* obj, LuaObjType objType);
+	static bool AddShadowMaterialObject(const CSolidObject* obj, LuaObjType objType);
 
 	static void DrawOpaqueMaterialObjects(LuaObjType objType, bool deferredPass);
 	static void DrawAlphaMaterialObjects(LuaObjType objType, bool deferredPass);

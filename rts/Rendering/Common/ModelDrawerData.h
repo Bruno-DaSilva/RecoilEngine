@@ -63,14 +63,15 @@ protected:
 	void UpdateObject(const T* co, bool init);
 protected:
 	void ExtractTransforms();
-	void UpdateCommon(T* o);
-	// non-const: it authors the drawer-owned draw-flag storage (sim/draw §A, PR 4)
-	virtual void UpdateObjectDrawFlags(CSolidObject* o) = 0;
+	void UpdateCommon(const T* o);
+	// authors the drawer-owned draw-flag storage (sim/draw §A, PR 4); the
+	// object itself is read-only (draw code cannot mutate sim state, PR 10)
+	virtual void UpdateObjectDrawFlags(const CSolidObject* o) = 0;
 private:
 	void ExtractObjectTransforms(const T* o);
 	void UpdateObjectUniforms(const T* o);
 public:
-	const std::vector<T*>& GetUnsortedObjects() const { return unsortedObjects; }
+	const std::vector<const T*>& GetUnsortedObjects() const { return unsortedObjects; }
 	const ModelRenderContainer<T>& GetModelRenderer(int modelType) const { return modelRenderers[modelType]; }
 
 	// render-owned draw-visibility flags (sim/draw §A: these were drawFlag/previousDrawFlag
@@ -92,10 +93,10 @@ public:
 	void ClearPreviousDrawFlags() { for (auto object : unsortedObjects) DrawFlagRef(object).prev = 0; }
 
 	const auto& GetObjectTransformMemAlloc(const T* o) const {
-		const auto it = scTransMemAllocMap.find(const_cast<T*>(o));
+		const auto it = scTransMemAllocMap.find(o);
 		return (it != scTransMemAllocMap.end()) ? it->second : ScopedTransformMemAlloc::Dummy();
 	}
-	auto& GetObjectTransformMemAlloc(const T* o) { return scTransMemAllocMap[const_cast<T*>(o)]; }
+	auto& GetObjectTransformMemAlloc(const T* o) { return scTransMemAllocMap[o]; }
 
 	// render-owned interpolated draw positions (sim/draw decoupling §A: these were
 	// fields on the sim objects, authored at draw rate — evicted to drawer storage).
@@ -140,7 +141,7 @@ protected:
 
 	std::array<ModelRenderContainer<T>, MODELTYPE_CNT> modelRenderers;
 
-	std::vector<T*> unsortedObjects;
+	std::vector<const T*> unsortedObjects;
 	std::vector<DrawPosition> drawPositions; // indexed by object id
 	std::vector<DrawFlagState> drawFlags;    // indexed by object id
 	spring::unordered_map<const T*, ScopedTransformMemAlloc> scTransMemAllocMap;
@@ -181,10 +182,8 @@ inline CModelDrawerDataBase<T>::~CModelDrawerDataBase()
 }
 
 template<typename T>
-inline void CModelDrawerDataBase<T>::AddObject(const T* co, bool add)
+inline void CModelDrawerDataBase<T>::AddObject(const T* o, bool add)
 {
-	T* o = const_cast<T*>(co);
-
 	if (o->model != nullptr) {
 		modelRenderers[MDL_TYPE(o)].AddObject(o);
 	}
@@ -208,21 +207,19 @@ inline void CModelDrawerDataBase<T>::AddObject(const T* co, bool add)
 	scTransMemAllocMap.emplace(o, ScopedTransformMemAlloc(numMatrices));
 	transformsExtractionPending = true; //make sure the new allocation is filled at least once before the next sim frame
 
-	modelUniformsStorage.AddObject(co);
+	modelUniformsStorage.AddObject(o);
 }
 
 template<typename T>
-inline void CModelDrawerDataBase<T>::DelObject(const T* co, bool del)
+inline void CModelDrawerDataBase<T>::DelObject(const T* o, bool del)
 {
-	T* o = const_cast<T*>(co);
-
 	if (o->model != nullptr) {
 		modelRenderers[MDL_TYPE(o)].DelObject(o);
 	}
 
 	if (del && spring::VectorErase(unsortedObjects, o)) {
 		scTransMemAllocMap.erase(o);
-		modelUniformsStorage.DelObject(co);
+		modelUniformsStorage.DelObject(o);
 	}
 }
 
@@ -346,7 +343,7 @@ inline void CModelDrawerDataBase<T>::UpdateObjectUniforms(const T* o)
 }
 
 template<typename T>
-inline void CModelDrawerDataBase<T>::UpdateCommon(T* o)
+inline void CModelDrawerDataBase<T>::UpdateCommon(const T* o)
 {
 	assert(o);
 	DrawFlagRef(o).prev = GetDrawFlag(o);

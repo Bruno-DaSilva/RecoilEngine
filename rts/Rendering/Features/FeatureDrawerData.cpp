@@ -57,7 +57,7 @@ void CFeatureDrawerData::RenderFeatureDestroyed(const CFeature* feature)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	DelObject(feature, feature->def->drawType == DRAWTYPE_MODEL);
-	LuaObjectDrawer::SetObjectLOD(const_cast<CFeature*>(feature), LUAOBJ_FEATURE, 0);
+	LuaObjectDrawer::SetObjectLOD(feature, LUAOBJ_FEATURE, 0);
 
 	// unlike the other id-keyed slots this one is read for arbitrary features
 	// (decal fading), so reset it: a non-model feature reusing the id would
@@ -112,14 +112,14 @@ void CFeatureDrawerData::Update()
 
 	if (mtModelDrawer) {
 		for_mt_chunk(0, unsortedObjects.size(), [this](const int k) {
-			CFeature* f = unsortedObjects[k];
+			const CFeature* f = unsortedObjects[k];
 			UpdateDrawPos(f);
 			UpdateCommon(f);
 			UpdateUnsyncedTransform(f);
 		}, CModelDrawerDataConcept::MT_CHUNK_OR_MIN_CHUNK_SIZE_UPDT);
 	}
 	else {
-		for (CFeature* f : unsortedObjects) {
+		for (const CFeature* f : unsortedObjects) {
 			UpdateDrawPos(f);
 			UpdateCommon(f);
 			UpdateUnsyncedTransform(f);
@@ -133,11 +133,11 @@ bool CFeatureDrawerData::IsAlpha(const CFeature* co) const
 	return (GetDrawAlpha(co) < 1.0f);
 }
 
-void CFeatureDrawerData::UpdateObjectDrawFlags(CSolidObject* o)
+void CFeatureDrawerData::UpdateObjectDrawFlags(const CSolidObject* o)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 
-	CFeature* f = static_cast<CFeature*>(o);
+	const CFeature* f = static_cast<const CFeature*>(o);
 	ResetDrawFlag(f);
 
 	float& drawAlpha = drawAlphas[f->id]; // slot exists for every registered object
@@ -249,7 +249,7 @@ void CFeatureDrawerData::UpdateUnsyncedTransform(const CFeature* f)
 	}
 }
 
-void CFeatureDrawerData::UpdateDrawPos(CFeature* f)
+void CFeatureDrawerData::UpdateDrawPos(const CFeature* f)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	auto& dp = drawPositions[f->id];

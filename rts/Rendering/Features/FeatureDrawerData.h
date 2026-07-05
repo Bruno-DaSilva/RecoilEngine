@@ -39,9 +39,9 @@ public:
 	// matching the old member's construction-time init.
 	float GetDrawAlpha(const CFeature* f) const;
 protected:
-	void UpdateObjectDrawFlags(CSolidObject* o) override;
+	void UpdateObjectDrawFlags(const CSolidObject* o) override;
 private:
-	void UpdateDrawPos(CFeature* f);
+	void UpdateDrawPos(const CFeature* f);
 	void UpdateUnsyncedTransform(const CFeature* f);
 public:
 	float featureDrawDistance;

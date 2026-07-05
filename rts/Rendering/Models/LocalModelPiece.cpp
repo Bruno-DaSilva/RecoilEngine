@@ -298,7 +298,7 @@ void LocalModelPiece::DrawLOD(uint32_t lod) const
 
 
 
-void LocalModelPiece::SetLODCount(uint32_t count)
+void LocalModelPiece::SetLODCount(uint32_t count) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	// any new LOD's get null-lists first

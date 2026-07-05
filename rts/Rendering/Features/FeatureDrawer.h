@@ -26,12 +26,12 @@ public:
 	virtual void DrawIndividual(const CFeature* feature, bool noLuaCall) const = 0;
 	virtual void DrawIndividualNoTrans(const CFeature* feature, bool noLuaCall) const = 0;
 protected:
-	virtual void DrawOpaqueFeature(CFeature* f, uint8_t thisPassMask) const = 0;
-	virtual void DrawAlphaFeature(CFeature* f, uint8_t thisPassMask) const = 0;
+	virtual void DrawOpaqueFeature(const CFeature* f, uint8_t thisPassMask) const = 0;
+	virtual void DrawAlphaFeature(const CFeature* f, uint8_t thisPassMask) const = 0;
 public:
 	// modelDrawerData proxies
 	void ConfigNotify(const std::string& key, const std::string& value) { modelDrawerData->ConfigNotify(key, value); }
-	static const std::vector<CFeature*>& GetUnsortedFeatures() { return modelDrawerData->GetUnsortedObjects(); }
+	static const std::vector<const CFeature*>& GetUnsortedFeatures() { return modelDrawerData->GetUnsortedObjects(); }
 
 	// drawer-owned draw-time positions/transforms (sim/draw §A drawPos eviction)
 	static const float3& GetDrawPos(const CFeature* feature) { return modelDrawerData->GetDrawPos(feature); }
@@ -51,9 +51,9 @@ public:
 public:
 	virtual void DrawFeatureModel(const CFeature* feature, bool noLuaCall) const = 0;
 protected:
-	static bool ShouldDrawOpaqueFeature(CFeature* f, uint8_t thisPassMask);
-	static bool ShouldDrawAlphaFeature(CFeature* f, uint8_t thisPassMask);
-	static bool ShouldDrawFeatureShadow(CFeature* f);
+	static bool ShouldDrawOpaqueFeature(const CFeature* f, uint8_t thisPassMask);
+	static bool ShouldDrawAlphaFeature(const CFeature* f, uint8_t thisPassMask);
+	static bool ShouldDrawFeatureShadow(const CFeature* f);
 
 	void PushIndividualState(const CFeature* feature, bool deferredPass) const;
 	void PopIndividualState(const CFeature* feature, bool deferredPass) const;
@@ -105,9 +105,9 @@ protected:
 	void DrawOpaqueObjects(int modelType, bool drawReflection, bool drawRefraction) const override;
 	void DrawAlphaObjects(int modelType, bool drawReflection, bool drawRefraction) const override;
 
-	void DrawOpaqueFeature(CFeature* f, uint8_t thisPassMask) const override;
-	void DrawAlphaFeature(CFeature* f, uint8_t thisPassMask) const override;
-	void DrawFeatureShadow(CFeature* f) const;
+	void DrawOpaqueFeature(const CFeature* f, uint8_t thisPassMask) const override;
+	void DrawAlphaFeature(const CFeature* f, uint8_t thisPassMask) const override;
+	void DrawFeatureShadow(const CFeature* f) const;
 
 	void DrawFeatureModel(const CFeature* feature, bool noLuaCall) const override;
 };

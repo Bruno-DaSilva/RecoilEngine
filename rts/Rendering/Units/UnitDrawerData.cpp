@@ -139,7 +139,7 @@ CUnitDrawerData::CUnitDrawerData(bool& mtModelDrawer_)
 CUnitDrawerData::~CUnitDrawerData()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	for (CUnit* u : unsortedObjects) {
+	for (const CUnit* u : unsortedObjects) {
 		groundDecals->ForceRemoveSolidObject(u);
 	}
 
@@ -198,7 +198,7 @@ void CUnitDrawerData::Update()
 
 	iconZoomDist = dist;
 
-	const auto updateBody = [this](CUnit* u) {
+	const auto updateBody = [this](const CUnit* u) {
 		UpdateDrawPos(u);
 
 		if (useScreenIcons)
@@ -211,12 +211,12 @@ void CUnitDrawerData::Update()
 
 	if (mtModelDrawer) {
 		for_mt_chunk(0, unsortedObjects.size(), [this, &updateBody](const int k) {
-			CUnit* unit = unsortedObjects[k];
+			const CUnit* unit = unsortedObjects[k];
 			updateBody(unit);
 		}, CModelDrawerDataConcept::MT_CHUNK_OR_MIN_CHUNK_SIZE_UPDT);
 	}
 	else {
-		for (CUnit* unit : unsortedObjects)
+		for (const CUnit* unit : unsortedObjects)
 			updateBody(unit);
 	}
 
@@ -294,7 +294,7 @@ void CUnitDrawerData::UpdateCurrentUnitIcon(const CUnit* unit)
 	}
 }
 
-void CUnitDrawerData::UpdateUnitIconState(CUnit* unit)
+void CUnitDrawerData::UpdateUnitIconState(const CUnit* unit)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	const unsigned short losStatus = unit->losStatus[gu->myAllyTeam];
@@ -315,7 +315,7 @@ void CUnitDrawerData::UpdateUnitIconState(CUnit* unit)
 	}
 }
 
-void CUnitDrawerData::UpdateUnitIconStateScreen(CUnit* unit)
+void CUnitDrawerData::UpdateUnitIconStateScreen(const CUnit* unit)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (game->hideInterface && iconHideWithUI) // icons are hidden with UI
@@ -361,7 +361,7 @@ void CUnitDrawerData::UpdateUnitIconStateScreen(CUnit* unit)
 	SetUnitIsIcon(unit, iconZoomDist / iconSizeMult > iconFadeStart && std::abs(pos.x - radiusPos.x) < limit * 0.9);
 }
 
-void CUnitDrawerData::UpdateDrawPos(CUnit* u)
+void CUnitDrawerData::UpdateDrawPos(const CUnit* u)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 
@@ -392,10 +392,10 @@ CMatrix44f CUnitDrawerData::GetUnsyncedTransformMatrix(const CUnit* unit, bool f
 	return (unit->ComposeMatrix(interPos));
 }
 
-void CUnitDrawerData::UpdateObjectDrawFlags(CSolidObject* o)
+void CUnitDrawerData::UpdateObjectDrawFlags(const CSolidObject* o)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	CUnit* u = static_cast<CUnit*>(o);
+	const CUnit* u = static_cast<const CUnit*>(o);
 
 	{
 		//icons flag is set before UpdateObjectDrawFlags() is called
@@ -651,7 +651,6 @@ bool CUnitDrawerData::UpdateUnitGhosts(const CUnit* unit, const GhostAllyMask& d
 		return false;
 
 	bool addedOwnAllyTeam = false;
-	CUnit* u = const_cast<CUnit*>(unit);
 
 	// TODO - make ghosted buildings per allyTeam - so they are correctly dealt with
 	// when spectating
@@ -665,22 +664,22 @@ bool CUnitDrawerData::UpdateUnitGhosts(const CUnit* unit, const GhostAllyMask& d
 			if (gso == nullptr) {
 				gso = ghostMemPool.alloc<GhostSolidObject>();
 
-				gso->pos = u->pos;
-				gso->midPos = u->midPos;
+				gso->pos = unit->pos;
+				gso->midPos = unit->midPos;
 				gso->modelName = gsoModel->name;
 				gso->refCount = 0;
-				gso->facing = u->buildFacing;
-				gso->dir = u->frontdir;
-				gso->team = u->team;
-				gso->radius = u->radius;
+				gso->facing = unit->buildFacing;
+				gso->dir = unit->frontdir;
+				gso->team = unit->team;
+				gso->radius = unit->radius;
 				gso->GetModel();
 
 				// gso is a shared object, we can't rely on the unit's currentIconIndex being representative in case the team changes
 				gso->currentIconIndex = icon::iconHandler.GetIconIdxOrDefault(GetIconState(unit).definedIconName);
 
-				gso->iconRadius = GetUnitIconRadius(u);
+				gso->iconRadius = GetUnitIconRadius(unit);
 
-				groundDecals->GhostCreated(u, gso);
+				groundDecals->GhostCreated(unit, gso);
 
 			}
 
@@ -694,7 +693,7 @@ bool CUnitDrawerData::UpdateUnitGhosts(const CUnit* unit, const GhostAllyMask& d
 
 		}
 
-		spring::VectorErase(savedData.liveGhostBuildings[allyTeam][MDL_TYPE(u)], u);
+		spring::VectorErase(savedData.liveGhostBuildings[allyTeam][MDL_TYPE(unit)], unit);
 	}
 	return addedOwnAllyTeam;
 }
@@ -702,19 +701,17 @@ bool CUnitDrawerData::UpdateUnitGhosts(const CUnit* unit, const GhostAllyMask& d
 void CUnitDrawerData::RenderUnitDestroyed(const CUnit* unit)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	CUnit* u = const_cast<CUnit*>(unit);
-
 	// dispatched at the boundary drain against the unit's deferred shell
 	// (PR 13); losStatus froze at death -- sim detached the unit from all
 	// LOS updating before parking it -- so the mask still reads the values
 	// the old synchronous dispatch saw
 	UpdateUnitGhosts(unit, unit->leavesGhost ? CalcDeadGhostAllyMask(unit) : GhostAllyMask{});
 	// must happen after UpdateUnitGhosts()
-	IconStateRef(u).currentIconIndex = icon::INVALID_ICON_INDEX;
+	IconStateRef(unit).currentIconIndex = icon::INVALID_ICON_INDEX;
 
 	DelObject(unit, true);	
 
-	LuaObjectDrawer::SetObjectLOD(u, LUAOBJ_UNIT, 0);
+	LuaObjectDrawer::SetObjectLOD(unit, LUAOBJ_UNIT, 0);
 }
 
 void CUnitDrawerData::UnitEnteredRadar(const CUnit* unit, int allyTeam)
@@ -757,13 +754,11 @@ void CUnitDrawerData::UnitEnteredLos(const CUnit* unit, int allyTeam)
 
 void CUnitDrawerData::ApplyUnitEnteredLos(const CUnit* unit, int allyTeam, bool leavesGhostAtEvent)
 {
-	CUnit* u = const_cast<CUnit*>(unit); //cleanup
-
 	// use the event-time leavesGhost value: interleaved UnitLeavesGhostChanged
 	// records replay any later flips in order, so the live-ghost container ops
 	// mirror master's op-for-op
 	if (leavesGhostAtEvent)
-		spring::VectorErase(savedData.liveGhostBuildings[allyTeam][MDL_TYPE(unit)], u);
+		spring::VectorErase(savedData.liveGhostBuildings[allyTeam][MDL_TYPE(unit)], unit);
 
 	if (allyTeam != gu->myAllyTeam)
 		return;
@@ -782,10 +777,8 @@ void CUnitDrawerData::UnitLeftLos(const CUnit* unit, int allyTeam)
 
 void CUnitDrawerData::ApplyUnitLeftLos(const CUnit* unit, int allyTeam, bool leavesGhostAtEvent)
 {
-	CUnit* u = const_cast<CUnit*>(unit); //cleanup
-
 	if (leavesGhostAtEvent)
-		spring::VectorInsertUnique(savedData.liveGhostBuildings[allyTeam][MDL_TYPE(unit)], u, true);
+		spring::VectorInsertUnique(savedData.liveGhostBuildings[allyTeam][MDL_TYPE(unit)], unit, true);
 
 	if (allyTeam != gu->myAllyTeam)
 		return;

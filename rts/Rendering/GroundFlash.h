@@ -20,7 +20,7 @@ public:
 	CGroundFlash(const float3& _pos);
 	CGroundFlash();
 
-	bool UpdateAnimParams() override;
+	bool UpdateAnimParams() const override;
 
 	virtual ~CGroundFlash() {}
 	virtual void Draw() {}

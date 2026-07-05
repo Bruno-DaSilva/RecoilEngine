@@ -80,7 +80,7 @@ public:
 		int ypart
 	);
 
-	void Draw() override;
+	void Draw() const override;
 	void Update() override;
 	void PreDelete() {
 		collection = nullptr;

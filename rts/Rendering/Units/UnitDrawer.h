@@ -51,7 +51,7 @@ public:
 
 	static void AddTempDrawUnit(const CUnitDrawerData::TempDrawUnit& tempDrawUnit) { modelDrawerData->AddTempDrawUnit(tempDrawUnit); }
 
-	static const std::vector<CUnit*>& GetUnsortedUnits() { return modelDrawerData->GetUnsortedObjects(); }
+	static const std::vector<const CUnit*>& GetUnsortedUnits() { return modelDrawerData->GetUnsortedObjects(); }
 
 	// drawer-owned draw-time positions/transforms (sim/draw §A drawPos eviction)
 	static const float3& GetDrawPos(const CUnit* unit) { return modelDrawerData->GetDrawPos(unit); }
@@ -110,9 +110,9 @@ public:
 
 	virtual void DrawBuildIcons(const std::vector<CCursorIcons::BuildIcon>& buildIcons) const = 0;
 protected:
-	static bool ShouldDrawOpaqueUnit(CUnit* u, uint8_t thisPassMask);
-	static bool ShouldDrawAlphaUnit(CUnit* u, uint8_t thisPassMask);
-	static bool ShouldDrawUnitShadow(CUnit* u);
+	static bool ShouldDrawOpaqueUnit(const CUnit* u, uint8_t thisPassMask);
+	static bool ShouldDrawAlphaUnit(const CUnit* u, uint8_t thisPassMask);
+	static bool ShouldDrawUnitShadow(const CUnit* u);
 
 	virtual void DrawGhostedBuildings(int modelType) const = 0;
 protected:
@@ -189,9 +189,9 @@ protected:
 
 	void DrawGhostedBuildings(int modelType) const override;
 
-	void DrawOpaqueUnit(CUnit* unit, uint8_t thisPassMask) const;
-	void DrawUnitShadow(CUnit* unit) const;
-	void DrawAlphaUnit(CUnit* unit, int modelType, uint8_t thisPassMask, bool drawGhostBuildingsPass) const;
+	void DrawOpaqueUnit(const CUnit* unit, uint8_t thisPassMask) const;
+	void DrawUnitShadow(const CUnit* unit) const;
+	void DrawAlphaUnit(const CUnit* unit, int modelType, uint8_t thisPassMask, bool drawGhostBuildingsPass) const;
 
 	void DrawOpaqueAIUnit(const CUnitDrawerData::TempDrawUnit& unit) const;
 	void DrawAlphaAIUnit(const CUnitDrawerData::TempDrawUnit& unit) const;

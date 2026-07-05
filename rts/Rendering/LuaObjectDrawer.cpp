@@ -378,7 +378,7 @@ void LuaObjectDrawer::DrawMaterialBin(
 ) {
 	currBin->Execute(*prevMat, deferredPass);
 
-	const std::vector<CSolidObject*>& objects = currBin->GetObjects(objType);
+	const std::vector<const CSolidObject*>& objects = currBin->GetObjects(objType);
 	const LuaMatShader* binShader = &currBin->shaders[deferredPass];
 
 	// skip entire bin if we need a shader for this pass and have none
@@ -605,7 +605,7 @@ bool LuaObjectDrawer::DrawSingleObjectNoTrans(const CSolidObject* obj, LuaObjTyp
 
 
 
-void LuaObjectDrawer::SetObjectLOD(CSolidObject* obj, LuaObjType objType, unsigned int lodCount)
+void LuaObjectDrawer::SetObjectLOD(const CSolidObject* obj, LuaObjType objType, unsigned int lodCount)
 {
 	if (!obj->localModel.Initialized())
 		return;
@@ -613,7 +613,7 @@ void LuaObjectDrawer::SetObjectLOD(CSolidObject* obj, LuaObjType objType, unsign
 	obj->localModel.SetLODCount(lodCount);
 }
 
-bool LuaObjectDrawer::AddObjectForLOD(CSolidObject* obj, LuaObjType objType, bool useAlphaMat, bool useShadowMat)
+bool LuaObjectDrawer::AddObjectForLOD(const CSolidObject* obj, LuaObjType objType, bool useAlphaMat, bool useShadowMat)
 {
 	if (useShadowMat)
 		return (AddShadowMaterialObject(obj, objType));
@@ -625,7 +625,7 @@ bool LuaObjectDrawer::AddObjectForLOD(CSolidObject* obj, LuaObjType objType, boo
 
 
 
-bool LuaObjectDrawer::AddOpaqueMaterialObject(CSolidObject* obj, LuaObjType objType)
+bool LuaObjectDrawer::AddOpaqueMaterialObject(const CSolidObject* obj, LuaObjType objType)
 {
 	LuaObjectMaterialData* matData = obj->GetLuaMaterialData();
 
@@ -635,7 +635,7 @@ bool LuaObjectDrawer::AddOpaqueMaterialObject(CSolidObject* obj, LuaObjType objT
 	return (matData->AddObjectForLOD(obj, objType, matType, lodDist));
 }
 
-bool LuaObjectDrawer::AddAlphaMaterialObject(CSolidObject* obj, LuaObjType objType)
+bool LuaObjectDrawer::AddAlphaMaterialObject(const CSolidObject* obj, LuaObjType objType)
 {
 	LuaObjectMaterialData* matData = obj->GetLuaMaterialData();
 
@@ -645,7 +645,7 @@ bool LuaObjectDrawer::AddAlphaMaterialObject(CSolidObject* obj, LuaObjType objTy
 	return (matData->AddObjectForLOD(obj, objType, matType, lodDist));
 }
 
-bool LuaObjectDrawer::AddShadowMaterialObject(CSolidObject* obj, LuaObjType objType)
+bool LuaObjectDrawer::AddShadowMaterialObject(const CSolidObject* obj, LuaObjType objType)
 {
 	LuaObjectMaterialData* matData = obj->GetLuaMaterialData();
 

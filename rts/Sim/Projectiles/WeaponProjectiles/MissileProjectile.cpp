@@ -384,7 +384,7 @@ void CMissileProjectile::UpdateGroundBounce() {
 
 
 
-void CMissileProjectile::Draw()
+void CMissileProjectile::Draw() const
 {
 	const float3 drawPos = projectileDrawer->GetDrawPos(this);
 	RECOIL_DETAILED_TRACY_ZONE;

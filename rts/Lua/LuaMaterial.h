@@ -366,10 +366,10 @@ class LuaMatBin : public LuaMaterial {
 		void ClearUnits() { units.clear(); }
 		void ClearFeatures() { features.clear(); }
 
-		const std::vector<CSolidObject*>& GetUnits() const { return units; }
-		const std::vector<CSolidObject*>& GetFeatures() const { return features; }
-		const std::vector<CSolidObject*>& GetObjects(LuaObjType objType) const {
-			static const std::vector<CSolidObject*> dummy;
+		const std::vector<const CSolidObject*>& GetUnits() const { return units; }
+		const std::vector<const CSolidObject*>& GetFeatures() const { return features; }
+		const std::vector<const CSolidObject*>& GetObjects(LuaObjType objType) const {
+			static const std::vector<const CSolidObject*> dummy;
 
 			switch (objType) {
 				case LUAOBJ_UNIT   : { return (GetUnits   ()); } break;
@@ -383,9 +383,9 @@ class LuaMatBin : public LuaMaterial {
 		void Ref() { refCount++; }
 		void UnRef();
 
-		void AddUnit(CSolidObject* o) { units.push_back(o); }
-		void AddFeature(CSolidObject* o) { features.push_back(o); }
-		void AddObject(CSolidObject* o, LuaObjType objType) {
+		void AddUnit(const CSolidObject* o) { units.push_back(o); }
+		void AddFeature(const CSolidObject* o) { features.push_back(o); }
+		void AddObject(const CSolidObject* o, LuaObjType objType) {
 			switch (objType) {
 				case LUAOBJ_UNIT   : { AddUnit   (o); } break;
 				case LUAOBJ_FEATURE: { AddFeature(o); } break;
@@ -403,8 +403,8 @@ class LuaMatBin : public LuaMaterial {
 	private:
 		int refCount;
 
-		std::vector<CSolidObject*> units;
-		std::vector<CSolidObject*> features;
+		std::vector<const CSolidObject*> units;
+		std::vector<const CSolidObject*> features;
 };
 
 

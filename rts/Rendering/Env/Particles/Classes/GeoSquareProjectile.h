@@ -16,7 +16,7 @@ public:
 		float w1, float w2
 	);
 
-	void Draw() override;
+	void Draw() const override;
 	void Update() override;
 
 	int GetProjectilesCount() const override;

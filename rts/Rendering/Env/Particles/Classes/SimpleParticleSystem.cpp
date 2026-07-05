@@ -96,7 +96,7 @@ void CSimpleParticleSystem::Serialize(creg::ISerializer* s)
 		texture = projectileDrawer->textureAtlas->GetTexturePtr(name);
 }
 
-void CSimpleParticleSystem::Draw()
+void CSimpleParticleSystem::Draw() const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (!UpdateAnimParams())

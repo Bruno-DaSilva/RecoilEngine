@@ -541,8 +541,7 @@ const CollisionVolume* CSolidObject::GetCollisionVolume(const LocalModelPiece* l
 	return (lmp->GetCollisionVolume());
 }
 
-      LuaObjectMaterialData* CSolidObject::GetLuaMaterialData()       { return (localModel.GetLuaMaterialData()); }
-const LuaObjectMaterialData* CSolidObject::GetLuaMaterialData() const { return (localModel.GetLuaMaterialData()); }
+LuaObjectMaterialData* CSolidObject::GetLuaMaterialData() const { return (localModel.GetLuaMaterialData()); }
 
 
 float CSolidObject::GetDrawRadius() const { return localModel.GetDrawRadius(); }

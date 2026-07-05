@@ -14,7 +14,7 @@ public:
 
 	CLaserProjectile(const ProjectileParams& params);
 
-	void Draw() override;
+	void Draw() const override;
 	void Update() override;
 	void Collision(CUnit* unit) override;
 	void Collision(CFeature* feature) override;

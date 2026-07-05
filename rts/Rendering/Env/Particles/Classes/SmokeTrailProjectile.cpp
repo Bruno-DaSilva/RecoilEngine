@@ -108,7 +108,7 @@ void CSmokeTrailProjectile::UpdateEndPos(const float3 pos, const float3 dir)
 }
 
 
-void CSmokeTrailProjectile::Draw()
+void CSmokeTrailProjectile::Draw() const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	const float age = gs->frameNum + globalRendering->timeOffset - creationTime;

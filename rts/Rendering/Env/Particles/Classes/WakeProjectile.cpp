@@ -83,7 +83,7 @@ void CWakeProjectile::Update()
 	}
 }
 
-void CWakeProjectile::Draw()
+void CWakeProjectile::Draw() const
 {
 	const float3 drawPos = projectileDrawer->GetDrawPos(this);
 	RECOIL_DETAILED_TRACY_ZONE;

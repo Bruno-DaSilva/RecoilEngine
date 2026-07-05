@@ -90,7 +90,7 @@ void CDirtProjectile::Update()
 	deleteMe |= (alpha <= 0.0f);
 }
 
-void CDirtProjectile::Draw()
+void CDirtProjectile::Draw() const
 {
 	const float3 drawPos = projectileDrawer->GetDrawPos(this);
 	RECOIL_DETAILED_TRACY_ZONE;
