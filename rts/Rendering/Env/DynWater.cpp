@@ -1059,7 +1059,8 @@ void CDynWater::AddShipWakes()
 		va->EnlargeArrays(nadd, 0, VA_SIZE_TN);
 		va2->EnlargeArrays(nadd, 0, VA_SIZE_TN);
 
-		for (const CUnit* unit: units) {
+		for (const int unitID: units) {
+			const CUnit* unit = DrawerGetObjectByID<CUnit>(unitID);
 			const MoveDef* moveDef = unit->moveDef;
 
 			if (moveDef == NULL)

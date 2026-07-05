@@ -7,6 +7,7 @@
 #include "Game/GlobalUnsynced.h"
 #include "Sim/Features/Feature.h"
 #include "Sim/Features/FeatureDef.h"
+#include "Sim/Features/FeatureHandler.h"
 #include "Rendering/LuaObjectDrawer.h"
 #include "Rendering/ShadowHandler.h"
 #include "Rendering/Common/ModelDrawerHelpers.h"
@@ -22,6 +23,15 @@ CONFIG(float, FeatureFadeDistance)
 .defaultValue(4500.0f)
 .minimumValue(0.0f)
 .description("Distance at which features will begin to fade from view.");
+
+// id resolution for the drawer-side containers (see ModelDrawerData.h)
+template<>
+const CFeature* DrawerGetObjectByID<CFeature>(int id)
+{
+	const CFeature* feature = featureHandler.GetFeature(id);
+	assert(feature != nullptr);
+	return feature;
+}
 
 
 void CFeatureDrawerData::RenderFeaturePreCreated(const CFeature* feature)
@@ -49,7 +59,7 @@ void CFeatureDrawerData::RenderFeatureCreated(const CFeature* feature)
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(
 		feature->def->drawType != DRAWTYPE_MODEL ||
-		std::find(unsortedObjects.begin(), unsortedObjects.end(), feature) != unsortedObjects.end()
+		std::find(unsortedObjects.begin(), unsortedObjects.end(), feature->id) != unsortedObjects.end()
 	);
 }
 
@@ -112,14 +122,15 @@ void CFeatureDrawerData::Update()
 
 	if (mtModelDrawer) {
 		for_mt_chunk(0, unsortedObjects.size(), [this](const int k) {
-			const CFeature* f = unsortedObjects[k];
+			const CFeature* f = DrawerGetObjectByID<CFeature>(unsortedObjects[k]);
 			UpdateDrawPos(f);
 			UpdateCommon(f);
 			UpdateUnsyncedTransform(f);
 		}, CModelDrawerDataConcept::MT_CHUNK_OR_MIN_CHUNK_SIZE_UPDT);
 	}
 	else {
-		for (const CFeature* f : unsortedObjects) {
+		for (const int featureID : unsortedObjects) {
+			const CFeature* f = DrawerGetObjectByID<CFeature>(featureID);
 			UpdateDrawPos(f);
 			UpdateCommon(f);
 			UpdateUnsyncedTransform(f);

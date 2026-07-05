@@ -51,7 +51,7 @@ public:
 
 	static void AddTempDrawUnit(const CUnitDrawerData::TempDrawUnit& tempDrawUnit) { modelDrawerData->AddTempDrawUnit(tempDrawUnit); }
 
-	static const std::vector<const CUnit*>& GetUnsortedUnits() { return modelDrawerData->GetUnsortedObjects(); }
+	static const std::vector<int>& GetUnsortedUnits() { return modelDrawerData->GetUnsortedObjects(); } // unit ids (PR 14)
 
 	// drawer-owned draw-time positions/transforms (sim/draw §A drawPos eviction)
 	static const float3& GetDrawPos(const CUnit* unit) { return modelDrawerData->GetDrawPos(unit); }

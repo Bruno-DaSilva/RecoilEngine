@@ -214,8 +214,8 @@ void CFeatureDrawerLegacy::DrawObjectsShadow(int modelType) const
 		const auto* texMat = textureHandlerS3O.GetTexture(mdlRenderer.GetObjectBinKey(i));
 		CModelDrawerHelper::modelDrawerHelpers[modelType]->BindShadowTex(texMat);
 
-		for (auto* o : mdlRenderer.GetObjectBin(i)) {
-			DrawFeatureShadow(o);
+		for (const int featureID : mdlRenderer.GetObjectBin(i)) {
+			DrawFeatureShadow(DrawerGetObjectByID<CFeature>(featureID));
 		}
 
 		CModelDrawerHelper::modelDrawerHelpers[modelType]->UnbindShadowTex();
@@ -238,8 +238,8 @@ void CFeatureDrawerLegacy::DrawOpaqueObjects(int modelType, bool drawReflection,
 
 		CModelDrawerHelper::BindModelTypeTexture(modelType, mdlRenderer.GetObjectBinKey(i));
 
-		for (auto* o : mdlRenderer.GetObjectBin(i)) {
-			DrawOpaqueFeature(o, thisPassMask);
+		for (const int featureID : mdlRenderer.GetObjectBin(i)) {
+			DrawOpaqueFeature(DrawerGetObjectByID<CFeature>(featureID), thisPassMask);
 		}
 	}
 }
@@ -260,8 +260,8 @@ void CFeatureDrawerLegacy::DrawAlphaObjects(int modelType, bool drawReflection, 
 
 		CModelDrawerHelper::BindModelTypeTexture(modelType, mdlRenderer.GetObjectBinKey(i));
 
-		for (auto* o : mdlRenderer.GetObjectBin(i)) {
-			DrawAlphaFeature(o, thisPassMask);
+		for (const int featureID : mdlRenderer.GetObjectBin(i)) {
+			DrawAlphaFeature(DrawerGetObjectByID<CFeature>(featureID), thisPassMask);
 		}
 	}
 }
@@ -320,7 +320,9 @@ void CFeatureDrawerGL4::DrawObjectsShadow(int modelType) const
 
 		const auto& bin = mdlRenderer.GetObjectBin(i);
 
-		for (auto* o : bin) {
+		for (const int featureID : bin) {
+			const CFeature* o = DrawerGetObjectByID<CFeature>(featureID);
+
 			if (!ShouldDrawFeatureShadow(o))
 				continue;
 
@@ -357,7 +359,9 @@ void CFeatureDrawerGL4::DrawOpaqueObjects(int modelType, bool drawReflection, bo
 
 		CModelDrawerHelper::BindModelTypeTexture(modelType, mdlRenderer.GetObjectBinKey(i));
 
-		for (auto* o : mdlRenderer.GetObjectBin(i)) {
+		for (const int featureID : mdlRenderer.GetObjectBin(i)) {
+			const CFeature* o = DrawerGetObjectByID<CFeature>(featureID);
+
 			if (!ShouldDrawOpaqueFeature(o, thisPassMask))
 				continue;
 
@@ -394,7 +398,9 @@ void CFeatureDrawerGL4::DrawAlphaObjects(int modelType, bool drawReflection, boo
 
 		const auto& bin = mdlRenderer.GetObjectBin(i);
 
-		for (auto* o : bin) {
+		for (const int featureID : bin) {
+			const CFeature* o = DrawerGetObjectByID<CFeature>(featureID);
+
 			if (!ShouldDrawAlphaFeature(o, thisPassMask))
 				continue;
 

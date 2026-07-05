@@ -18,12 +18,30 @@ public:
 	size_t operator()(const TObject* o) const { return size_t(o->model->textureType); }
 };
 
+// what the bins store per object (PR 14: drawer containers hold IDs, not
+// pointers; draw passes resolve the id through the object's handler). The
+// projectile drawer keeps identity handles until its own conversion lands.
+template<typename TObject>
+struct ModelRenderContainerTraits {
+	using Handle = int;
+	static Handle ToHandle(const TObject* o) { return o->id; }
+};
+
+class CProjectile;
+template<>
+struct ModelRenderContainerTraits<CProjectile> {
+	using Handle = const CProjectile*;
+	static Handle ToHandle(const CProjectile* o) { return o; }
+};
+
 template<typename TObject, typename TObjectSelector = ModelRenderContainerSelector<TObject>>
 class ModelRenderContainer {
+public:
+	using Handle = typename ModelRenderContainerTraits<TObject>::Handle;
 private:
 	// note: there can be no more texture-types than S3DModel instances
 	std::array< int, MAX_MODEL_OBJECTS > keys;
-	std::vector< std::vector<const TObject*> > bins;
+	std::vector< std::vector<Handle> > bins;
 
 	size_t numObjs = 0;
 	size_t numBins = 0;
@@ -78,7 +96,7 @@ public:
 			bin.reserve(256);
 
 		// numBins += (ki == ke);
-		numObjs += spring::VectorInsertUnique(bin, o);
+		numObjs += spring::VectorInsertUnique(bin, ModelRenderContainerTraits<TObject>::ToHandle(o));
 	}
 
 	void DelObject(const TObject* o) {
@@ -96,7 +114,7 @@ public:
 		// and alpha containers (since it does not know the
 		// cloaked state) which also means the tex-type key
 		// might not exist here
-		numObjs -= spring::VectorErase(bin, o);
+		numObjs -= spring::VectorErase(bin, ModelRenderContainerTraits<TObject>::ToHandle(o));
 		numBins -= (bin.empty());
 
 		if (!bin.empty())

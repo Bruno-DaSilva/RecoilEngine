@@ -31,7 +31,7 @@ protected:
 public:
 	// modelDrawerData proxies
 	void ConfigNotify(const std::string& key, const std::string& value) { modelDrawerData->ConfigNotify(key, value); }
-	static const std::vector<const CFeature*>& GetUnsortedFeatures() { return modelDrawerData->GetUnsortedObjects(); }
+	static const std::vector<int>& GetUnsortedFeatures() { return modelDrawerData->GetUnsortedObjects(); } // feature ids (PR 14)
 
 	// drawer-owned draw-time positions/transforms (sim/draw §A drawPos eviction)
 	static const float3& GetDrawPos(const CFeature* feature) { return modelDrawerData->GetDrawPos(feature); }

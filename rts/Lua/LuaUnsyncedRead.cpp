@@ -2301,19 +2301,20 @@ namespace {
 	static uint8_t GetRenderObjectPreviousDrawFlag(const CUnit* u) { return CUnitDrawer::GetPreviousDrawFlag(u); }
 	static uint8_t GetRenderObjectPreviousDrawFlag(const CFeature* f) { return CFeatureDrawer::GetPreviousDrawFlag(f); }
 
-	template<typename V>
-	static int GetRenderObjects(lua_State* L, const V& renderObjects, const char* func) {
+	// the drawer containers hold object ids (PR 14); resolve for the flag reads
+	template<typename TObj>
+	static int GetRenderObjects(lua_State* L, const std::vector<int>& renderObjects, const char* func) {
 		const int  drawMask = luaL_optint(L, 1, 0);
 		const bool sendMask = luaL_optboolean(L, 2, false);
 
 		lua_createtable(L, renderObjects.size(), 0);
 		uint32_t count = 0;
-		for (const auto renderObject : renderObjects)
+		for (const int objectID : renderObjects)
 		{
-			if ((GetRenderObjectDrawFlag(renderObject) & drawMask) == 0)
+			if ((GetRenderObjectDrawFlag(DrawerGetObjectByID<TObj>(objectID)) & drawMask) == 0)
 				continue;
 
-			lua_pushnumber(L, renderObject->id);
+			lua_pushnumber(L, objectID);
 			lua_rawseti(L, -2, ++count);
 		}
 
@@ -2322,20 +2323,22 @@ namespace {
 
 		lua_createtable(L, count, 0);
 		count = 0;
-		for (const auto renderObject : renderObjects)
+		for (const int objectID : renderObjects)
 		{
-			if ((GetRenderObjectDrawFlag(renderObject) & drawMask) == 0)
+			const uint8_t drawFlag = GetRenderObjectDrawFlag(DrawerGetObjectByID<TObj>(objectID));
+
+			if ((drawFlag & drawMask) == 0)
 				continue;
 
-			lua_pushnumber(L, GetRenderObjectDrawFlag(renderObject));
+			lua_pushnumber(L, drawFlag);
 			lua_rawseti(L, -2, ++count);
 		}
 
 		return 2;
 	}
 
-	template<typename V>
-	static int GetRenderObjectsDrawFlagChanged(lua_State* L, const V& renderObjects, const char* func) {
+	template<typename TObj>
+	static int GetRenderObjectsDrawFlagChanged(lua_State* L, const std::vector<int>& renderObjects, const char* func) {
 		const bool sendMask = luaL_optboolean(L, 1, false);
 
 		std::vector<int> changedIds;
@@ -2344,11 +2347,13 @@ namespace {
 		std::vector<uint8_t> changedDrawFlags;
 		changedDrawFlags.reserve(renderObjects.size());
 
-		for (const auto renderObject : renderObjects)
+		for (const int objectID : renderObjects)
 		{
+			const TObj* renderObject = DrawerGetObjectByID<TObj>(objectID);
+
 			if (GetRenderObjectPreviousDrawFlag(renderObject) == GetRenderObjectDrawFlag(renderObject))
 				continue;
-			changedIds.push_back(renderObject->id);
+			changedIds.push_back(objectID);
 			changedDrawFlags.push_back(GetRenderObjectDrawFlag(renderObject));
 		}
 
@@ -2414,7 +2419,7 @@ namespace {
  */
 int LuaUnsyncedRead::GetRenderUnits(lua_State* L)
 {
-	return GetRenderObjects(L, unitDrawer->GetUnsortedUnits(), __func__);
+	return GetRenderObjects<CUnit>(L, unitDrawer->GetUnsortedUnits(), __func__);
 }
 
 /***
@@ -2433,7 +2438,7 @@ int LuaUnsyncedRead::GetRenderUnits(lua_State* L)
  */
 int LuaUnsyncedRead::GetRenderUnitsDrawFlagChanged(lua_State* L)
 {
-	return GetRenderObjectsDrawFlagChanged(L, unitDrawer->GetUnsortedUnits(), __func__);
+	return GetRenderObjectsDrawFlagChanged<CUnit>(L, unitDrawer->GetUnsortedUnits(), __func__);
 }
 
 /***
@@ -2454,7 +2459,7 @@ int LuaUnsyncedRead::GetRenderUnitsDrawFlagChanged(lua_State* L)
  */
 int LuaUnsyncedRead::GetRenderFeatures(lua_State* L)
 {
-	return GetRenderObjects(L, featureDrawer->GetUnsortedFeatures(), __func__);
+	return GetRenderObjects<CFeature>(L, featureDrawer->GetUnsortedFeatures(), __func__);
 }
 
 /***
@@ -2473,7 +2478,7 @@ int LuaUnsyncedRead::GetRenderFeatures(lua_State* L)
  */
 int LuaUnsyncedRead::GetRenderFeaturesDrawFlagChanged(lua_State* L)
 {
-	return GetRenderObjectsDrawFlagChanged(L, featureDrawer->GetUnsortedFeatures(), __func__);
+	return GetRenderObjectsDrawFlagChanged<CFeature>(L, featureDrawer->GetUnsortedFeatures(), __func__);
 }
 
 /***

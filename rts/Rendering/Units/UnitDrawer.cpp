@@ -403,7 +403,8 @@ void CUnitDrawerGLSL::DrawUnitMiniMapIcons() const
 	// allyteam as of the sim frame the drawer containers were drained at
 	const auto& snapshot = simSnapshot.Read();
 
-	for (auto* unit : modelDrawerData->GetUnsortedObjects()) {
+	for (const int unitID : modelDrawerData->GetUnsortedObjects()) {
+		const CUnit* unit = DrawerGetObjectByID<CUnit>(unitID);
 		const size_t iconIndex = minimap->UseUnitIcons() ? modelDrawerData->GetUnitIconIndex(unit) : defIconIdx;
 
 		if (iconIndex == icon::INVALID_ICON_INDEX)
@@ -561,7 +562,8 @@ void CUnitDrawerGLSL::DrawUnitIcons() const
 	static auto& rb = RenderBuffer::GetTypedRenderBuffer<VA_TYPE_TC3>();
 	rb.AssertSubmission();
 
-	for (auto* unit : modelDrawerData->GetUnsortedObjects()) {
+	for (const int unitID : modelDrawerData->GetUnsortedObjects()) {
+		const CUnit* unit = DrawerGetObjectByID<CUnit>(unitID);
 		const size_t iconIndex = modelDrawerData->GetUnitIconIndex(unit);
 
 		if (iconIndex == icon::INVALID_ICON_INDEX)
@@ -671,7 +673,8 @@ void CUnitDrawerGLSL::DrawUnitIconsScreen() const
 	const auto isFullView = gu->spectatingFullView;
 	const float ghostIconDimming = modelDrawerData->ghostIconDimming;
 
-	for (auto* unit : modelDrawerData->GetUnsortedObjects()) {
+	for (const int unitID : modelDrawerData->GetUnsortedObjects()) {
+		const CUnit* unit = DrawerGetObjectByID<CUnit>(unitID);
 		const size_t iconIndex = modelDrawerData->GetUnitIconIndex(unit);
 
 		if (iconIndex == icon::INVALID_ICON_INDEX)
@@ -779,8 +782,8 @@ void CUnitDrawerGLSL::DrawObjectsShadow(int modelType) const
 			continue;
 
 		CModelDrawerHelper::BindModelTypeTexture(modelType, mdlRenderer.GetObjectBinKey(i));
-		for (auto* o : mdlRenderer.GetObjectBin(i)) {
-			DrawUnitShadow(o);
+		for (const int unitID : mdlRenderer.GetObjectBin(i)) {
+			DrawUnitShadow(DrawerGetObjectByID<CUnit>(unitID));
 		}
 
 		CModelDrawerHelper::modelDrawerHelpers[modelType]->UnbindShadowTex();
@@ -803,8 +806,8 @@ void CUnitDrawerGLSL::DrawOpaqueObjects(int modelType, bool drawReflection, bool
 
 		CModelDrawerHelper::BindModelTypeTexture(modelType, mdlRenderer.GetObjectBinKey(i));
 
-		for (auto* o : mdlRenderer.GetObjectBin(i)) {
-			DrawOpaqueUnit(o, thisPassMask);
+		for (const int unitID : mdlRenderer.GetObjectBin(i)) {
+			DrawOpaqueUnit(DrawerGetObjectByID<CUnit>(unitID), thisPassMask);
 		}
 	}
 }
@@ -825,8 +828,8 @@ void CUnitDrawerGLSL::DrawAlphaObjects(int modelType, bool drawReflection, bool 
 
 		CModelDrawerHelper::BindModelTypeTexture(modelType, mdlRenderer.GetObjectBinKey(i));
 
-		for (auto* o : mdlRenderer.GetObjectBin(i)) {
-			DrawAlphaUnit(o, modelType, thisPassMask, false);
+		for (const int unitID : mdlRenderer.GetObjectBin(i)) {
+			DrawAlphaUnit(DrawerGetObjectByID<CUnit>(unitID), modelType, thisPassMask, false);
 		}
 	}
 
@@ -1639,7 +1642,9 @@ void CUnitDrawerGL4::DrawObjectsShadow(int modelType) const
 		static vector<const ObjType*> beingBuilt;
 		beingBuilt.clear();
 
-		for (auto* o : bin) {
+		for (const int unitID : bin) {
+			const CUnit* o = DrawerGetObjectByID<CUnit>(unitID);
+
 			if (!ShouldDrawUnitShadow(o))
 				continue;
 
@@ -1688,7 +1693,9 @@ void CUnitDrawerGL4::DrawOpaqueObjects(int modelType, bool drawReflection, bool 
 		static vector<const ObjType*> beingBuilt;
 		beingBuilt.clear();
 
-		for (auto* o : mdlRenderer.GetObjectBin(i)) {
+		for (const int unitID : mdlRenderer.GetObjectBin(i)) {
+			const CUnit* o = DrawerGetObjectByID<CUnit>(unitID);
+
 			if (!ShouldDrawOpaqueUnit(o, thisPassMask))
 				continue;
 
@@ -1734,7 +1741,9 @@ void CUnitDrawerGL4::DrawAlphaObjects(int modelType, bool drawReflection, bool d
 
 		const auto& bin = mdlRenderer.GetObjectBin(i);
 
-		for (auto* o : bin) {
+		for (const int unitID : bin) {
+			const CUnit* o = DrawerGetObjectByID<CUnit>(unitID);
+
 			if (!ShouldDrawAlphaUnit(o, thisPassMask))
 				continue;
 

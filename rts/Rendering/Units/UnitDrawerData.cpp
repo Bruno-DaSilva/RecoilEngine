@@ -32,6 +32,15 @@
 
 static FixedDynMemPoolT<MAX_UNITS / 1000, MAX_UNITS / 32, GhostSolidObject> ghostMemPool;
 
+// id resolution for the drawer-side containers (see ModelDrawerData.h)
+template<>
+const CUnit* DrawerGetObjectByID<CUnit>(int id)
+{
+	const CUnit* unit = unitHandler.GetUnit(id);
+	assert(unit != nullptr);
+	return unit;
+}
+
 ///////////////////////////
 
 CR_BIND_POOL(GhostSolidObject, ,ghostMemPool.allocMem, ghostMemPool.freeMem)
@@ -139,8 +148,9 @@ CUnitDrawerData::CUnitDrawerData(bool& mtModelDrawer_)
 CUnitDrawerData::~CUnitDrawerData()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	for (const CUnit* u : unsortedObjects) {
-		groundDecals->ForceRemoveSolidObject(u);
+	// rendering is torn down before the sim, so the ids still resolve
+	for (const int unitID : unsortedObjects) {
+		groundDecals->ForceRemoveSolidObject(DrawerGetObjectByID<CUnit>(unitID));
 	}
 
 	for (UnitDefImage& img : unitDefImages) {
@@ -211,13 +221,12 @@ void CUnitDrawerData::Update()
 
 	if (mtModelDrawer) {
 		for_mt_chunk(0, unsortedObjects.size(), [this, &updateBody](const int k) {
-			const CUnit* unit = unsortedObjects[k];
-			updateBody(unit);
+			updateBody(DrawerGetObjectByID<CUnit>(unsortedObjects[k]));
 		}, CModelDrawerDataConcept::MT_CHUNK_OR_MIN_CHUNK_SIZE_UPDT);
 	}
 	else {
-		for (const CUnit* unit : unsortedObjects)
-			updateBody(unit);
+		for (const int unitID : unsortedObjects)
+			updateBody(DrawerGetObjectByID<CUnit>(unitID));
 	}
 
 	if ((useDistToGroundForIcons = (camHandler->GetCurrentController()).GetUseDistToGroundForIcons())) {
@@ -611,7 +620,7 @@ void CUnitDrawerData::RenderUnitPreCreated(const CUnit* unit)
 void CUnitDrawerData::RenderUnitCreated(const CUnit* unit, int cloaked)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	assert(std::find(unsortedObjects.begin(), unsortedObjects.end(), unit) != unsortedObjects.end());
+	assert(std::find(unsortedObjects.begin(), unsortedObjects.end(), unit->id) != unsortedObjects.end());
 	UpdateCurrentUnitIcon(unit);
 }
 
@@ -808,8 +817,8 @@ void CUnitDrawerData::ApplyUnitLeavesGhostChanged(const CUnit* unit, const Ghost
 
 void CUnitDrawerData::PlayerChanged(int playerID)
 {
-	for (auto* unit : unsortedObjects) {
-		UpdateCurrentUnitIcon(unit);
+	for (const int unitID : unsortedObjects) {
+		UpdateCurrentUnitIcon(DrawerGetObjectByID<CUnit>(unitID));
 	}
 }
 

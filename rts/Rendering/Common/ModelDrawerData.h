@@ -26,6 +26,15 @@
 #include "Game/GlobalUnsynced.h"
 #include "Game/CameraHandler.h"
 
+// id -> live object resolution for the drawer-side containers (PR 14: the
+// containers hold IDs; ids are looked up through the object's handler at
+// use time). Post-drain invariant: every id in a drawer container resolves
+// to a live object -- destroy records erase the id at the boundary drain
+// before any draw-side consumer iterates. Explicit specializations for
+// CUnit (UnitDrawerData.cpp) and CFeature (FeatureDrawerData.cpp).
+template<typename T>
+const T* DrawerGetObjectByID(int id);
+
 class CModelDrawerDataConcept : public CEventClient {
 public:
 	CModelDrawerDataConcept(const std::string& ecName, int ecOrder)
@@ -71,7 +80,8 @@ private:
 	void ExtractObjectTransforms(const T* o);
 	void UpdateObjectUniforms(const T* o);
 public:
-	const std::vector<const T*>& GetUnsortedObjects() const { return unsortedObjects; }
+	// object ids; resolve via DrawerGetObjectByID<T> (see above)
+	const std::vector<int>& GetUnsortedObjects() const { return unsortedObjects; }
 	const ModelRenderContainer<T>& GetModelRenderer(int modelType) const { return modelRenderers[modelType]; }
 
 	// render-owned draw-visibility flags (sim/draw §A: these were drawFlag/previousDrawFlag
@@ -90,7 +100,7 @@ public:
 	void AddDrawFlag(const T* o, DrawFlags f) { DrawFlagRef(o).flag |=  f; }
 	void DelDrawFlag(const T* o, DrawFlags f) { DrawFlagRef(o).flag &= ~f; }
 
-	void ClearPreviousDrawFlags() { for (auto object : unsortedObjects) DrawFlagRef(object).prev = 0; }
+	void ClearPreviousDrawFlags() { for (const int id : unsortedObjects) drawFlags[id].prev = 0; }
 
 	const auto& GetObjectTransformMemAlloc(const T* o) const {
 		const auto it = scTransMemAllocMap.find(o);
@@ -141,7 +151,7 @@ protected:
 
 	std::array<ModelRenderContainer<T>, MODELTYPE_CNT> modelRenderers;
 
-	std::vector<const T*> unsortedObjects;
+	std::vector<int> unsortedObjects; // object ids (see GetUnsortedObjects)
 	std::vector<DrawPosition> drawPositions; // indexed by object id
 	std::vector<DrawFlagState> drawFlags;    // indexed by object id
 	spring::unordered_map<const T*, ScopedTransformMemAlloc> scTransMemAllocMap;
@@ -191,7 +201,7 @@ inline void CModelDrawerDataBase<T>::AddObject(const T* o, bool add)
 	if (!add)
 		return;
 
-	unsortedObjects.emplace_back(o);
+	unsortedObjects.emplace_back(o->id);
 
 	if (o->id >= drawPositions.size())
 		drawPositions.resize(o->id + 1);
@@ -217,7 +227,7 @@ inline void CModelDrawerDataBase<T>::DelObject(const T* o, bool del)
 		modelRenderers[MDL_TYPE(o)].DelObject(o);
 	}
 
-	if (del && spring::VectorErase(unsortedObjects, o)) {
+	if (del && spring::VectorErase(unsortedObjects, o->id)) {
 		scTransMemAllocMap.erase(o);
 		modelUniformsStorage.DelObject(o);
 	}
@@ -279,11 +289,11 @@ inline void CModelDrawerDataBase<T>::ExtractTransforms()
 
 	if (mtModelDrawer) {
 		for_mt_chunk(0, unsortedObjects.size(), [this](const int k) {
-			ExtractObjectTransforms(unsortedObjects[k]);
+			ExtractObjectTransforms(DrawerGetObjectByID<T>(unsortedObjects[k]));
 		}, CModelDrawerDataConcept::MT_CHUNK_OR_MIN_CHUNK_SIZE_UPDT);
 	} else {
-		for (const T* o : unsortedObjects)
-			ExtractObjectTransforms(o);
+		for (const int id : unsortedObjects)
+			ExtractObjectTransforms(DrawerGetObjectByID<T>(id));
 	}
 }
 
