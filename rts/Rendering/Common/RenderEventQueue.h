@@ -3,10 +3,12 @@
 #pragma once
 
 #include <array>
+#include <cassert>
 #include <cstdint>
 #include <vector>
 
 #include "Sim/Misc/GlobalConstants.h"
+#include "System/UnorderedMap.hpp"
 
 class CUnit;
 class CFeature;
@@ -75,11 +77,10 @@ using GhostAllyMask = std::array<uint64_t, (MAX_TEAMS + 63) / 64>;
 class RenderEventQueue {
 public:
 	// these records are the seed of the recorded-stream event schema
-	// (doc/replay-seeking-architecture.md): keep them plain data. <obj> is a
-	// transitional dispatch handle only -- valid at dispatch time because
-	// destroyed objects stay undestructed in DeferredObjectDeleter until
-	// after the drain -- and goes away when PR 14 rekeys the drawer
-	// containers by ID.
+	// (doc/replay-seeking-architecture.md): plain data, no object pointers
+	// (PR 14). Dispatch resolves <id> back to the object: the live one from
+	// its handler, or -- for records fired by an object generation that died
+	// before the drain -- the parked shell tracked in <pendingDestroyShells>.
 	struct Record {
 		enum class Type : uint8_t {
 			UnitPreCreated,
@@ -102,7 +103,6 @@ public:
 		int32_t id;       // unitID / featureID / projectileID
 		int32_t arg1;     // UnitCreated: cloaked; LOS records: allyTeam; UnitLeavesGhostChanged: ghost-mask pool index
 		int32_t arg2;     // UnitEnteredLos/UnitLeftLos: unit->leavesGhost at fire time
-		const void* obj;  // transitional, see above
 	};
 public:
 	/// opens the deferral window; called at the top of CGame::Update, ahead
@@ -117,6 +117,9 @@ public:
 		while (!records.empty())
 			Flush();
 
+		// every queued destroy record just dispatched, popping its shell
+		assert(pendingDestroyShells.empty());
+
 		deferring = false;
 	}
 
@@ -126,6 +129,7 @@ public:
 	void Clear() {
 		records.clear();
 		ghostMasks.clear();
+		pendingDestroyShells.clear();
 		deferring = false;
 	}
 
@@ -157,11 +161,38 @@ public:
 private:
 	void Push(const Record& record);
 	void Dispatch(const Record& record);
+
+	// dispatch-time id -> object resolution (PR 14). Keyed by object kind +
+	// (for projectiles) id namespace + id; the value is the FIFO of parked
+	// shells whose destroy records are still queued. A queued record fired by
+	// generation N of a reused id resolves to generation N's shell because
+	// fire order interleaves generations strictly (a PreCreated of gen N+1
+	// can only follow the Destroyed of gen N, which pops gen N's shell); with
+	// no pending destroy for the id, the handler lookup returns the live
+	// object, which by the same ordering is the generation that fired the
+	// record. Only populated while deferring: in immediate mode destroy
+	// records dispatch at the fire site, where the object is still registered
+	// in its handler (all three destroy sites fire before deregistering).
+	enum class ObjKind : uint8_t { Unit, Feature, Projectile };
+	static uint64_t ShellKey(ObjKind kind, bool synced, int32_t id) {
+		return (uint64_t(kind) << 40) | (uint64_t(synced) << 39) | uint32_t(id);
+	}
+	void PushDestroyShell(uint64_t key, const void* obj);
+	const void* PopDestroyShell(uint64_t key);      // dispatch of a *Destroyed record
+	const void* FindDestroyShell(uint64_t key) const;
+
+	const CUnit* ResolveUnit(int32_t id) const;
+	const CFeature* ResolveFeature(int32_t id) const;
+	const CProjectile* ResolveProjectile(int32_t id, bool synced) const;
 private:
 	std::vector<Record> records;
 	// side pool for the rare records that carry a per-allyteam mask; indexed
 	// by Record::arg1, cleared together with <records>
 	std::vector<GhostAllyMask> ghostMasks;
+
+	// parked shells (DeferredObjectDeleter) with a queued destroy record, in
+	// fire order per key; see the resolution comment above
+	spring::unordered_map<uint64_t, std::vector<const void*>> pendingDestroyShells;
 
 	bool deferring = false;
 	bool draining = false;
