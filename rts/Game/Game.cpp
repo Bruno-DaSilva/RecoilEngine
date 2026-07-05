@@ -5,6 +5,7 @@
 #include <Rml/Backends/RmlUi_Backend.h>
 #include <RmlUi/Core.h>
 #include "Game.h"
+#include "BoundaryStats.h"
 #include "Camera.h"
 #include "CameraHandler.h"
 #include "ChatMessage.h"
@@ -288,6 +289,9 @@ CGame::~CGame()
 {
 	ENTER_SYNCED_CODE();
 	LOG("[Game::%s][1]", __func__);
+
+	// write out a partial /boundarydump if the game ends before its end frame
+	BoundaryStats::FlushPartial();
 
 	RmlGui::Shutdown();
 	helper->Kill();
@@ -1808,6 +1812,8 @@ void CGame::SimFrame() {
 
 	// sample per-sim-frame profiler self/inclusive/count for an active /profiledump
 	CTimeProfiler::GetInstance().DumpFrame(gs->frameNum);
+	// sample per-sim-frame boundary-size stats for an active /boundarydump
+	BoundaryStats::SampleFrame(gs->frameNum);
 
 	#ifdef HEADLESS
 	{

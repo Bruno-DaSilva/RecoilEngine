@@ -33,6 +33,10 @@ Each row is a per-sim-frame **delta of cumulative totals**. For per-frame averag
 ### Callout rows (count>0, deep mode only)
 `self_ms` = body time **excluding nested callouts**; `incl_ms` = body **including** nested callouts. For **leaf** callouts `self==incl`. For **higher-order** callouts (`RenderToTexture`, `BeginEnd`, `ActiveTexture`, and event-triggering ones like `CreateUnit`/`DestroyUnit`/`GiveOrderToUnit`) `incl > self`, because they run nested callouts / Lua / event cascades. **Sum the `self` column for an honest callout total** — summing `incl` double-counts (higher-order rows contain the leaves).
 
+## `/boundarydump` (sim|draw boundary sizes)
+
+`/boundarydump <startFrame> <endFrame> [out.csv]` is the companion boundary-size dump (one fixed-width row per sim frame: transform/uniform storage sizes and dirty rates, piece-pose churn, command-queue mutations and length distribution, projectile churn by class, unit/feature/LOS event rates, hot-field change rates). It keeps its own small buffer, so full-game ranges are fine where /profiledump's per-name rows would be too heavy. Columns are self-describing; `d_` prefixes are per-frame deltas of cumulative counters, `hf_` are per-unit hot-field exact-change counts, and `sample_cost_ms` is the sampler's own per-frame cost.
+
 ## `.folded` (flamegraph)
 
 Brendan-Gregg collapsed-stack format: one line per unique call path, `root;child;…;leaf <microseconds>`, summed over the whole dump window. Weight is **self**-microseconds; the flamegraph tool sums children to get inclusive widths. Import into speedscope (drag the file in) or feed to `flamegraph.pl`.

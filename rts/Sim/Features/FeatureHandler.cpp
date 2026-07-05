@@ -2,6 +2,7 @@
 
 #include "FeatureHandler.h"
 #include "Feature.h"
+#include "Game/BoundaryStats.h"
 #include "FeatureDef.h"
 #include "FeatureDefHandler.h"
 #include "FeatureMemPool.h"
@@ -140,6 +141,8 @@ bool CFeatureHandler::AddFeature(CFeature* feature)
 	// LoadFeature should make sure this is true
 	assert(CanAddFeature(feature->id));
 
+	BoundaryStats::Add(BoundaryStats::ctr.featCreated);
+
 	InsertActiveFeature(feature);
 	SetFeatureUpdateable(feature);
 	return true;
@@ -237,6 +240,8 @@ bool CFeatureHandler::UpdateFeature(CFeature* feature)
 	assert(feature->inUpdateQue);
 
 	if (feature->deleteMe) {
+		BoundaryStats::Add(BoundaryStats::ctr.featDestroyed);
+
 		Sim::registry.destroy(feature->entityReference);
 
 		eventHandler.RenderFeatureDestroyed(feature);

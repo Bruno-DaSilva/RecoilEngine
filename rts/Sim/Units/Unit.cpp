@@ -21,6 +21,7 @@
 #include "CommandAI/BuilderCaches.h"
 
 #include "ExternalAI/EngineOutHandler.h"
+#include "Game/BoundaryStats.h"
 #include "Game/GameHelper.h"
 #include "Game/GameSetup.h"
 #include "Game/GlobalUnsynced.h"
@@ -878,12 +879,14 @@ void CUnit::SetLosStatus(int at, unsigned short newStatus)
 	if (diffBits) {
 		if (diffBits & LOS_INLOS) {
 			if (newStatus & LOS_INLOS) {
+				BoundaryStats::Add(BoundaryStats::ctr.losEnterLos);
 				eventHandler.UnitEnteredLos(this, at);
 				eoh->UnitEnteredLos(*this, at);
 			} else {
 				// clear before sending the event
 				losStatus[at] &= ~LOS_INLOS;
 
+				BoundaryStats::Add(BoundaryStats::ctr.losLeaveLos);
 				eventHandler.UnitLeftLos(this, at);
 				eoh->UnitLeftLos(*this, at);
 			}
@@ -891,12 +894,14 @@ void CUnit::SetLosStatus(int at, unsigned short newStatus)
 
 		if (diffBits & LOS_INRADAR) {
 			if (newStatus & LOS_INRADAR) {
+				BoundaryStats::Add(BoundaryStats::ctr.losEnterRadar);
 				eventHandler.UnitEnteredRadar(this, at);
 				eoh->UnitEnteredRadar(*this, at);
 			} else {
 				// clear before sending the event
 				losStatus[at] &= ~LOS_INRADAR;
 
+				BoundaryStats::Add(BoundaryStats::ctr.losLeaveRadar);
 				eventHandler.UnitLeftRadar(this, at);
 				eoh->UnitLeftRadar(*this, at);
 			}

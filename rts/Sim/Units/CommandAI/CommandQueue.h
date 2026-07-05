@@ -5,6 +5,7 @@
 
 #include <deque>
 #include "Command.h"
+#include "Game/BoundaryStats.h"
 
 /// A wrapper class for std::deque<Command> to keep track of commands
 class CCommandQueue {
@@ -44,10 +45,12 @@ class CCommandQueue {
 		inline void push_front(const Command& cmd);
 
 		void emplace_back(Command&& cmd) {
+			BoundaryStats::Add(BoundaryStats::ctr.cmdPushBack);
 			queue.emplace_back(cmd);
 			queue.back().SetTag(GetNextTag());
 		}
 		void emplace_front(Command&& cmd) {
+			BoundaryStats::Add(BoundaryStats::ctr.cmdPushFront);
 			queue.emplace_front(cmd);
 			queue.front().SetTag(GetNextTag());
 		}
@@ -56,23 +59,28 @@ class CCommandQueue {
 
 		inline void pop_back()
 		{
+			BoundaryStats::Add(BoundaryStats::ctr.cmdPopBack);
 			queue.pop_back();
 		}
 		inline void pop_front()
 		{
+			BoundaryStats::Add(BoundaryStats::ctr.cmdPopFront);
 			queue.pop_front();
 		}
 
 		inline iterator erase(iterator pos)
 		{
+			BoundaryStats::Add(BoundaryStats::ctr.cmdErase);
 			return queue.erase(pos);
 		}
 		inline iterator erase(iterator first, iterator last)
 		{
+			BoundaryStats::Add(BoundaryStats::ctr.cmdErase, last - first);
 			return queue.erase(first, last);
 		}
 		inline void clear()
 		{
+			BoundaryStats::Add(BoundaryStats::ctr.cmdClearCmds, queue.size());
 			queue.clear();
 		}
 
@@ -125,6 +133,7 @@ inline int CCommandQueue::GetNextTag()
 
 inline void CCommandQueue::push_back(const Command& cmd)
 {
+	BoundaryStats::Add(BoundaryStats::ctr.cmdPushBack);
 	queue.push_back(cmd);
 	queue.back().SetTag(GetNextTag());
 }
@@ -132,6 +141,7 @@ inline void CCommandQueue::push_back(const Command& cmd)
 
 inline void CCommandQueue::push_front(const Command& cmd)
 {
+	BoundaryStats::Add(BoundaryStats::ctr.cmdPushFront);
 	queue.push_front(cmd);
 	queue.front().SetTag(GetNextTag());
 }
@@ -139,6 +149,7 @@ inline void CCommandQueue::push_front(const Command& cmd)
 
 inline CCommandQueue::iterator CCommandQueue::insert(iterator pos, const Command& cmd)
 {
+	BoundaryStats::Add(BoundaryStats::ctr.cmdInsert);
 	Command tmpCmd = cmd;
 	tmpCmd.SetTag(GetNextTag());
 	return queue.insert(pos, tmpCmd);

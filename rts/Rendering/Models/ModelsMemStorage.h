@@ -5,6 +5,7 @@
 
 #include "ModelsMemStorageDefs.h"
 #include "ModelsLock.h"
+#include "Game/BoundaryStats.h"
 #include "System/Transform.hpp"
 #include "System/MemPoolTypes.h"
 #include "System/FreeListMap.h"
@@ -35,10 +36,12 @@ public:
 		auto lock = CModelsLock::GetScopedLock();
 
 		using DT = StablePosAllocator<MyType>;
+		BoundaryStats::Add(BoundaryStats::ctr.traChecked);
 		const auto& curValue = const_cast<const DT&>(storage)[idx];
 		if (eqCmp(curValue, newValue))
 			return false;
 
+		BoundaryStats::Add(BoundaryStats::ctr.traChanged);
 		updateList.SetUpdate(idx);
 		auto& mutValue = const_cast<DT&>(storage)[idx];
 		mutValue = newValue;
@@ -52,6 +55,7 @@ public:
 	void UpdateForced(std::size_t idx, MyTypeLike&& newValue) {
 		auto lock = CModelsLock::GetScopedLock();
 
+		BoundaryStats::Add(BoundaryStats::ctr.traForced);
 		updateList.SetUpdate(idx);
 		auto& mutValue = storage[idx];
 		mutValue = newValue;

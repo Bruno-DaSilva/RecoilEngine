@@ -21,6 +21,7 @@
 #include "Sim/MoveTypes/Systems/UnitTrapCheckSystem.h"
 #include "Sim/Path/IPathManager.h"
 #include "Sim/Weapons/Weapon.h"
+#include "Game/BoundaryStats.h"
 #include "System/EventHandler.h"
 #include "System/Log/ILog.h"
 #include "System/SpringMath.h"
@@ -219,6 +220,8 @@ bool CUnitHandler::AddUnit(CUnit* unit)
 	// LoadUnit should make sure this is true
 	assert(CanAddUnit(unit->id));
 
+	BoundaryStats::Add(BoundaryStats::ctr.unitCreated);
+
 	InsertActiveUnit(unit);
 	teamHandler.Team(unit->team)->AddUnit(unit, CTeam::AddBuilt);
 
@@ -287,6 +290,8 @@ void CUnitHandler::DeleteUnit(CUnit* delUnit)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(delUnit->isDead);
+
+	BoundaryStats::Add(BoundaryStats::ctr.unitDestroyed);
 
 	// we want to call RenderUnitDestroyed while the unit is still valid
 	eventHandler.RenderUnitDestroyed(delUnit);

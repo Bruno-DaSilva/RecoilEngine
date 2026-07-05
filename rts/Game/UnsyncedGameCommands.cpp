@@ -1,7 +1,10 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+#include <algorithm>
 #include <array>
+#include <fstream>
 #include <functional>
 #include <tuple>
+#include <vector>
 
 #include "UnsyncedGameCommands.h"
 
@@ -9,6 +12,7 @@
 #include "SyncedGameCommands.h"
 #include "SyncedActionExecutor.h"
 #include "Action.h"
+#include "BoundaryStats.h"
 #include "CameraHandler.h"
 #include "ConsoleHistory.h"
 #include "CommandMessage.h"
@@ -1510,6 +1514,38 @@ public:
 		return true;
 	}
 };
+
+
+class BoundaryDumpActionExecutor : public IUnsyncedActionExecutor {
+public:
+	BoundaryDumpActionExecutor() : IUnsyncedActionExecutor(
+		"BoundaryDump",
+		"Dump per-sim-frame sim|draw boundary-size stats (transform/uniform storage sizes+dirty rates, piece-pose churn, "
+		"command-queue mutations, projectile/unit/feature/LOS churn) over a frame range to a CSV: /boundarydump <startFrame> <endFrame> [outPath]"
+	) {}
+
+	bool Execute(const UnsyncedAction& action) const final {
+		const auto args = CSimpleParser::Tokenize(action.GetArgs());
+
+		if (args.size() < 2) {
+			LOG_L(L_WARNING, "[/boundarydump] usage: /boundarydump <startFrame> <endFrame> [outPath]");
+			return true;
+		}
+
+		const int f0 = StringToInt(args[0]);
+		const int f1 = StringToInt(args[1]);
+		std::string path = (args.size() > 2) ? args[2] : "boundarydump.csv";
+
+		// resolve a relative path against the write data-dir (see /profiledump)
+		if (!FileSystem::IsAbsolutePath(path))
+			path = dataDirLocater.GetWriteDirPath() + path;
+
+		// one fixed-width row per sim frame; sampled from CGame::SimFrame
+		BoundaryStats::StartDump(f0, f1, path);
+		return true;
+	}
+};
+
 
 
 class DebugActionExecutor : public IUnsyncedActionExecutor {
@@ -4120,6 +4156,7 @@ void UnsyncedGameCommands::AddDefaultActionExecutors()
 	AddActionExecutor(AllocActionExecutor<PauseActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<DebugActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<ProfileDumpActionExecutor>());
+	AddActionExecutor(AllocActionExecutor<BoundaryDumpActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<DebugCubeMapActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<DebugQuadFieldActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<DrawSkyActionExecutor>());

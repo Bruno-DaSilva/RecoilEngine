@@ -8,6 +8,7 @@
 #include "Sim/Misc/DamageArray.h"
 #include "Sim/Misc/GroundBlockingObjectMap.h"
 #include "Sim/MoveTypes/MoveDefHandler.h"
+#include "Game/BoundaryStats.h"
 #include "Game/GameHelper.h"
 #include "System/SpringMath.h"
 #include "System/Quaternion.h"
@@ -463,11 +464,34 @@ void CSolidObject::CondUpdatePrevTransform()
 
 void CSolidObject::UpdatePrevFrameTransform()
 {
+	// boundary-size measurement (read-only, unsynced counters): per-sim-frame
+	// piece-pose churn = pieces whose model-space transform changed since the
+	// previous save; root churn = objects whose unit-space transform changed
+	if (BoundaryStats::Active()) {
+		uint64_t changed = 0;
+
+		for (const auto& lmp : localModel.pieces) {
+			changed += !lmp.GetModelSpaceTransform().equals(lmp.GetPrevModelSpaceTransformRaw());
+		}
+
+		BoundaryStats::Add(BoundaryStats::ctr.pieceSampled, localModel.pieces.size());
+		BoundaryStats::Add(BoundaryStats::ctr.pieceChanged, changed);
+		BoundaryStats::Add(BoundaryStats::ctr.objSampled);
+
+		if (changed > 0)
+			BoundaryStats::Add(BoundaryStats::ctr.objPieceChanged);
+	}
+
 	for (auto& lmp : localModel.pieces) {
 		lmp.SavePrevModelSpaceTransform();
 	}
 
-	preFrameTra = Transform{ CQuaternion::MakeFrom(GetTransformMatrix(true)), pos };
+	const Transform newPreFrameTra = Transform{ CQuaternion::MakeFrom(GetTransformMatrix(true)), pos };
+
+	if (BoundaryStats::Active() && !newPreFrameTra.equals(preFrameTra))
+		BoundaryStats::Add(BoundaryStats::ctr.objMoved);
+
+	preFrameTra = newPreFrameTra;
 }
 
 void CSolidObject::ForcedSpin(const float3& zdir)

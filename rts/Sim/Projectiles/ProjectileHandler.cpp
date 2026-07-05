@@ -5,6 +5,7 @@
 #include "Projectile.h"
 #include "ProjectileHandler.h"
 #include "ProjectileMemPool.h"
+#include "Game/BoundaryStats.h"
 #include "Game/GlobalUnsynced.h"
 #include "Game/TraceRay.h"
 #include "Map/Ground.h"
@@ -279,10 +280,53 @@ static void UPDATE_REF_CONTAINER(T& cont) {
 
 
 
+// boundary-size measurement: spawn rates by re-derivability class — ballistic
+// weapon projectiles can be re-derived from spawn params by a stream consumer,
+// guided (tracking) ones need per-frame updates, hitscan ones live 1-2 frames
+static void CountProjectileChurn(const CProjectile* p, const bool spawn)
+{
+	using namespace BoundaryStats;
+
+	if (!spawn) {
+		Add(p->synced ? ctr.projDespawnSynced : ctr.projDespawnUnsynced);
+		return;
+	}
+
+	if (!p->synced) {
+		Add(ctr.projSpawnUnsynced);
+		return;
+	}
+
+	if (p->piece) {
+		Add(ctr.projSpawnPiece);
+		return;
+	}
+
+	if (p->weapon) {
+		const auto* wp = static_cast<const CWeaponProjectile*>(p);
+		const WeaponDef* wd = wp->GetWeaponDef();
+
+		if (wd == nullptr)
+			Add(ctr.projSpawnSyncedOther);
+		else if (wd->IsHitScanWeapon())
+			Add(ctr.projSpawnHitscan);
+		else if (wd->tracks)
+			Add(ctr.projSpawnGuided);
+		else
+			Add(ctr.projSpawnBallistic);
+
+		return;
+	}
+
+	Add(ctr.projSpawnSyncedOther);
+}
+
 void CProjectileHandler::CreateProjectile(CProjectile* p)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	p->createMe = false;
+
+	CountProjectileChurn(p, true);
 
 	if (p->synced || PH_UNSYNCED_PROJECTILE_EVENTS == 1)
 		eventHandler.ProjectileCreated(p, p->GetAllyteamID());
@@ -294,6 +338,8 @@ void CProjectileHandler::DestroyProjectile(CProjectile* p)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(!p->createMe);
+
+	CountProjectileChurn(p, false);
 
 	eventHandler.RenderProjectileDestroyed(p);
 

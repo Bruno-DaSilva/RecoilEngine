@@ -95,6 +95,7 @@ struct LocalModelPiece
 	void SetScriptVisible(bool b);
 
 	void SavePrevModelSpaceTransform();
+	const Transform& GetPrevModelSpaceTransformRaw() const { return prevModelSpaceTra; }
 	Transform GetEffectivePrevModelSpaceTransform() const;
 
 	void PostLoad();
