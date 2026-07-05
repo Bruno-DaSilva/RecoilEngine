@@ -148,7 +148,8 @@ public:
 	AtlasedTexture* seismictex = nullptr;
 public:
 	static bool CanDrawProjectile(const CProjectile* pro, int allyTeam);
-	static bool ShouldDrawProjectile(const CProjectile* pro, uint8_t thisPassMask);
+	// non-static: reads the drawer-owned drawFlags storage (PR 4)
+	bool ShouldDrawProjectile(const CProjectile* pro, uint8_t thisPassMask) const;
 
 	static TypedRenderBuffer<VA_TYPE_C>& GetMiniMapLinesRB();
 	static TypedRenderBuffer<VA_TYPE_C>& GetMiniMapPointsRB();
