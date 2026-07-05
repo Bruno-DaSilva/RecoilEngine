@@ -98,12 +98,15 @@ CWaitCommandsAI::~CWaitCommandsAI()
 }
 
 
-void CWaitCommandsAI::Update()
+void CWaitCommandsAI::Update(int prevFrame)
 {
 //	if ((gs->frameNum % GAME_SPEED) == 0) printf("Waits: %i\n", waitMap.size()); // FIXME
 
-	// limit the updates
-	if ((gs->frameNum % updatePeriod) != 0) {
+	// limit the updates; the caller runs this once per sim-frame batch at the
+	// unsynced boundary, so gate on an updatePeriod crossing in (prevFrame,
+	// frameNum] instead of (frameNum % updatePeriod) so fast-forward batches
+	// don't step over the gate (prevFrame < 0 => first frame, always fire)
+	if (prevFrame >= 0 && (gs->frameNum / updatePeriod) == (prevFrame / updatePeriod)) {
 		return;
 	}
 

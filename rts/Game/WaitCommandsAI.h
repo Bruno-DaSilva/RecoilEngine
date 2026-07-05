@@ -31,7 +31,7 @@ class CWaitCommandsAI {
 		CWaitCommandsAI();
 		~CWaitCommandsAI();
 
-		void Update();
+		void Update(int prevFrame);
 		void DrawCommands() const;
 
 		// called from SelectedUnits

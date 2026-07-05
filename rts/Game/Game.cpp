@@ -1273,6 +1273,8 @@ bool CGame::UpdateUnsynced(const spring_time currentTime)
 	}
 
 	const bool newSimFrame = (lastSimFrame != gs->frameNum);
+	// last processed sim frame, for the PR 11b boundary movers' crossing checks
+	const int prevSimFrame = lastSimFrame;
 	numDrawFrames++;
 	globalRendering->drawFrame = std::max(1U, globalRendering->drawFrame + 1);
 	globalRendering->lastFrameStart = currentTime;
@@ -1372,6 +1374,32 @@ bool CGame::UpdateUnsynced(const spring_time currentTime)
 
 	lastSimFrame = gs->frameNum;
 
+	// sim-frame boundary: unsynced work relocated out of CGame::SimFrame's
+	// misplaced-work block (PR 11b). Runs once per batch of sim frames (>1 under
+	// fast-forward) at the sim-quiescent boundary, after ClientReadNet drained
+	// its frame budget and after the render-event queue drain in Draw(). None of
+	// these write synced state or consume gsRNG; their only sim-facing effect is
+	// net messages, timing-equivalent to user input. The skipping early-return
+	// above preserves the former !skipping gate.
+	if (newSimFrame && !gs->PreSimFrame()) {
+		// keep waitCommandsAI before sound->NewFrame: a wait release plays a
+		// unit-reply sample that must land in the same emit budget as on master
+		waitCommandsAI.Update(prevSimFrame);
+		// sweep all expired buckets, not just frameNum's (see GeometricObjects.cpp)
+		geometricObjects->Update();
+		// reset the audio emit counter once per batch (never at raw draw rate)
+		sound->NewFrame();
+
+		CPlayer* p = playerHandler.Player(gu->myPlayerNum);
+		p->fpsController.SendStateUpdate();
+
+		CTeamHighlight::Update(prevSimFrame);
+
+		// dead-ghost pruning is draw-owned; run it after the batch's render-event
+		// drain so ghosts created by the batch's destroy events exist first
+		CUnitDrawer::UpdateGhostedBuildings();
+	}
+
 	// set camera
 	camHandler->UpdateController(playerHandler.Player(gu->myPlayerNum), gu->fpsMode);
 
@@ -1418,6 +1446,11 @@ bool CGame::UpdateUnsynced(const spring_time currentTime)
 	mouse->UpdateCursors();
 	guihandler->Update();
 	commandDrawer->Update();
+
+	// UI unit-group housekeeping: draw-owned containers, no frame-keyed logic,
+	// safe at draw rate (moved from CGame::SimFrame, PR 11b)
+	for (auto& grouphandler: uiGroupHandlers)
+		grouphandler.Update();
 
 	{
 		SCOPED_TIMER("Update::EventHandler");
@@ -1762,21 +1795,11 @@ void CGame::SimFrame() {
 	spring_lua_alloc_update_stats((gs->frameNum % GAME_SPEED) == 0);
 
 	if (!skipping) {
-		// everything here is unsynced and should ideally moved to Game::Update()
-		waitCommandsAI.Update();
-		geometricObjects->Update();
-		sound->NewFrame();
+		// eoh->Update stays on the sim path: its single-player cheat callbacks
+		// mutate synced state, and AIs assume once-per-sim-frame Update(frame)
+		// cadence. The rest of this block was unsynced and moved to
+		// CGame::UpdateUnsynced / Draw per PR 11b (11a classification table).
 		eoh->Update();
-
-		for (auto& grouphandler: uiGroupHandlers)
-			grouphandler.Update();
-
-		CPlayer* p = playerHandler.Player(gu->myPlayerNum);
-		FPSUnitController& c = p->fpsController;
-
-		c.SendStateUpdate(/*camera->GetMovState(), mouse->buttons*/);
-
-		CTeamHighlight::Update(gs->frameNum);
 	}
 
 	// everything from here is simulation
@@ -1823,10 +1846,9 @@ void CGame::SimFrame() {
 		}
 		envResHandler.Update();
 		losHandler->Update();
-		// dead ghosts have to be updated in sim, after los,
-		// to make sure they represent the current knowledge correctly.
-		// should probably be split from drawer
-		CUnitDrawer::UpdateGhostedBuildings();
+		// UpdateGhostedBuildings() (dead-ghost pruning) moved to the unsynced
+		// boundary in CGame::UpdateUnsynced (PR 11b): it is draw-owned state and
+		// must run after the batch's render-event drain, not on the sim path.
 		interceptHandler.Update(false);
 
 		teamHandler.GameFrame(gs->frameNum);
