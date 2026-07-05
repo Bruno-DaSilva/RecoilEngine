@@ -2085,18 +2085,18 @@ int LuaUnsyncedRead::GetVisibleUnits(lua_State* L)
 	unitQuadIter.ResetState();
 	readMap->GridVisibility(nullptr, &unitQuadIter, 1e9, CQuadField::BASE_QUAD_SIZE / SQUARE_SIZE);
 
-	// Even though we're in unsynced it's ok to use gs->tempNum since its exact value
-	// doesn't matter
-	const int tempNum = gs->GetTempNum();
+	// unsynced/draw context: use the unsynced dedup scratch (gu counter +
+	// CWorldObject::unsyncedTempNum) so this never touches synced scratch
+	const int tempNum = gu->GetTempNum();
 	lua_createtable(L, unitQuadIter.GetObjectCount(), 0);
 
 	unsigned int count = 0;
 	for (auto visUnitList: unitQuadIter.GetObjectLists()) {
 		for (CUnit* u: *visUnitList) {
-			if (u->tempNum == tempNum)
+			if (u->unsyncedTempNum == tempNum)
 				continue;
 
-			u->tempNum = tempNum;
+			u->unsyncedTempNum = tempNum;
 
 			if (u->noDraw)
 				continue;
@@ -2173,18 +2173,18 @@ int LuaUnsyncedRead::GetVisibleFeatures(lua_State* L)
 	featureQuadIter.ResetState();
 	readMap->GridVisibility(nullptr, &featureQuadIter, 1e9, CQuadField::BASE_QUAD_SIZE / SQUARE_SIZE);
 
-	// Even though we're in unsynced it's ok to use gs->tempNum since its exact value
-	// doesn't matter
-	const int tempNum = gs->GetTempNum();
+	// unsynced/draw context: use the unsynced dedup scratch (gu counter +
+	// CWorldObject::unsyncedTempNum) so this never touches synced scratch
+	const int tempNum = gu->GetTempNum();
 	lua_createtable(L, featureQuadIter.GetObjectCount(), 0);
 
 	unsigned int count = 0;
 	for (auto visFeatureList: featureQuadIter.GetObjectLists()) {
 		for (CFeature* f: *visFeatureList) {
-			if (f->tempNum == tempNum)
+			if (f->unsyncedTempNum == tempNum)
 				continue;
 
-			f->tempNum = tempNum;
+			f->unsyncedTempNum = tempNum;
 
 			if (f->noDraw)
 				continue;
@@ -2246,18 +2246,18 @@ int LuaUnsyncedRead::GetVisibleProjectiles(lua_State* L)
 	projQuadIter.ResetState();
 	readMap->GridVisibility(nullptr, &projQuadIter, 1e9, CQuadField::BASE_QUAD_SIZE / SQUARE_SIZE);
 
-	// Even though we're in unsynced it's ok to use gs->tempNum since its exact value
-	// doesn't matter
-	const int tempNum = gs->GetTempNum();
+	// unsynced/draw context: use the unsynced dedup scratch (gu counter +
+	// CWorldObject::unsyncedTempNum) so this never touches synced scratch
+	const int tempNum = gu->GetTempNum();
 	lua_createtable(L, projQuadIter.GetObjectCount(), 0);
 
 	unsigned int count = 0;
 	for (auto visProjectileList: projQuadIter.GetObjectLists()) {
 		for (CProjectile* p: *visProjectileList) {
-			if (p->tempNum == tempNum)
+			if (p->unsyncedTempNum == tempNum)
 				continue;
 
-			p->tempNum = tempNum;
+			p->unsyncedTempNum = tempNum;
 
 
 			if (allyTeamID >= 0 && !losHandler->InLos(p, allyTeamID))
@@ -2522,9 +2522,9 @@ int LuaUnsyncedRead::GetUnitsInScreenRectangle(lua_State* L)
 
 	const int allegiance = LuaUtils::ParseAllegiance(L, __func__, 5);
 
-	// Even though we're in unsynced it's ok to use gs->tempNum since its exact value
-	// doesn't matter
-	const int tempNum = gs->GetTempNum();
+	// unsynced/draw context: use the unsynced dedup scratch (gu counter +
+	// CWorldObject::unsyncedTempNum) so this never touches synced scratch
+	const int tempNum = gu->GetTempNum();
 	lua_createtable(L, unitQuadIter.GetObjectCount(), 0);
 
 	auto runLoop = [&](auto disqualifier) {
@@ -2534,10 +2534,10 @@ int LuaUnsyncedRead::GetUnitsInScreenRectangle(lua_State* L)
 				if (disqualifier(unit))
 					continue;
 
-				if (unit->tempNum == tempNum)
+				if (unit->unsyncedTempNum == tempNum)
 					continue;
 
-				unit->tempNum = tempNum;
+				unit->unsyncedTempNum = tempNum;
 
 				const float3 vpPos = camera->CalcViewPortCoordinates(CUnitDrawer::GetDrawPos(unit));
 
@@ -2601,16 +2601,18 @@ int LuaUnsyncedRead::GetFeaturesInScreenRectangle(lua_State* L)
 	featureQuadIter.ResetState();
 	readMap->GridVisibility(nullptr, &featureQuadIter, 1e9, CQuadField::BASE_QUAD_SIZE / SQUARE_SIZE);
 
-	const int tempNum = gs->GetTempNum();
+	// unsynced/draw context: use the unsynced dedup scratch (gu counter +
+	// CWorldObject::unsyncedTempNum) so this never touches synced scratch
+	const int tempNum = gu->GetTempNum();
 	lua_createtable(L, featureQuadIter.GetObjectCount(), 0);
 
 	uint32_t count = 0;
 	for (auto visFeatureList : featureQuadIter.GetObjectLists()) {
 		for ( CFeature* feature : *visFeatureList ) {
-			if (feature->tempNum == tempNum)
+			if (feature->unsyncedTempNum == tempNum)
 				continue;
 
-			feature->tempNum = tempNum;
+			feature->unsyncedTempNum = tempNum;
 			const float3 vpPos = camera->CalcViewPortCoordinates(CFeatureDrawer::GetDrawPos(feature));
 
 			if (vpPos.x > r || vpPos.x < l)

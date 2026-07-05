@@ -771,10 +771,10 @@ void CQuadField::GetProjectilesExact(QuadFieldQuery& qfq, const float3& pos, flo
 
 	for (const int qi: *qfQuery.quads) {
 		for (CProjectile* p: baseQuads[qi].projectiles) {
-			if (p->tempNum == tempNum)
+			if (p->syncedTempNum == tempNum)
 				continue;
 
-			p->tempNum = tempNum;
+			p->syncedTempNum = tempNum;
 
 			if (pos.SqDistance(p->pos) >= Square(radius + p->radius))
 				continue;
@@ -796,10 +796,10 @@ void CQuadField::GetProjectilesExact(QuadFieldQuery& qfq, const float3& mins, co
 
 	for (const int qi: *qfQuery.quads) {
 		for (CProjectile* p: baseQuads[qi].projectiles) {
-			if (p->tempNum == tempNum)
+			if (p->syncedTempNum == tempNum)
 				continue;
 
-			p->tempNum = tempNum;
+			p->syncedTempNum = tempNum;
 
 			const float3& pos = p->pos;
 			if (pos.x < mins.x || pos.x > maxs.x)
@@ -883,10 +883,10 @@ bool CQuadField::NoSolidsExact(
 
 	for (const int qi: *qfQuery.quads) {
 		for (CUnit* u: baseQuads[qi].units) {
-			if (u->tempNum == tempNum)
+			if (u->syncedTempNum == tempNum)
 				continue;
 
-			u->tempNum = tempNum;
+			u->syncedTempNum = tempNum;
 
 			if (!u->HasPhysicalStateBit(physicalStateBits))
 				continue;
@@ -899,10 +899,10 @@ bool CQuadField::NoSolidsExact(
 		}
 
 		for (CFeature* f: baseQuads[qi].features) {
-			if (f->tempNum == tempNum)
+			if (f->syncedTempNum == tempNum)
 				continue;
 
-			f->tempNum = tempNum;
+			f->syncedTempNum = tempNum;
 
 			if (!f->HasPhysicalStateBit(physicalStateBits))
 				continue;
@@ -939,10 +939,10 @@ void CQuadField::GetUnitsAndFeaturesColVol(
 
 		for (CUnit* u: quad.units) {
 			// prevent double adding
-			if (u->tempNum == tempNum)
+			if (u->syncedTempNum == tempNum)
 				continue;
 
-			u->tempNum = tempNum;
+			u->syncedTempNum = tempNum;
 
 			const auto* colvol = &u->collisionVolume;
 			const float totRad = radius + colvol->GetBoundingRadius();
@@ -955,10 +955,10 @@ void CQuadField::GetUnitsAndFeaturesColVol(
 
 		for (CFeature* f: quad.features) {
 			// prevent double adding
-			if (f->tempNum == tempNum)
+			if (f->syncedTempNum == tempNum)
 				continue;
 
-			f->tempNum = tempNum;
+			f->syncedTempNum = tempNum;
 
 			const auto* colvol = &f->collisionVolume;
 			const float totRad = radius + colvol->GetBoundingRadius();
@@ -970,7 +970,8 @@ void CQuadField::GetUnitsAndFeaturesColVol(
 		}
 		if (repulsers != nullptr) {
 			for (CPlasmaRepulser* r: quad.repulsers) {
-				// prevent double adding
+				// prevent double adding; r->tempNum is CPlasmaRepulser's own
+				// (sim-only) marker, distinct from CWorldObject::syncedTempNum
 				if (r->tempNum == tempNum)
 					continue;
 

@@ -793,7 +793,7 @@ bool CBuilder::StartBuild(BuildInfo& buildInfo, CFeature*& feature, bool& inWait
 			// <pos> might map to a non-blocking portion
 			// of the buildee's yardmap, fallback check
 			if (u == nullptr)
-				u = CGameHelper::GetClosestFriendlyUnit(nullptr, buildInfo.pos, buildDistance, allyteam);
+				u = CGameHelper::GetClosestFriendlyUnit(nullptr, buildInfo.pos, buildDistance, allyteam, true);
 
 			if (u != nullptr) {
 				if (CanAssistUnit(u, buildInfo.def)) {

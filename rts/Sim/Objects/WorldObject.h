@@ -77,7 +77,19 @@ public:
 
 public:
 	int id = -1;
-	int tempNum = 0;            ///< used to check if object has already been processed (in QuadField queries, etc)
+	// Synced/sim-thread scratch marker, paired with CGlobalSynced::GetTempNum();
+	// used to dedup an object across QuadField query cells. Synced determinism
+	// depends on this counter/field pair keeping its exact increment sequence, so
+	// it is written ONLY by sim-context queries. Draw/unsynced-context queries use
+	// unsyncedTempNum below instead (see PR 9, sim/draw decoupling).
+	int syncedTempNum = 0;      ///< used to check if object has already been processed (in synced QuadField queries, etc)
+	// Draw/unsynced counterpart of syncedTempNum, paired with
+	// CGlobalUnsynced::GetTempNum(). Written ONLY by draw/unsynced-context queries
+	// (LuaUnsyncedRead visibility scans, MiniMap picking, ...); sim never reads it,
+	// so it is not creg-serialized. Single-threaded today (every draw-side caller
+	// runs on the main thread); if the draw side is ever multithreaded this needs
+	// the same per-thread treatment as mtTempNum.
+	int unsyncedTempNum = 0;
 
 	Transform preFrameTra;      ///< used for interpolation
 

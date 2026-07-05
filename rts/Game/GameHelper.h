@@ -138,7 +138,9 @@ public:
 		bool sphereDistTest,
 		bool checkSightDist
 	);
-	static CUnit* GetClosestFriendlyUnit(const CUnit* excludeUnit, const float3& pos, float searchRadius, int searchAllyteam);
+	// synced selects the object-dedup scratch space: pass true from sim/synced
+	// callers, false only from the draw/UI thread (MiniMap picking). See PR 9.
+	static CUnit* GetClosestFriendlyUnit(const CUnit* excludeUnit, const float3& pos, float searchRadius, int searchAllyteam, bool synced);
 	static CUnit* GetClosestEnemyAircraft(const CUnit* excludeUnit, const float3& pos, float searchRadius, int searchAllyteam);
 
 	static void BuggerOff(const float3& pos, float radius, bool spherical, bool forced, int teamId, const CUnit* excludeUnit);

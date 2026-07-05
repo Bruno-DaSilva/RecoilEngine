@@ -10,7 +10,9 @@
 CR_BIND_DERIVED(CWorldObject, CObject, )
 CR_REG_METADATA(CWorldObject, (
 	CR_MEMBER(id),
-	CR_MEMBER(tempNum),
+	CR_MEMBER(syncedTempNum),
+	// unsyncedTempNum is draw/unsynced scratch; sim never reads it -> not serialized
+	CR_IGNORED(unsyncedTempNum),
 	CR_MEMBER(mtTempNum),
 	CR_MEMBER(radius),
 	CR_MEMBER(buildeeRadius),

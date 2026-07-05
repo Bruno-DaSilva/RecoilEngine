@@ -3335,7 +3335,7 @@ int LuaSyncedRead::GetUnitNearestAlly(lua_State* L)
 
 	const float range = luaL_optnumber(L, 2, 1.0e9f);
 	const CUnit* target =
-		CGameHelper::GetClosestFriendlyUnit(unit, unit->pos, range, unit->allyteam);
+		CGameHelper::GetClosestFriendlyUnit(unit, unit->pos, range, unit->allyteam, true);
 
 	if (target != nullptr) {
 		lua_pushnumber(L, target->id);

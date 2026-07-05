@@ -29,6 +29,14 @@ public:
 	void SetMyPlayer(const int myNumber);
 	CPlayer* GetMyPlayer();
 
+	// Unsynced scratch counter -- mirror of CGlobalSynced::GetTempNum() for the
+	// draw/unsynced side. Draw-context QuadField-style dedup queries (MiniMap
+	// picking, LuaUnsyncedRead visibility scans, ...) bump this and stamp
+	// CWorldObject::unsyncedTempNum, so they never read or write the synced
+	// counter or synced per-object marker. Main-thread only today; make it
+	// per-thread (like CGlobalSynced::mtTempNum) if the draw side goes MT.
+	int GetTempNum() { return unsyncedTempNum++; }
+
 public:
 	/**
 	 * @brief minimum Frames Per Second
@@ -168,6 +176,16 @@ public:
 	*/
 	std::atomic<bool> globalQuit = {false};
 	std::atomic<bool> globalReload = {false};
+
+private:
+	/**
+	 * @brief unsynced temp num
+	 *
+	 * Unsynced counterpart of CGlobalSynced's tempNum; hands out temporary but
+	 * unique numbers for draw/unsynced-context object-dedup queries. See
+	 * GetTempNum() and CWorldObject::unsyncedTempNum.
+	 */
+	int unsyncedTempNum = 1;
 };
 
 

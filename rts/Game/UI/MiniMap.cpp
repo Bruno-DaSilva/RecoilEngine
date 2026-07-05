@@ -651,7 +651,7 @@ void CMiniMap::SelectUnits(int x, int y)
 		if (gu->spectatingFullSelect) {
 			unit = CGameHelper::GetClosestUnit(pos, unitSelectRadius);
 		} else {
-			unit = CGameHelper::GetClosestFriendlyUnit(nullptr, pos, unitSelectRadius, gu->myAllyTeam);
+			unit = CGameHelper::GetClosestFriendlyUnit(nullptr, pos, unitSelectRadius, gu->myAllyTeam, false); // draw/UI picking -> unsynced scratch
 		}
 
 		selectedUnitsHandler.HandleSingleUnitClickSelection(lastClicked = unit, false, bp.lastRelease >= (gu->gameTime - mouse->doubleClickTime) && unit == _lastClicked);

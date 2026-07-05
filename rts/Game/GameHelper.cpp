@@ -375,12 +375,17 @@ void CGameHelper::Explosion(const CExplosionParams& params) {
  * should be implemented in the Query object if desired.
  * (It isn't necessary for e.g. GetClosest** methods.)
  */
-template<typename TFilter, typename TQuery>
+// Synced selects the object-dedup scratch space: sim-context callers pass true
+// (synced counter + CWorldObject::syncedTempNum, whose increment sequence is a
+// synced-determinism invariant); draw-context callers -- currently only MiniMap
+// unit picking -- pass false (CGlobalUnsynced counter + unsyncedTempNum) so they
+// never touch the synced scratch. See PR 9 (sim/draw decoupling).
+template<bool Synced, typename TFilter, typename TQuery>
 static inline void QueryUnits(TFilter filter, TQuery& query)
 {
 	QuadFieldQuery qfQuery;
 	quadField.GetQuads(qfQuery, query.pos, query.radius);
-	const int tempNum = gs->GetTempNum();
+	const int tempNum = Synced ? gs->GetTempNum() : gu->GetTempNum();
 
 	for (int t = 0; t < teamHandler.ActiveAllyTeams(); ++t) { //FIXME
 		if (!filter.Team(t))
@@ -390,10 +395,12 @@ static inline void QueryUnits(TFilter filter, TQuery& query)
 			const auto& allyTeamUnits = quadField.GetQuad(qi).teamUnits[t];
 
 			for (CUnit* u: allyTeamUnits) {
-				if (u->tempNum == tempNum)
+				int& objTempNum = Synced ? u->syncedTempNum : u->unsyncedTempNum;
+
+				if (objTempNum == tempNum)
 					continue;
 
-				u->tempNum = tempNum;
+				objTempNum = tempNum;
 
 				if (!filter.Unit(u))
 					continue;
@@ -703,10 +710,10 @@ size_t CGameHelper::GenerateWeaponTargets(const CWeapon* weapon, const CUnit* av
 			const std::vector<CUnit*>& allyTeamUnits = quadField.GetQuad(qi).teamUnits[t];
 
 			for (CUnit* targetUnit: allyTeamUnits) {
-				if (targetUnit->tempNum == tempNum)
+				if (targetUnit->syncedTempNum == tempNum)
 					continue;
 
-				targetUnit->tempNum = tempNum;
+				targetUnit->syncedTempNum = tempNum;
 
 				if (!weapon->TestTarget(testPos, SWeaponTarget(targetUnit)))
 					continue;
@@ -770,8 +777,8 @@ size_t CGameHelper::GenerateWeaponTargets(const CWeapon* weapon, const CUnit* av
 
 				const bool allowTarget = eventHandler.AllowWeaponTarget(weaponOwner->id, targetUnit->id, weapon->weaponNum, weaponDef->id, &targetPriority);
 
-				// Lua call may have changed tempNum, so needs to be set again
-				targetUnit->tempNum = tempNum;
+				// Lua call may have changed syncedTempNum, so needs to be set again
+				targetUnit->syncedTempNum = tempNum;
 
 				if (!allowTarget)
 					continue;
@@ -791,7 +798,8 @@ CUnit* CGameHelper::GetClosestUnit(const float3& pos, float searchRadius)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	Query::ClosestUnit_ErrorPos_NOT_SYNCED q(pos, searchRadius);
-	QueryUnits(Filter::Friendly_All_Plus_Enemy_InLos_NOT_SYNCED(), q);
+	// draw/UI picking (MiniMap): use the unsynced dedup scratch
+	QueryUnits<false>(Filter::Friendly_All_Plus_Enemy_InLos_NOT_SYNCED(), q);
 	return q.GetClosestUnit();
 }
 
@@ -799,7 +807,7 @@ CUnit* CGameHelper::GetClosestEnemyUnit(const CUnit* excludeUnit, const float3& 
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	Query::ClosestUnit q(pos, searchRadius);
-	QueryUnits(Filter::Enemy_InLos(excludeUnit, searchAllyteam), q);
+	QueryUnits<true>(Filter::Enemy_InLos(excludeUnit, searchAllyteam), q);
 	return q.GetClosestUnit();
 }
 
@@ -807,7 +815,7 @@ CUnit* CGameHelper::GetClosestValidTarget(const float3& pos, float searchRadius,
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	Query::ClosestUnit q(pos, searchRadius);
-	QueryUnits(Filter::Enemy_InLos_ValidTarget(searchAllyteam, cai), q);
+	QueryUnits<true>(Filter::Enemy_InLos_ValidTarget(searchAllyteam, cai), q);
 	return q.GetClosestUnit();
 }
 
@@ -825,23 +833,30 @@ CUnit* CGameHelper::GetClosestEnemyUnitNoLosTest(
 	if (sphereDistTest) {
 		// includes target radius
 		Query::ClosestUnit_InLos q(searchPos, searchRadius, checkSightDist);
-		QueryUnits(Filter::Enemy(excludeUnit, searchAllyteam), q);
+		QueryUnits<true>(Filter::Enemy(excludeUnit, searchAllyteam), q);
 		closestUnit = q.GetClosestUnit();
 	} else {
 		// excludes target radius
 		Query::ClosestUnit_InLos_Cylinder q(searchPos, searchRadius, checkSightDist);
-		QueryUnits(Filter::Enemy(excludeUnit, searchAllyteam), q);
+		QueryUnits<true>(Filter::Enemy(excludeUnit, searchAllyteam), q);
 		closestUnit = q.GetClosestUnit();
 	}
 
 	return closestUnit;
 }
 
-CUnit* CGameHelper::GetClosestFriendlyUnit(const CUnit* excludeUnit, const float3& pos, float searchRadius, int searchAllyteam)
+// Mixed-context helper: reached from sim (Builder), synced Lua (LuaSyncedRead)
+// AND draw/UI picking (MiniMap). Callers pass synced=false only from the
+// draw/UI thread so it uses the unsynced dedup scratch there; every sim/synced
+// caller passes true and keeps the synced scratch's exact increment sequence.
+CUnit* CGameHelper::GetClosestFriendlyUnit(const CUnit* excludeUnit, const float3& pos, float searchRadius, int searchAllyteam, bool synced)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	Query::ClosestUnit q(pos, searchRadius);
-	QueryUnits(Filter::Friendly(excludeUnit, searchAllyteam), q);
+	if (synced)
+		QueryUnits<true>(Filter::Friendly(excludeUnit, searchAllyteam), q);
+	else
+		QueryUnits<false>(Filter::Friendly(excludeUnit, searchAllyteam), q);
 	return q.GetClosestUnit();
 }
 
@@ -849,7 +864,7 @@ CUnit* CGameHelper::GetClosestEnemyAircraft(const CUnit* excludeUnit, const floa
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	Query::ClosestUnit q(pos, searchRadius);
-	QueryUnits(Filter::EnemyAircraft(excludeUnit, searchAllyteam), q);
+	QueryUnits<true>(Filter::EnemyAircraft(excludeUnit, searchAllyteam), q);
 	return q.GetClosestUnit();
 }
 
@@ -860,7 +875,7 @@ size_t CGameHelper::GetEnemyUnits(const float3& pos, float searchRadius, int sea
 	found.reserve(128);
 
 	Query::AllUnitsById q(pos, searchRadius, found);
-	QueryUnits(Filter::Enemy_InLos(nullptr, searchAllyteam), q);
+	QueryUnits<true>(Filter::Enemy_InLos(nullptr, searchAllyteam), q);
 
 	return (found.size());
 }
@@ -872,7 +887,7 @@ size_t CGameHelper::GetEnemyUnitsNoLosTest(const float3& pos, float searchRadius
 	found.reserve(128);
 
 	Query::AllUnitsById q(pos, searchRadius, found);
-	QueryUnits(Filter::Enemy(nullptr, searchAllyteam), q);
+	QueryUnits<true>(Filter::Enemy(nullptr, searchAllyteam), q);
 
 	return (found.size());
 }
