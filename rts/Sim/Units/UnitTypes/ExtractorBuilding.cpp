@@ -37,7 +37,15 @@ float CExtractorBuilding::maxExtractionRange = 0.0f;
 
 CExtractorBuilding::~CExtractorBuilding()
 {
+	if (!detached)
+		CExtractorBuilding::PreDestruct();
+}
+
+void CExtractorBuilding::PreDestruct()
+{
 	ResetExtraction();
+
+	CBuilding::PreDestruct();
 }
 
 void CExtractorBuilding::PreInit(const UnitLoadParams& params)

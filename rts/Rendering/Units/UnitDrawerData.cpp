@@ -664,8 +664,10 @@ void CUnitDrawerData::RenderUnitDestroyed(const CUnit* unit)
 	RECOIL_DETAILED_TRACY_ZONE;
 	CUnit* u = const_cast<CUnit*>(unit);
 
-	// synchronous (fired through renderEventQueue's flush+dispatch destroy
-	// path), so the mask can be computed from live losStatus right here
+	// dispatched at the boundary drain against the unit's deferred shell
+	// (PR 13); losStatus froze at death -- sim detached the unit from all
+	// LOS updating before parking it -- so the mask still reads the values
+	// the old synchronous dispatch saw
 	UpdateUnitGhosts(unit, unit->leavesGhost ? CalcDeadGhostAllyMask(unit) : GhostAllyMask{});
 	// must happen after UpdateUnitGhosts()
 	u->currentIconIndex = icon::INVALID_ICON_INDEX;

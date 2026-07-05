@@ -39,15 +39,18 @@ using GhostAllyMask = std::array<uint64_t, (MAX_TEAMS + 63) / 64>;
  *    reads are end-state-equivalent (icon state); any fact that sim may
  *    overwrite before the drain is captured into the record at fire time
  *    (the leavesGhost bit of LOS records, the dead-ghost allyteam mask).
- *  - Destruction is synchronous behind the same API. Drawer containers hold
- *    raw CUnit* / CFeature* / CProjectile* and all three destroy sites free the
- *    object immediately after firing, so a Render*Destroyed call first
- *    flushes every pending record (this preserves global order exactly: the
- *    queue is simply drained early) and then dispatches the destroy in place.
- *    PR-13 HANDOFF POINT: once the deferred-deletion epoch extends object
- *    lifetime past the draw boundary, the three Render*Destroyed methods
- *    become a plain Push and the mid-sim flushes disappear. Do not extend
- *    lifetimes here.
+ *  - Destruction queues like everything else (PR 13). The three destroy
+ *    sites no longer free the object: they run PreDestruct() -- the
+ *    sync-observable destructor half, at unchanged sim time -- and park the
+ *    undestructed shell in DeferredObjectDeleter. The shell's plain fields
+ *    and localModel stay readable, so destroy records (and any earlier
+ *    records of the same object: creation, LOS) dispatch against valid
+ *    memory in exact fire order. Right after Drain() returns, CGame::Draw
+ *    calls DeferredObjectDeleter::AckDrainedDestroys(), which destructs and
+ *    poisons the shells; their pool slots are released at the end of that
+ *    Draw. Consequence for handlers: after the drain, drawer containers
+ *    hold live objects only -- every parked shell had its destroy record
+ *    dispatched by then.
  *  - Outside the sim phase the queue is in immediate mode and dispatches in
  *    place: game-load object creation and draw-callin projectile spawns
  *    (e.g. Lua Spring.SpawnCEG from DrawWorld) keep master's timing. The
@@ -73,9 +76,10 @@ class RenderEventQueue {
 public:
 	// these records are the seed of the recorded-stream event schema
 	// (doc/replay-seeking-architecture.md): keep them plain data. <obj> is a
-	// transitional dispatch handle only -- guaranteed live at dispatch time
-	// because destruction flushes the queue -- and goes away when PR 14
-	// rekeys the drawer containers by ID.
+	// transitional dispatch handle only -- valid at dispatch time because
+	// destroyed objects stay undestructed in DeferredObjectDeleter until
+	// after the drain -- and goes away when PR 14 rekeys the drawer
+	// containers by ID.
 	struct Record {
 		enum class Type : uint8_t {
 			UnitPreCreated,
@@ -127,15 +131,20 @@ public:
 
 	bool Empty() const { return records.empty(); }
 
+	/// dispatches all pending records in order without closing the deferral
+	/// window; pool-pressure valve of DeferredObjectDeleter only (this is
+	/// the same in-place dispatch every destroy performed before PR 13)
+	void Flush();
+
 	// sim-side fire sites call these instead of eventHandler.Render*
 	void RenderUnitPreCreated(const CUnit* unit);
 	void RenderUnitCreated(const CUnit* unit, int cloaked);
-	void RenderUnitDestroyed(const CUnit* unit);          // synchronous, see PR-13 handoff above
+	void RenderUnitDestroyed(const CUnit* unit);
 	void RenderFeaturePreCreated(const CFeature* feature);
 	void RenderFeatureCreated(const CFeature* feature);
-	void RenderFeatureDestroyed(const CFeature* feature); // synchronous, see PR-13 handoff above
+	void RenderFeatureDestroyed(const CFeature* feature);
 	void RenderProjectileCreated(const CProjectile* p);
-	void RenderProjectileDestroyed(const CProjectile* p); // synchronous, see PR-13 handoff above
+	void RenderProjectileDestroyed(const CProjectile* p);
 
 	// LOS-transition / ghost deltas, enqueued by CUnitDrawerData's event
 	// handlers (the events themselves also have sim-time consumers -- Lua,
@@ -147,7 +156,6 @@ public:
 	void UnitLeavesGhostChanged(const CUnit* unit, const GhostAllyMask& deadGhostAllyMask);
 private:
 	void Push(const Record& record);
-	void Flush();
 	void Dispatch(const Record& record);
 private:
 	std::vector<Record> records;

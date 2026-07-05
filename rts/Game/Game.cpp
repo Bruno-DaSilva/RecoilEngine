@@ -73,6 +73,7 @@
 #include "Sim/Features/FeatureDefHandler.h"
 #include "Sim/Features/FeatureHandler.h"
 #include "Sim/Misc/CategoryHandler.h"
+#include "Sim/Objects/DeferredObjectDeleter.h"
 #include "Sim/Misc/DamageArrayHandler.h"
 #include "Sim/Misc/YardmapStatusEffectsMap.h"
 #include "Sim/Misc/GeometricObjects.h"
@@ -1054,6 +1055,10 @@ void CGame::KillSimulation()
 	LOG("[Game::%s][2]", __func__);
 	unitHandler.DeleteScripts();
 
+	// KillRendering dropped any queued destroy records; destruct and free
+	// the deferred shells before the handlers clear the pools under them
+	deferredObjectDeleter.Clear();
+
 	featureHandler.Kill(); // depends on unitHandler (via ~CFeature)
 	unitHandler.Kill();
 	projectileHandler.Kill();
@@ -1440,8 +1445,13 @@ bool CGame::UpdateUnsynced(const spring_time currentTime)
 
 bool CGame::Draw() {
 	// apply the sim frames' queued render-event records (object creation,
-	// LOS transitions) before any draw-side code reads the drawer containers
+	// destruction, LOS transitions) before any draw-side code reads the
+	// drawer containers
 	renderEventQueue.Drain();
+	// the drain dispatched every queued destroy record: the draw side has
+	// acked those objects, so destruct their deferred shells and poison the
+	// slots; ReleaseAcked() at the end of this Draw returns them to the pools
+	deferredObjectDeleter.AckDrainedDestroys();
 
 	const spring_time currentTimePreUpdate = spring_gettime();
 
@@ -1564,6 +1574,9 @@ bool CGame::Draw() {
 	globalRendering->SetGLTimeStamp(CGlobalRendering::FRAME_END_TIME_QUERY_IDX);
 
 	lastDrawFrameTime = currentTimePostDraw;
+
+	// return the poisoned slots of this Draw's acked destroys to the pools
+	deferredObjectDeleter.ReleaseAcked();
 
 	return true;
 }

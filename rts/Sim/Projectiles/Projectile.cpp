@@ -108,10 +108,20 @@ CProjectile::CProjectile(
 CProjectile::~CProjectile()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	if (!synced)
-		return;
+	// deferred-deleted projectiles (CProjectileHandler::DestroyProjectile)
+	// already ran PreDestruct() at the old free site; direct frees
+	// (teardown, ground flashes) run it here
+	if (!detached)
+		CProjectile::PreDestruct();
+}
 
-	quadField.RemoveProjectile(this);
+void CProjectile::PreDestruct()
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	if (synced)
+		quadField.RemoveProjectile(this);
+
+	CExpGenSpawnable::PreDestruct();
 }
 
 void CProjectile::Init(const CUnit* owner, const float3& offset)

@@ -183,7 +183,16 @@ CWeaponProjectile::CWeaponProjectile(const ProjectileParams& params)
 CWeaponProjectile::~CWeaponProjectile()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	if (!detached)
+		CWeaponProjectile::PreDestruct();
+}
+
+void CWeaponProjectile::PreDestruct()
+{
+	RECOIL_DETAILED_TRACY_ZONE;
 	DynDamageArray::DecRef(damages);
+
+	CProjectile::PreDestruct();
 }
 
 

@@ -23,6 +23,8 @@ public:
 	CWeaponProjectile(const ProjectileParams& params);
 	~CWeaponProjectile() override;
 
+	void PreDestruct() override;
+
 	virtual void Explode(CUnit* hitUnit, CFeature* hitFeature, CWeapon* hitWeapon, float3 impactPos, float3 impactDir);
 	void Collision() override;
 	void Collision(CFeature* feature) override;

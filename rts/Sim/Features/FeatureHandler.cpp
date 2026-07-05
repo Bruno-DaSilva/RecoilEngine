@@ -10,6 +10,7 @@
 #include "Map/ReadMap.h"
 #include "Sim/Ecs/Registry.h"
 #include "Sim/Misc/QuadField.h"
+#include "Sim/Objects/DeferredObjectDeleter.h"
 #include "Sim/Units/CommandAI/BuilderCaches.h"
 #include "System/creg/STL_Set.h"
 #include "Rendering/Common/RenderEventQueue.h"
@@ -255,8 +256,9 @@ bool CFeatureHandler::UpdateFeature(CFeature* feature)
 
 		// ID must match parameter for object commands, just use this
 		CSolidObject::SetDeletingRefID(feature->GetBlockingMapID());
-		// destructor removes feature from update-queue
-		featureMemPool.free(feature);
+		// PR 13: sync-observable teardown (PreDestruct) runs here, at the old
+		// free site; the slot is released after the draw boundary drain
+		deferredObjectDeleter.Defer(feature);
 		CSolidObject::SetDeletingRefID(-1);
 		return true;
 	}

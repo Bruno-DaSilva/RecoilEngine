@@ -113,10 +113,10 @@ void RenderEventQueue::RenderUnitCreated(const CUnit* unit, int cloaked)
 
 void RenderEventQueue::RenderUnitDestroyed(const CUnit* unit)
 {
-	// PR-13 handoff point: flush + in-place dispatch becomes Push(record)
-	// once object lifetime extends past the draw boundary (see class docs)
-	Flush();
-	Dispatch({ Record::Type::UnitDestroyed, false, unit->id, 0, 0, unit });
+	// PR 13: the deferred-deletion epoch (DeferredObjectDeleter) keeps the
+	// object shell readable until after the drain, so destroys queue like
+	// every other record (see class docs)
+	Push({ Record::Type::UnitDestroyed, false, unit->id, 0, 0, unit });
 }
 
 
@@ -132,9 +132,8 @@ void RenderEventQueue::RenderFeatureCreated(const CFeature* feature)
 
 void RenderEventQueue::RenderFeatureDestroyed(const CFeature* feature)
 {
-	// PR-13 handoff point, as above
-	Flush();
-	Dispatch({ Record::Type::FeatureDestroyed, false, feature->id, 0, 0, feature });
+	// PR 13: queued, as above
+	Push({ Record::Type::FeatureDestroyed, false, feature->id, 0, 0, feature });
 }
 
 
@@ -145,9 +144,8 @@ void RenderEventQueue::RenderProjectileCreated(const CProjectile* p)
 
 void RenderEventQueue::RenderProjectileDestroyed(const CProjectile* p)
 {
-	// PR-13 handoff point, as above
-	Flush();
-	Dispatch({ Record::Type::ProjectileDestroyed, p->synced, p->id, 0, 0, p });
+	// PR 13: queued, as above
+	Push({ Record::Type::ProjectileDestroyed, p->synced, p->id, 0, 0, p });
 }
 
 

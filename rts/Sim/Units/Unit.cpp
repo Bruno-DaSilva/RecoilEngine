@@ -103,6 +103,17 @@ CUnit::~CUnit()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(unitMemPool.mapped(this));
+
+	// deferred-deleted units (CUnitHandler::DeleteUnit) already ran
+	// PreDestruct() at the old free site; direct frees (teardown) run
+	// the sync-observable half here, exactly where it used to run
+	if (!detached)
+		CUnit::PreDestruct();
+}
+
+void CUnit::PreDestruct()
+{
+	RECOIL_DETAILED_TRACY_ZONE;
 	// clean up if we are still under MoveCtrl here
 	DisableScriptMoveType();
 
@@ -147,6 +158,8 @@ CUnit::~CUnit()
 	// ScriptCallback may reference weapons, so delete the script first
 	CWeaponLoader::FreeWeapons(this);
 	quadField.RemoveUnit(this);
+
+	CSolidObject::PreDestruct();
 }
 
 

@@ -18,6 +18,7 @@
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/QuadField.h"
 #include "Sim/Misc/TeamHandler.h"
+#include "Sim/Objects/DeferredObjectDeleter.h"
 #include "Rendering/Env/Particles/Classes/NanoProjectile.h"
 #include "Sim/Projectiles/WeaponProjectiles/WeaponProjectile.h"
 #include "Sim/Units/Unit.h"
@@ -360,7 +361,9 @@ void CProjectileHandler::DestroyProjectile(CProjectile* p)
 		projectiles[false].Del(p->id);
 	}
 
-	projMemPool.free(p);
+	// PR 13: sync-observable teardown (PreDestruct) runs here, at the old
+	// free site; the slot is released after the draw boundary drain
+	deferredObjectDeleter.Defer(p);
 }
 
 uint32_t CProjectileHandler::UnsyncedRandInt(uint32_t N) { return guRNG.NextInt(N); }

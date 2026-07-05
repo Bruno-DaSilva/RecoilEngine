@@ -105,7 +105,9 @@ void DepthBufferCopy::DestroyTextureAndFBO(bool ms)
 		depthFBO = nullptr;
 	}
 
+#ifndef HEADLESS // stub glGenTextures hands out 0
 	assert(depthTexture);
+#endif
 	if (depthTexture) {
 		glDeleteTextures(1, &depthTexture);
 		depthTexture = 0u;

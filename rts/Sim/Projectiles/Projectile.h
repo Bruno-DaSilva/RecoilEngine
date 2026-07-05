@@ -41,6 +41,8 @@ public:
 	);
 	virtual ~CProjectile();
 
+	void PreDestruct() override;
+
 	virtual void Collision() { Delete(); }
 	virtual void Collision(CUnit* unit) { Collision(); }
 	virtual void Collision(CFeature* feature) { Collision(); }

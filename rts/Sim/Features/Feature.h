@@ -28,6 +28,8 @@ public:
 	CFeature();
 	~CFeature();
 
+	void PreDestruct() override;
+
 	CR_DECLARE_SUB(MoveCtrl)
 	struct MoveCtrl {
 		CR_DECLARE_STRUCT(MoveCtrl)

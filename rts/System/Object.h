@@ -20,6 +20,19 @@ public:
 	CObject();
 	virtual ~CObject();
 
+	/**
+	 * Runs the destructor's sync-observable side effects (death-dependence
+	 * severing at this level; overriders prepend their old destructor
+	 * bodies) without destructing the object. Deferred sim-object deletion
+	 * (DeferredObjectDeleter) calls this at the old pool-free site so the
+	 * remaining shell -- plain fields, localModel -- stays readable until
+	 * the draw side has consumed the object's queued render records; the
+	 * real destructor then runs at the ack point and skips everything done
+	 * here (guarded by <detached>). Overrides must mirror destructor order:
+	 * own old-dtor body first, then chain to the base-class PreDestruct().
+	 */
+	virtual void PreDestruct();
+
 	/// Request to not inform this when obj dies
 	virtual void DeleteDeathDependence(CObject* obj, DependenceType dep);
 	/// Request to inform this when obj dies

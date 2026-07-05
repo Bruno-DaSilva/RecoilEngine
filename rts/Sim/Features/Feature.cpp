@@ -92,13 +92,23 @@ CFeature::~CFeature()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(featureMemPool.mapped(this));
+
+	// deferred-deleted features (CFeatureHandler::UpdateFeature) already ran
+	// PreDestruct() at the old free site; direct frees (teardown) run it here
+	if (!detached)
+		CFeature::PreDestruct();
+}
+
+void CFeature::PreDestruct()
+{
+	RECOIL_DETAILED_TRACY_ZONE;
 	UnBlock();
 	quadField.RemoveFeature(this);
 
-	if (!def->geoThermal)
-		return;
+	if (def->geoThermal)
+		CGeoThermSmokeProjectile::GeoThermDestroyed(this);
 
-	CGeoThermSmokeProjectile::GeoThermDestroyed(this);
+	CSolidObject::PreDestruct();
 }
 
 

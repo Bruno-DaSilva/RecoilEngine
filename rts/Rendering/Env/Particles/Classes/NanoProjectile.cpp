@@ -65,7 +65,16 @@ CNanoProjectile::CNanoProjectile(float3 pos, float3 speed, int lifeTime, SColor 
 CNanoProjectile::~CNanoProjectile()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	if (!detached)
+		CNanoProjectile::PreDestruct();
+}
+
+void CNanoProjectile::PreDestruct()
+{
+	RECOIL_DETAILED_TRACY_ZONE;
 	projectileHandler.currentNanoParticles -= 1;
+
+	CProjectile::PreDestruct();
 }
 
 void CNanoProjectile::Update()

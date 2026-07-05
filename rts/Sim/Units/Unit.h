@@ -69,6 +69,8 @@ public:
 	CUnit();
 	virtual ~CUnit();
 
+	void PreDestruct() override;
+
 	static void InitStatic();
 
 	void SanityCheck() const;

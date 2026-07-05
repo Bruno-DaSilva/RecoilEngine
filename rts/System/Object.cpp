@@ -51,6 +51,16 @@ CObject::CObject() : detached(false)
 
 CObject::~CObject()
 {
+	// deferred-deleted sim objects (units, features, projectiles) run
+	// PreDestruct() at the old pool-free site and are destructed later,
+	// once the draw side has consumed their destroy record; every other
+	// object arrives here with detached == false and severs now
+	if (!detached)
+		CObject::PreDestruct();
+}
+
+void CObject::PreDestruct()
+{
 	assert(!detached);
 	detached = true;
 

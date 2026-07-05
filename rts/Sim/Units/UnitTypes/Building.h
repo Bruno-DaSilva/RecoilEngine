@@ -13,8 +13,16 @@ public:
 
 	CBuilding(): CUnit() { immobile = true; }
 
+	virtual ~CBuilding() {
+		if (!detached)
+			CBuilding::PreDestruct();
+	}
+
 	// Unblock is required here because the blockMap is not available during ~CUnit()
-	virtual ~CBuilding() { UnBlock(); };
+	void PreDestruct() override {
+		UnBlock();
+		CUnit::PreDestruct();
+	}
 
 	void PostLoad();
 	void PreInit(const UnitLoadParams& params) override;

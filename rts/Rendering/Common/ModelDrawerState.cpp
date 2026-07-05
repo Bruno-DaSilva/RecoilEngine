@@ -225,7 +225,9 @@ void CModelDrawerStateGLSL::Disable(bool deferredPass) const
 void CModelDrawerStateGLSL::SetNanoColor(const float4& color) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+#ifndef HEADLESS // stub shaders are never bound, same guard as SetTeamColor
 	assert(modelShader->IsBound());
+#endif
 	modelShader->SetUniform4v("nanoColor", &color.x);
 }
 

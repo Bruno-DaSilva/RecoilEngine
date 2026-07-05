@@ -19,6 +19,7 @@
 #include "Sim/MoveTypes/Systems/GeneralMoveSystem.h"
 #include "Sim/MoveTypes/Systems/GroundMoveSystem.h"
 #include "Sim/MoveTypes/Systems/UnitTrapCheckSystem.h"
+#include "Sim/Objects/DeferredObjectDeleter.h"
 #include "Sim/Path/IPathManager.h"
 #include "Sim/Weapons/Weapon.h"
 #include "Game/BoundaryStats.h"
@@ -324,7 +325,10 @@ void CUnitHandler::DeleteUnit(CUnit* delUnit)
 	entt::entity delUnitEntity = delUnit->entityReference;
 
 	CSolidObject::SetDeletingRefID(delUnit->id);
-	unitMemPool.free(delUnit);
+	// PR 13: runs the sync-observable destructor half (PreDestruct) here, at
+	// the old free site; the shell stays readable for the queued render
+	// records and its pool slot is released after the draw boundary drain
+	deferredObjectDeleter.Defer(delUnit);
 	CSolidObject::SetDeletingRefID(-1);
 
 	assert( Sim::registry.valid(delUnitEntity) );
