@@ -136,6 +136,7 @@ set(sources_engine_Rendering
 		"${CMAKE_CURRENT_SOURCE_DIR}/Common/ModelDrawerHelpers.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Common/RenderEventQueue.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Common/SimSnapshot.cpp"
+		"${CMAKE_CURRENT_SOURCE_DIR}/Common/SnapshotDiffGate.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Common/SnapshotHash.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Common/UpdateList.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Features/FeatureDrawerData.cpp"

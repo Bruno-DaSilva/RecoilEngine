@@ -37,6 +37,7 @@
 #include "Rendering/Common/RenderEventQueue.h"
 #include "Rendering/Common/SimSnapshot.h"
 #include "Rendering/Common/SnapshotHash.h"
+#include "Rendering/Common/SnapshotDiffGate.h"
 #include "Rendering/Env/IWater.h"
 #include "Rendering/Env/WaterRendering.h"
 #include "Rendering/Env/MapRendering.h"
@@ -299,6 +300,9 @@ CGame::~CGame()
 	// flush the /snaphashdump file; runs on every rewind reload too, and the
 	// dump deliberately survives the reload so forward + resim passes accumulate
 	SnapshotHash::FlushPartial();
+
+	// report the snapshot differential gate totals if it was left armed
+	snapshotDiffGate.FlushPartial();
 
 	RmlGui::Shutdown();
 	helper->Kill();
@@ -1496,6 +1500,11 @@ bool CGame::Draw() {
 	// unless a sim frame completed since the last extraction (contract in
 	// SimSnapshot.h)
 	simSnapshot.Update();
+
+	// TEST-ONLY (PR 17): when armed via /snapshotdiffgate, verify every value the
+	// snapshot would serve bit-matches the live sim read at this boundary. A
+	// single branch when unarmed.
+	snapshotDiffGate.CheckBoundary();
 
 	const spring_time currentTimePreUpdate = spring_gettime();
 

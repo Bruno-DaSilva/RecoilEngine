@@ -14,6 +14,7 @@
 #include "Action.h"
 #include "BoundaryStats.h"
 #include "CameraHandler.h"
+#include "Rendering/Common/SnapshotDiffGate.h"
 #include "ConsoleHistory.h"
 #include "CommandMessage.h"
 #include "Game.h"
@@ -1641,6 +1642,33 @@ public:
 		}
 
 		LOG("[/calloutcensus] wrote %u callout rows to %s", unsigned(rows.size()), path.c_str());
+		return true;
+	}
+};
+
+
+class SnapshotDiffGateActionExecutor : public IUnsyncedActionExecutor {
+public:
+	SnapshotDiffGateActionExecutor() : IUnsyncedActionExecutor(
+		"SnapshotDiffGate",
+		"TEST-ONLY (PR 17): verify that SimSnapshot-served values bit-match the live sim reads at each "
+		"draw boundary. /snapshotdiffgate [arm|disarm|dump]: arm starts verifying (default), dump reports "
+		"running totals, disarm reports and stops. Zero cost when unarmed; mismatches log + count, never crash."
+	) {}
+
+	bool Execute(const UnsyncedAction& action) const final {
+		const auto args = CSimpleParser::Tokenize(action.GetArgs());
+		const std::string sub = StringToLower((!args.empty()) ? args[0] : "arm");
+
+		if (sub == "arm")
+			snapshotDiffGate.Arm();
+		else if (sub == "disarm")
+			snapshotDiffGate.Disarm();
+		else if (sub == "dump")
+			snapshotDiffGate.Dump();
+		else
+			LOG_L(L_WARNING, "[/snapshotdiffgate] usage: /snapshotdiffgate [arm|disarm|dump]");
+
 		return true;
 	}
 };
@@ -4257,6 +4285,7 @@ void UnsyncedGameCommands::AddDefaultActionExecutors()
 	AddActionExecutor(AllocActionExecutor<BoundaryDumpActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<SnapHashDumpActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<CalloutCensusActionExecutor>());
+	AddActionExecutor(AllocActionExecutor<SnapshotDiffGateActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<DebugCubeMapActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<DebugQuadFieldActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<DrawSkyActionExecutor>());
