@@ -81,7 +81,7 @@ These are fields that live inside `CUnit`/`CFeature`/`CProjectile` but are autho
 | `CFeature::drawAlpha` fade | `FeatureDrawerData.cpp:150-176` | render-side |
 | `p->SetSortDist` | `ProjectileDrawer.cpp:403` | render-side sort key array |
 | `LocalModelPiece` dirty-flag reset/recompute | `ModelDrawerData.h:182-197` | extraction must snapshot piece transforms instead of lazily recomputing in place |
-| `losStatus[allyTeam] &= ~LOS_PREVLOS` | `UnitDrawerData.cpp:637,720-721` | ghost bookkeeping must not clear sim LOS bits; needs its own render-side prev-LOS shadow |
+| `losStatus[allyTeam] &= ~LOS_PREVLOS` | `UnitDrawerData.cpp:637,720-721` | **DONE 2026-07-05 (PR 7)** — audit found the doc premise wrong: the clears fire at sim-event time (not draw rate) and LOS_PREVLOS has synced readers (GetErrorVector→weapon aim, GenerateWeaponTargets, synced GetUnitLosState), so a render-side shadow would desync; the clears moved *into* sim (`CUnit::SetLeavesGhost`, bit-identical ordering) and the dying-unit clear was dropped as provably unobservable — drawer is now a pure losStatus reader |
 | `tempNum`/`mtTempNum` quadfield scratch | `WorldObject.h:82,104` stamped by draw-time `GuiTraceRay` | dedicated scratch id space for draw-thread queries, or picking runs at the boundary |
 
 Each row is an independently landable refactor with zero behavior change. This is Phase 0.
@@ -196,7 +196,7 @@ Mapping to the PR plan below: Tracks 1–5 refine Phases 0–1 plus the telemetr
 
 **Sync audit list** — the four places the structural argument has an asterisk; each is the review focus of its PR:
 1. Does `slowUpdate` icon-distance logic read `drawPos`? If any synced path reads a draw-authored field, that's a latent master desync bug — find and fix (read sim `pos`) before/with the eviction.
-2. `LOS_PREVLOS`: eviction stops draw code clearing a bit inside synced `losStatus`; needs an explicit no-synced-readers audit.
+2. `LOS_PREVLOS`: eviction stops draw code clearing a bit inside synced `losStatus`; needs an explicit no-synced-readers audit. **DONE 2026-07-05 (PR 7)** — synced readers DO exist (GetErrorVector, GenerateWeaponTargets, synced Lua LOS queries), which killed the shadow design; resolution and full reader table in the PR-7 commit message.
 3. Each §F relocation item needs a touches-synced-state/RNG check before moving (e.g. confirm `waitCommandsAI` is genuinely unsynced-side despite the engine's "misplaced" comment); anything synced stays put.
 4. Track-1 instrumentation must be side-effect-free reads (no streflop perturbation).
 
@@ -210,7 +210,7 @@ Model tiers — **[F] = Fable**, **[O] = Opus**. Rule of thumb: Fable where the 
 
 **Wave 1 — Fable frontier (no upstream deps; start immediately, mutually parallel)**
 3. [F] (T2) `drawPos`/`drawMidPos` → render-side array. Sets the Track-2 eviction pattern; includes sync audit item 1. Unblocks PRs 4–6, 9.
-7. [F] (T2) `LOS_PREVLOS` clearing → render-side prev-LOS shadow (audit item 2; synced-reader audit + ghost-bookkeeping semantics).
+7. [F] (T2) `LOS_PREVLOS` clearing → render-side prev-LOS shadow (audit item 2; synced-reader audit + ghost-bookkeeping semantics). **DONE 2026-07-05** — audit overturned the shadow design (synced readers exist; clears are sim-event-time, not draw-rate); landed as sim-side ownership move instead, full audit table in the commit message (`Move LOS_PREVLOS ghost accounting from draw code into sim`). See §A row.
 8. [F] (T2) `LocalModelPiece` dirty-flag recompute → extraction-time snapshot of piece transforms (lazy→eager semantic change; animation-correctness and perf edges). Feeds PR 15's piece-transform layout.
 11a. [F] (T3) Synced-state/RNG classification table for every §F item (audit item 3) — lands as reviewable doc/table before any code moves. Unblocks 11b.
 12. [F] (T4) Render-event delta queue — ordering semantics and catch-up edge cases are the substance. With 13, defines the rules PR 14 follows.
