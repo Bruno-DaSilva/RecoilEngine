@@ -42,8 +42,6 @@ CR_REG_METADATA(CProjectile,
 		CR_MEMBER(drawOrder),
 	CR_MEMBER_ENDFLAG(CM_Config),
 
-	CR_MEMBER(drawPos),
-
 	CR_MEMBER(myrange),
 	CR_MEMBER(mygravity),
 	CR_IGNORED(sortDist),
@@ -215,22 +213,6 @@ CUnit* CProjectile::owner() const {
 	return (unitHandler.GetUnit(ownerID));
 }
 
-
-CMatrix44f CProjectile::GetTransformMatrix(bool offsetPos) const {
-	float3 xdir;
-	float3 ydir;
-
-	if (math::fabs(dir.y) < 0.95f) {
-		xdir = dir.cross(UpVector);
-		xdir.SafeANormalize();
-	} else {
-		xdir.x = 1.0f;
-	}
-
-	ydir = xdir.cross(dir);
-
-	return (CMatrix44f(drawPos + (dir * radius * 0.9f * offsetPos), -xdir, ydir, dir));
-}
 
 bool CProjectile::GetMemberInfo(SExpGenSpawnableMemberInfo& memberInfo)
 {

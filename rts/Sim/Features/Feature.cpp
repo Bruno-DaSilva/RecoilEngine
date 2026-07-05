@@ -516,7 +516,7 @@ void CFeature::ForcedSpin(const float3& newDir)
 	RECOIL_DETAILED_TRACY_ZONE;
 	// update local direction-vectors
 	CSolidObject::ForcedSpin(newDir);
-	UpdateTransform(pos, true);
+	UpdateTransform(pos);
 }
 
 void CFeature::ForcedSpin(const float3& newFrontDir, const float3& newRightDir)
@@ -524,22 +524,21 @@ void CFeature::ForcedSpin(const float3& newFrontDir, const float3& newRightDir)
 	RECOIL_DETAILED_TRACY_ZONE;
 	// update local direction-vectors
 	CSolidObject::ForcedSpin(newFrontDir, newRightDir);
-	UpdateTransform(pos, true);
+	UpdateTransform(pos);
 }
 
-void CFeature::UpdateTransform(const float3& p, bool synced)
+void CFeature::UpdateTransform(const float3& p)
 {
-	transMatrix[synced] = std::move(ComposeMatrix(p));
+	transMatrix = std::move(ComposeMatrix(p));
 
-	if (synced)
-		CondUpdatePrevTransform();
+	CondUpdatePrevTransform();
 }
 
 void CFeature::UpdateTransformAndPhysState()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	UpdateDirVectors(!def->upright && IsOnGround(), true, 0.0f);
-	UpdateTransform(pos, true);
+	UpdateTransform(pos);
 
 	UpdatePhysicalStateBit(CSolidObject::PSTATE_BIT_MOVING, (SetSpeed(speed) != 0.0f));
 	UpdatePhysicalState(0.1f);

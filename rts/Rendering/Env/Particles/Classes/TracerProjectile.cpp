@@ -1,5 +1,6 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
+#include "Rendering/Env/Particles/ProjectileDrawer.h"
 #include "TracerProjectile.h"
 
 #include "Rendering/GL/myGL.h"
@@ -65,6 +66,7 @@ void CTracerProjectile::Update()
 
 void CTracerProjectile::Draw()
 {
+	const float3 drawPos = projectileDrawer->GetDrawPos(this);
 	RECOIL_DETAILED_TRACY_ZONE;
 	drawLength = std::min(drawLength, 3.0f);
 

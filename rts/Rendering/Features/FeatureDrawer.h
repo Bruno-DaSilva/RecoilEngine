@@ -33,6 +33,12 @@ public:
 	void ConfigNotify(const std::string& key, const std::string& value) { modelDrawerData->ConfigNotify(key, value); }
 	static const std::vector<CFeature*>& GetUnsortedFeatures() { return modelDrawerData->GetUnsortedObjects(); }
 
+	// drawer-owned draw-time positions/transforms (sim/draw §A drawPos eviction)
+	static const float3& GetDrawPos(const CFeature* feature) { return modelDrawerData->GetDrawPos(feature); }
+	static const float3& GetDrawMidPos(const CFeature* feature) { return modelDrawerData->GetDrawMidPos(feature); }
+	static float3 GetObjDrawMidPos(const CFeature* feature) { return modelDrawerData->GetObjDrawMidPos(feature); }
+	static const CMatrix44f& GetUnsyncedTransformMatrix(const CFeature* feature) { return modelDrawerData->GetUnsyncedTransformMatrix(feature); }
+
 	static void ClearPreviousDrawFlags() { modelDrawerData->ClearPreviousDrawFlags(); }
 public:
 	virtual void DrawFeatureModel(const CFeature* feature, bool noLuaCall) const = 0;

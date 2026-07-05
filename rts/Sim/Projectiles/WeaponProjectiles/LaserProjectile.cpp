@@ -4,6 +4,7 @@
 #include "Game/Camera.h"
 #include "LaserProjectile.h"
 #include "Map/Ground.h"
+#include "Rendering/Env/Particles/ProjectileDrawer.h"
 #include "Rendering/Env/Particles/Classes/SimpleParticleSystem.h"
 #include "Rendering/GL/RenderBuffers.h"
 #include "Sim/Misc/GlobalConstants.h"
@@ -186,6 +187,7 @@ void CLaserProjectile::Collision()
 
 void CLaserProjectile::Draw()
 {
+	const float3 drawPos = projectileDrawer->GetDrawPos(this);
 	RECOIL_DETAILED_TRACY_ZONE;
 	// dont draw if a 3d model has been defined for us
 	if (model != nullptr)

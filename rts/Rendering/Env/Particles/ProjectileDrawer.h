@@ -61,6 +61,17 @@ public:
 	void RenderProjectileCreated(const CProjectile* projectile);
 	void RenderProjectileDestroyed(const CProjectile* projectile);
 
+	// drawer-owned interpolated draw position, parallel to renderProjectiles
+	// (sim/draw §A drawPos eviction; was a CProjectile field). Zero for
+	// projectiles not (yet) registered, as the old member default was.
+	const float3& GetDrawPos(const CProjectile* p) const {
+		static const float3 zero;
+		const uint32_t ri = p->GetRenderIndex();
+		return (ri < drawPositions.size()) ? drawPositions[ri] : zero;
+	}
+	// draw-time transform (was CProjectile::GetTransformMatrix, "UNSYNCED ONLY")
+	CMatrix44f GetTransformMatrix(const CProjectile* p, bool offsetPos) const;
+
 	unsigned int NumSmokeTextures() const { return (smokeTextures.size()); }
 
 	void IncPerlinTexObjectCount() { perlinTexObjects++; }
@@ -160,6 +171,9 @@ private:
 	FBO perlinFB;
 
 	std::vector<const AtlasedTexture*> smokeTextures;
+
+	/// interpolated draw positions, parallel to renderProjectiles (see GetDrawPos)
+	std::vector<float3> drawPositions;
 
 	/// projectiles container
 	std::vector<CProjectile*> renderProjectiles;

@@ -112,7 +112,7 @@ public:
 	void EnableScriptMoveType();
 	void DisableScriptMoveType();
 
-	CMatrix44f GetTransformMatrix(bool synced = false, bool fullread = false) const override final;
+	CMatrix44f GetTransformMatrix() const override final;
 
 	void DependentDied(CObject* o);
 
@@ -149,7 +149,6 @@ public:
 
 	float3 GetErrorVector(int allyteam) const;
 	float3 GetErrorPos(int allyteam, bool aiming = false) const { return (aiming? aimPos: midPos) + GetErrorVector(allyteam); }
-	float3 GetObjDrawErrorPos(int allyteam) const { return (GetObjDrawMidPos() + GetErrorVector(allyteam)); }
 
 	float3 GetLuaErrorVector(int allyteam, bool fullRead) const { return (fullRead? ZeroVector: GetErrorVector(allyteam)); }
 	float3 GetLuaErrorPos(int allyteam, bool fullRead) const { return (midPos + GetLuaErrorVector(allyteam, fullRead)); }

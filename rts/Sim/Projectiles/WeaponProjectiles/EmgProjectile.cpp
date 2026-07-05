@@ -2,6 +2,7 @@
 
 
 #include "EmgProjectile.h"
+#include "Rendering/Env/Particles/ProjectileDrawer.h"
 #include "Game/Camera.h"
 #include "Map/Ground.h"
 #include "Rendering/GL/RenderBuffers.h"
@@ -75,6 +76,7 @@ void CEmgProjectile::Update()
 
 void CEmgProjectile::Draw()
 {
+	const float3 drawPos = projectileDrawer->GetDrawPos(this);
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (!validTextures[0])
 		return;

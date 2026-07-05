@@ -9,6 +9,7 @@
 #include "Game/GlobalUnsynced.h"
 #include "Map/Ground.h"
 #include "Rendering/GlobalRendering.h"
+#include "Rendering/Units/UnitDrawer.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/LosHandler.h"
 #include "Sim/Misc/TeamHandler.h"
@@ -210,7 +211,7 @@ float3 CUnitTracker::CalcAveragePos() const
 	float3 p;
 
 	for (const int unitID: trackedUnitIDs) {
-		p += unitHandler.GetUnitUnsafe(unitID)->drawPos;
+		p += CUnitDrawer::GetDrawPos(unitHandler.GetUnitUnsafe(unitID));
 	}
 
 	return (p / trackedUnitIDs.size());
@@ -224,7 +225,7 @@ float3 CUnitTracker::CalcExtentsPos() const
 	float3 maxPos(-1e9f, -1e9f, -1e9f);
 
 	for (const int unitID: trackedUnitIDs) {
-		const float3& p = unitHandler.GetUnitUnsafe(unitID)->drawPos;
+		const float3& p = CUnitDrawer::GetDrawPos(unitHandler.GetUnitUnsafe(unitID));
 
 		minPos = float3::min(minPos, p);
 		maxPos = float3::max(maxPos, p);
@@ -279,7 +280,7 @@ void CUnitTracker::SetCam()
 				pos = CalcExtentsPos();
 			} break;
 			default: {
-				pos = u->drawMidPos;
+				pos = CUnitDrawer::GetDrawMidPos(u);
 			} break;
 		}
 
@@ -293,7 +294,7 @@ void CUnitTracker::SetCam()
 
 		const float3 modFrontVec = u->frontdir * u->radius * 3.0f;
 		const float3 mixRightDir = mix<float3>(u->rightdir, RgtVector, 0.75f); // NB: will be 0 if u->r == -R
-		      float3 modPlanePos = u->drawMidPos - modFrontVec;
+		      float3 modPlanePos = CUnitDrawer::GetDrawMidPos(u) - modFrontVec;
 
 		modPlanePos.y = std::max(modPlanePos.y, CGround::GetHeightReal(modPlanePos.x, modPlanePos.z, false) + (u->radius * 2.0f));
 
@@ -301,7 +302,7 @@ void CUnitTracker::SetCam()
 		trackDir += (u->frontdir - trackDir) * (1 - math::pow(0.90f, deltaTime));
 		smoothedRight = mix<float3>(smoothedRight, mixRightDir, deltaTime * 0.05f).SafeANormalize();
 
-		const float3 wantedDir = (u->drawMidPos - camera->GetPos()).SafeANormalize();
+		const float3 wantedDir = (CUnitDrawer::GetDrawMidPos(u) - camera->GetPos()).SafeANormalize();
 		const float3 cameraDir = (wantedDir + trackDir.SafeANormalize()).SafeANormalize();
 
 		camera->SetPos(trackPos);

@@ -991,7 +991,7 @@ size_t LuaVBOImpl::MatrixDataFromProjectileIDsImpl(const Iterable& ids, int attr
 		const bool doOffset = wp && wp->GetProjectileType() == WEAPON_MISSILE_PROJECTILE;
 
 		const CMatrix44f trMat = projectileDrawer->CanDrawProjectile(p, -1) ?
-			p->GetTransformMatrix(doOffset) :
+			projectileDrawer->GetTransformMatrix(p, doOffset) :
 			CMatrix44f::Zero();
 
 		memcpy(&matDataVec[16 * idx], &trMat, sizeof(CMatrix44f));

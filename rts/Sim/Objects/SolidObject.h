@@ -190,7 +190,9 @@ public:
 	void UpdatePrevFrameTransform();
 
 	CMatrix44f ComposeMatrix(const float3& p) const { return (CMatrix44f(p, -rightdir, updir, frontdir)); }
-	virtual CMatrix44f GetTransformMatrix(bool synced = false, bool fullread = false) const = 0;
+	// the synced transform; draw-time (interpolated / error-offset) transforms
+	// live with the drawers (CUnitDrawer/CFeatureDrawer::GetUnsyncedTransformMatrix)
+	virtual CMatrix44f GetTransformMatrix() const = 0;
 
 	const CollisionVolume* GetCollisionVolume(const LocalModelPiece* lmp) const;
 
@@ -231,13 +233,6 @@ public:
 	// these transform a point or vector to object-space
 	float3 GetObjectSpaceVec(const float3& v) const { return (      (frontdir * v.z) + (rightdir * v.x) + (updir * v.y)); }
 	float3 GetObjectSpacePos(const float3& p) const { return (pos + (frontdir * p.z) + (rightdir * p.x) + (updir * p.y)); }
-
-	// note: requires drawPos to have been set first
-	float3 GetObjectSpaceDrawPos(const float3& p) const { return (drawPos + GetObjectSpaceVec(p)); }
-
-	// unsynced mid-{position,vector}s
-	float3 GetMdlDrawMidPos() const;
-	float3 GetObjDrawMidPos() const;
 
 
 	int2 GetMapPos() const { return (GetMapPos(pos)); }
@@ -423,11 +418,6 @@ public:
 	float3 groundBlockPos;
 
 	float3 dragScales = OnesVector;
-
-	///< pos + speed * timeOffset (unsynced)
-	float3 drawPos;
-	///< drawPos + relMidPos (unsynced)
-	float3 drawMidPos;
 
 	bool objectUsable = true;
 

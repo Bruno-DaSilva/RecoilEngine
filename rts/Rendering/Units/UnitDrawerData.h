@@ -169,7 +169,14 @@ private:
 
 	void UpdateUnitIconState(CUnit* unit);
 	void UpdateUnitIconStateScreen(CUnit* unit);
-	static void UpdateDrawPos(CUnit* unit);
+	void UpdateDrawPos(CUnit* unit);
+public:
+	// draw-time positions/transforms with radar error applied (drawer-owned since
+	// the §A drawPos eviction; these replaced CUnit::GetObjDrawErrorPos and the
+	// unsynced branch of CUnit::GetTransformMatrix)
+	float3 GetObjDrawErrorPos(const CUnit* unit, int allyteam) const;
+	CMatrix44f GetUnsyncedTransformMatrix(const CUnit* unit, bool fullread = false) const;
+private:
 
 	/// Returns true if the given unit should be drawn as icon in the current frame.
 	bool DrawAsIconByDistance(const CUnit* unit, const float sqUnitCamDist) const;

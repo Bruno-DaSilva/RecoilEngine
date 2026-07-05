@@ -50,6 +50,7 @@ void CWreckProjectile::Update()
 
 void CWreckProjectile::Draw()
 {
+	const float3 drawPos = projectileDrawer->GetDrawPos(this);
 	RECOIL_DETAILED_TRACY_ZONE;
 	unsigned char col[4];
 	col[0] = (unsigned char) (0.15f * 200);

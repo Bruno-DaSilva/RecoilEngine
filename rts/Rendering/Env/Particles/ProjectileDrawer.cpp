@@ -349,6 +349,7 @@ void CProjectileDrawer::Kill() {
 	smokeTextures.clear();
 
 	renderProjectiles.clear();
+	drawPositions.clear();
 
 	for (auto& dp : drawParticles)
 		dp.clear();
@@ -376,7 +377,7 @@ void CProjectileDrawer::UpdateDrawFlags()
 		CProjectile* p = renderProjectiles[i];
 		const bool hasModel = (p->model != nullptr);
 
-		p->drawPos = p->GetDrawPos(globalRendering->timeOffset);
+		const float3& drawPos = (drawPositions[i] = p->GetDrawPos(globalRendering->timeOffset));
 
 		p->previousDrawFlag = p->drawFlag;
 		p->ResetDrawFlag();
@@ -397,10 +398,10 @@ void CProjectileDrawer::UpdateDrawFlags()
 				continue;
 
 			const CCamera* cam = CCameraHandler::GetCamera(camType);
-			if (!cam->InView(p->drawPos, p->GetDrawRadius()))
+			if (!cam->InView(drawPos, p->GetDrawRadius()))
 				continue;
 
-			p->SetSortDist(camType, cam->ProjectedDistance(p->drawPos));
+			p->SetSortDist(camType, cam->ProjectedDistance(drawPos));
 
 			switch (camType)
 			{
@@ -410,7 +411,7 @@ void CProjectileDrawer::UpdateDrawFlags()
 					else
 						p->AddDrawFlag(DrawFlags::SO_ALPHAF_FLAG);
 
-					if (p->drawPos.y - p->GetDrawRadius() < 0.0f)
+					if (drawPos.y - p->GetDrawRadius() < 0.0f)
 						p->AddDrawFlag(DrawFlags::SO_REFRAC_FLAG);
 
 					// Special case of piece projectile, since it has a model and fire particle
@@ -418,7 +419,7 @@ void CProjectileDrawer::UpdateDrawFlags()
 						p->AddDrawFlag(DrawFlags::SO_ALPHAF_FLAG);
 				} break;
 				case CCamera::CAMTYPE_UWREFL: {
-					if (CModelDrawerHelper::ObjectVisibleReflection(p->drawPos, cam->GetPos(), p->GetDrawRadius()))
+					if (CModelDrawerHelper::ObjectVisibleReflection(drawPos, cam->GetPos(), p->GetDrawRadius()))
 						p->AddDrawFlag(DrawFlags::SO_REFLEC_FLAG);
 				} break;
 				case CCamera::CAMTYPE_SHADOW: {
@@ -939,7 +940,7 @@ void CProjectileDrawer::DrawProjectileModel(const CProjectile* p)
 			CUnitDrawer::SetTeamColor(wp->GetTeamID());
 
 			glPushMatrix();
-				glMultMatrixf(wp->GetTransformMatrix(wp->GetProjectileType() == WEAPON_MISSILE_PROJECTILE));
+				glMultMatrixf(projectileDrawer->GetTransformMatrix(wp, wp->GetProjectileType() == WEAPON_MISSILE_PROJECTILE));
 
 				if (!p->luaDraw || !eventHandler.DrawProjectile(p))
 					wp->model->DrawStatic();
@@ -956,7 +957,7 @@ void CProjectileDrawer::DrawProjectileModel(const CProjectile* p)
 
 			auto scopedPushPop = spring::ScopedNullResource(glPushMatrix, glPopMatrix);
 
-			glTranslatef3(pp->drawPos);
+			glTranslatef3(projectileDrawer->GetDrawPos(pp));
 			glRotatef(pp->GetDrawAngle(), pp->spinVec.x, pp->spinVec.y, pp->spinVec.z);
 
 			if (p->luaDraw && eventHandler.DrawProjectile(p)) {
@@ -1214,6 +1215,7 @@ void CProjectileDrawer::RenderProjectileCreated(const CProjectile* p)
 	{
 		const_cast<CProjectile*>(p)->SetRenderIndex(renderProjectiles.size());
 		renderProjectiles.push_back(const_cast<CProjectile*>(p));
+		drawPositions.emplace_back(); // zero until the first UpdateDrawFlags, as the old member was
 	}
 
 	if (p->model != nullptr)
@@ -1233,7 +1235,27 @@ void CProjectileDrawer::RenderProjectileDestroyed(const CProjectile* p)
 	renderProjectiles[ri]->SetRenderIndex(ri);
 	renderProjectiles.pop_back();
 
+	drawPositions[ri] = drawPositions.back();
+	drawPositions.pop_back();
+
 	if (p->model != nullptr)
 		modelRenderers[MDL_TYPE(p)].DelObject(p);
+}
+
+CMatrix44f CProjectileDrawer::GetTransformMatrix(const CProjectile* p, bool offsetPos) const
+{
+	float3 xdir;
+	float3 ydir;
+
+	if (math::fabs(p->dir.y) < 0.95f) {
+		xdir = p->dir.cross(UpVector);
+		xdir.SafeANormalize();
+	} else {
+		xdir.x = 1.0f;
+	}
+
+	ydir = xdir.cross(p->dir);
+
+	return (CMatrix44f(GetDrawPos(p) + (p->dir * p->radius * 0.9f * offsetPos), -xdir, ydir, p->dir));
 }
 

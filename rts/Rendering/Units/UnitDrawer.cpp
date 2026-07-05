@@ -331,7 +331,7 @@ void CUnitDrawerGLSL::DrawUnitTrans(const CUnit* unit, uint32_t preList, uint32_
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	glPushMatrix();
-	glMultMatrixf(unit->GetTransformMatrix());
+	glMultMatrixf(GetUnsyncedTransformMatrix(unit));
 
 	DrawUnitNoTrans(unit, preList, postList, lodCall, noLuaCall);
 
@@ -449,8 +449,8 @@ void CUnitDrawerGLSL::DrawUnitMiniMapIcons() const
 
 		const float iconScale = CUnitDrawerHelper::GetUnitIconScale(unit);
 		const float3& pos = (!isFullView) ?
-			unit->GetObjDrawErrorPos(myAllyTeam) :
-			unit->GetObjDrawMidPos();
+			GetObjDrawErrorPos(unit, myAllyTeam) :
+			GetObjDrawMidPos(unit);
 
 		DrawUnitMiniMapIcon(rb, iconIndex, iconScale, pos, currentColor);
 	}
@@ -575,8 +575,8 @@ void CUnitDrawerGLSL::DrawUnitIcons() const
 
 		// drawMidPos is auto-calculated now; can wobble on its own as pieces move
 		float3 pos = (!gu->spectatingFullView) ?
-			unit->GetObjDrawErrorPos(gu->myAllyTeam) :
-			unit->GetObjDrawMidPos();
+			GetObjDrawErrorPos(unit, gu->myAllyTeam) :
+			GetObjDrawMidPos(unit);
 
 		// use white for selected units
 		const auto& iconColor = unit->isSelected ? color4::white : teamHandler.Team(unit->team)->color;
@@ -688,8 +688,8 @@ void CUnitDrawerGLSL::DrawUnitIconsScreen() const
 
 		// drawMidPos is auto-calculated now; can wobble on its own as pieces move
 		float3 pos = (!isFullView) ?
-			unit->GetObjDrawErrorPos(myAllyTeam) :
-			unit->GetObjDrawMidPos();
+			GetObjDrawErrorPos(unit, myAllyTeam) :
+			GetObjDrawMidPos(unit);
 
 		pos = camera->CalcViewPortCoordinates(pos);
 		if (pos.z > 1.0f || pos.z < 0.0f)
@@ -941,7 +941,7 @@ void CUnitDrawerGLSL::DrawAlphaUnit(CUnit* unit, int modelType, uint8_t thisPass
 		}
 
 		glPushMatrix();
-		glTranslatef3(unit->drawPos);
+		glTranslatef3(GetDrawPos(unit));
 		glRotatef(unit->buildFacing * 90.0f, 0, 1, 0);
 
 		// the units in liveGhostedBuildings[modelType] are not

@@ -176,6 +176,7 @@ void CTorpedoProjectile::Update()
 
 void CTorpedoProjectile::Draw()
 {
+	const float3 drawPos = projectileDrawer->GetDrawPos(this);
 	RECOIL_DETAILED_TRACY_ZONE;
 	// do not draw if a 3D model has been defined for us
 	if (model != nullptr)

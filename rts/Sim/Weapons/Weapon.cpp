@@ -921,7 +921,7 @@ float3 CWeapon::GetTargetBorderPos(
 	tmpColVol.SetIgnoreHits(false);
 
 	// our weapon muzzle is inside the target unit's volume (FIXME: use aimFromPos?)
-	if (CCollisionHandler::DetectHit(targetUnit, &tmpColVol, targetUnit->GetTransformMatrix(true), weaponMuzzlePos, ZeroVector, nullptr))
+	if (CCollisionHandler::DetectHit(targetUnit, &tmpColVol, targetUnit->GetTransformMatrix(), weaponMuzzlePos, ZeroVector, nullptr))
 		return (targetBorderPos = weaponMuzzlePos);
 
 	// otherwise, perform a raytrace to find the proper length correction
@@ -944,7 +944,7 @@ float3 CWeapon::GetTargetBorderPos(
 
 	// adjust the length of <targetVec> based on the targetBorder factor
 	// the muzzle position must not be inside tmpColVol for this to work
-	if (CCollisionHandler::DetectHit(targetUnit, &tmpColVol, targetUnit->GetTransformMatrix(true), weaponMuzzlePos, targetRayPos, &tmpColQry) && tmpColQry.AllHit())
+	if (CCollisionHandler::DetectHit(targetUnit, &tmpColVol, targetUnit->GetTransformMatrix(), weaponMuzzlePos, targetRayPos, &tmpColQry) && tmpColQry.AllHit())
 		targetBorderPos = mix(tmpColQry.GetIngressPos(), tmpColQry.GetEgressPos(), weaponDef->targetBorder <= 0.0f);
 
 	return targetBorderPos;

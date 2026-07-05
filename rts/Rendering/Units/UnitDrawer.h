@@ -53,6 +53,14 @@ public:
 
 	static const std::vector<CUnit*>& GetUnsortedUnits() { return modelDrawerData->GetUnsortedObjects(); }
 
+	// drawer-owned draw-time positions/transforms (sim/draw §A drawPos eviction)
+	static const float3& GetDrawPos(const CUnit* unit) { return modelDrawerData->GetDrawPos(unit); }
+	static const float3& GetDrawMidPos(const CUnit* unit) { return modelDrawerData->GetDrawMidPos(unit); }
+	static float3 GetObjectSpaceDrawPos(const CUnit* unit, const float3& p) { return modelDrawerData->GetObjectSpaceDrawPos(unit, p); }
+	static float3 GetObjDrawMidPos(const CUnit* unit) { return modelDrawerData->GetObjDrawMidPos(unit); }
+	static float3 GetObjDrawErrorPos(const CUnit* unit, int allyteam) { return modelDrawerData->GetObjDrawErrorPos(unit, allyteam); }
+	static CMatrix44f GetUnsyncedTransformMatrix(const CUnit* unit, bool fullread = false) { return modelDrawerData->GetUnsyncedTransformMatrix(unit, fullread); }
+
 	static void ClearPreviousDrawFlags() { modelDrawerData->ClearPreviousDrawFlags(); }
 	static void UnitLeavesGhostChanged(const CUnit* unit, const bool leaveDeadGhost) { modelDrawerData->UnitLeavesGhostChanged(unit, leaveDeadGhost); }
 

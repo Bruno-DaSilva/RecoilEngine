@@ -99,6 +99,7 @@ void CSmokeProjectile::Update()
 
 void CSmokeProjectile::Draw()
 {
+	const float3 drawPos = projectileDrawer->GetDrawPos(this);
 	RECOIL_DETAILED_TRACY_ZONE;
 	unsigned char col[4];
 	unsigned char alpha = (unsigned char) ((1 - age) * 255);

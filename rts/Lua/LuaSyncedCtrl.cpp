@@ -663,7 +663,7 @@ static int SetSolidObjectRotation(lua_State* L, T* o)
 	o->SetDirVectorsEuler(angles);
 
 	if constexpr(std::is_same_v<T, CFeature>)
-		o->UpdateTransform(o->pos, true);
+		o->UpdateTransform(o->pos);
 
 	return 0;
 }
@@ -685,7 +685,7 @@ static int SetSolidObjectHeadingAndUpDir(lua_State* L, T* o)
 	o->UpdateMidAndAimPos();
 
 	if constexpr (std::is_same_v<T, CFeature>)
-		o->UpdateTransform(o->pos, true);
+		o->UpdateTransform(o->pos);
 
 	return 0;
 }
@@ -711,7 +711,7 @@ static int SetSolidObjectDirection(lua_State* L, CSolidObject* o, const char* fu
 		);
 	}
 
-	// Note there's no need to call o->UpdateTransform(o->pos, true); because both variants of o->ForcedSpin
+	// Note there's no need to call o->UpdateTransform(o->pos); because both variants of o->ForcedSpin
 	// defined in CFeature do it anyway
 
 	if (lua_isnumber(L, 5) && lua_isnumber(L, 6) && lua_isnumber(L, 7)) {

@@ -92,6 +92,7 @@ void CDirtProjectile::Update()
 
 void CDirtProjectile::Draw()
 {
+	const float3 drawPos = projectileDrawer->GetDrawPos(this);
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (!IsValidTexture(texture))
 		return;

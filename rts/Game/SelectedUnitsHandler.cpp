@@ -14,6 +14,7 @@
 #include "ExternalAI/SkirmishAIHandler.h"
 #include "Rendering/CommandDrawer.h"
 #include "Rendering/LineDrawer.h"
+#include "Rendering/Units/UnitDrawer.h"
 #include "Rendering/GL/myGL.h"
 #include "Rendering/GL/RenderBuffers.h"
 #include "Sim/Misc/TeamHandler.h"
@@ -649,21 +650,23 @@ void CSelectedUnitsHandler::Draw()
 				mhxsize = (moveDef == nullptr) ? uhxsize : ((moveDef->xsize * SQUARE_SIZE) >> 1),
 				mhzsize = (moveDef == nullptr) ? uhzsize : ((moveDef->zsize * SQUARE_SIZE) >> 1);
 
+			const float3& drawPos = CUnitDrawer::GetDrawPos(unit);
+
 			// UnitDef footprint corners
 			rb.AddQuadLines(
-				{ float3(unit->drawPos.x + uhxsize, unit->drawPos.y, unit->drawPos.z + uhzsize), color1 },
-				{ float3(unit->drawPos.x - uhxsize, unit->drawPos.y, unit->drawPos.z + uhzsize), color1 },
-				{ float3(unit->drawPos.x - uhxsize, unit->drawPos.y, unit->drawPos.z - uhzsize), color1 },
-				{ float3(unit->drawPos.x + uhxsize, unit->drawPos.y, unit->drawPos.z - uhzsize), color1 }
+				{ float3(drawPos.x + uhxsize, drawPos.y, drawPos.z + uhzsize), color1 },
+				{ float3(drawPos.x - uhxsize, drawPos.y, drawPos.z + uhzsize), color1 },
+				{ float3(drawPos.x - uhxsize, drawPos.y, drawPos.z - uhzsize), color1 },
+				{ float3(drawPos.x + uhxsize, drawPos.y, drawPos.z - uhzsize), color1 }
 			);
 
 			if (globalRendering->drawDebug && (mhxsize != uhxsize || mhzsize != uhzsize)) {
 				// MoveDef footprint corners
 				rb.AddQuadLines(
-					{ float3(unit->drawPos.x + mhxsize, unit->drawPos.y, unit->drawPos.z + mhzsize), color2 },
-					{ float3(unit->drawPos.x - mhxsize, unit->drawPos.y, unit->drawPos.z + mhzsize), color2 },
-					{ float3(unit->drawPos.x - mhxsize, unit->drawPos.y, unit->drawPos.z - mhzsize), color2 },
-					{ float3(unit->drawPos.x + mhxsize, unit->drawPos.y, unit->drawPos.z - mhzsize), color2 }
+					{ float3(drawPos.x + mhxsize, drawPos.y, drawPos.z + mhzsize), color2 },
+					{ float3(drawPos.x - mhxsize, drawPos.y, drawPos.z + mhzsize), color2 },
+					{ float3(drawPos.x - mhxsize, drawPos.y, drawPos.z - mhzsize), color2 },
+					{ float3(drawPos.x + mhxsize, drawPos.y, drawPos.z - mhzsize), color2 }
 				);
 			}
 		}

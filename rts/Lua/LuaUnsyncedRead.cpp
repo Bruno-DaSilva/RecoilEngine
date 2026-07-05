@@ -43,7 +43,6 @@
 #include "Rendering/Env/IGroundDecalDrawer.h"
 #include "Rendering/Env/Particles/Classes/NanoProjectile.h"
 #include "Rendering/Map/InfoTexture/IInfoTextureHandler.h"
-#include "Rendering/Units/UnitDrawer.h"
 #include "Rendering/Features/FeatureDrawer.h"
 #include "Rendering/IconHandler.h"
 #include "Sim/Features/Feature.h"
@@ -1725,12 +1724,16 @@ int LuaUnsyncedRead::GetFeatureSelectionVolumeData(lua_State* L)
 
 
 
-static int GetObjectTransformMatrix(const CSolidObject* o, lua_State* L)
+static CMatrix44f GetDrawTransformMatrix(const CUnit* u) { return CUnitDrawer::GetUnsyncedTransformMatrix(u); }
+static CMatrix44f GetDrawTransformMatrix(const CFeature* f) { return CFeatureDrawer::GetUnsyncedTransformMatrix(f); }
+
+template<typename TObj>
+static int GetObjectTransformMatrix(const TObj* o, lua_State* L)
 {
 	if (o == nullptr)
 		return 0;
 
-	CMatrix44f m = o->GetTransformMatrix(false);
+	CMatrix44f m = GetDrawTransformMatrix(o);
 
 	if (luaL_optboolean(L, 2, false))
 		m = m.InvertAffine();
@@ -1950,7 +1953,7 @@ int LuaUnsyncedRead::GetUnitViewPosition(lua_State* L)
 	if (unit == nullptr)
 		return 0;
 
-	const float3 unitPos = (luaL_optboolean(L, 2, false)) ? unit->GetObjDrawMidPos() : unit->drawPos;
+	const float3 unitPos = (luaL_optboolean(L, 2, false)) ? CUnitDrawer::GetObjDrawMidPos(unit) : CUnitDrawer::GetDrawPos(unit);
 	const float3 errorVec = unit->GetLuaErrorVector(CLuaHandle::GetHandleReadAllyTeam(L), CLuaHandle::GetHandleFullRead(L));
 
 	lua_pushnumber(L, unitPos.x + errorVec.x);
@@ -2115,7 +2118,7 @@ int LuaUnsyncedRead::GetVisibleUnits(lua_State* L)
 
 			//No check for AllUnits, since there's no need.
 
-			if (!camera->InView(u->drawMidPos, testRadius + (u->GetDrawRadius() * radiusMult)))
+			if (!camera->InView(CUnitDrawer::GetDrawMidPos(u), testRadius + (u->GetDrawRadius() * radiusMult)))
 				continue;
 
 			lua_pushnumber(L, u->id);
@@ -2195,7 +2198,7 @@ int LuaUnsyncedRead::GetVisibleFeatures(lua_State* L)
 			if (!gu->spectatingFullView && !f->IsInLosForAllyTeam(allyTeamID))
 				continue;
 
-			if (!camera->InView(f->drawMidPos, testRadius + (f->GetDrawRadius() * radiusMult)))
+			if (!camera->InView(CFeatureDrawer::GetDrawMidPos(f), testRadius + (f->GetDrawRadius() * radiusMult)))
 				continue;
 
 			lua_pushnumber(L, f->id);
@@ -2529,7 +2532,7 @@ int LuaUnsyncedRead::GetUnitsInScreenRectangle(lua_State* L)
 
 				unit->tempNum = tempNum;
 
-				const float3 vpPos = camera->CalcViewPortCoordinates(unit->drawPos);
+				const float3 vpPos = camera->CalcViewPortCoordinates(CUnitDrawer::GetDrawPos(unit));
 
 				if (vpPos.x > r || vpPos.x < l)
 					continue;
@@ -2601,7 +2604,7 @@ int LuaUnsyncedRead::GetFeaturesInScreenRectangle(lua_State* L)
 				continue;
 
 			feature->tempNum = tempNum;
-			const float3 vpPos = camera->CalcViewPortCoordinates(feature->drawPos);
+			const float3 vpPos = camera->CalcViewPortCoordinates(CFeatureDrawer::GetDrawPos(feature));
 
 			if (vpPos.x > r || vpPos.x < l)
 				continue;

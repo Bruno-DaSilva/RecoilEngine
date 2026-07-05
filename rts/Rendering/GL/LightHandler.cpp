@@ -6,7 +6,10 @@
 #include "Rendering/Shaders/Shader.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/LosHandler.h"
+#include "Rendering/Units/UnitDrawer.h"
+#include "Rendering/Env/Particles/ProjectileDrawer.h"
 #include "Sim/Projectiles/Projectile.h"
+#include "Sim/Units/Unit.h"
 
 #include "System/Misc/TracyDefs.h"
 
@@ -161,26 +164,27 @@ void GL::LightHandler::Update(Shader::IProgramObject* shader) {
 		if (light.GetTrackObject() != nullptr) {
 			switch (light.GetTrackType()) {
 				case GL::Light::TRACK_TYPE_UNIT: {
-					const CSolidObject* so = static_cast<const CSolidObject*>(light.GetTrackObject());
+					// tracked objects of this type are always units (AddLightTrackingTarget)
+					const CUnit* u = static_cast<const CUnit*>(light.GetTrackObject());
 
 					if (light.LocalSpace()) {
-						lightPos = so->GetObjectSpaceDrawPos(lightPos);
-						lightDir = so->GetObjectSpaceVec(lightDir);
+						lightPos = CUnitDrawer::GetObjectSpaceDrawPos(u, lightPos);
+						lightDir = u->GetObjectSpaceVec(lightDir);
 					} else {
-						lightPos = so->drawPos;
-						lightDir = so->frontdir;
+						lightPos = CUnitDrawer::GetDrawPos(u);
+						lightDir = u->frontdir;
 					}
 				} break;
 				case GL::Light::TRACK_TYPE_PROJ: {
 					const CProjectile* po = static_cast<const CProjectile*>(light.GetTrackObject());
 
 					if (light.LocalSpace()) {
-						const CMatrix44f m = po->GetTransformMatrix(false);
+						const CMatrix44f m = projectileDrawer->GetTransformMatrix(po, false);
 
 						lightPos = m * lightPos;
 						lightDir = m * lightDir;
 					} else {
-						lightPos = po->drawPos;
+						lightPos = projectileDrawer->GetDrawPos(po);
 						lightDir = po->dir;
 					}
 				} break;

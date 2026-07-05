@@ -7,6 +7,7 @@
 #include "Rendering/GL/RenderBuffers.h"
 #include "Rendering/Textures/TextureAtlas.h"
 #include "Sim/Projectiles/ProjectileMemPool.h"
+#include "Rendering/Units/UnitDrawer.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Weapons/PlasmaRepulser.h"
 #include "Sim/Weapons/WeaponDef.h"
@@ -206,7 +207,7 @@ float3 ShieldSegmentCollection::GetShieldDrawPos() const
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(shield != nullptr);
 	assert(shield->owner != nullptr);
-	return shield->owner->GetObjectSpaceDrawPos(shield->relWeaponMuzzlePos);
+	return CUnitDrawer::GetObjectSpaceDrawPos(shield->owner, shield->relWeaponMuzzlePos);
 }
 
 ShieldSegmentProjectile::ShieldSegmentProjectile(

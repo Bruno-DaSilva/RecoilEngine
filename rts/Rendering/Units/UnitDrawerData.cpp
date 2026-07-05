@@ -308,7 +308,7 @@ void CUnitDrawerData::UpdateUnitIconState(CUnit* unit)
 
 		asIcon &= DrawAsIconByDistance(unit, (unit->pos - camera->GetPos()).SqLength());
 		// drawing icons is cheap but not free, avoid a perf-hit when many are offscreen
-		asIcon &= (camera->InView(unit->drawMidPos, unit->GetDrawRadius()));
+		asIcon &= (camera->InView(GetDrawMidPos(unit), unit->GetDrawRadius()));
 		unit->SetIsIcon(asIcon);
 	}
 }
@@ -363,14 +363,31 @@ void CUnitDrawerData::UpdateDrawPos(CUnit* u)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 
+	auto& dp = drawPositions[u->id];
+
 	if (const CUnit* t = u->GetTransporter(); t != nullptr) {
-		u->drawPos = u->GetDrawPosOther(t->preFrameTra.t, t->pos, globalRendering->timeOffset);
+		dp.pos = u->GetDrawPosOther(t->preFrameTra.t, t->pos, globalRendering->timeOffset);
 	}
 	else {
-		u->drawPos = u->GetDrawPos(globalRendering->timeOffset);
+		dp.pos = u->GetDrawPos(globalRendering->timeOffset);
 	}
 
-	u->drawMidPos = u->GetMdlDrawMidPos();
+	dp.midPos = GetMdlDrawMidPos(u);
+}
+
+float3 CUnitDrawerData::GetObjDrawErrorPos(const CUnit* unit, int allyteam) const
+{
+	return (GetObjDrawMidPos(unit) + unit->GetErrorVector(allyteam));
+}
+
+CMatrix44f CUnitDrawerData::GetUnsyncedTransformMatrix(const CUnit* unit, bool fullread) const
+{
+	float3 interPos = GetDrawPos(unit);
+
+	if (!fullread && !gu->spectatingFullView)
+		interPos += unit->GetErrorVector(gu->myAllyTeam);
+
+	return (unit->ComposeMatrix(interPos));
 }
 
 void CUnitDrawerData::UpdateObjectDrawFlags(CSolidObject* o) const
@@ -407,13 +424,13 @@ void CUnitDrawerData::UpdateObjectDrawFlags(CSolidObject* o) const
 		if (!(u->losStatus[gu->myAllyTeam] & LOS_INLOS) && !gu->spectatingFullView)
 			continue;
 
-		if (!cam->InView(u->drawMidPos, u->GetDrawRadius()))
+		if (!cam->InView(GetDrawMidPos(u), u->GetDrawRadius()))
 			continue;
 
 		switch (camType)
 		{
 			case CCamera::CAMTYPE_PLAYER: {
-				const float sqrCamDist = (u->drawPos - cam->GetPos()).SqLength();
+				const float sqrCamDist = (GetDrawPos(u) - cam->GetPos()).SqLength();
 
 				if (!IsAlpha(u)) {
 					u->SetDrawFlag(DrawFlags::SO_OPAQUE_FLAG);
@@ -427,7 +444,7 @@ void CUnitDrawerData::UpdateObjectDrawFlags(CSolidObject* o) const
 			} break;
 
 			case CCamera::CAMTYPE_UWREFL: {
-				if (CModelDrawerHelper::ObjectVisibleReflection(u->drawMidPos, cam->GetPos(), u->GetDrawRadius()))
+				if (CModelDrawerHelper::ObjectVisibleReflection(GetDrawMidPos(u), cam->GetPos(), u->GetDrawRadius()))
 					u->AddDrawFlag(DrawFlags::SO_REFLEC_FLAG);
 			} break;
 

@@ -6,6 +6,8 @@
 #include "GlobalUnsynced.h"
 #include "Map/Ground.h"
 #include "Rendering/GlobalRendering.h"
+#include "Rendering/Units/UnitDrawer.h"
+#include "Rendering/Features/FeatureDrawer.h"
 #include "Sim/Features/Feature.h"
 #include "Sim/Misc/CollisionHandler.h"
 #include "Sim/Misc/CollisionVolume.h"
@@ -136,7 +138,7 @@ inline static bool TestTrajectoryConeHelper(
 
 	CollisionQuery cq;
 	// chord check to hitPos
-	const CMatrix44f objTransform = obj->GetTransformMatrix(true);
+	const CMatrix44f objTransform = obj->GetTransformMatrix();
 
 	// use heuristic to choose which chord to check
 	// if projectile is traveling upwards, check from muzzle to position
@@ -252,7 +254,7 @@ float TraceRay(
 					if (!f->HasCollidableStateBit(CSolidObject::CSTATE_BIT_QUADMAPRAYS))
 						continue;
 
-					if (CCollisionHandler::DetectHit(f, f->GetTransformMatrix(true), pos, pos + dir * traceLength, &cq, true)) {
+					if (CCollisionHandler::DetectHit(f, f->GetTransformMatrix(), pos, pos + dir * traceLength, &cq, true)) {
 						const float len = cq.GetHitPosDist(pos, dir);
 
 						// we want the closest feature (intersection point) on the ray
@@ -290,7 +292,7 @@ float TraceRay(
 					if (!doHitTest)
 						continue;
 
-					if (CCollisionHandler::DetectHit(u, u->GetTransformMatrix(true), pos, pos + dir * traceLength, &cq, true)) {
+					if (CCollisionHandler::DetectHit(u, u->GetTransformMatrix(), pos, pos + dir * traceLength, &cq, true)) {
 						const float len = cq.GetHitPosDist(pos, dir);
 
 						// we want the closest unit (intersection point) on the ray
@@ -349,7 +351,7 @@ void TraceRayShields(
 			if (!r->CanIntercept(emitter->weaponDef->interceptedByShieldType, emitter->owner->allyteam))
 				continue;
 
-			if (CCollisionHandler::DetectHit(r->owner, &r->collisionVolume, r->owner->GetTransformMatrix(true), start, start + dir * length, &cq, true)) {
+			if (CCollisionHandler::DetectHit(r->owner, &r->collisionVolume, r->owner->GetTransformMatrix(), start, start + dir * length, &cq, true)) {
 				if (cq.InsideHit() && r->weaponDef->exteriorShield)
 					continue;
 
@@ -458,7 +460,7 @@ float GuiTraceRay(
 			if (u->GetIsIcon() || (!unitInSight && unitOnRadar && unitIsEnemy))
 				cv.InitSphere(u->iconRadius);
 
-			if (CCollisionHandler::MouseHit(u, u->GetTransformMatrix(false), start, start + dir * guiRayLength, &cv, &cq)) {
+			if (CCollisionHandler::MouseHit(u, CUnitDrawer::GetUnsyncedTransformMatrix(u), start, start + dir * guiRayLength, &cv, &cq)) {
 				// get the distance to the ray-volume ingress point
 				// (not likely to generate inside-hit special cases)
 				const float ingressDist = cq.GetIngressPosDist(start, dir);
@@ -494,7 +496,7 @@ float GuiTraceRay(
 
 			const CollisionVolume& cv = f->selectionVolume;
 
-			if (CCollisionHandler::MouseHit(f, f->GetTransformMatrix(false), start, start + dir * guiRayLength, &cv, &cq)) {
+			if (CCollisionHandler::MouseHit(f, CFeatureDrawer::GetUnsyncedTransformMatrix(f), start, start + dir * guiRayLength, &cv, &cq)) {
 				const float hitDist = cq.GetHitPosDist(start, dir);
 
 				const bool factoryHitBeforeUnit = ( hitFactory && hitDist <  minEgressDist);

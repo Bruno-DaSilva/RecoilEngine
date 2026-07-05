@@ -97,9 +97,6 @@ public:
 	void SetCustomExpGenID(uint32_t id) { cegID = id; }
 	void SetRenderIndex(uint32_t idx) { renderIndex = idx; }
 
-	// UNSYNCED ONLY
-	CMatrix44f GetTransformMatrix(bool offsetPos) const;
-
 	float GetSortDist(uint32_t camType) const { return sortDist[camType]; }
 	void SetSortDist(uint32_t camType, float d) { sortDist[camType] = d + sortDistOffset; }
 public:
@@ -122,7 +119,6 @@ public:
 	bool blockPreciseCol = false;
 
 	float3 dir = FwdVector;        // set via Init()
-	float3 drawPos;
 
 	float myrange = 0.0f;          // used by WeaponProjectile::TraveledRange
 	float mygravity = 0.0f;

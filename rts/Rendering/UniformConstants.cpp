@@ -4,6 +4,8 @@
 #include <stdint.h>
 
 #include "Rendering/GlobalRendering.h"
+#include "Rendering/Units/UnitDrawer.h"
+#include "Rendering/Features/FeatureDrawer.h"
 #include "Rendering/ShadowHandler.h"
 #include "Rendering/Env/ISky.h"
 #include "Rendering/Env/SunLighting.h"
@@ -280,9 +282,9 @@ void UniformConstants::UpdateParamsImpl(UniformParamsBuffer* updateBuffer)
 		const float3 tracePos = camPos + (pxlDir * traceDist);
 
 		if (unit)
-			updateBuffer->mouseWorldPos = float4{ unit->drawPos, 1.0f };
+			updateBuffer->mouseWorldPos = float4{ CUnitDrawer::GetDrawPos(unit), 1.0f };
 		else if (feature)
-			updateBuffer->mouseWorldPos = float4{ feature->drawPos, 1.0f };
+			updateBuffer->mouseWorldPos = float4{ CFeatureDrawer::GetDrawPos(feature), 1.0f };
 		else
 			updateBuffer->mouseWorldPos = float4{ tracePos, 1.0f };
 

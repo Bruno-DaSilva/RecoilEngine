@@ -775,7 +775,7 @@ void CUnit::UpdateTransportees()
 		if (unitDef->holdSteady) {
 			// slave transportee orientation to piece
 			if (tu.piece >= 0) {
-				const CMatrix44f& transMat = GetTransformMatrix(true);
+				const CMatrix44f& transMat = GetTransformMatrix();
 				const auto pieceMat = script->GetPieceMatrix(tu.piece);
 
 				transportee->SetDirVectors(transMat * pieceMat);
@@ -1459,15 +1459,10 @@ void CUnit::ApplyImpulse(const float3& impulse) {
 /******************************************************************************/
 /******************************************************************************/
 
-CMatrix44f CUnit::GetTransformMatrix(bool synced, bool fullread) const
+CMatrix44f CUnit::GetTransformMatrix() const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	float3 interPos = synced ? pos : drawPos;
-
-	if (!synced && !fullread && !gu->spectatingFullView)
-		interPos += GetErrorVector(gu->myAllyTeam);
-
-	return (ComposeMatrix(interPos));
+	return (ComposeMatrix(pos));
 }
 
 /******************************************************************************/

@@ -78,12 +78,41 @@ public:
 		return (it != scTransMemAllocMap.end()) ? it->second : ScopedTransformMemAlloc::Dummy();
 	}
 	auto& GetObjectTransformMemAlloc(const T* o) { return scTransMemAllocMap[const_cast<T*>(o)]; }
+
+	// render-owned interpolated draw positions (sim/draw decoupling §A: these were
+	// fields on the sim objects, authored at draw rate — evicted to drawer storage).
+	// Keyed by object id (ids are dense and bounded); slots are zeroed on AddObject,
+	// matching the old member initialization, and written once per draw frame by the
+	// derived UpdateDrawPos(). Values for deleted objects go stale until id reuse,
+	// exactly like the old members went stale on the freed object. Objects never
+	// registered with the drawer (non-model features) read zero, as their members
+	// permanently did.
+	const float3& GetDrawPos(const T* o) const { return GetDrawPosition(o).pos; }
+	const float3& GetDrawMidPos(const T* o) const { return GetDrawPosition(o).midPos; }
+
+	// these transform a point or vector to object-space, based at the draw position
+	float3 GetObjectSpaceDrawPos(const T* o, const float3& p) const { return (GetDrawPos(o) + o->GetObjectSpaceVec(p)); }
+
+	// unsynced mid-positions (drawPos-based counterparts of relMidPos/localModel mid)
+	float3 GetMdlDrawMidPos(const T* o) const { return (GetObjectSpaceDrawPos(o, WORLD_TO_OBJECT_SPACE * o->localModel.GetRelMidPos())); }
+	float3 GetObjDrawMidPos(const T* o) const { return (GetObjectSpaceDrawPos(o, WORLD_TO_OBJECT_SPACE * o->relMidPos)); }
 private:
 	static constexpr int MMA_SIZE0 = 2 << 17;
 protected:
+	struct DrawPosition {
+		float3 pos;
+		float3 midPos;
+	};
+
+	const DrawPosition& GetDrawPosition(const T* o) const {
+		static const DrawPosition zero = {};
+		return (o->id < drawPositions.size()) ? drawPositions[o->id] : zero;
+	}
+
 	std::array<ModelRenderContainer<T>, MODELTYPE_CNT> modelRenderers;
 
 	std::vector<T*> unsortedObjects;
+	std::vector<DrawPosition> drawPositions; // indexed by object id
 	spring::unordered_map<const T*, ScopedTransformMemAlloc> scTransMemAllocMap;
 
 	// last sim frame ExtractTransforms() ran for; extraction is due once per new sim frame
@@ -134,6 +163,11 @@ inline void CModelDrawerDataBase<T>::AddObject(const T* co, bool add)
 		return;
 
 	unsortedObjects.emplace_back(o);
+
+	if (o->id >= drawPositions.size())
+		drawPositions.resize(o->id + 1);
+
+	drawPositions[o->id] = {}; // zero until the first UpdateDrawPos, as the old members were
 
 	const uint32_t numMatrices = ((o->model ? o->model->numPieces : 0) + 1u) * 2;
 	scTransMemAllocMap.emplace(o, ScopedTransformMemAlloc(numMatrices));
@@ -232,7 +266,7 @@ inline void CModelDrawerDataBase<T>::ExtractObjectTransforms(const T* o)
 	ScopedTransformMemAlloc& stma = GetObjectTransformMemAlloc(o);
 
 	const auto& tmPrev = o->preFrameTra;
-	const auto  tmCurr = Transform::FromMatrix(o->GetTransformMatrix(true)); //synced transform
+	const auto  tmCurr = Transform::FromMatrix(o->GetTransformMatrix()); //synced transform
 
 	// conditionally update new and prev synced positions
 	stma.UpdateIfChanged(0, tmPrev);
@@ -269,7 +303,7 @@ inline void CModelDrawerDataBase<T>::UpdateObjectUniforms(const T* o)
 	if (gu->spectatingFullView || o->IsInLosForAllyTeam(gu->myAllyTeam)) {
 		uni.id = o->id;
 		// TODO remove drawPos, replace with pos
-		uni.drawPos = float4{ o->drawPos, o->heading * math::PI / SPRING_MAX_HEADING };
+		uni.drawPos = float4{ GetDrawPos(o), o->heading * math::PI / SPRING_MAX_HEADING };
 		uni.speed = o->speed;
 		uni.maxHealth = o->maxHealth;
 		uni.health = o->health;

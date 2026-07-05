@@ -84,8 +84,7 @@ public:
 	bool UpdatePosition();
 	bool UpdateVelocity(const float3& dragAccel, const float3& gravAccel, const float3& movMask, const float3& velMask);
 
-	void SetTransform(const CMatrix44f& m, bool synced) { transMatrix[synced] = m; }
-	void UpdateTransform(const float3& p, bool synced);
+	void UpdateTransform(const float3& p);
 	void UpdateTransformAndPhysState();
 	void UpdateQuadFieldPosition(const float3& moveVec);
 
@@ -99,9 +98,9 @@ public:
 
 	// NOTE:
 	//   unlike CUnit which recalculates the matrix on each call
-	//   (and uses the synced and error args) CFeature caches it
-	CMatrix44f GetTransformMatrix(bool synced = false, bool fullread = false) const override final { return transMatrix[synced]; }
-	const CMatrix44f& GetTransformMatrixRef(bool synced = false) const { return transMatrix[synced]; }
+	//   CFeature caches it; the draw-time matrix lives in CFeatureDrawerData
+	CMatrix44f GetTransformMatrix() const override final { return transMatrix; }
+	const CMatrix44f& GetTransformMatrixRef() const { return transMatrix; }
 
 	CFeature* CreateWreck(int wreckLevel, int smokeTime);
 
@@ -146,7 +145,7 @@ public:
 
 private:
 	// [0] := unsynced, [1] := synced
-	CMatrix44f transMatrix[2];
+	CMatrix44f transMatrix;
 };
 
 #endif // _FEATURE_H

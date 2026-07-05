@@ -76,9 +76,6 @@ CR_REG_METADATA(CSolidObject,
 
 	CR_MEMBER(dragScales),
 
-	CR_MEMBER(drawPos),
-	CR_MEMBER(drawMidPos),
-
 	CR_MEMBER(buildFacing),
 	CR_MEMBER(modParams),
 
@@ -310,10 +307,6 @@ YardMapStatus CSolidObject::GetGroundBlockingMaskAtPos(float3 gpos) const
 }
 
 
-// unsynced mid-{position,vector}s
-float3 CSolidObject::GetMdlDrawMidPos() const { return (GetObjectSpaceDrawPos(WORLD_TO_OBJECT_SPACE * localModel.GetRelMidPos())); }
-float3 CSolidObject::GetObjDrawMidPos() const { return (GetObjectSpaceDrawPos(WORLD_TO_OBJECT_SPACE * relMidPos                )); }
-
 int2 CSolidObject::GetMapPosStatic(const float3& position, int xsize, int zsize)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
@@ -486,7 +479,7 @@ void CSolidObject::UpdatePrevFrameTransform()
 		lmp.SavePrevModelSpaceTransform();
 	}
 
-	const Transform newPreFrameTra = Transform{ CQuaternion::MakeFrom(GetTransformMatrix(true)), pos };
+	const Transform newPreFrameTra = Transform{ CQuaternion::MakeFrom(GetTransformMatrix()), pos };
 
 	if (BoundaryStats::Active() && !newPreFrameTra.equals(preFrameTra))
 		BoundaryStats::Add(BoundaryStats::ctr.objMoved);

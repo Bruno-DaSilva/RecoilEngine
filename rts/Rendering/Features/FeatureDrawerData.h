@@ -26,11 +26,19 @@ public:
 public:
 	void Update() override;
 	bool IsAlpha(const CFeature* co) const override;
+
+	// draw-time transform (drawer-owned since the §A drawPos eviction; this
+	// replaced the unsynced half of CFeature::transMatrix). Identity until the
+	// feature first passes the draw-flag gate below, as the old member was.
+	const CMatrix44f& GetUnsyncedTransformMatrix(const CFeature* f) const;
 protected:
 	void UpdateObjectDrawFlags(CSolidObject* o) const override;
 private:
-	static void UpdateDrawPos(CFeature* f);
+	void UpdateDrawPos(CFeature* f);
+	void UpdateUnsyncedTransform(const CFeature* f);
 public:
 	float featureDrawDistance;
 	float featureFadeDistance;
+private:
+	std::vector<CMatrix44f> unsyncedTransforms; // indexed by feature id
 };

@@ -31,6 +31,11 @@ void CFeatureDrawerData::RenderFeaturePreCreated(const CFeature* feature)
 		return;
 
 	UpdateObject(feature, true);
+
+	if (feature->id >= unsyncedTransforms.size())
+		unsyncedTransforms.resize(feature->id + 1);
+
+	unsyncedTransforms[feature->id] = CMatrix44f{}; // identity until first drawn, as the old member was
 }
 
 //TODO remove
@@ -99,12 +104,14 @@ void CFeatureDrawerData::Update()
 			CFeature* f = unsortedObjects[k];
 			UpdateDrawPos(f);
 			UpdateCommon(f);
+			UpdateUnsyncedTransform(f);
 		}, CModelDrawerDataConcept::MT_CHUNK_OR_MIN_CHUNK_SIZE_UPDT);
 	}
 	else {
 		for (CFeature* f : unsortedObjects) {
 			UpdateDrawPos(f);
 			UpdateCommon(f);
+			UpdateUnsyncedTransform(f);
 		}
 	}
 }
@@ -140,13 +147,13 @@ void CFeatureDrawerData::UpdateObjectDrawFlags(CSolidObject* o) const
 		if (!f->IsInLosForAllyTeam(gu->myAllyTeam) && !gu->spectatingFullView)
 			continue;
 
-		if (!cam->InView(f->drawMidPos, f->GetDrawRadius()))
+		if (!cam->InView(GetDrawMidPos(f), f->GetDrawRadius()))
 			continue;
 
 		switch (camType)
 			{
 			case CCamera::CAMTYPE_PLAYER: {
-				const float camDist = (f->drawPos - cam->GetPos()).Length();
+				const float camDist = (GetDrawPos(f) - cam->GetPos()).Length();
 
 				// special case for non-fading features
 				if (!f->alphaFade) {
@@ -190,7 +197,7 @@ void CFeatureDrawerData::UpdateObjectDrawFlags(CSolidObject* o) const
 				if (!f->HasDrawFlag(DrawFlags::SO_OPAQUE_FLAG) && !f->HasDrawFlag(DrawFlags::SO_ALPHAF_FLAG))
 					continue;
 
-				if (CModelDrawerHelper::ObjectVisibleReflection(f->drawMidPos, cam->GetPos(), f->GetDrawRadius()))
+				if (CModelDrawerHelper::ObjectVisibleReflection(GetDrawMidPos(f), cam->GetPos(), f->GetDrawRadius()))
 					f->AddDrawFlag(DrawFlags::SO_REFLEC_FLAG);
 			} break;
 
@@ -208,14 +215,25 @@ void CFeatureDrawerData::UpdateObjectDrawFlags(CSolidObject* o) const
 		}
 	}
 
+}
+
+const CMatrix44f& CFeatureDrawerData::GetUnsyncedTransformMatrix(const CFeature* f) const
+{
+	static const CMatrix44f identity;
+	return (f->id < unsyncedTransforms.size()) ? unsyncedTransforms[f->id] : identity;
+}
+
+void CFeatureDrawerData::UpdateUnsyncedTransform(const CFeature* f)
+{
 	if (f->alwaysUpdateMat || (f->drawFlag > DrawFlags::SO_NODRAW_FLAG && f->drawFlag < DrawFlags::SO_DRICON_FLAG)) {
-		f->UpdateTransform(f->drawPos, false);
+		unsyncedTransforms[f->id] = f->ComposeMatrix(GetDrawPos(f));
 	}
 }
 
 void CFeatureDrawerData::UpdateDrawPos(CFeature* f)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	f->drawPos    = f->GetDrawPos(globalRendering->timeOffset);
-	f->drawMidPos = f->GetMdlDrawMidPos();
+	auto& dp = drawPositions[f->id];
+	dp.pos    = f->GetDrawPos(globalRendering->timeOffset);
+	dp.midPos = GetMdlDrawMidPos(f);
 }

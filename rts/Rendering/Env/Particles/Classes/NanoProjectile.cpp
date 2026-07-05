@@ -87,6 +87,7 @@ void CNanoProjectile::Update()
 
 void CNanoProjectile::Draw()
 {
+	const float3 drawPos = projectileDrawer->GetDrawPos(this);
 	RECOIL_DETAILED_TRACY_ZONE;
 	{
 		const float t = (gs->frameNum - createFrame + globalRendering->timeOffset);

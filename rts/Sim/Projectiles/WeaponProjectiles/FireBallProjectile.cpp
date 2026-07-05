@@ -53,6 +53,7 @@ CFireBallProjectile::CFireBallProjectile(const ProjectileParams& params)
 
 void CFireBallProjectile::Draw()
 {
+	const float3 drawPos = projectileDrawer->GetDrawPos(this);
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (!validTextures[0])
 		return;

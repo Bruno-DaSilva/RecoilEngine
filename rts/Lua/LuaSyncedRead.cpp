@@ -27,6 +27,8 @@
 #include "Map/MapParser.h"
 #include "Map/ReadMap.h"
 #include "Rendering/Env/GrassDrawer.h"
+#include "Rendering/Units/UnitDrawer.h"
+#include "Rendering/Features/FeatureDrawer.h"
 #include "Rendering/Models/IModelParser.h"
 #include "Rendering/Models/3DModel.hpp"
 #include "Rendering/Models/3DModelPiece.hpp"
@@ -558,12 +560,18 @@ static int GetSolidObjectPosition(lua_State* L, const CSolidObject* o, bool isFe
 	return (3 + (3 * returnMidPos) + (3 * returnAimPos));
 }
 
-static int GetSolidObjectRotation(lua_State* L, const CSolidObject* o)
+// draw-time (interpolated / error-offset) transforms for unsynced handles;
+// the drawers own these since the sim/draw §A drawPos eviction
+static CMatrix44f GetDrawTransformMatrix(const CUnit* u) { return CUnitDrawer::GetUnsyncedTransformMatrix(u); }
+static CMatrix44f GetDrawTransformMatrix(const CFeature* f) { return CFeatureDrawer::GetUnsyncedTransformMatrix(f); }
+
+template<typename TObj>
+static int GetSolidObjectRotation(lua_State* L, const TObj* o)
 {
 	if (o == nullptr)
 		return 0;
 
-	const CMatrix44f& matrix = o->GetTransformMatrix(CLuaHandle::GetHandleSynced(L));
+	const CMatrix44f matrix = CLuaHandle::GetHandleSynced(L) ? o->GetTransformMatrix() : GetDrawTransformMatrix(o);
 	const float3 angles = matrix.GetEulerAnglesLftHand();
 
 	assert(matrix.IsOrthoNormal());
@@ -6910,7 +6918,7 @@ int LuaSyncedRead::GetFeatureDirection(lua_State* L)
 	if (feature == nullptr || !LuaUtils::IsFeatureVisible(L, feature))
 		return 0;
 
-	const CMatrix44f& mat = feature->GetTransformMatrixRef(true);
+	const CMatrix44f& mat = feature->GetTransformMatrixRef();
 	const float3& xdir = mat.GetX();
 	const float3& ydir = mat.GetY();
 	const float3& zdir = mat.GetZ();

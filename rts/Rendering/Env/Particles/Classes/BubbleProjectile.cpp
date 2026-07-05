@@ -80,6 +80,7 @@ void CBubbleProjectile::Update()
 
 void CBubbleProjectile::Draw()
 {
+	const float3 drawPos = projectileDrawer->GetDrawPos(this);
 	RECOIL_DETAILED_TRACY_ZONE;
 	unsigned char col[4];
 	col[0] = (unsigned char)(255 * alpha);
