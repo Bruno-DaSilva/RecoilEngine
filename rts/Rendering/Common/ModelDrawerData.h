@@ -103,10 +103,10 @@ public:
 	void ClearPreviousDrawFlags() { for (const int id : unsortedObjects) drawFlags[id].prev = 0; }
 
 	const auto& GetObjectTransformMemAlloc(const T* o) const {
-		const auto it = scTransMemAllocMap.find(o);
+		const auto it = scTransMemAllocMap.find(o->id);
 		return (it != scTransMemAllocMap.end()) ? it->second : ScopedTransformMemAlloc::Dummy();
 	}
-	auto& GetObjectTransformMemAlloc(const T* o) { return scTransMemAllocMap[o]; }
+	auto& GetObjectTransformMemAlloc(const T* o) { return scTransMemAllocMap[o->id]; }
 
 	// render-owned interpolated draw positions (sim/draw decoupling §A: these were
 	// fields on the sim objects, authored at draw rate — evicted to drawer storage).
@@ -154,7 +154,7 @@ protected:
 	std::vector<int> unsortedObjects; // object ids (see GetUnsortedObjects)
 	std::vector<DrawPosition> drawPositions; // indexed by object id
 	std::vector<DrawFlagState> drawFlags;    // indexed by object id
-	spring::unordered_map<const T*, ScopedTransformMemAlloc> scTransMemAllocMap;
+	spring::unordered_map<int, ScopedTransformMemAlloc> scTransMemAllocMap; // keyed by object id
 
 	// last sim frame ExtractTransforms() ran for; extraction is due once per new sim frame
 	int32_t transformsExtractedFrame = std::numeric_limits<int32_t>::lowest();
@@ -214,7 +214,7 @@ inline void CModelDrawerDataBase<T>::AddObject(const T* o, bool add)
 	drawFlags[o->id] = {}; // SO_NODRAW_FLAG until the first UpdateObjectDrawFlags, as the old members were
 
 	const uint32_t numMatrices = ((o->model ? o->model->numPieces : 0) + 1u) * 2;
-	scTransMemAllocMap.emplace(o, ScopedTransformMemAlloc(numMatrices));
+	scTransMemAllocMap.emplace(o->id, ScopedTransformMemAlloc(numMatrices));
 	transformsExtractionPending = true; //make sure the new allocation is filled at least once before the next sim frame
 
 	modelUniformsStorage.AddObject(o);
@@ -228,7 +228,7 @@ inline void CModelDrawerDataBase<T>::DelObject(const T* o, bool del)
 	}
 
 	if (del && spring::VectorErase(unsortedObjects, o->id)) {
-		scTransMemAllocMap.erase(o);
+		scTransMemAllocMap.erase(o->id);
 		modelUniformsStorage.DelObject(o);
 	}
 }

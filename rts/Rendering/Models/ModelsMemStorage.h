@@ -156,7 +156,12 @@ private:
 
 ////////////////////////////////////////////////////////////////////
 
-class CWorldObject;
+class CUnit;
+class CFeature;
+// per-object shader uniforms storage. Keyed by object id per kind (PR 14:
+// drawer-side containers hold IDs, not sim-object pointers); only units and
+// features are ever registered (by CModelDrawerDataBase add/del), the def-
+// and model-typed overloads below are no-op dummies for template callers.
 class ModelUniformsStorage {
 private:
 	using MyType = ModelUniformData;
@@ -164,12 +169,18 @@ public:
 	void Init();
 	void Kill();
 public:
-	size_t AddObject(const CWorldObject* o);
-	size_t GetObjOffset(const CWorldObject* o);
-	size_t GetObjOffset(const CWorldObject* o) const;
-	const MyType& GetObjUniformsArray(const CWorldObject* o) const;
-	MyType& GetObjUniformsArray(const CWorldObject* o);
-	void   DelObject(const CWorldObject* o);
+	size_t AddObject(const CUnit* o);
+	size_t AddObject(const CFeature* o);
+	size_t GetObjOffset(const CUnit* o);
+	size_t GetObjOffset(const CFeature* o);
+	size_t GetObjOffset(const CUnit* o) const;
+	size_t GetObjOffset(const CFeature* o) const;
+	const MyType& GetObjUniformsArray(const CUnit* o) const;
+	const MyType& GetObjUniformsArray(const CFeature* o) const;
+	MyType& GetObjUniformsArray(const CUnit* o);
+	MyType& GetObjUniformsArray(const CFeature* o);
+	void   DelObject(const CUnit* o);
+	void   DelObject(const CFeature* o);
 
 	size_t AddObject(const SolidObjectDef* o) { return INVALID_INDEX; }
 	size_t GetObjOffset(const SolidObjectDef* o) { return INVALID_INDEX; }
@@ -189,13 +200,22 @@ public:
 	const auto& GetUpdateList() const { return updateList; }
 	      auto& GetUpdateList()       { return updateList; }
 private:
+	enum ObjKind : uint8_t { OBJ_UNIT = 0, OBJ_FEATURE = 1, OBJ_KIND_CNT = 2 };
+
+	size_t AddSlot();
+	size_t AddObjectImpl(ObjKind kind, int id);
+	size_t GetObjOffsetImpl(ObjKind kind, int id);
+	size_t GetObjOffsetImpl(ObjKind kind, int id) const;
+	void   DelObjectImpl(ObjKind kind, int id);
+
 	UpdateList updateList;
 public:
 	static constexpr size_t INVALID_INDEX = 0;
 private:
 	inline static MyType dummy = {};
 
-	spring::unordered_map<const CWorldObject*, size_t> objectsMap;
+	// object id -> storage offset, per object kind
+	spring::unordered_map<int, size_t> objectsMaps[OBJ_KIND_CNT];
 	spring::FreeListMap<MyType> storage;
 };
 
