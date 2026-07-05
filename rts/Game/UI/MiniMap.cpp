@@ -25,6 +25,7 @@
 #include "Map/Ground.h"
 #include "Map/ReadMap.h"
 #include "Rendering/CommandDrawer.h"
+#include "Rendering/Common/SimSnapshot.h"
 #include "Rendering/IconHandler.h"
 #include "Rendering/LineDrawer.h"
 #include "Rendering/ShadowHandler.h"
@@ -859,7 +860,10 @@ CUnit* CMiniMap::GetSelectUnit(const float3& pos) const
 	if (unit == nullptr)
 		return unit;
 
-	if ((unit->losStatus[gu->myAllyTeam] & (LOS_INLOS | LOS_INRADAR)) || gu->spectatingFullView)
+	// snapshot-served losStatus (SimSnapshot contract): row for the local
+	// allyteam as of the last completed sim frame; a unit the snapshot does
+	// not cover yet reads as 0, i.e. not selectable
+	if (gu->spectatingFullView || (simSnapshot.Read().LosStatus(unit->id) & (LOS_INLOS | LOS_INRADAR)))
 		return unit;
 
 	return nullptr;

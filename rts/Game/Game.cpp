@@ -35,6 +35,7 @@
 #include "ExternalAI/SkirmishAIHandler.h"
 #include "Rendering/WorldDrawer.h"
 #include "Rendering/Common/RenderEventQueue.h"
+#include "Rendering/Common/SimSnapshot.h"
 #include "Rendering/Env/IWater.h"
 #include "Rendering/Env/WaterRendering.h"
 #include "Rendering/Env/MapRendering.h"
@@ -1008,6 +1009,7 @@ void CGame::KillRendering()
 	// pending records reference sim objects that die without further drains
 	// (CUnitHandler::Kill frees units without Render*Destroyed notifications)
 	renderEventQueue.Clear();
+	simSnapshot.Clear();
 	icon::iconHandler.Kill();
 	spring::SafeDelete(geometricObjects);
 	worldDrawer.Kill();
@@ -1452,6 +1454,11 @@ bool CGame::Draw() {
 	// acked those objects, so destruct their deferred shells and poison the
 	// slots; ReleaseAcked() at the end of this Draw returns them to the pools
 	deferredObjectDeleter.AckDrainedDestroys();
+
+	// publish the observable-state snapshot for draw-side consumers; no-op
+	// unless a sim frame completed since the last extraction (contract in
+	// SimSnapshot.h)
+	simSnapshot.Update();
 
 	const spring_time currentTimePreUpdate = spring_gettime();
 

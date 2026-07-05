@@ -28,6 +28,7 @@
 #include "Rendering/Textures/3DOTextureHandler.h"
 #include "Rendering/Textures/S3OTextureHandler.h"
 #include "Rendering/Common/ModelDrawerHelpers.h"
+#include "Rendering/Common/SimSnapshot.h"
 #include "Rendering/Models/3DModelVAO.hpp"
 #include "Rendering/Models/ModelsMemStorage.h"
 
@@ -398,6 +399,9 @@ void CUnitDrawerGLSL::DrawUnitMiniMapIcons() const
 	const auto isFullView = gu->spectatingFullView;
 	const float ghostIconDimming = modelDrawerData->ghostIconDimming;
 	const auto defIconIdx = icon::iconHandler.GetDefaultIconIdx();
+	// snapshot-served losStatus (SimSnapshot contract): row for the local
+	// allyteam as of the sim frame the drawer containers were drained at
+	const auto& snapshot = simSnapshot.Read();
 
 	for (auto* unit : modelDrawerData->GetUnsortedObjects()) {
 		const size_t iconIndex = minimap->UseUnitIcons() ? unit->currentIconIndex : defIconIdx;
@@ -433,7 +437,7 @@ void CUnitDrawerGLSL::DrawUnitMiniMapIcons() const
 				currentColor = teamHandler.Team(unit->team)->color;
 			}
 
-			if (!isFullView && !(unit->losStatus[myAllyTeam] & LOS_INRADAR)) {
+			if (!isFullView && !(snapshot.LosStatus(unit->id) & LOS_INRADAR)) {
 				if (ghostIconDimming == 0.0f)
 					continue;
 
