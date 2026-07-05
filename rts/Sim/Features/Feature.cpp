@@ -25,6 +25,7 @@
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Units/UnitDefHandler.h"
 #include "Sim/Units/UnitHandler.h"
+#include "Rendering/Common/RenderEventQueue.h"
 #include "System/EventHandler.h"
 #include "System/SpringMath.h"
 #include "System/creg/DefTypes.h"
@@ -104,8 +105,8 @@ CFeature::~CFeature()
 void CFeature::PostLoad()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	eventHandler.RenderFeaturePreCreated(this);
-	eventHandler.RenderFeatureCreated(this);
+	renderEventQueue.RenderFeaturePreCreated(this);
+	renderEventQueue.RenderFeatureCreated(this);
 }
 
 
@@ -249,11 +250,11 @@ void CFeature::Initialize(const FeatureLoadParams& params)
 
 	MoveTypes::RegisterFeatureForUnitTrapCheck(this);
 
-	eventHandler.RenderFeaturePreCreated(this);
+	renderEventQueue.RenderFeaturePreCreated(this);
 	// allow Spring.SetFeatureBlocking to be called from gadget:FeatureCreated
 	// (callin sees the complete default state, but can change any part of it)
 	eventHandler.FeatureCreated(this);
-	eventHandler.RenderFeatureCreated(this);
+	renderEventQueue.RenderFeatureCreated(this);
 }
 
 

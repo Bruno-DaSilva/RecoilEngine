@@ -60,6 +60,7 @@
 #include "Sim/Weapons/Weapon.h"
 #include "Sim/Weapons/WeaponDefHandler.h"
 #include "Sim/Weapons/WeaponLoader.h"
+#include "Rendering/Common/RenderEventQueue.h"
 #include "System/EventHandler.h"
 #include "System/Log/ILog.h"
 #include "System/Matrix44f.h"
@@ -378,7 +379,7 @@ void CUnit::PostInit(const CUnit* builder)
 	}
 
 	UpdateRenderParams();
-	eventHandler.RenderUnitPreCreated(this);
+	renderEventQueue.RenderUnitPreCreated(this);
 
 	// Lua might call SetUnitHealth within UnitCreated
 	// and trigger FinishedBuilding before we get to it
@@ -392,7 +393,7 @@ void CUnit::PostInit(const CUnit* builder)
 	if (!preBeingBuilt && !beingBuilt)
 		FinishedBuilding(true);
 
-	eventHandler.RenderUnitCreated(this, isCloaked);
+	renderEventQueue.RenderUnitCreated(this, isCloaked);
 }
 
 
@@ -400,8 +401,8 @@ void CUnit::PostLoad()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	UpdateRenderParams();
-	eventHandler.RenderUnitPreCreated(this);
-	eventHandler.RenderUnitCreated(this, isCloaked);
+	renderEventQueue.RenderUnitPreCreated(this);
+	renderEventQueue.RenderUnitCreated(this, isCloaked);
 }
 
 //////////////////////////////////////////////////////////////////////

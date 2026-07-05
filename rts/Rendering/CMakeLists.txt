@@ -134,6 +134,7 @@ set(sources_engine_Rendering
 		"${CMAKE_CURRENT_SOURCE_DIR}/Common/ModelDrawerData.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Common/ModelDrawerState.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Common/ModelDrawerHelpers.cpp"
+		"${CMAKE_CURRENT_SOURCE_DIR}/Common/RenderEventQueue.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Common/UpdateList.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Features/FeatureDrawerData.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Features/FeatureDrawer.cpp"

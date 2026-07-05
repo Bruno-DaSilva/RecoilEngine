@@ -34,6 +34,7 @@
 #include "ExternalAI/EngineOutHandler.h"
 #include "ExternalAI/SkirmishAIHandler.h"
 #include "Rendering/WorldDrawer.h"
+#include "Rendering/Common/RenderEventQueue.h"
 #include "Rendering/Env/IWater.h"
 #include "Rendering/Env/WaterRendering.h"
 #include "Rendering/Env/MapRendering.h"
@@ -1003,6 +1004,9 @@ void CGame::KillRendering()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	LOG("[Game::%s][1]", __func__);
+	// pending records reference sim objects that die without further drains
+	// (CUnitHandler::Kill frees units without Render*Destroyed notifications)
+	renderEventQueue.Clear();
 	icon::iconHandler.Kill();
 	spring::SafeDelete(geometricObjects);
 	worldDrawer.Kill();
@@ -1164,6 +1168,10 @@ bool CGame::Update()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	good_fpu_control_registers("CGame::Update");
+
+	// sim->render events fired below (ClientReadNet -> SimFrame) queue up as
+	// records; CGame::Draw drains them at the draw boundary
+	renderEventQueue.BeginSimPhase();
 
 	jobDispatcher.Update();
 	clientNet->Update();
@@ -1431,6 +1439,10 @@ bool CGame::UpdateUnsynced(const spring_time currentTime)
 
 
 bool CGame::Draw() {
+	// apply the sim frames' queued render-event records (object creation,
+	// LOS transitions) before any draw-side code reads the drawer containers
+	renderEventQueue.Drain();
+
 	const spring_time currentTimePreUpdate = spring_gettime();
 
 	if (UpdateUnsynced(currentTimePreUpdate))

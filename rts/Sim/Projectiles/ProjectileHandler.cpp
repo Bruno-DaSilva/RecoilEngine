@@ -26,6 +26,7 @@
 #include "Sim/Weapons/WeaponDef.h"
 #include "Sim/Weapons/PlasmaRepulser.h"
 #include "System/Config/ConfigHandler.h"
+#include "Rendering/Common/RenderEventQueue.h"
 #include "System/EventHandler.h"
 #include "System/Log/ILog.h"
 #include "System/Cpp11Compat.hpp"
@@ -331,7 +332,7 @@ void CProjectileHandler::CreateProjectile(CProjectile* p)
 	if (p->synced || PH_UNSYNCED_PROJECTILE_EVENTS == 1)
 		eventHandler.ProjectileCreated(p, p->GetAllyteamID());
 
-	eventHandler.RenderProjectileCreated(p);
+	renderEventQueue.RenderProjectileCreated(p);
 }
 
 void CProjectileHandler::DestroyProjectile(CProjectile* p)
@@ -341,7 +342,7 @@ void CProjectileHandler::DestroyProjectile(CProjectile* p)
 
 	CountProjectileChurn(p, false);
 
-	eventHandler.RenderProjectileDestroyed(p);
+	renderEventQueue.RenderProjectileDestroyed(p);
 
 	if (p->synced) {
 		//modelUniformsStorage.DelObject(p);

@@ -56,6 +56,12 @@ public:
 	static void ClearPreviousDrawFlags() { modelDrawerData->ClearPreviousDrawFlags(); }
 	static void UnitLeavesGhostChanged(const CUnit* unit, const bool leaveDeadGhost) { modelDrawerData->UnitLeavesGhostChanged(unit, leaveDeadGhost); }
 
+	// renderEventQueue dispatch targets for queued LOS-transition records
+	static void ApplyUnitRadarChanged(const CUnit* unit, int allyTeam) { modelDrawerData->ApplyUnitRadarChanged(unit, allyTeam); }
+	static void ApplyUnitEnteredLos(const CUnit* unit, int allyTeam, bool leavesGhostAtEvent) { modelDrawerData->ApplyUnitEnteredLos(unit, allyTeam, leavesGhostAtEvent); }
+	static void ApplyUnitLeftLos(const CUnit* unit, int allyTeam, bool leavesGhostAtEvent) { modelDrawerData->ApplyUnitLeftLos(unit, allyTeam, leavesGhostAtEvent); }
+	static void ApplyUnitLeavesGhostChanged(const CUnit* unit, const GhostAllyMask& deadGhostAllyMask) { modelDrawerData->ApplyUnitLeavesGhostChanged(unit, deadGhostAllyMask); }
+
 	static void UpdateCurrentUnitIcon(const CUnit* unit) { modelDrawerData->UpdateCurrentUnitIcon(unit); }
 public:
 	// DrawUnit*

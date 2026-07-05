@@ -12,6 +12,7 @@
 #include "Sim/Misc/QuadField.h"
 #include "Sim/Units/CommandAI/BuilderCaches.h"
 #include "System/creg/STL_Set.h"
+#include "Rendering/Common/RenderEventQueue.h"
 #include "System/EventHandler.h"
 #include "System/TimeProfiler.h"
 
@@ -244,7 +245,7 @@ bool CFeatureHandler::UpdateFeature(CFeature* feature)
 
 		Sim::registry.destroy(feature->entityReference);
 
-		eventHandler.RenderFeatureDestroyed(feature);
+		renderEventQueue.RenderFeatureDestroyed(feature);
 		eventHandler.FeatureDestroyed(feature);
 
 		deletedFeatureIDs.push_back(feature->id);

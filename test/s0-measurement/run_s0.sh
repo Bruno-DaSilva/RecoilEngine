@@ -31,7 +31,9 @@ SPRING_DATADIR="${SPRING_DATADIR:-/www/projects/bar-data}"
 
 SPRING_BIN="${3:-${SPRING_BIN:-}}"
 if [[ -z "$SPRING_BIN" ]]; then
-	SPRING_BIN="$(find "$REPO/build" -maxdepth 3 -type f -name spring-headless 2>/dev/null | head -n1 || true)"
+	# exclude install trees: build/install/ may hold a stale engine from a
+	# different branch (this once silently invalidated a whole gate run)
+	SPRING_BIN="$(find "$REPO/build" -maxdepth 3 -type f -name spring-headless -not -path "*/install/*" 2>/dev/null | head -n1 || true)"
 fi
 if [[ -z "$SPRING_BIN" || ! -x "$SPRING_BIN" ]]; then
 	echo "ERROR: no spring-headless binary found; build it or pass as arg 3 / \$SPRING_BIN" >&2
@@ -72,7 +74,7 @@ S0DumpEndFrame = ${S0_DUMP_END:-200000}
 S0ProfStart = ${S0_PROF_START:--1}
 S0ProfLen = ${S0_PROF_LEN:-900}
 S0QuitFrame = ${S0_QUIT_FRAME:-0}
-S0FastForward = 1
+S0FastForward = ${S0_FF:-1}
 WorkerThreadCount = ${WORKERS:--1}
 EOF
 

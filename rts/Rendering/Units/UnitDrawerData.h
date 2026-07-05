@@ -5,6 +5,7 @@
 
 #include "System/float3.h"
 #include "Rendering/Common/ModelDrawerData.h"
+#include "Rendering/Common/RenderEventQueue.h"
 #include "Rendering/UnitDefImage.h"
 #include "Game/GlobalUnsynced.h"
 
@@ -56,15 +57,24 @@ public:
 	void RenderUnitCreated(const CUnit* unit, int cloaked) override;
 	void RenderUnitDestroyed(const CUnit* unit) override;
 
+	// LOS-transition event handlers append records to renderEventQueue; the
+	// Apply* counterparts below run at the draw-boundary drain (or in place
+	// outside the sim phase) and hold the original mutation logic
 	void UnitEnteredRadar(const CUnit* unit, int allyTeam) override;
-	void UnitLeftRadar(const CUnit* unit, int allyTeam) override { UnitEnteredRadar(unit, allyTeam); }
+	void UnitLeftRadar(const CUnit* unit, int allyTeam) override;
 
 	void UnitEnteredLos(const CUnit* unit, int allyTeam) override;
 	void UnitLeftLos(const CUnit* unit, int allyTeam) override;
 
+	void ApplyUnitRadarChanged(const CUnit* unit, int allyTeam);
+	void ApplyUnitEnteredLos(const CUnit* unit, int allyTeam, bool leavesGhostAtEvent);
+	void ApplyUnitLeftLos(const CUnit* unit, int allyTeam, bool leavesGhostAtEvent);
+	void ApplyUnitLeavesGhostChanged(const CUnit* unit, const GhostAllyMask& deadGhostAllyMask);
+
 	void PlayerChanged(int playerID) override;
 
-	bool UpdateUnitGhosts(const CUnit* unit, const bool addNewGhost);
+	GhostAllyMask CalcDeadGhostAllyMask(const CUnit* unit) const;
+	bool UpdateUnitGhosts(const CUnit* unit, const GhostAllyMask& deadGhostAllyMask);
 	void UnitLeavesGhostChanged(const CUnit* unit, const bool leaveDeadGhost);
 public:
 	class TempDrawUnit {

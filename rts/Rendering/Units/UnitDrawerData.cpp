@@ -585,7 +585,27 @@ S3DModel* CUnitDrawerData::GetUnitModel(const CUnit* unit) const
 	return gsoModel;
 }
 
-bool CUnitDrawerData::UpdateUnitGhosts(const CUnit* unit, const bool addNewGhost)
+// which allyteams get a dead ghost when this unit dies / stops leaving
+// ghosts; computed at event time because sim owns (and clears) the
+// LOS_PREVLOS bits this reads
+GhostAllyMask CUnitDrawerData::CalcDeadGhostAllyMask(const CUnit* unit) const
+{
+	GhostAllyMask mask = {};
+
+	if (!gameSetup->ghostedBuildings)
+		return mask;
+
+	for (int allyTeam = 0; allyTeam < savedData.deadGhostBuildings.size(); ++allyTeam) {
+		const auto ls = unit->losStatus[allyTeam];
+
+		if (!(ls & (LOS_INLOS | LOS_CONTRADAR | LOS_INRADAR)) && (ls & LOS_PREVLOS))
+			mask[allyTeam / 64] |= (uint64_t(1) << (allyTeam % 64));
+	}
+
+	return mask;
+}
+
+bool CUnitDrawerData::UpdateUnitGhosts(const CUnit* unit, const GhostAllyMask& deadGhostAllyMask)
 {
 	if (!gameSetup->ghostedBuildings)
 		return false;
@@ -599,9 +619,9 @@ bool CUnitDrawerData::UpdateUnitGhosts(const CUnit* unit, const bool addNewGhost
 	S3DModel* gsoModel = GetUnitModel(unit);
 
 	for (int allyTeam = 0; allyTeam < savedData.deadGhostBuildings.size(); ++allyTeam) {
-		const bool canSeeGhost = !(u->losStatus[allyTeam] & (LOS_INLOS | LOS_CONTRADAR | LOS_INRADAR)) && (u->losStatus[allyTeam] & (LOS_PREVLOS));
+		const bool canSeeGhost = (deadGhostAllyMask[allyTeam / 64] & (uint64_t(1) << (allyTeam % 64))) != 0;
 
-		if (addNewGhost && canSeeGhost) {
+		if (canSeeGhost) {
 			if (gso == nullptr) {
 				gso = ghostMemPool.alloc<GhostSolidObject>();
 
@@ -644,7 +664,9 @@ void CUnitDrawerData::RenderUnitDestroyed(const CUnit* unit)
 	RECOIL_DETAILED_TRACY_ZONE;
 	CUnit* u = const_cast<CUnit*>(unit);
 
-	UpdateUnitGhosts(unit, unit->leavesGhost);
+	// synchronous (fired through renderEventQueue's flush+dispatch destroy
+	// path), so the mask can be computed from live losStatus right here
+	UpdateUnitGhosts(unit, unit->leavesGhost ? CalcDeadGhostAllyMask(unit) : GhostAllyMask{});
 	// must happen after UpdateUnitGhosts()
 	u->currentIconIndex = icon::INVALID_ICON_INDEX;
 
@@ -659,15 +681,46 @@ void CUnitDrawerData::UnitEnteredRadar(const CUnit* unit, int allyTeam)
 	if (allyTeam != gu->myAllyTeam)
 		return;
 
+	renderEventQueue.UnitEnteredRadar(unit, allyTeam);
+}
+
+void CUnitDrawerData::UnitLeftRadar(const CUnit* unit, int allyTeam)
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	if (allyTeam != gu->myAllyTeam)
+		return;
+
+	renderEventQueue.UnitLeftRadar(unit, allyTeam);
+}
+
+void CUnitDrawerData::ApplyUnitRadarChanged(const CUnit* unit, int allyTeam)
+{
+	// re-check: gu->myAllyTeam may have changed since the record was queued;
+	// PlayerChanged refreshes every icon on such switches
+	if (allyTeam != gu->myAllyTeam)
+		return;
+
 	UpdateCurrentUnitIcon(unit);
 }
 
 void CUnitDrawerData::UnitEnteredLos(const CUnit* unit, int allyTeam)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// master's no-op set, evaluated at event time like master does
+	if (allyTeam != gu->myAllyTeam && !unit->leavesGhost)
+		return;
+
+	renderEventQueue.UnitEnteredLos(unit, allyTeam, unit->leavesGhost);
+}
+
+void CUnitDrawerData::ApplyUnitEnteredLos(const CUnit* unit, int allyTeam, bool leavesGhostAtEvent)
+{
 	CUnit* u = const_cast<CUnit*>(unit); //cleanup
 
-	if (unit->leavesGhost)
+	// use the event-time leavesGhost value: interleaved UnitLeavesGhostChanged
+	// records replay any later flips in order, so the live-ghost container ops
+	// mirror master's op-for-op
+	if (leavesGhostAtEvent)
 		spring::VectorErase(savedData.liveGhostBuildings[allyTeam][MDL_TYPE(unit)], u);
 
 	if (allyTeam != gu->myAllyTeam)
@@ -679,9 +732,17 @@ void CUnitDrawerData::UnitEnteredLos(const CUnit* unit, int allyTeam)
 void CUnitDrawerData::UnitLeftLos(const CUnit* unit, int allyTeam)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	if (allyTeam != gu->myAllyTeam && !unit->leavesGhost)
+		return;
+
+	renderEventQueue.UnitLeftLos(unit, allyTeam, unit->leavesGhost);
+}
+
+void CUnitDrawerData::ApplyUnitLeftLos(const CUnit* unit, int allyTeam, bool leavesGhostAtEvent)
+{
 	CUnit* u = const_cast<CUnit*>(unit); //cleanup
 
-	if (unit->leavesGhost)
+	if (leavesGhostAtEvent)
 		spring::VectorInsertUnique(savedData.liveGhostBuildings[allyTeam][MDL_TYPE(unit)], u, true);
 
 	if (allyTeam != gu->myAllyTeam)
@@ -697,7 +758,14 @@ void CUnitDrawerData::UnitLeavesGhostChanged(const CUnit* unit, const bool leave
 	if (unit->leavesGhost)
 		return;
 
-	if (UpdateUnitGhosts(unit, leaveDeadGhost)) {
+	// capture the dead-ghost decision now: CUnit::SetLeavesGhost clears the
+	// LOS_PREVLOS bits it derives from right after this notification returns
+	renderEventQueue.UnitLeavesGhostChanged(unit, leaveDeadGhost ? CalcDeadGhostAllyMask(unit) : GhostAllyMask{});
+}
+
+void CUnitDrawerData::ApplyUnitLeavesGhostChanged(const CUnit* unit, const GhostAllyMask& deadGhostAllyMask)
+{
+	if (UpdateUnitGhosts(unit, deadGhostAllyMask)) {
 		// left decoy dead ghost for own team
 		UpdateCurrentUnitIcon(unit);
 	}

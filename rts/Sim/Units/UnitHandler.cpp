@@ -22,6 +22,7 @@
 #include "Sim/Path/IPathManager.h"
 #include "Sim/Weapons/Weapon.h"
 #include "Game/BoundaryStats.h"
+#include "Rendering/Common/RenderEventQueue.h"
 #include "System/EventHandler.h"
 #include "System/Log/ILog.h"
 #include "System/SpringMath.h"
@@ -294,7 +295,7 @@ void CUnitHandler::DeleteUnit(CUnit* delUnit)
 	BoundaryStats::Add(BoundaryStats::ctr.unitDestroyed);
 
 	// we want to call RenderUnitDestroyed while the unit is still valid
-	eventHandler.RenderUnitDestroyed(delUnit);
+	renderEventQueue.RenderUnitDestroyed(delUnit);
 
 	const auto it = std::find(activeUnits.begin(), activeUnits.end(), delUnit);
 
