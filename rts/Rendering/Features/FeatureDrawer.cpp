@@ -55,19 +55,19 @@ bool CFeatureDrawer::ShouldDrawOpaqueFeature(CFeature* f, uint8_t thisPassMask)
 	assert(f);
 	assert(f->model);
 
-	if (f->drawFlag == 0)
+	if (GetDrawFlag(f) == 0)
 		return false;
 
-	if (f->HasDrawFlag(DrawFlags::SO_ALPHAF_FLAG))
+	if (HasDrawFlag(f, DrawFlags::SO_ALPHAF_FLAG))
 		return false;
 
-	if (thisPassMask == DrawFlags::SO_REFLEC_FLAG && !f->HasDrawFlag(DrawFlags::SO_REFLEC_FLAG))
+	if (thisPassMask == DrawFlags::SO_REFLEC_FLAG && !HasDrawFlag(f, DrawFlags::SO_REFLEC_FLAG))
 		return false;
 
-	if (thisPassMask == DrawFlags::SO_REFRAC_FLAG && !f->HasDrawFlag(DrawFlags::SO_REFRAC_FLAG))
+	if (thisPassMask == DrawFlags::SO_REFRAC_FLAG && !HasDrawFlag(f, DrawFlags::SO_REFRAC_FLAG))
 		return false;
 
-	if (thisPassMask == DrawFlags::SO_OPAQUE_FLAG && !f->HasDrawFlag(DrawFlags::SO_OPAQUE_FLAG))
+	if (thisPassMask == DrawFlags::SO_OPAQUE_FLAG && !HasDrawFlag(f, DrawFlags::SO_OPAQUE_FLAG))
 		return false;
 
 	if (LuaObjectDrawer::AddOpaqueMaterialObject(f, LUAOBJ_FEATURE))
@@ -85,19 +85,19 @@ bool CFeatureDrawer::ShouldDrawAlphaFeature(CFeature* f, uint8_t thisPassMask)
 	assert(f);
 	assert(f->model);
 
-	if (f->drawFlag == 0)
+	if (GetDrawFlag(f) == 0)
 		return false;
 
-	if (f->HasDrawFlag(DrawFlags::SO_OPAQUE_FLAG))
+	if (HasDrawFlag(f, DrawFlags::SO_OPAQUE_FLAG))
 		return false;
 
-	if (thisPassMask == DrawFlags::SO_REFLEC_FLAG && !f->HasDrawFlag(DrawFlags::SO_REFLEC_FLAG))
+	if (thisPassMask == DrawFlags::SO_REFLEC_FLAG && !HasDrawFlag(f, DrawFlags::SO_REFLEC_FLAG))
 		return false;
 
-	if (thisPassMask == DrawFlags::SO_REFRAC_FLAG && !f->HasDrawFlag(DrawFlags::SO_REFRAC_FLAG))
+	if (thisPassMask == DrawFlags::SO_REFRAC_FLAG && !HasDrawFlag(f, DrawFlags::SO_REFRAC_FLAG))
 		return false;
 
-	if (thisPassMask == DrawFlags::SO_ALPHAF_FLAG && !f->HasDrawFlag(DrawFlags::SO_ALPHAF_FLAG))
+	if (thisPassMask == DrawFlags::SO_ALPHAF_FLAG && !HasDrawFlag(f, DrawFlags::SO_ALPHAF_FLAG))
 		return false;
 
 	if (LuaObjectDrawer::AddAlphaMaterialObject(f, LUAOBJ_FEATURE))
@@ -117,7 +117,7 @@ bool CFeatureDrawer::ShouldDrawFeatureShadow(CFeature* f)
 
 	static constexpr uint8_t thisPassMask = DrawFlags::SO_SHOPAQ_FLAG;
 
-	if (!f->HasDrawFlag(DrawFlags::SO_SHOPAQ_FLAG))
+	if (!HasDrawFlag(f, DrawFlags::SO_SHOPAQ_FLAG))
 		return false;
 
 	if (LuaObjectDrawer::AddShadowMaterialObject(f, LUAOBJ_FEATURE))

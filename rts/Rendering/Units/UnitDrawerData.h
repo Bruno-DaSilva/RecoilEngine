@@ -163,7 +163,17 @@ public:
 	auto*       GetSavedData()       { return &savedData; }
 	const auto* GetSavedData() const { return &savedData; }
 protected:
-	void UpdateObjectDrawFlags(CSolidObject* o) const override;
+	void UpdateObjectDrawFlags(CSolidObject* o) override;
+public:
+	// icon state lives in the drawFlag storage (SO_DRICON_FLAG); moved off CUnit
+	// with the flags (sim/draw §A, PR 4). Read via CUnitDrawer::GetIsIcon.
+	bool GetUnitIsIcon(const CUnit* u) const { return HasDrawFlag(u, DrawFlags::SO_DRICON_FLAG); }
+	void SetUnitIsIcon(const CUnit* u, bool b) {
+		if (b)
+			AddDrawFlag(u, DrawFlags::SO_DRICON_FLAG);
+		else
+			DelDrawFlag(u, DrawFlags::SO_DRICON_FLAG);
+	}
 private:
 	void UpdateTempDrawUnits(std::vector<TempDrawUnit>& tempDrawUnits);
 

@@ -19,6 +19,7 @@
 #include "Rendering/Models/ModelsMemStorage.h"
 #include "Rendering/Models/ModelRenderContainer.h"
 #include "Rendering/Models/3DModel.hpp"
+#include "Sim/Objects/WorldObject.h" // DrawFlags
 #include "Rendering/Env/IWater.h"
 #include "Map/ReadMap.h"
 #include "Game/Camera.h"
@@ -63,7 +64,8 @@ protected:
 protected:
 	void ExtractTransforms();
 	void UpdateCommon(T* o);
-	virtual void UpdateObjectDrawFlags(CSolidObject* o) const = 0;
+	// non-const: it authors the drawer-owned draw-flag storage (sim/draw §A, PR 4)
+	virtual void UpdateObjectDrawFlags(CSolidObject* o) = 0;
 private:
 	void ExtractObjectTransforms(const T* o);
 	void UpdateObjectUniforms(const T* o);
@@ -71,7 +73,23 @@ public:
 	const std::vector<T*>& GetUnsortedObjects() const { return unsortedObjects; }
 	const ModelRenderContainer<T>& GetModelRenderer(int modelType) const { return modelRenderers[modelType]; }
 
-	void ClearPreviousDrawFlags() { for (auto object : unsortedObjects) object->previousDrawFlag = 0; }
+	// render-owned draw-visibility flags (sim/draw §A: these were drawFlag/previousDrawFlag
+	// fields on the sim objects, authored and consumed only by draw code — evicted to
+	// drawer storage). Keyed by object id; SO_NODRAW_FLAG on AddObject (matching the old
+	// member init), stale after death until id reuse, and unregistered objects read
+	// SO_NODRAW_FLAG — each matching the old member semantics exactly.
+	uint8_t GetDrawFlag(const T* o) const { return GetDrawFlagState(o).flag; }
+	uint8_t GetPreviousDrawFlag(const T* o) const { return GetDrawFlagState(o).prev; }
+	bool HasDrawFlag(const T* o, DrawFlags f) const { return (GetDrawFlag(o) & f) == f; }
+
+	// mutators; only valid for registered objects (id slot exists), as UpdateObjectDrawFlags
+	// and the icon-state pass are the sole writers — matching the old member's always-present
+	void ResetDrawFlag(const T* o) { DrawFlagRef(o).flag = DrawFlags::SO_NODRAW_FLAG; }
+	void SetDrawFlag(const T* o, DrawFlags f) { DrawFlagRef(o).flag  =  f; }
+	void AddDrawFlag(const T* o, DrawFlags f) { DrawFlagRef(o).flag |=  f; }
+	void DelDrawFlag(const T* o, DrawFlags f) { DrawFlagRef(o).flag &= ~f; }
+
+	void ClearPreviousDrawFlags() { for (auto object : unsortedObjects) DrawFlagRef(object).prev = 0; }
 
 	const auto& GetObjectTransformMemAlloc(const T* o) const {
 		const auto it = scTransMemAllocMap.find(const_cast<T*>(o));
@@ -109,10 +127,22 @@ protected:
 		return (o->id < drawPositions.size()) ? drawPositions[o->id] : zero;
 	}
 
+	struct DrawFlagState {
+		uint8_t flag = DrawFlags::SO_NODRAW_FLAG;
+		uint8_t prev = DrawFlags::SO_NODRAW_FLAG;
+	};
+
+	const DrawFlagState& GetDrawFlagState(const T* o) const {
+		static const DrawFlagState zero = {};
+		return (o->id < drawFlags.size()) ? drawFlags[o->id] : zero;
+	}
+	DrawFlagState& DrawFlagRef(const T* o) { return drawFlags[o->id]; }
+
 	std::array<ModelRenderContainer<T>, MODELTYPE_CNT> modelRenderers;
 
 	std::vector<T*> unsortedObjects;
 	std::vector<DrawPosition> drawPositions; // indexed by object id
+	std::vector<DrawFlagState> drawFlags;    // indexed by object id
 	spring::unordered_map<const T*, ScopedTransformMemAlloc> scTransMemAllocMap;
 
 	// last sim frame ExtractTransforms() ran for; extraction is due once per new sim frame
@@ -168,6 +198,11 @@ inline void CModelDrawerDataBase<T>::AddObject(const T* co, bool add)
 		drawPositions.resize(o->id + 1);
 
 	drawPositions[o->id] = {}; // zero until the first UpdateDrawPos, as the old members were
+
+	if (o->id >= drawFlags.size())
+		drawFlags.resize(o->id + 1);
+
+	drawFlags[o->id] = {}; // SO_NODRAW_FLAG until the first UpdateObjectDrawFlags, as the old members were
 
 	const uint32_t numMatrices = ((o->model ? o->model->numPieces : 0) + 1u) * 2;
 	scTransMemAllocMap.emplace(o, ScopedTransformMemAlloc(numMatrices));
@@ -298,7 +333,7 @@ template<typename T>
 inline void CModelDrawerDataBase<T>::UpdateObjectUniforms(const T* o)
 {
 	auto& uni = modelUniformsStorage.GetObjUniformsArray(o);
-	uni.drawFlag = o->drawFlag;
+	uni.drawFlag = GetDrawFlag(o);
 
 	if (gu->spectatingFullView || o->IsInLosForAllyTeam(gu->myAllyTeam)) {
 		uni.id = o->id;
@@ -314,7 +349,7 @@ template<typename T>
 inline void CModelDrawerDataBase<T>::UpdateCommon(T* o)
 {
 	assert(o);
-	o->previousDrawFlag = o->drawFlag;
+	DrawFlagRef(o).prev = GetDrawFlag(o);
 	UpdateObjectDrawFlags(o);
 
 	// transforms are no longer updated here: ExtractTransforms() covers every

@@ -32,7 +32,7 @@ public:
 	// feature first passes the draw-flag gate below, as the old member was.
 	const CMatrix44f& GetUnsyncedTransformMatrix(const CFeature* f) const;
 protected:
-	void UpdateObjectDrawFlags(CSolidObject* o) const override;
+	void UpdateObjectDrawFlags(CSolidObject* o) override;
 private:
 	void UpdateDrawPos(CFeature* f);
 	void UpdateUnsyncedTransform(const CFeature* f);

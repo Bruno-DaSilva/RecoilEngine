@@ -350,6 +350,7 @@ void CProjectileDrawer::Kill() {
 
 	renderProjectiles.clear();
 	drawPositions.clear();
+	drawFlags.clear();
 
 	for (auto& dp : drawParticles)
 		dp.clear();
@@ -379,13 +380,13 @@ void CProjectileDrawer::UpdateDrawFlags()
 
 		const float3& drawPos = (drawPositions[i] = p->GetDrawPos(globalRendering->timeOffset));
 
-		p->previousDrawFlag = p->drawFlag;
-		p->ResetDrawFlag();
+		uint8_t& drawFlag = drawFlags[i];
+		drawFlag = DrawFlags::SO_NODRAW_FLAG;
 
 		if (!CanDrawProjectile(p, p->GetAllyteamID()))
 			return;
 
-		p->SetDrawFlag(DrawFlags::SO_DRICON_FLAG); //reuse as a minimap draw indication
+		drawFlag = DrawFlags::SO_DRICON_FLAG; //reuse as a minimap draw indication
 
 		for (uint32_t camType = CCamera::CAMTYPE_PLAYER; camType < CCamera::CAMTYPE_ENVMAP; ++camType) {
 			if (camType == CCamera::CAMTYPE_UWREFL && !IWater::GetWater()->CanDrawReflectionPass())
@@ -407,30 +408,30 @@ void CProjectileDrawer::UpdateDrawFlags()
 			{
 				case CCamera::CAMTYPE_PLAYER: {
 					if (hasModel)
-						p->AddDrawFlag(DrawFlags::SO_OPAQUE_FLAG);
+						drawFlag |= DrawFlags::SO_OPAQUE_FLAG;
 					else
-						p->AddDrawFlag(DrawFlags::SO_ALPHAF_FLAG);
+						drawFlag |= DrawFlags::SO_ALPHAF_FLAG;
 
 					if (drawPos.y - p->GetDrawRadius() < 0.0f)
-						p->AddDrawFlag(DrawFlags::SO_REFRAC_FLAG);
+						drawFlag |= DrawFlags::SO_REFRAC_FLAG;
 
 					// Special case of piece projectile, since it has a model and fire particle
 					if (p->piece)
-						p->AddDrawFlag(DrawFlags::SO_ALPHAF_FLAG);
+						drawFlag |= DrawFlags::SO_ALPHAF_FLAG;
 				} break;
 				case CCamera::CAMTYPE_UWREFL: {
 					if (CModelDrawerHelper::ObjectVisibleReflection(drawPos, cam->GetPos(), p->GetDrawRadius()))
-						p->AddDrawFlag(DrawFlags::SO_REFLEC_FLAG);
+						drawFlag |= DrawFlags::SO_REFLEC_FLAG;
 				} break;
 				case CCamera::CAMTYPE_SHADOW: {
 					if unlikely(hasModel)
-						p->AddDrawFlag(DrawFlags::SO_SHOPAQ_FLAG);
+						drawFlag |= DrawFlags::SO_SHOPAQ_FLAG;
 					else
-						p->AddDrawFlag(DrawFlags::SO_SHTRAN_FLAG);
+						drawFlag |= DrawFlags::SO_SHTRAN_FLAG;
 
 					// Special case of piece projectile, since it has a model and fire particle
 					if (p->piece)
-						p->AddDrawFlag(DrawFlags::SO_SHTRAN_FLAG);
+						drawFlag |= DrawFlags::SO_SHTRAN_FLAG;
 				} break;
 			}
 		}
@@ -589,11 +590,11 @@ bool CProjectileDrawer::ShouldDrawProjectile(const CProjectile* p, uint8_t thisP
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(p);
 
-	if (p->drawFlag == 0)
+	if (GetDrawFlag(p) == 0)
 		return false;
 
 	assert(std::popcount(thisPassMask) == 1);
-	return p->HasDrawFlag(static_cast<DrawFlags>(thisPassMask));
+	return HasDrawFlag(p, static_cast<DrawFlags>(thisPassMask));
 }
 
 void CProjectileDrawer::DrawProjectilesMiniMap()
@@ -1216,6 +1217,7 @@ void CProjectileDrawer::RenderProjectileCreated(const CProjectile* p)
 		const_cast<CProjectile*>(p)->SetRenderIndex(renderProjectiles.size());
 		renderProjectiles.push_back(const_cast<CProjectile*>(p));
 		drawPositions.emplace_back(); // zero until the first UpdateDrawFlags, as the old member was
+		drawFlags.emplace_back(DrawFlags::SO_NODRAW_FLAG); // as the old member default was
 	}
 
 	if (p->model != nullptr)
@@ -1237,6 +1239,9 @@ void CProjectileDrawer::RenderProjectileDestroyed(const CProjectile* p)
 
 	drawPositions[ri] = drawPositions.back();
 	drawPositions.pop_back();
+
+	drawFlags[ri] = drawFlags.back();
+	drawFlags.pop_back();
 
 	if (p->model != nullptr)
 		modelRenderers[MDL_TYPE(p)].DelObject(p);

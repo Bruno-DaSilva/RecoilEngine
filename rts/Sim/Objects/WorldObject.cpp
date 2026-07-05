@@ -17,8 +17,8 @@ CR_REG_METADATA(CWorldObject, (
 	CR_MEMBER(height),
 	CR_MEMBER(sqRadius),
 	CR_MEMBER(drawRadius),
-	CR_MEMBER(drawFlag),
-	CR_MEMBER(previousDrawFlag),
+	// drawFlag/previousDrawFlag evicted to drawer-owned storage (sim/draw §A, PR 4);
+	// they were unsynced, draw-authored scratch state — creg format is engine-version-local
 	CR_MEMBER(preFrameTra),
 	// the projectile system needs to know that 'pos' and 'speed' are accessible by script
 	CR_MEMBER_BEGINFLAG(CM_Config),

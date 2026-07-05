@@ -208,7 +208,7 @@ static inline CUnit* ParseDrawUnit(lua_State* L, const char* caller, int index)
 
 	if (unit == nullptr)
 		return nullptr;
-	if (unit->GetIsIcon())
+	if (CUnitDrawer::GetIsIcon(unit))
 		return nullptr;
 	if (!camera->InView(unit->midPos, unit->radius))
 		return nullptr;

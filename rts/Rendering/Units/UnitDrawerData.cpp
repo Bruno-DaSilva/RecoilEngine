@@ -297,7 +297,7 @@ void CUnitDrawerData::UpdateUnitIconState(CUnit* unit)
 	RECOIL_DETAILED_TRACY_ZONE;
 	const unsigned short losStatus = unit->losStatus[gu->myAllyTeam];
 
-	unit->SetIsIcon((losStatus & LOS_INRADAR) != 0);
+	SetUnitIsIcon(unit, (losStatus & LOS_INRADAR) != 0);
 
 	//further refinement if visible
 	if ((losStatus & LOS_INLOS) != 0 || gu->spectatingFullView) {
@@ -309,7 +309,7 @@ void CUnitDrawerData::UpdateUnitIconState(CUnit* unit)
 		asIcon &= DrawAsIconByDistance(unit, (unit->pos - camera->GetPos()).SqLength());
 		// drawing icons is cheap but not free, avoid a perf-hit when many are offscreen
 		asIcon &= (camera->InView(GetDrawMidPos(unit), unit->GetDrawRadius()));
-		unit->SetIsIcon(asIcon);
+		SetUnitIsIcon(unit, asIcon);
 	}
 }
 
@@ -318,13 +318,13 @@ void CUnitDrawerData::UpdateUnitIconStateScreen(CUnit* unit)
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (game->hideInterface && iconHideWithUI) // icons are hidden with UI
 	{
-		unit->SetIsIcon(false); // draw unit model always
+		SetUnitIsIcon(unit, false); // draw unit model always
 		return;
 	}
 
 	if (unit->currentIconIndex == icon::INVALID_ICON_INDEX || unit->health <= 0 || unit->beingBuilt || unit->noDraw || unit->IsInVoid())
 	{
-		unit->SetIsIcon(false);
+		SetUnitIsIcon(unit, false);
 		return;
 	}
 
@@ -350,13 +350,13 @@ void CUnitDrawerData::UpdateUnitIconStateScreen(CUnit* unit)
 
 	if (!(losStatus & LOS_INLOS) && !gu->spectatingFullView) // no LOS on unit
 	{
-		unit->SetIsIcon(losStatus & LOS_INRADAR); // draw icon if unit is on radar
+		SetUnitIsIcon(unit, losStatus & LOS_INRADAR); // draw icon if unit is on radar
 		return;
 	}
 
 	// don't render unit's model if it is smaller than icon by 10% in screen space
 	// render it anyway in case icon isn't completely opaque (below FadeStart distance)
-	unit->SetIsIcon(iconZoomDist / iconSizeMult > iconFadeStart && std::abs(pos.x - radiusPos.x) < limit * 0.9);
+	SetUnitIsIcon(unit, iconZoomDist / iconSizeMult > iconFadeStart && std::abs(pos.x - radiusPos.x) < limit * 0.9);
 }
 
 void CUnitDrawerData::UpdateDrawPos(CUnit* u)
@@ -390,16 +390,16 @@ CMatrix44f CUnitDrawerData::GetUnsyncedTransformMatrix(const CUnit* unit, bool f
 	return (unit->ComposeMatrix(interPos));
 }
 
-void CUnitDrawerData::UpdateObjectDrawFlags(CSolidObject* o) const
+void CUnitDrawerData::UpdateObjectDrawFlags(CSolidObject* o)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	CUnit* u = static_cast<CUnit*>(o);
 
 	{
 		//icons flag is set before UpdateObjectDrawFlags() is called
-		const bool isIcon = u->HasDrawFlag(DrawFlags::SO_DRICON_FLAG);
-		u->ResetDrawFlag();
-		u->SetIsIcon(isIcon);
+		const bool isIcon = HasDrawFlag(u, DrawFlags::SO_DRICON_FLAG);
+		ResetDrawFlag(u);
+		SetUnitIsIcon(u, isIcon);
 	}
 
 	for (uint32_t camType = CCamera::CAMTYPE_PLAYER; camType < CCamera::CAMTYPE_ENVMAP; ++camType) {
@@ -415,7 +415,7 @@ void CUnitDrawerData::UpdateObjectDrawFlags(CSolidObject* o) const
 			continue;
 
 		// unit will be drawn as icon instead
-		if (u->GetIsIcon())
+		if (GetUnitIsIcon(u))
 			continue;
 
 		if (u->IsInVoid())
@@ -433,26 +433,26 @@ void CUnitDrawerData::UpdateObjectDrawFlags(CSolidObject* o) const
 				const float sqrCamDist = (GetDrawPos(u) - cam->GetPos()).SqLength();
 
 				if (!IsAlpha(u)) {
-					u->SetDrawFlag(DrawFlags::SO_OPAQUE_FLAG);
+					SetDrawFlag(u, DrawFlags::SO_OPAQUE_FLAG);
 				}
 				else {
-					u->SetDrawFlag(DrawFlags::SO_ALPHAF_FLAG);
+					SetDrawFlag(u, DrawFlags::SO_ALPHAF_FLAG);
 				}
 
 				if (u->IsInWater())
-					u->AddDrawFlag(DrawFlags::SO_REFRAC_FLAG);
+					AddDrawFlag(u, DrawFlags::SO_REFRAC_FLAG);
 			} break;
 
 			case CCamera::CAMTYPE_UWREFL: {
 				if (CModelDrawerHelper::ObjectVisibleReflection(GetDrawMidPos(u), cam->GetPos(), u->GetDrawRadius()))
-					u->AddDrawFlag(DrawFlags::SO_REFLEC_FLAG);
+					AddDrawFlag(u, DrawFlags::SO_REFLEC_FLAG);
 			} break;
 
 			case CCamera::CAMTYPE_SHADOW: {
 				if unlikely(IsAlpha(u))
-					u->AddDrawFlag(DrawFlags::SO_SHTRAN_FLAG);
+					AddDrawFlag(u, DrawFlags::SO_SHTRAN_FLAG);
 				else
-					u->AddDrawFlag(DrawFlags::SO_SHOPAQ_FLAG);
+					AddDrawFlag(u, DrawFlags::SO_SHOPAQ_FLAG);
 			} break;
 
 			default: { assert(false); } break;

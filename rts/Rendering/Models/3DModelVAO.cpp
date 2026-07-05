@@ -9,6 +9,8 @@
 #include "3DModelPiece.hpp"
 #include "IModelParser.h"
 #include "Rendering/ModelsDataUploader.h"
+#include "Rendering/Units/UnitDrawer.h"
+#include "Rendering/Features/FeatureDrawer.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Features/Feature.h"
@@ -339,7 +341,7 @@ bool S3DModelVAO::AddToSubmission(const CUnit* unit)
 	const S3DModel* model = unit->model;
 	assert(model);
 
-	return AddToSubmissionImpl(unit, model->indxStart, model->indxCount, unit->team, unit->drawFlag);
+	return AddToSubmissionImpl(unit, model->indxStart, model->indxCount, unit->team, CUnitDrawer::GetDrawFlag(unit));
 }
 
 bool S3DModelVAO::AddToSubmission(const CFeature* feature)
@@ -350,7 +352,7 @@ bool S3DModelVAO::AddToSubmission(const CFeature* feature)
 	const S3DModel* model = feature->model;
 	assert(model);
 
-	return AddToSubmissionImpl(feature, model->indxStart, model->indxCount, feature->team, feature->drawFlag);
+	return AddToSubmissionImpl(feature, model->indxStart, model->indxCount, feature->team, CFeatureDrawer::GetDrawFlag(feature));
 }
 
 bool S3DModelVAO::AddToSubmission(const UnitDef* unitDef, uint8_t teamID)
@@ -484,7 +486,7 @@ bool S3DModelVAO::SubmitImmediately(const CUnit* unit, const GLenum mode, bool b
 	const S3DModel* model = unit->model;
 	assert(model);
 
-	return SubmitImmediatelyImpl(unit, model->indxStart, model->indxCount, unit->team, unit->drawFlag, mode, bindUnbind);
+	return SubmitImmediatelyImpl(unit, model->indxStart, model->indxCount, unit->team, CUnitDrawer::GetDrawFlag(unit), mode, bindUnbind);
 }
 
 bool S3DModelVAO::SubmitImmediately(const CFeature* feature, GLenum mode, bool bindUnbind)
@@ -495,7 +497,7 @@ bool S3DModelVAO::SubmitImmediately(const CFeature* feature, GLenum mode, bool b
 	const S3DModel* model = feature->model;
 	assert(model);
 
-	return SubmitImmediatelyImpl(feature, model->indxStart, model->indxCount, feature->team, feature->drawFlag, mode, bindUnbind);
+	return SubmitImmediatelyImpl(feature, model->indxStart, model->indxCount, feature->team, CFeatureDrawer::GetDrawFlag(feature), mode, bindUnbind);
 }
 
 bool S3DModelVAO::SubmitImmediately(const UnitDef* unitDef, int teamID, GLenum mode, bool bindUnbind)

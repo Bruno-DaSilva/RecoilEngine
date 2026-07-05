@@ -1367,7 +1367,7 @@ int LuaUnsyncedRead::GetUnitDrawFlag(lua_State* L)
 	if (unit == nullptr)
 		return 0;
 
-	lua_pushinteger(L, unit->drawFlag);
+	lua_pushinteger(L, CUnitDrawer::GetDrawFlag(unit));
 	return 1;
 }
 
@@ -1698,7 +1698,7 @@ int LuaUnsyncedRead::GetFeatureDrawFlag(lua_State* L)
 	if (feature == nullptr)
 		return 0;
 
-	lua_pushinteger(L, feature->drawFlag);
+	lua_pushinteger(L, CFeatureDrawer::GetDrawFlag(feature));
 	return 1;
 }
 
@@ -1852,7 +1852,7 @@ int LuaUnsyncedRead::IsUnitVisible(lua_State* L)
 			lua_pushboolean(L, false);
 		} else {
 			lua_pushboolean(L,
-				(!checkIcon || !unit->GetIsIcon()) &&
+				(!checkIcon || !CUnitDrawer::GetIsIcon(unit)) &&
 				camera->InView(unit->midPos, radius));
 		}
 	}
@@ -1861,7 +1861,7 @@ int LuaUnsyncedRead::IsUnitVisible(lua_State* L)
 			lua_pushboolean(L, false);
 		} else {
 			lua_pushboolean(L,
-				(!checkIcon || !unit->GetIsIcon()) &&
+				(!checkIcon || !CUnitDrawer::GetIsIcon(unit)) &&
 				camera->InView(unit->midPos, radius));
 		}
 	}
@@ -1882,7 +1882,7 @@ int LuaUnsyncedRead::IsUnitIcon(lua_State* L)
 	if (unit == nullptr)
 		return 0;
 
-	lua_pushboolean(L, unit->GetIsIcon());
+	lua_pushboolean(L, CUnitDrawer::GetIsIcon(unit));
 	return 1;
 }
 
@@ -2104,7 +2104,7 @@ int LuaUnsyncedRead::GetVisibleUnits(lua_State* L)
 			if (allyTeamID >= 0 && !(u->losStatus[allyTeamID] & LOS_INLOS))
 				continue;
 
-			if (noIcons && u->GetIsIcon())
+			if (noIcons && CUnitDrawer::GetIsIcon(u))
 				continue;
 
 			if ((teamID == LuaUtils::AllyUnits)  && (allyTeamID != u->allyteam))
@@ -2189,7 +2189,7 @@ int LuaUnsyncedRead::GetVisibleFeatures(lua_State* L)
 			if (f->noDraw)
 				continue;
 
-			if (noIcons && f->drawFlag == DrawFlags::SO_DRICON_FLAG)
+			if (noIcons && CFeatureDrawer::GetDrawFlag(f) == DrawFlags::SO_DRICON_FLAG)
 				continue;
 
 			if (noGeos && f->def->geoThermal)
@@ -2290,6 +2290,13 @@ int LuaUnsyncedRead::GetVisibleProjectiles(lua_State* L)
 }
 
 namespace {
+	// drawFlag/previousDrawFlag are drawer-owned since the sim/draw §A eviction (PR 4);
+	// dispatch per object type to the matching drawer storage
+	static uint8_t GetRenderObjectDrawFlag(const CUnit* u) { return CUnitDrawer::GetDrawFlag(u); }
+	static uint8_t GetRenderObjectDrawFlag(const CFeature* f) { return CFeatureDrawer::GetDrawFlag(f); }
+	static uint8_t GetRenderObjectPreviousDrawFlag(const CUnit* u) { return CUnitDrawer::GetPreviousDrawFlag(u); }
+	static uint8_t GetRenderObjectPreviousDrawFlag(const CFeature* f) { return CFeatureDrawer::GetPreviousDrawFlag(f); }
+
 	template<typename V>
 	static int GetRenderObjects(lua_State* L, const V& renderObjects, const char* func) {
 		const int  drawMask = luaL_optint(L, 1, 0);
@@ -2299,7 +2306,7 @@ namespace {
 		uint32_t count = 0;
 		for (const auto renderObject : renderObjects)
 		{
-			if ((renderObject->drawFlag & drawMask) == 0)
+			if ((GetRenderObjectDrawFlag(renderObject) & drawMask) == 0)
 				continue;
 
 			lua_pushnumber(L, renderObject->id);
@@ -2313,10 +2320,10 @@ namespace {
 		count = 0;
 		for (const auto renderObject : renderObjects)
 		{
-			if ((renderObject->drawFlag & drawMask) == 0)
+			if ((GetRenderObjectDrawFlag(renderObject) & drawMask) == 0)
 				continue;
 
-			lua_pushnumber(L, renderObject->drawFlag);
+			lua_pushnumber(L, GetRenderObjectDrawFlag(renderObject));
 			lua_rawseti(L, -2, ++count);
 		}
 
@@ -2335,10 +2342,10 @@ namespace {
 
 		for (const auto renderObject : renderObjects)
 		{
-			if (renderObject->previousDrawFlag == renderObject->drawFlag)
+			if (GetRenderObjectPreviousDrawFlag(renderObject) == GetRenderObjectDrawFlag(renderObject))
 				continue;
 			changedIds.push_back(renderObject->id);
-			changedDrawFlags.push_back(renderObject->drawFlag);
+			changedDrawFlags.push_back(GetRenderObjectDrawFlag(renderObject));
 		}
 
 		lua_createtable(L, changedIds.size(), 0);

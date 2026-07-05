@@ -186,22 +186,22 @@ bool CUnitDrawer::ShouldDrawOpaqueUnit(CUnit* u, uint8_t thisPassMask)
 	assert(u);
 	assert(u->model);
 
-	if (u->drawFlag == 0)
+	if (GetDrawFlag(u) == 0)
 		return false;
 
-	if (u->GetIsIcon())
+	if (GetIsIcon(u))
 		return false;
 
-	if (u->HasDrawFlag(DrawFlags::SO_ALPHAF_FLAG))
+	if (HasDrawFlag(u, DrawFlags::SO_ALPHAF_FLAG))
 		return false;
 
-	if (thisPassMask == DrawFlags::SO_REFLEC_FLAG && !u->HasDrawFlag(DrawFlags::SO_REFLEC_FLAG))
+	if (thisPassMask == DrawFlags::SO_REFLEC_FLAG && !HasDrawFlag(u, DrawFlags::SO_REFLEC_FLAG))
 		return false;
 
-	if (thisPassMask == DrawFlags::SO_REFRAC_FLAG && !u->HasDrawFlag(DrawFlags::SO_REFRAC_FLAG))
+	if (thisPassMask == DrawFlags::SO_REFRAC_FLAG && !HasDrawFlag(u, DrawFlags::SO_REFRAC_FLAG))
 		return false;
 
-	if (thisPassMask == DrawFlags::SO_OPAQUE_FLAG && !u->HasDrawFlag(DrawFlags::SO_OPAQUE_FLAG))
+	if (thisPassMask == DrawFlags::SO_OPAQUE_FLAG && !HasDrawFlag(u, DrawFlags::SO_OPAQUE_FLAG))
 		return false;
 
 	if (LuaObjectDrawer::AddOpaqueMaterialObject(u, LUAOBJ_UNIT))
@@ -219,22 +219,22 @@ bool CUnitDrawer::ShouldDrawAlphaUnit(CUnit* u, uint8_t thisPassMask)
 	assert(u);
 	assert(u->model);
 
-	if (u->drawFlag == 0)
+	if (GetDrawFlag(u) == 0)
 		return false;
 
-	if (u->GetIsIcon())
+	if (GetIsIcon(u))
 		return false;
 
-	if (u->HasDrawFlag(DrawFlags::SO_OPAQUE_FLAG))
+	if (HasDrawFlag(u, DrawFlags::SO_OPAQUE_FLAG))
 		return false;
 
-	if (thisPassMask == DrawFlags::SO_REFLEC_FLAG && !u->HasDrawFlag(DrawFlags::SO_REFLEC_FLAG))
+	if (thisPassMask == DrawFlags::SO_REFLEC_FLAG && !HasDrawFlag(u, DrawFlags::SO_REFLEC_FLAG))
 		return false;
 
-	if (thisPassMask == DrawFlags::SO_REFRAC_FLAG && !u->HasDrawFlag(DrawFlags::SO_REFRAC_FLAG))
+	if (thisPassMask == DrawFlags::SO_REFRAC_FLAG && !HasDrawFlag(u, DrawFlags::SO_REFRAC_FLAG))
 		return false;
 
-	if (thisPassMask == DrawFlags::SO_ALPHAF_FLAG && !u->HasDrawFlag(DrawFlags::SO_ALPHAF_FLAG))
+	if (thisPassMask == DrawFlags::SO_ALPHAF_FLAG && !HasDrawFlag(u, DrawFlags::SO_ALPHAF_FLAG))
 		return false;
 
 	if (LuaObjectDrawer::AddAlphaMaterialObject(u, LUAOBJ_UNIT))
@@ -254,7 +254,7 @@ bool CUnitDrawer::ShouldDrawUnitShadow(CUnit* u)
 
 	static constexpr uint8_t thisPassMask = DrawFlags::SO_SHOPAQ_FLAG;
 
-	if (!u->HasDrawFlag(DrawFlags::SO_SHOPAQ_FLAG))
+	if (!HasDrawFlag(u, DrawFlags::SO_SHOPAQ_FLAG))
 		return false;
 
 	if (LuaObjectDrawer::AddShadowMaterialObject(u, LUAOBJ_UNIT))
@@ -565,7 +565,7 @@ void CUnitDrawerGLSL::DrawUnitIcons() const
 		if (unit->currentIconIndex == icon::INVALID_ICON_INDEX)
 			continue;
 
-		if (!unit->GetIsIcon())
+		if (!GetIsIcon(unit))
 			continue;
 
 		if (!unit->drawIcon)
@@ -710,7 +710,7 @@ void CUnitDrawerGLSL::DrawUnitIconsScreen() const
 			}
 		}
 
-		DrawUnitIconScreen(rb, unit->currentIconIndex, pos, currentColor, unit->radius, unit->GetIsIcon());
+		DrawUnitIconScreen(rb, unit->currentIconIndex, pos, currentColor, unit->radius, GetIsIcon(unit));
 	}
 	
 	if (!isFullView && ghostIconDimming > 0.0f) {
@@ -958,7 +958,7 @@ void CUnitDrawerGLSL::DrawAlphaUnit(CUnit* unit, int modelType, uint8_t thisPass
 		return;
 	}
 
-	if (unit->GetIsIcon())
+	if (GetIsIcon(unit))
 		return;
 
 	if ((losStatus & LOS_INLOS) || gu->spectatingFullView) {

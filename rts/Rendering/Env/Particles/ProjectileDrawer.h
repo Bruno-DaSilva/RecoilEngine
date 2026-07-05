@@ -72,6 +72,17 @@ public:
 	// draw-time transform (was CProjectile::GetTransformMatrix, "UNSYNCED ONLY")
 	CMatrix44f GetTransformMatrix(const CProjectile* p, bool offsetPos) const;
 
+	// drawer-owned draw-visibility flags, parallel to renderProjectiles (sim/draw §A
+	// drawFlag eviction; was a CProjectile field). SO_NODRAW_FLAG for projectiles not
+	// (yet) registered, as the old member default was. (previousDrawFlag was dropped:
+	// it was a per-frame dead store for projectiles — no reader ever consumed it, the
+	// GetRenderObjectsDrawFlagChanged consumer only queries units/features.)
+	uint8_t GetDrawFlag(const CProjectile* p) const {
+		const uint32_t ri = p->GetRenderIndex();
+		return (ri < drawFlags.size()) ? drawFlags[ri] : DrawFlags::SO_NODRAW_FLAG;
+	}
+	bool HasDrawFlag(const CProjectile* p, DrawFlags f) const { return (GetDrawFlag(p) & f) == f; }
+
 	unsigned int NumSmokeTextures() const { return (smokeTextures.size()); }
 
 	void IncPerlinTexObjectCount() { perlinTexObjects++; }
@@ -174,6 +185,9 @@ private:
 
 	/// interpolated draw positions, parallel to renderProjectiles (see GetDrawPos)
 	std::vector<float3> drawPositions;
+
+	/// draw-visibility flags, parallel to renderProjectiles (see GetDrawFlag)
+	std::vector<uint8_t> drawFlags;
 
 	/// projectiles container
 	std::vector<CProjectile*> renderProjectiles;

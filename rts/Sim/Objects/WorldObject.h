@@ -1,7 +1,6 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
-#ifndef WORLD_OBJECT_H
-#define WORLD_OBJECT_H
+#pragma once
 
 #include "System/Object.h"
 #include "System/float4.h"
@@ -11,6 +10,12 @@
 
 struct S3DModel;
 
+// Render-side draw-visibility bitset. The per-object drawFlag/previousDrawFlag
+// values are authored and consumed exclusively by draw code and live in
+// drawer-owned storage (CModelDrawerDataBase<T> for units/features,
+// CProjectileDrawer for projectiles) since the sim/draw §A eviction (PR 4).
+// The enum only lives in this (sim) header for include locality — it is
+// transitively visible everywhere the drawers and their consumers need it.
 enum DrawFlags : uint8_t {
 	SO_NODRAW_FLAG = 0, // must be 0
 	SO_OPAQUE_FLAG = 1,
@@ -67,13 +72,6 @@ public:
 	float3 GetDrawPos(float t) const { return mix(preFrameTra.t, pos, t); }
 	float3 GetDrawPosOther(const float3& prevFramePos, const float3& currFramePos, float t) const { return preFrameTra.t + (currFramePos - prevFramePos) * t; }
 
-	void ResetDrawFlag() { drawFlag = DrawFlags::SO_NODRAW_FLAG; }
-	void SetDrawFlag(DrawFlags f) { drawFlag  =  f; }
-	void AddDrawFlag(DrawFlags f) { drawFlag |=  f; }
-	void DelDrawFlag(DrawFlags f) { drawFlag &= ~f; }
-	bool HasDrawFlag(DrawFlags f) const { return (drawFlag & f) == f; }
-	DrawFlags GetDrawFlag() const { return static_cast<DrawFlags>(drawFlag); }
-
 	inline int GetMtTempNum() const { return mtTempNum[ThreadPool::GetThreadNum()]; }
 	inline void SetMtTempNum(int value) { mtTempNum[ThreadPool::GetThreadNum()] = value; }
 
@@ -94,8 +92,7 @@ public:
 	bool useAirLos = false;     ///< if true, the object's visibility is checked against airLosMap[allyteam]
 	bool alwaysVisible = false; ///< if true, object is drawn even if not in LOS
 
-	uint8_t drawFlag = DrawFlags::SO_NODRAW_FLAG;
-	uint8_t previousDrawFlag = DrawFlags::SO_NODRAW_FLAG;
+	// drawFlag/previousDrawFlag evicted to drawer-owned storage (sim/draw §A, PR 4)
 
 	S3DModel* model = nullptr;
 protected:
@@ -103,5 +100,3 @@ protected:
 public:
 	std::array<int, ThreadPool::MAX_THREADS> mtTempNum = {};
 };
-
-#endif /* WORLD_OBJECT_H */

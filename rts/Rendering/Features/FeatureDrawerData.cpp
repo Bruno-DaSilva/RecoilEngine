@@ -122,12 +122,12 @@ bool CFeatureDrawerData::IsAlpha(const CFeature* co) const
 	return (co->drawAlpha < 1.0f);
 }
 
-void CFeatureDrawerData::UpdateObjectDrawFlags(CSolidObject* o) const
+void CFeatureDrawerData::UpdateObjectDrawFlags(CSolidObject* o)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 
 	CFeature* f = static_cast<CFeature*>(o);
-	f->ResetDrawFlag();
+	ResetDrawFlag(f);
 
 	for (uint32_t camType = CCamera::CAMTYPE_PLAYER; camType < CCamera::CAMTYPE_ENVMAP; ++camType) {
 		if (camType == CCamera::CAMTYPE_UWREFL && !IWater::GetWater()->CanDrawReflectionPass())
@@ -157,7 +157,7 @@ void CFeatureDrawerData::UpdateObjectDrawFlags(CSolidObject* o) const
 
 				// special case for non-fading features
 				if (!f->alphaFade) {
-					f->SetDrawFlag(DrawFlags::SO_OPAQUE_FLAG);
+					SetDrawFlag(f, DrawFlags::SO_OPAQUE_FLAG);
 					f->drawAlpha = 1.0f;
 					continue;
 				}
@@ -171,9 +171,9 @@ void CFeatureDrawerData::UpdateObjectDrawFlags(CSolidObject* o) const
 				// close enough to draw solid
 				if (camDist < featureFadeDistance) {
 					f->drawAlpha = 1.0f;
-					f->SetDrawFlag(DrawFlags::SO_OPAQUE_FLAG);
+					SetDrawFlag(f, DrawFlags::SO_OPAQUE_FLAG);
 					if (f->IsInWater())
-						f->AddDrawFlag(DrawFlags::SO_REFRAC_FLAG);
+						AddDrawFlag(f, DrawFlags::SO_REFRAC_FLAG);
 
 					continue;
 				}
@@ -185,20 +185,20 @@ void CFeatureDrawerData::UpdateObjectDrawFlags(CSolidObject* o) const
 				}
 
 				f->drawAlpha = std::max(0.0f, 1.0f - (camDist - featureFadeDistance) / (featureDrawDistance - featureFadeDistance));
-				f->SetDrawFlag(DrawFlags::SO_ALPHAF_FLAG);
+				SetDrawFlag(f, DrawFlags::SO_ALPHAF_FLAG);
 				if (f->IsInWater())
-					f->AddDrawFlag(DrawFlags::SO_REFRAC_FLAG);
+					AddDrawFlag(f, DrawFlags::SO_REFRAC_FLAG);
 			} break;
 
 			case CCamera::CAMTYPE_UWREFL: {
 				if (f->drawAlpha <= 0.0f)
 					continue;
 
-				if (!f->HasDrawFlag(DrawFlags::SO_OPAQUE_FLAG) && !f->HasDrawFlag(DrawFlags::SO_ALPHAF_FLAG))
+				if (!HasDrawFlag(f, DrawFlags::SO_OPAQUE_FLAG) && !HasDrawFlag(f, DrawFlags::SO_ALPHAF_FLAG))
 					continue;
 
 				if (CModelDrawerHelper::ObjectVisibleReflection(GetDrawMidPos(f), cam->GetPos(), f->GetDrawRadius()))
-					f->AddDrawFlag(DrawFlags::SO_REFLEC_FLAG);
+					AddDrawFlag(f, DrawFlags::SO_REFLEC_FLAG);
 			} break;
 
 			case CCamera::CAMTYPE_SHADOW: {
@@ -206,9 +206,9 @@ void CFeatureDrawerData::UpdateObjectDrawFlags(CSolidObject* o) const
 					continue;
 
 				if unlikely(IsAlpha(f))
-					f->AddDrawFlag(DrawFlags::SO_SHTRAN_FLAG);
+					AddDrawFlag(f, DrawFlags::SO_SHTRAN_FLAG);
 				else
-					f->AddDrawFlag(DrawFlags::SO_SHOPAQ_FLAG);
+					AddDrawFlag(f, DrawFlags::SO_SHOPAQ_FLAG);
 			} break;
 
 			default: { assert(false); } break;
@@ -225,7 +225,8 @@ const CMatrix44f& CFeatureDrawerData::GetUnsyncedTransformMatrix(const CFeature*
 
 void CFeatureDrawerData::UpdateUnsyncedTransform(const CFeature* f)
 {
-	if (f->alwaysUpdateMat || (f->drawFlag > DrawFlags::SO_NODRAW_FLAG && f->drawFlag < DrawFlags::SO_DRICON_FLAG)) {
+	const uint8_t drawFlag = GetDrawFlag(f);
+	if (f->alwaysUpdateMat || (drawFlag > DrawFlags::SO_NODRAW_FLAG && drawFlag < DrawFlags::SO_DRICON_FLAG)) {
 		unsyncedTransforms[f->id] = f->ComposeMatrix(GetDrawPos(f));
 	}
 }

@@ -61,6 +61,12 @@ public:
 	static float3 GetObjDrawErrorPos(const CUnit* unit, int allyteam) { return modelDrawerData->GetObjDrawErrorPos(unit, allyteam); }
 	static CMatrix44f GetUnsyncedTransformMatrix(const CUnit* unit, bool fullread = false) { return modelDrawerData->GetUnsyncedTransformMatrix(unit, fullread); }
 
+	// drawer-owned draw-visibility flags + icon state (sim/draw §A drawFlag eviction, PR 4)
+	static uint8_t GetDrawFlag(const CUnit* unit) { return modelDrawerData->GetDrawFlag(unit); }
+	static uint8_t GetPreviousDrawFlag(const CUnit* unit) { return modelDrawerData->GetPreviousDrawFlag(unit); }
+	static bool HasDrawFlag(const CUnit* unit, DrawFlags f) { return modelDrawerData->HasDrawFlag(unit, f); }
+	static bool GetIsIcon(const CUnit* unit) { return modelDrawerData->GetUnitIsIcon(unit); }
+
 	static void ClearPreviousDrawFlags() { modelDrawerData->ClearPreviousDrawFlags(); }
 	static void UnitLeavesGhostChanged(const CUnit* unit, const bool leaveDeadGhost) { modelDrawerData->UnitLeavesGhostChanged(unit, leaveDeadGhost); }
 

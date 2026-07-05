@@ -1561,7 +1561,7 @@ void CGroundDecalHandler::UpdateDecalsVisibility()
 				const bool decalOwnerInCurLOS = ((unit->losStatus[gu->myAllyTeam] &   LOS_INLOS) != 0);
 				const bool decalOwnerInPrvLOS = ((unit->losStatus[gu->myAllyTeam] & LOS_PREVLOS) != 0);
 				const bool isGhostNow = gameSetup->ghostedBuildings && decalOwnerInPrvLOS && !decalOwnerInCurLOS;
-				const bool iconOnly = (unit->GetDrawFlag() == DrawFlags::SO_DRICON_FLAG);
+				const bool iconOnly = (CUnitDrawer::GetDrawFlag(unit) == DrawFlags::SO_DRICON_FLAG);
 
 				if (!gu->spectatingFullView && isGhostNow) {
 					// don't show ground decals for ghosts, this not for long used to be ghostDimming

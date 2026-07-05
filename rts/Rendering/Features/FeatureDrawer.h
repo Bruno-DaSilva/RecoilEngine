@@ -39,6 +39,11 @@ public:
 	static float3 GetObjDrawMidPos(const CFeature* feature) { return modelDrawerData->GetObjDrawMidPos(feature); }
 	static const CMatrix44f& GetUnsyncedTransformMatrix(const CFeature* feature) { return modelDrawerData->GetUnsyncedTransformMatrix(feature); }
 
+	// drawer-owned draw-visibility flags (sim/draw §A drawFlag eviction, PR 4)
+	static uint8_t GetDrawFlag(const CFeature* feature) { return modelDrawerData->GetDrawFlag(feature); }
+	static uint8_t GetPreviousDrawFlag(const CFeature* feature) { return modelDrawerData->GetPreviousDrawFlag(feature); }
+	static bool HasDrawFlag(const CFeature* feature, DrawFlags f) { return modelDrawerData->HasDrawFlag(feature, f); }
+
 	static void ClearPreviousDrawFlags() { modelDrawerData->ClearPreviousDrawFlags(); }
 public:
 	virtual void DrawFeatureModel(const CFeature* feature, bool noLuaCall) const = 0;

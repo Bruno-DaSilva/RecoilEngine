@@ -257,13 +257,8 @@ public: // unsynced methods
 	const CGroup* GetGroup() const;
 	      CGroup* GetGroup();
 
-	bool GetIsIcon() const { return HasDrawFlag(DrawFlags::SO_DRICON_FLAG); }
-	void SetIsIcon(bool b) {
-		if (b)
-			AddDrawFlag(DrawFlags::SO_DRICON_FLAG);
-		else
-			DelDrawFlag(DrawFlags::SO_DRICON_FLAG);
-	}
+	// GetIsIcon()/SetIsIcon() evicted to the drawer (CUnitDrawer::GetIsIcon,
+	// CUnitDrawerData::SetUnitIsIcon) with the drawFlag storage (sim/draw §A, PR 4)
 public:
 	static float ExperienceScale(float limExperience, float experienceWeight) {
 		// limExperience ranges from 0.0 to 0.9999...
