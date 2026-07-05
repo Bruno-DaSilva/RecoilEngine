@@ -90,6 +90,10 @@ void CFeatureDrawerData::ConfigNotify(const std::string& key, const std::string&
 void CFeatureDrawerData::Update()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+
+	// defined extraction point: snapshot piece/object transforms once per new sim frame
+	ExtractTransforms();
+
 	if (mtModelDrawer) {
 		for_mt_chunk(0, unsortedObjects.size(), [this](const int k) {
 			CFeature* f = unsortedObjects[k];

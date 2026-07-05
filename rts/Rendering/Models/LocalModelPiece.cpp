@@ -120,12 +120,12 @@ void LocalModelPiece::ResetWasUpdated() const
 {
 	// wasUpdated needs to trigger twice because otherwise
 	// once all animation of piece stops and dirty is no longer triggered
-	// UpdateObjectTrasform() would exit too early and wouldn't update
+	// ExtractObjectTransforms() would exit too early and wouldn't update
 	// prevModelSpaceTra, causing the piece transform to jerk between the
 	// up-to-date modelSpaceTra and stale prevModelSpaceTra
 	// By passing values from right to left we make sure to trigger
 	// wasUpdated[0] || wasUpdated[1] at least twice after such situation
-	// happens, thus uploading prevModelSpaceTra in UpdateObjectTrasform() too
+	// happens, thus uploading prevModelSpaceTra in ExtractObjectTransforms() too
 	wasUpdated[1] = std::exchange(wasUpdated[0], false);
 
 	// use this call to also reset noInterpolation

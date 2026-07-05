@@ -43,9 +43,9 @@ namespace BoundaryStats {
 	using Counter = std::atomic<uint64_t>;
 
 	struct Counters {
-		// TransformsMemStorage write traffic (GPU-extraction proxy; draw-path
-		// rate, deduped to one upload per object per sim frame by
-		// lastSyncedFrameUpload — see CModelDrawerDataBase::UpdateObjectTrasform)
+		// TransformsMemStorage write traffic (GPU-extraction proxy; one
+		// extraction pass over all objects per new sim frame — see
+		// CModelDrawerDataBase::ExtractTransforms)
 		Counter traChecked{0};   // UpdateIfChanged calls (compare performed)
 		Counter traChanged{0};   // ... of which the value actually differed
 		Counter traForced{0};    // UpdateForced calls (unconditional writes)

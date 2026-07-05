@@ -179,6 +179,10 @@ void CUnitDrawerData::ConfigNotify(const std::string& key, const std::string& va
 void CUnitDrawerData::Update()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+
+	// defined extraction point: snapshot piece/object transforms once per new sim frame
+	ExtractTransforms();
+
 	iconSizeBase = std::max(1.0f, std::max(globalRendering->viewSizeX, globalRendering->viewSizeY) * iconSizeMult * iconScale);
 
 	for (int modelType = MODELTYPE_3DO; modelType < MODELTYPE_CNT; modelType++) {
