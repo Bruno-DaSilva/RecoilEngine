@@ -1152,6 +1152,9 @@ void CGuiHandler::SetCursorIcon() const
 bool CGuiHandler::TryTarget(const SCommandDescription& cmdDesc) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// PR 27b: GuiTraceRay + weapon-state reads walk sim state; park the sim
+	// (nest-safe, no-op flag-off/parked) -- master ran this serially anyway
+	CGame::ScopedExternalSimPause simPause;
 	if (cmdDesc.id != CMD_ATTACK)
 		return true;
 
@@ -1683,6 +1686,9 @@ float CGuiHandler::GetNumberInput(const SCommandDescription& cd) const
 int CGuiHandler::GetDefaultCommand(int x, int y, const float3& cameraPos, const float3& mouseDir) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// PR 27b: GuiTraceRay + commandAI possibleCommands walks (the windowed
+	// dogfood SIGSEGV at SelectedUnitsHandler::GetDefaultCmd); see TryTarget
+	CGame::ScopedExternalSimPause simPause;
 	CInputReceiver* ir = nullptr;
 
 	if (!game->hideInterface && !mouse->offscreen)
@@ -2170,6 +2176,8 @@ bool ZeroRadiusAllowed(const Command &c) {
 Command CGuiHandler::GetCommand(int mouseX, int mouseY, int buttonHint, bool preview, const float3& cameraPos, const float3& mouseDir)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// PR 27b: see TryTarget
+	CGame::ScopedExternalSimPause simPause;
 	const Command defaultRet(CMD_FAILED);
 
 	int tempInCommand = inCommand;
@@ -2500,6 +2508,8 @@ static void FillRowOfBuildPos(const BuildInfo& startInfo, float x, float z, floa
 size_t CGuiHandler::GetBuildPositions(const BuildInfo& startInfo, const BuildInfo& endInfo, const float3& cameraPos, const float3& mouseDir)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// PR 27b: blocking-map + yardmap reads; see TryTarget
+	CGame::ScopedExternalSimPause simPause;
 	// both builds must have the same unitdef
 	assert(startInfo.def == endInfo.def);
 
@@ -3542,6 +3552,10 @@ static inline void DrawWeaponArc(const CUnit* unit)
 void CGuiHandler::DrawMapStuff(bool onMiniMap)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// PR 27b: the world-space GUI pass reads sim state broadly (queues,
+	// ranges, traces); park for the whole pass. Perf follow-up: fold into
+	// the barrier window instead of a second park. See TryTarget.
+	CGame::ScopedExternalSimPause simPause;
 	if (!onMiniMap) {
 		glEnable(GL_DEPTH_TEST);
 		glDepthMask(GL_FALSE);

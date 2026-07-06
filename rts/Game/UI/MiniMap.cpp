@@ -13,6 +13,7 @@
 #include "TooltipConsole.h"
 #include "Game/Camera.h"
 #include "Game/CameraHandler.h"
+#include "Game/Game.h"
 #include "Game/GameHelper.h"
 #include "Game/GlobalUnsynced.h"
 #include "Game/SelectedUnitsHandler.h"
@@ -1415,6 +1416,9 @@ void CMiniMap::DrawForReal(bool useNormalizedCoors, bool updateTex, bool luaCall
 void CMiniMap::DrawCameraFrustumAndMouseSelection()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// PR 27b: the minimap hover trace (GuiTraceRay) walks sim state; park
+	// the sim (nest-safe, no-op flag-off/parked)
+	CGame::ScopedExternalSimPause simPause;
 	glEnable(GL_SCISSOR_TEST);
 	glScissor(curPos.x, curPos.y, curDim.x, curDim.y);
 
