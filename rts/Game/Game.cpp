@@ -1283,8 +1283,6 @@ bool CGame::UpdateUnsynced(const spring_time currentTime)
 	}
 
 	const bool newSimFrame = (lastSimFrame != gs->frameNum);
-	// last processed sim frame, for the PR 11b boundary movers' crossing checks
-	const int prevSimFrame = lastSimFrame;
 	numDrawFrames++;
 	globalRendering->drawFrame = std::max(1U, globalRendering->drawFrame + 1);
 	globalRendering->lastFrameStart = currentTime;
@@ -1384,31 +1382,9 @@ bool CGame::UpdateUnsynced(const spring_time currentTime)
 
 	lastSimFrame = gs->frameNum;
 
-	// sim-frame boundary: unsynced work relocated out of CGame::SimFrame's
-	// misplaced-work block (PR 11b). Runs once per batch of sim frames (>1 under
-	// fast-forward) at the sim-quiescent boundary, after ClientReadNet drained
-	// its frame budget and after the render-event queue drain in Draw(). None of
-	// these write synced state or consume gsRNG; their only sim-facing effect is
-	// net messages, timing-equivalent to user input. The skipping early-return
-	// above preserves the former !skipping gate.
-	if (newSimFrame && !gs->PreSimFrame()) {
-		// keep waitCommandsAI before sound->NewFrame: a wait release plays a
-		// unit-reply sample that must land in the same emit budget as on master
-		waitCommandsAI.Update(prevSimFrame);
-		// sweep all expired buckets, not just frameNum's (see GeometricObjects.cpp)
-		geometricObjects->Update();
-		// reset the audio emit counter once per batch (never at raw draw rate)
-		sound->NewFrame();
-
-		CPlayer* p = playerHandler.Player(gu->myPlayerNum);
-		p->fpsController.SendStateUpdate();
-
-		CTeamHighlight::Update(prevSimFrame);
-
-		// dead-ghost pruning is draw-owned; run it after the batch's render-event
-		// drain so ghosts created by the batch's destroy events exist first
-		CUnitDrawer::UpdateGhostedBuildings();
-	}
+	// the PR-11b boundary movers that used to run here moved into
+	// SimDrawBarrier() (PR 26) -- same per-sim-frame-batch gating, same order
+	// relative to the render-event drain, now inside the one barrier function
 
 	// set camera
 	camHandler->UpdateController(playerHandler.Player(gu->myPlayerNum), gu->fpsMode);
@@ -1488,25 +1464,121 @@ bool CGame::UpdateUnsynced(const spring_time currentTime)
 }
 
 
-bool CGame::Draw() {
-	// apply the sim frames' queued render-event records (object creation,
+/**
+ * @brief SimDrawBarrier -- the sim|draw extract barrier (PR 26)
+ *
+ * THE place where mutable sim state crosses to the draw side, once per draw
+ * frame. Under the Phase-2 thread split this function body becomes the
+ * sim-pause window verbatim: sim pauses at a frame edge (never mid-SimFrame),
+ * this runs, sim resumes -- so everything that must happen "at the boundary"
+ * has to live inside it, and nothing else may read mutable synced state
+ * per-boundary from outside it.
+ *
+ * Contract:
+ *  - SINGLE CALL SITE: the top of CGame::Draw, before any other draw-side
+ *    code runs (input handlers calling in from elsewhere read the previous
+ *    boundary's published data). Do not add call sites.
+ *  - ORDER (fixed; each step's comment states its dependency):
+ *      1. renderEventQueue.Drain()            -- drawer containers reach the
+ *         completed sim frame's end state before anything draw-side reads them
+ *         (PR 12; catch-up batches apply N frames of records here, in order).
+ *      2. deferredObjectDeleter.AckDrainedDestroys() -- the drain dispatched
+ *         every queued destroy record, so destruct the deferred shells and
+ *         poison the slots (PR 13). ReleaseAcked() at the end of the same
+ *         Draw returns the slots to the pools -- the ack/release pair brackets
+ *         the draw frame; at split time the release folds into the next
+ *         barrier (pools are sim-owned).
+ *      3. simSnapshot.Update()                -- publish the observable-state
+ *         snapshot (unit/projectile/feature rows due-checked per SimSnapshot.h;
+ *         the PR-26 team/player boundary copy re-extracts unconditionally).
+ *         After the drain, so snapshot and drawer containers agree on the same
+ *         completed frame.
+ *      4. snapshotDiffGate.CheckBoundary()    -- TEST-ONLY (PR 17) gate hook,
+ *         right after publish; a single branch when unarmed.
+ *      5. the PR-11b boundary movers          -- once per batch of completed
+ *         sim frames, skip-gated exactly as before (see the block comment).
+ *      6. readMap->UpdateDraw()               -- the heightmap dirty-rect
+ *         drain (synced heightmap -> unsynced copy + UnsyncedHeightMapUpdate
+ *         events), moved here from CWorldDrawer::Update: it is boundary work
+ *         (sim writes the rect queue). Runs after the movers, preserving
+ *         their old relative order.
+ *  - MAY NOT run inside: rendering, GL work, or Lua callins -- with the one
+ *    sanctioned exception of the drain's Render* event dispatches (and the
+ *    UnsyncedHeightMapUpdate events of step 6), which exist precisely to fire
+ *    at the boundary.
+ *  - Deferred second half (documented decision, PR 26): the drawer extraction
+ *    layer (CModelDrawerDataBase::Update/ExtractTransforms/
+ *    UpdateObjectUniforms, projectileDrawer->UpdateDrawFlags -- the section-C
+ *    UPD class) still runs inside worldDrawer.Update(), later in the frame,
+ *    because it consumes the camera state updated between here and there;
+ *    moving it into this function today would change culling inputs (a
+ *    behavior change this PR forbids). At split time (27b) the pause window
+ *    must span it: either the camera update moves ahead of the barrier and
+ *    the extraction half moves in here, or the window extends -- decided
+ *    there.
+ */
+void CGame::SimDrawBarrier()
+{
+	// (1) apply the sim frames' queued render-event records (object creation,
 	// destruction, LOS transitions) before any draw-side code reads the
 	// drawer containers
 	renderEventQueue.Drain();
-	// the drain dispatched every queued destroy record: the draw side has
+	// (2) the drain dispatched every queued destroy record: the draw side has
 	// acked those objects, so destruct their deferred shells and poison the
 	// slots; ReleaseAcked() at the end of this Draw returns them to the pools
 	deferredObjectDeleter.AckDrainedDestroys();
 
-	// publish the observable-state snapshot for draw-side consumers; no-op
-	// unless a sim frame completed since the last extraction (contract in
-	// SimSnapshot.h)
+	// (3) publish the observable-state snapshot for draw-side consumers
+	// (contract in SimSnapshot.h; the team/player copy refreshes every call)
 	simSnapshot.Update();
 
-	// TEST-ONLY (PR 17): when armed via /snapshotdiffgate, verify every value the
-	// snapshot would serve bit-matches the live sim read at this boundary. A
-	// single branch when unarmed.
+	// (4) TEST-ONLY (PR 17): when armed via /snapshotdiffgate, verify every
+	// value the snapshot would serve bit-matches the live sim read at this
+	// boundary. A single branch when unarmed.
 	snapshotDiffGate.CheckBoundary();
+
+	// (5) sim-frame boundary: unsynced work relocated out of CGame::SimFrame's
+	// misplaced-work block (PR 11b). Runs once per batch of sim frames (>1
+	// under fast-forward) at the sim-quiescent boundary, after ClientReadNet
+	// drained its frame budget and after the render-event queue drain above.
+	// None of these write synced state or consume gsRNG; their only sim-facing
+	// effect is net messages, timing-equivalent to user input. The !skipping
+	// gate preserves the former UpdateUnsynced early-return (movers never ran
+	// during /skip fast-forward); lastSimFrame itself is only advanced by
+	// UpdateUnsynced, exactly as before.
+	if (!skipping && (lastSimFrame != gs->frameNum) && !gs->PreSimFrame()) {
+		// last processed sim frame, for the movers' crossing checks
+		const int prevSimFrame = lastSimFrame;
+
+		// keep waitCommandsAI before sound->NewFrame: a wait release plays a
+		// unit-reply sample that must land in the same emit budget as on master
+		waitCommandsAI.Update(prevSimFrame);
+		// sweep all expired buckets, not just frameNum's (see GeometricObjects.cpp)
+		geometricObjects->Update();
+		// reset the audio emit counter once per batch (never at raw draw rate)
+		sound->NewFrame();
+
+		playerHandler.Player(gu->myPlayerNum)->fpsController.SendStateUpdate();
+
+		CTeamHighlight::Update(prevSimFrame);
+
+		// dead-ghost pruning is draw-owned; run it after the batch's render-event
+		// drain so ghosts created by the batch's destroy events exist first
+		CUnitDrawer::UpdateGhostedBuildings();
+	}
+
+	// (6) heightmap dirty-rect drain: copy sim heightmap updates into the
+	// unsynced heightmap + fire UnsyncedHeightMapUpdate (moved here from
+	// CWorldDrawer::Update, which never ran while skipping -- keep that gate
+	// so rects keep accumulating across /skip)
+	if (!skipping) {
+		readMap->UpdateDraw(firstUnsyncedHeightMapDrain);
+		firstUnsyncedHeightMapDrain = false;
+	}
+}
+
+bool CGame::Draw() {
+	SimDrawBarrier();
 
 	const spring_time currentTimePreUpdate = spring_gettime();
 

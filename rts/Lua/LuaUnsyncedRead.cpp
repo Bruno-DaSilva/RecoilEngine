@@ -3388,7 +3388,7 @@ static bool AddPlayerToRoster(lua_State* L, int playerID, bool onlyActivePlayers
  * @return number? b factor from 0 to 1
  * @return number? a factor from 0 to 1
  */
-int LuaUnsyncedRead::GetTeamColor(lua_State* L)
+static int GetTeamColorLive(lua_State* L, const char* caller)
 {
 	const int teamID = luaL_checkint(L, 1);
 	if ((teamID < 0) || (teamID >= teamHandler.ActiveTeams()))
@@ -3405,6 +3405,13 @@ int LuaUnsyncedRead::GetTeamColor(lua_State* L)
 	return 4;
 }
 
+int LuaUnsyncedRead::GetTeamColor(lua_State* L)
+{
+	// boundary-copy-served from draw context (sim|draw PR 26, see LuaSnapshotServe.h);
+	// registered unsynced but dereferences the live CTeam (section E.3)
+	return LuaSnapshotServe::Route(L, __func__, &GetTeamColorLive, &LuaSnapshotServe::GetTeamColor);
+}
+
 
 /***
  *
@@ -3415,7 +3422,7 @@ int LuaUnsyncedRead::GetTeamColor(lua_State* L)
  * @return number? b factor from 0 to 1
  * @return number? a factor from 0 to 1
  */
-int LuaUnsyncedRead::GetTeamOrigColor(lua_State* L)
+static int GetTeamOrigColorLive(lua_State* L, const char* caller)
 {
 	const int teamID = luaL_checkint(L, 1);
 	if ((teamID < 0) || (teamID >= teamHandler.ActiveTeams()))
@@ -3430,6 +3437,12 @@ int LuaUnsyncedRead::GetTeamOrigColor(lua_State* L)
 	lua_pushnumber(L, team->origColor[2] / 255.0f);
 	lua_pushnumber(L, team->origColor[3] / 255.0f);
 	return 4;
+}
+
+int LuaUnsyncedRead::GetTeamOrigColor(lua_State* L)
+{
+	// boundary-copy-served from draw context (sim|draw PR 26, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetTeamOrigColorLive, &LuaSnapshotServe::GetTeamOrigColor);
 }
 
 

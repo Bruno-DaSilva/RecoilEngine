@@ -6,12 +6,18 @@
 #include <vector>
 
 #include "SimSnapshot.h"
+#include "ExternalAI/SkirmishAIHandler.h"
+#include "Game/Game.h"
+#include "Game/GameSetup.h"
+#include "Game/Players/Player.h"
+#include "Game/Players/PlayerHandler.h"
 #include "Sim/Features/Feature.h"
 #include "Sim/Features/FeatureDef.h"
 #include "Sim/Features/FeatureHandler.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/LosHandler.h"
 #include "Sim/Misc/ModInfo.h"
+#include "Sim/Misc/Team.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Projectiles/ProjectileHandler.h"
 #include "Sim/Projectiles/WeaponProjectiles/WeaponProjectile.h"
@@ -82,7 +88,35 @@ static constexpr const char* FIELD_NAMES[] = {
 	"feat:selVol",
 	"feat:inLosAll",
 	"feat:globals",
+	"team:globals",
+	"team:state",
+	"team:res",
+	"team:stats",
+	"team:color",
+	"team:strings",
+	"player:globals",
+	"player:info",
+	"player:state",
+	"player:net",
+	"player:opts",
 };
+
+// structural compare for the copied customOpts maps (emilib::HashMap has no
+// operator==); sizes equal + every key of a maps to an equal value in b
+static bool OptsEqual(const spring::unordered_map<std::string, std::string>& a,
+                      const spring::unordered_map<std::string, std::string>& b)
+{
+	if (a.size() != b.size())
+		return false;
+
+	for (const auto& [key, value] : a) {
+		const auto it = b.find(key);
+		if (it == b.end() || it->second != value)
+			return false;
+	}
+
+	return true;
+}
 
 // field-wise CollisionVolume compare over exactly the params the hit-test reads
 // (avoids memcmp padding-byte false positives between two field-wise copies)
@@ -329,6 +363,7 @@ void SnapshotDiffGate::CheckBoundary()
 
 	CheckProjectileRows();
 	CheckFeatureRows();
+	CheckTeamPlayerRows();
 }
 
 void SnapshotDiffGate::CheckProjectileRows()
@@ -520,3 +555,109 @@ void SnapshotDiffGate::CheckFeatureRows()
 	}
 }
 
+void SnapshotDiffGate::CheckTeamPlayerRows()
+{
+	// team/player boundary copy (PR 26): re-extracted unconditionally right
+	// before this check, so every compare must trivially pass -- the pass
+	// verifies the extraction copies every field the serving twins read
+	const SimSnapshot::TeamRows& trows = simSnapshot.ReadTeams();
+	const SimSnapshot::PlayerRows& prows = simSnapshot.ReadPlayers();
+
+	{
+		const bool globalsEqual =
+			(trows.activeTeams == teamHandler.ActiveTeams()) &&
+			(trows.activeAllyTeams == teamHandler.ActiveAllyTeams()) &&
+			(trows.gaiaTeamID == teamHandler.GaiaTeamID()) &&
+			(bool(trows.useLuaGaia) == bool(gs->useLuaGaia)) &&
+			(bool(trows.gameOver) == (game != nullptr && game->IsGameOver()));
+		if (Bump(fields[T_GLOBALS], globalsEqual))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=team:globals mismatch (activeTeams snap=%d live=%d)",
+				gs->frameNum, trows.activeTeams, teamHandler.ActiveTeams());
+	}
+
+	for (int t = 0; t < trows.activeTeams && t < teamHandler.ActiveTeams(); ++t) {
+		const CTeam* team = teamHandler.Team(t);
+
+		const bool stateEqual =
+			(trows.leader[t] == team->GetLeader()) &&
+			(bool(trows.isDead[t]) == team->isDead) &&
+			(bool(trows.hasAIs[t]) == skirmishAIHandler.HasSkirmishAIsInTeam(t)) &&
+			(trows.allyTeam[t] == teamHandler.AllyTeam(t)) &&
+			BitEqual(trows.incomeMultiplier[t], team->GetIncomeMultiplier()) &&
+			(trows.numUnits[t] == static_cast<int32_t>(unitHandler.NumUnitsByTeam(t)));
+		if (Bump(fields[T_STATE], stateEqual))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d team=%d field=team:state mismatch", gs->frameNum, t);
+
+		const auto packEqual = [](const SResourcePack& a, const SResourcePack& b) {
+			return BitEqual(a.metal, b.metal) && BitEqual(a.energy, b.energy);
+		};
+		const bool resEqual =
+			packEqual(trows.res[t], team->res) &&
+			packEqual(trows.resStorage[t], team->resStorage) &&
+			packEqual(trows.resPrevPull[t], team->resPrevPull) &&
+			packEqual(trows.resPrevIncome[t], team->resPrevIncome) &&
+			packEqual(trows.resPrevExpense[t], team->resPrevExpense) &&
+			packEqual(trows.resShare[t], team->resShare) &&
+			packEqual(trows.resPrevSent[t], team->resPrevSent) &&
+			packEqual(trows.resPrevReceived[t], team->resPrevReceived) &&
+			packEqual(trows.resPrevExcess[t], team->resPrevExcess);
+		if (Bump(fields[T_RES], resEqual))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d team=%d field=team:res mismatch (metal snap=%.9g live=%.9g)",
+				gs->frameNum, t, trows.res[t].metal, team->res.metal);
+
+		// TeamStatistics is #pragma pack(1): no padding, memcmp-safe
+		if (Bump(fields[T_STATS], std::memcmp(&trows.currentStats[t], &team->GetCurrentStats(), sizeof(TeamStatistics)) == 0))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d team=%d field=team:stats mismatch", gs->frameNum, t);
+
+		const bool colorEqual =
+			(std::memcmp(trows.color[t].data(), team->color, 4) == 0) &&
+			(std::memcmp(trows.origColor[t].data(), team->origColor, 4) == 0);
+		if (Bump(fields[T_COLOR], colorEqual))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d team=%d field=team:color mismatch", gs->frameNum, t);
+
+		const bool stringsEqual =
+			(trows.sideName[t] == team->GetSideName()) &&
+			OptsEqual(trows.customOpts[t], team->GetAllValues());
+		if (Bump(fields[T_STRINGS], stringsEqual))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d team=%d field=team:strings mismatch", gs->frameNum, t);
+	}
+
+	{
+		const bool globalsEqual =
+			(prows.activePlayers == static_cast<int32_t>(playerHandler.ActivePlayers())) &&
+			(bool(prows.hostDemo) == gameSetup->hostDemo);
+		if (Bump(fields[PL_GLOBALS], globalsEqual))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=player:globals mismatch (activePlayers snap=%d live=%d)",
+				gs->frameNum, prows.activePlayers, int(playerHandler.ActivePlayers()));
+	}
+
+	for (int p = 0; p < prows.activePlayers && p < static_cast<int>(playerHandler.ActivePlayers()); ++p) {
+		const CPlayer* player = playerHandler.Player(p);
+
+		const bool infoEqual =
+			(prows.name[p] == player->name) &&
+			(prows.countryCode[p] == player->countryCode) &&
+			(prows.rank[p] == player->rank) &&
+			(bool(prows.isFromDemo[p]) == player->isFromDemo);
+		if (Bump(fields[PL_INFO], infoEqual))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d player=%d field=player:info mismatch", gs->frameNum, p);
+
+		const bool stateEqual =
+			(bool(prows.active[p]) == player->active) &&
+			(bool(prows.spectator[p]) == player->spectator) &&
+			(prows.team[p] == player->team) &&
+			(bool(prows.desynced[p]) == player->desynced);
+		if (Bump(fields[PL_STATE], stateEqual))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d player=%d field=player:state mismatch", gs->frameNum, p);
+
+		const bool netEqual =
+			(prows.ping[p] == player->ping) &&
+			BitEqual(prows.cpuUsage[p], player->cpuUsage);
+		if (Bump(fields[PL_NET], netEqual))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d player=%d field=player:net mismatch (ping snap=%d live=%d)",
+				gs->frameNum, p, prows.ping[p], player->ping);
+
+		if (Bump(fields[PL_OPTS], OptsEqual(prows.customOpts[p], player->GetAllValues())))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d player=%d field=player:opts mismatch", gs->frameNum, p);
+	}
+}

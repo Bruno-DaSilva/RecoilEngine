@@ -16,6 +16,7 @@
 #
 # Env overrides:
 #   SPRING_DATADIR   writable data dir with BAR content (default /www/projects/bar-data)
+#   DG_ARM           arm the gate; 0 = plain resim run   (default 1)
 #   DG_QUIT_FRAME    hard quit frame, 0 = at game end   (default 0)
 #   DG_FF            fast-forward (setspeed 20)          (default 1)
 #   DG_EXERCISE      widget calls positions callouts/frame (default 1)
@@ -72,6 +73,7 @@ if [[ -f "$SPRING_DATADIR/springsettings.cfg" ]]; then
 fi
 cat >> "$CFG" <<EOF
 DiffGateLabel = $LABEL
+DiffGateArm = ${DG_ARM:-1}
 DiffGateFastForward = ${DG_FF:-1}
 DiffGateQuitFrame = ${DG_QUIT_FRAME:-0}
 DiffGateExercise = ${DG_EXERCISE:-1}

@@ -145,6 +145,18 @@ private:
 		FT_SELVOL,
 		FT_INLOS,
 		FT_GLOBALS,     // featureVisibility / gaiaAllyTeam
+		// team/player boundary copy (PR 26, section E.3)
+		T_GLOBALS,      // activeTeams / activeAllyTeams / gaiaTeamID / useLuaGaia / gameOver
+		T_STATE,        // leader / isDead / hasAIs / allyTeam / incomeMultiplier / numUnits
+		T_RES,          // the 9 GetTeamResources packs
+		T_STATS,        // current TeamStatistics
+		T_COLOR,        // color / origColor
+		T_STRINGS,      // sideName / customOpts
+		PL_GLOBALS,     // activePlayers / hostDemo
+		PL_INFO,        // name / countryCode / rank / isFromDemo
+		PL_STATE,       // active / spectator / team / desynced
+		PL_NET,         // ping / cpuUsage
+		PL_OPTS,        // customOpts
 		F_COUNT
 	};
 
@@ -152,9 +164,11 @@ private:
 	// LOG_L(L_ERROR) line for this mismatch (mismatch and under the per-field cap)
 	bool Bump(FieldCounter& fc, bool equal);
 
-	// projectile-row / feature-row halves of the field pass (from CheckBoundary)
+	// projectile-row / feature-row / team+player halves of the field pass
+	// (from CheckBoundary)
 	void CheckProjectileRows();
 	void CheckFeatureRows();
+	void CheckTeamPlayerRows();
 
 	void Report(const char* reason) const;
 	void ResetCounters();

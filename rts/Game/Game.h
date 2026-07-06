@@ -114,6 +114,9 @@ private:
 	bool Update() override;
 	bool UpdateUnsynced(const spring_time currentTime);
 
+	/// the sim|draw extract barrier (PR 26); called once, at the top of Draw()
+	void SimDrawBarrier();
+
 	void DrawSkip(bool blackscreen = true);
 	void DrawInputReceivers();
 	void DrawInputText();
@@ -184,6 +187,11 @@ public:
 	bool skipping = false;
 	bool playing = false;
 	bool paused = false; // unsynced
+
+	// first-call flag for the heightmap dirty-rect drain inside SimDrawBarrier
+	// (was worldDrawer.numUpdates == 0 while the drain lived in
+	// CWorldDrawer::Update; CGame and the world drawer share lifetime)
+	bool firstUnsyncedHeightMapDrain = true;
 
 	/// Prevents spectator msgs from being seen by players
 	bool noSpectatorChat = false;

@@ -2,13 +2,21 @@
 
 #include "SimSnapshot.h"
 
+#include <cstring>
+
 #include "SnapshotHash.h"
+#include "ExternalAI/SkirmishAIHandler.h"
+#include "Game/Game.h"
+#include "Game/GameSetup.h"
+#include "Game/Players/Player.h"
+#include "Game/Players/PlayerHandler.h"
 #include "Sim/Features/Feature.h"
 #include "Sim/Features/FeatureDef.h"
 #include "Sim/Features/FeatureHandler.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/LosHandler.h"
 #include "Sim/Misc/ModInfo.h"
+#include "Sim/Misc/Team.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Projectiles/ProjectileHandler.h"
 #include "Sim/Projectiles/WeaponProjectiles/WeaponProjectile.h"
@@ -21,6 +29,40 @@
 #include "System/TimeProfiler.h"
 
 SimSnapshot simSnapshot;
+
+// assign-if-different helpers for the team/player boundary copy: the copy is
+// re-extracted EVERY boundary (values must be fresh), but the alloc-carrying
+// fields (strings, customOpts maps) are almost always unchanged -- comparing
+// first turns the steady-state cost into reads only, no allocations
+static inline void CopyString(std::string& dst, const char* src)
+{
+	if (dst != src)
+		dst = src;
+}
+
+static inline void CopyString(std::string& dst, const std::string& src)
+{
+	if (dst != src)
+		dst = src;
+}
+
+static inline void CopyOpts(spring::unordered_map<std::string, std::string>& dst,
+                            const spring::unordered_map<std::string, std::string>& src)
+{
+	const auto equal = [&]() {
+		if (dst.size() != src.size())
+			return false;
+		for (const auto& [key, value] : src) {
+			const auto it = dst.find(key);
+			if (it == dst.end() || it->second != value)
+				return false;
+		}
+		return true;
+	};
+
+	if (!equal())
+		dst = src;
+}
 
 bool SimSnapshot::UnitRows::PovUnitVisible(int unitID, int readAllyTeam, bool fullRead) const
 {
@@ -90,6 +132,17 @@ bool SimSnapshot::FeatureRows::IsInLosForAllyTeam(int id, int argAllyTeam) const
 
 void SimSnapshot::Update()
 {
+	SCOPED_TIMER("Update::SimSnapshot");
+
+	// team/player boundary copy (PR 26, section E.3): re-extracted EVERY
+	// boundary, no due check -- net messages mutate these tables between sim
+	// frames (share/resign transfers, NETMSG_PLAYERINFO ping/cpu at net rate),
+	// invisibly to the frameNum/aliveCount checks below, and the copy is KBs
+	ExtractTeams(*teamBack);
+	ExtractPlayers(*playerBack);
+	std::swap(teamFront, teamBack);
+	std::swap(playerFront, playerBack);
+
 	const bool due =
 		mutatedOutsideFrame ||
 		(front->simFrame != gs->frameNum) ||
@@ -99,8 +152,6 @@ void SimSnapshot::Update()
 		return;
 
 	mutatedOutsideFrame = false;
-
-	SCOPED_TIMER("Update::SimSnapshot");
 
 	const spring_time t0 = spring_gettime();
 
@@ -127,11 +178,14 @@ void SimSnapshot::HashCompletedFrame(int frameNum)
 	// Extract a private copy of the same rows the published buffer holds, but
 	// from the just-completed sim frame's live state (Extract stamps
 	// gs->frameNum, which equals frameNum here). front/back and generation are
-	// untouched, so nothing draw-side observes this.
+	// untouched, so nothing draw-side observes this. Player rows are not
+	// hashed at all (net-layer state, see the PlayerRows comment), so no
+	// player scratch exists.
 	Extract(hashScratch);
 	ExtractProjectiles(hashProjScratch);
 	ExtractFeatures(hashFeatScratch);
-	SnapshotHash::HashFrame(frameNum, hashScratch, hashProjScratch, hashFeatScratch);
+	ExtractTeams(hashTeamScratch);
+	SnapshotHash::HashFrame(frameNum, hashScratch, hashProjScratch, hashFeatScratch, hashTeamScratch);
 }
 
 void SimSnapshot::Clear()
@@ -164,6 +218,10 @@ void SimSnapshot::Clear()
 		std::fill(rows.valid.begin(), rows.valid.end(), 0);
 	for (FeatureRows& rows : featBuffers)
 		std::fill(rows.valid.begin(), rows.valid.end(), 0);
+	for (TeamRows& rows : teamBuffers)
+		rows.activeTeams = 0;
+	for (PlayerRows& rows : playerBuffers)
+		rows.activePlayers = 0;
 
 	generation = 0;
 	mutatedOutsideFrame = false;
@@ -401,5 +459,103 @@ void SimSnapshot::ExtractFeatures(FeatureRows& rows)
 
 		for (int at = 0; at < numAllyTeams; ++at)
 			rows.inLosAll[at * slots + id] = losHandler->InLos(f->pos, at);
+	}
+}
+
+void SimSnapshot::ExtractTeams(TeamRows& rows)
+{
+	const int activeTeams = teamHandler.ActiveTeams();
+
+	// global block
+	rows.activeTeams = activeTeams;
+	rows.activeAllyTeams = teamHandler.ActiveAllyTeams();
+	rows.gaiaTeamID = teamHandler.GaiaTeamID();
+	rows.useLuaGaia = gs->useLuaGaia;
+	rows.gameOver = (game != nullptr && game->IsGameOver());
+
+	if (rows.leader.size() != static_cast<size_t>(activeTeams)) {
+		rows.leader.resize(activeTeams);
+		rows.isDead.resize(activeTeams);
+		rows.hasAIs.resize(activeTeams);
+		rows.allyTeam.resize(activeTeams);
+		rows.incomeMultiplier.resize(activeTeams);
+		rows.numUnits.resize(activeTeams);
+		rows.color.resize(activeTeams);
+		rows.origColor.resize(activeTeams);
+		rows.sideName.resize(activeTeams);
+		rows.currentStats.resize(activeTeams);
+		rows.res.resize(activeTeams);
+		rows.resStorage.resize(activeTeams);
+		rows.resPrevPull.resize(activeTeams);
+		rows.resPrevIncome.resize(activeTeams);
+		rows.resPrevExpense.resize(activeTeams);
+		rows.resShare.resize(activeTeams);
+		rows.resPrevSent.resize(activeTeams);
+		rows.resPrevReceived.resize(activeTeams);
+		rows.resPrevExcess.resize(activeTeams);
+		rows.customOpts.resize(activeTeams);
+	}
+
+	for (int t = 0; t < activeTeams; ++t) {
+		const CTeam* team = teamHandler.Team(t);
+
+		rows.leader[t] = team->GetLeader();
+		rows.isDead[t] = team->isDead;
+		rows.hasAIs[t] = skirmishAIHandler.HasSkirmishAIsInTeam(t);
+		rows.allyTeam[t] = teamHandler.AllyTeam(t);
+		rows.incomeMultiplier[t] = team->GetIncomeMultiplier();
+		rows.numUnits[t] = static_cast<int32_t>(unitHandler.NumUnitsByTeam(t));
+		std::memcpy(rows.color[t].data(), team->color, 4);
+		std::memcpy(rows.origColor[t].data(), team->origColor, 4);
+		CopyString(rows.sideName[t], team->GetSideName());
+		rows.currentStats[t] = team->GetCurrentStats();
+		rows.res[t] = team->res;
+		rows.resStorage[t] = team->resStorage;
+		rows.resPrevPull[t] = team->resPrevPull;
+		rows.resPrevIncome[t] = team->resPrevIncome;
+		rows.resPrevExpense[t] = team->resPrevExpense;
+		rows.resShare[t] = team->resShare;
+		rows.resPrevSent[t] = team->resPrevSent;
+		rows.resPrevReceived[t] = team->resPrevReceived;
+		rows.resPrevExcess[t] = team->resPrevExcess;
+		CopyOpts(rows.customOpts[t], team->GetAllValues());
+	}
+}
+
+void SimSnapshot::ExtractPlayers(PlayerRows& rows)
+{
+	const int activePlayers = static_cast<int>(playerHandler.ActivePlayers());
+
+	rows.activePlayers = activePlayers;
+	rows.hostDemo = gameSetup->hostDemo;
+
+	if (rows.name.size() != static_cast<size_t>(activePlayers)) {
+		rows.name.resize(activePlayers);
+		rows.countryCode.resize(activePlayers);
+		rows.team.resize(activePlayers);
+		rows.rank.resize(activePlayers);
+		rows.ping.resize(activePlayers);
+		rows.cpuUsage.resize(activePlayers);
+		rows.active.resize(activePlayers);
+		rows.spectator.resize(activePlayers);
+		rows.isFromDemo.resize(activePlayers);
+		rows.desynced.resize(activePlayers);
+		rows.customOpts.resize(activePlayers);
+	}
+
+	for (int p = 0; p < activePlayers; ++p) {
+		const CPlayer* player = playerHandler.Player(p);
+
+		CopyString(rows.name[p], player->name);
+		CopyString(rows.countryCode[p], player->countryCode);
+		rows.team[p] = player->team;
+		rows.rank[p] = player->rank;
+		rows.ping[p] = player->ping;
+		rows.cpuUsage[p] = player->cpuUsage;
+		rows.active[p] = player->active;
+		rows.spectator[p] = player->spectator;
+		rows.isFromDemo[p] = player->isFromDemo;
+		rows.desynced[p] = player->desynced;
+		CopyOpts(rows.customOpts[p], player->GetAllValues());
 	}
 }

@@ -14,6 +14,9 @@ end
 -- this file (same pattern as test/s0-measurement):
 --
 --   DiffGateLabel        : echo prefix / log tag (string)
+--   DiffGateArm          : 1 => arm /snapshotdiffgate (0 = plain resim run:
+--                          fast-forward + quit-at-end only, gate untouched --
+--                          the uncontended wall-time / DESYNC gate)
 --   DiffGateFastForward  : 1 => /setspeed 20 + /speedcontrol 0
 --   DiffGateQuitFrame    : hard quit at this frame (0 = quit on game over / demo end)
 --   DiffGateExercise     : 1 => call the redirected positions/status-family
@@ -35,7 +38,7 @@ end
 -- Pass criterion: the engine's [SnapshotDiffGate] report prints
 --   "PASS (0 mismatches)" and total mismatches=0 over the whole replay.
 
-local label, fastForward, quitFrame, exercise
+local label, armGate, fastForward, quitFrame, exercise
 local povFrame, povSpan, povTeam
 local povActive = false
 local povDone = false
@@ -54,10 +57,12 @@ local function dumpAndQuit(reason)
 	end
 	finished = true
 	announce("finishing (" .. reason .. ") at frame " .. Spring.GetGameFrame())
-	-- print the running totals, then let engine teardown FlushPartial() print
-	-- the final report as well
-	Spring.SendCommands("snapshotdiffgate dump")
-	Spring.SendCommands("snapshotdiffgate disarm")
+	if armGate ~= 0 then
+		-- print the running totals, then let engine teardown FlushPartial()
+		-- print the final report as well
+		Spring.SendCommands("snapshotdiffgate dump")
+		Spring.SendCommands("snapshotdiffgate disarm")
+	end
 	Spring.SendCommands("quitforce")
 end
 
@@ -69,6 +74,7 @@ function widget:Initialize()
 	end
 
 	label       = Spring.GetConfigString("DiffGateLabel", "diffgate")
+	armGate     = Spring.GetConfigInt("DiffGateArm", 1)
 	fastForward = Spring.GetConfigInt("DiffGateFastForward", 1)
 	quitFrame   = Spring.GetConfigInt("DiffGateQuitFrame", 0)
 	exercise    = Spring.GetConfigInt("DiffGateExercise", 1)
@@ -105,8 +111,12 @@ function widget:GameFrame(f)
 
 	if not armed and f >= 1 then
 		armed = true
-		Spring.SendCommands("snapshotdiffgate arm")
-		announce("armed /snapshotdiffgate at frame " .. f)
+		if armGate ~= 0 then
+			Spring.SendCommands("snapshotdiffgate arm")
+			announce("armed /snapshotdiffgate at frame " .. f)
+		else
+			announce("plain resim run (gate not armed) from frame " .. f)
+		end
 	end
 
 	-- POV segment: drop full view and spectate one team so the redirected
@@ -184,6 +194,38 @@ local function ExerciseFamily()
 		Spring.GetProjectileDefID(pid)
 		Spring.GetProjectileTarget(pid)
 		Spring.GetProjectileOwnerID(pid)
+	end
+
+	-- team/player-table family (PR 26): served from the TeamRows/PlayerRows
+	-- boundary copy; ids come from the (also redirected) list callouts, which
+	-- match live by construction
+	Spring.GetGaiaTeamID()
+	local allyTeams = Spring.GetAllyTeamList()
+	for i = 1, #allyTeams do
+		Spring.GetTeamList(allyTeams[i])
+	end
+	local teams = Spring.GetTeamList()
+	for i = 1, #teams do
+		local tid = teams[i]
+		Spring.GetTeamInfo(tid)
+		Spring.GetTeamInfo(tid, false)
+		Spring.GetTeamAllyTeamID(tid)
+		Spring.GetTeamResources(tid, "metal")
+		Spring.GetTeamResources(tid, "energy")
+		Spring.GetTeamUnitStats(tid)
+		Spring.GetTeamResourceStats(tid, "metal")
+		Spring.GetTeamResourceStats(tid, "energy")
+		Spring.GetTeamDamageStats(tid)
+		Spring.GetTeamUnitCount(tid)
+		Spring.GetTeamColor(tid)
+		Spring.GetTeamOrigColor(tid)
+		Spring.GetPlayerList(tid)
+		Spring.GetPlayerList(tid, true)
+	end
+	local players = Spring.GetPlayerList()
+	for i = 1, #players do
+		Spring.GetPlayerInfo(players[i])
+		Spring.GetPlayerInfo(players[i], false)
 	end
 end
 

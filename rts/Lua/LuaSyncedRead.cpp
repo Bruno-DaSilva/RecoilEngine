@@ -1544,13 +1544,19 @@ int LuaSyncedRead::GetSideData(lua_State* L)
  *
  * @return integer teamID
  */
-int LuaSyncedRead::GetGaiaTeamID(lua_State* L)
+static int GetGaiaTeamIDLive(lua_State* L, const char* caller)
 {
 	if (!gs->useLuaGaia)
 		return 0;
 
 	lua_pushnumber(L, teamHandler.GaiaTeamID());
 	return 1;
+}
+
+int LuaSyncedRead::GetGaiaTeamID(lua_State* L)
+{
+	// boundary-copy-served from draw context (sim|draw PR 26, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetGaiaTeamIDLive, &LuaSnapshotServe::GetGaiaTeamID);
 }
 
 
@@ -1645,7 +1651,7 @@ int LuaSyncedRead::GetMapStartPositions(lua_State* L)
  * @function Spring.GetAllyTeamList
  * @return integer[] allyTeamIDs
  */
-int LuaSyncedRead::GetAllyTeamList(lua_State* L)
+static int GetAllyTeamListLive(lua_State* L, const char* caller)
 {
 	lua_createtable(L, teamHandler.ActiveAllyTeams(), 0);
 
@@ -1657,6 +1663,12 @@ int LuaSyncedRead::GetAllyTeamList(lua_State* L)
 	}
 
 	return 1;
+}
+
+int LuaSyncedRead::GetAllyTeamList(lua_State* L)
+{
+	// boundary-copy-served from draw context (sim|draw PR 26, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetAllyTeamListLive, &LuaSnapshotServe::GetAllyTeamList);
 }
 
 
@@ -1675,7 +1687,7 @@ int LuaSyncedRead::GetAllyTeamList(lua_State* L)
  * @param allyTeamID integer The ally team ID to filter teams by. A value less than 0 will return all teams.
  * @return number[]? teamIDs List of team IDs or `nil` if `allyTeamID` is invalid.
  */
-int LuaSyncedRead::GetTeamList(lua_State* L)
+static int GetTeamListLive(lua_State* L, const char* caller)
 {
 	int allyTeamID = -1;
 
@@ -1706,6 +1718,12 @@ int LuaSyncedRead::GetTeamList(lua_State* L)
 	return 1;
 }
 
+int LuaSyncedRead::GetTeamList(lua_State* L)
+{
+	// boundary-copy-served from draw context (sim|draw PR 26, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetTeamListLive, &LuaSnapshotServe::GetTeamList);
+}
+
 
 /***
  *
@@ -1714,7 +1732,7 @@ int LuaSyncedRead::GetTeamList(lua_State* L)
  * @param active boolean? (Default: `false`) whether to filter only active teams
  * @return number[]? list of playerIDs
  */
-int LuaSyncedRead::GetPlayerList(lua_State* L)
+static int GetPlayerListLive(lua_State* L, const char* caller)
 {
 	int teamID = -1;
 	bool active = false;
@@ -1760,6 +1778,12 @@ int LuaSyncedRead::GetPlayerList(lua_State* L)
 	return 1;
 }
 
+int LuaSyncedRead::GetPlayerList(lua_State* L)
+{
+	// boundary-copy-served from draw context (sim|draw PR 26, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetPlayerListLive, &LuaSnapshotServe::GetPlayerList);
+}
+
 
 /***
  *
@@ -1775,7 +1799,7 @@ int LuaSyncedRead::GetPlayerList(lua_State* L)
  * @return number incomeMultiplier
  * @return table<string,string> customTeamKeys when getTeamKeys is true, otherwise nil
  */
-int LuaSyncedRead::GetTeamInfo(lua_State* L)
+static int GetTeamInfoLive(lua_State* L, const char* caller)
 {
 	const int teamID = luaL_checkint(L, 1);
 	if (!teamHandler.IsValidTeam(teamID))
@@ -1811,6 +1835,12 @@ int LuaSyncedRead::GetTeamInfo(lua_State* L)
 	return 7 + getTeamOpts;
 }
 
+int LuaSyncedRead::GetTeamInfo(lua_State* L)
+{
+	// boundary-copy-served from draw context (sim|draw PR 26, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetTeamInfoLive, &LuaSnapshotServe::GetTeamInfo);
+}
+
 
 /***
  *
@@ -1818,7 +1848,7 @@ int LuaSyncedRead::GetTeamInfo(lua_State* L)
  * @param teamID integer
  * @return integer? allyTeamID
  */
-int LuaSyncedRead::GetTeamAllyTeamID(lua_State* L)
+static int GetTeamAllyTeamIDLive(lua_State* L, const char* caller)
 {
 	const int teamID = luaL_checkint(L, 1);
 	if (!teamHandler.IsValidTeam(teamID))
@@ -1830,6 +1860,12 @@ int LuaSyncedRead::GetTeamAllyTeamID(lua_State* L)
 
 	lua_pushnumber(L, teamHandler.AllyTeam(team->teamNum));
 	return 1;
+}
+
+int LuaSyncedRead::GetTeamAllyTeamID(lua_State* L)
+{
+	// boundary-copy-served from draw context (sim|draw PR 26, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetTeamAllyTeamIDLive, &LuaSnapshotServe::GetTeamAllyTeamID);
 }
 
 
@@ -1848,9 +1884,9 @@ int LuaSyncedRead::GetTeamAllyTeamID(lua_State* L)
  * @return number received      The total amount of the resource that has actually been received from allies (via sharing or manual transfer).
  * @return number excess        The amount of the resource that was lost due to storage overflow (wasted).
  */
-int LuaSyncedRead::GetTeamResources(lua_State* L)
+static int GetTeamResourcesLive(lua_State* L, const char* caller)
 {
-	const CTeam* team = ParseTeam(L, __func__, 1);
+	const CTeam* team = ParseTeam(L, caller, 1);
 	if (team == nullptr)
 		return 0;
 
@@ -1891,6 +1927,12 @@ int LuaSyncedRead::GetTeamResources(lua_State* L)
 	return 0;
 }
 
+int LuaSyncedRead::GetTeamResources(lua_State* L)
+{
+	// boundary-copy-served from draw context (sim|draw PR 26, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetTeamResourcesLive, &LuaSnapshotServe::GetTeamResources);
+}
+
 
 /***
  *
@@ -1903,9 +1945,9 @@ int LuaSyncedRead::GetTeamResources(lua_State* L)
  * @return number received
  * @return number sent
  */
-int LuaSyncedRead::GetTeamUnitStats(lua_State* L)
+static int GetTeamUnitStatsLive(lua_State* L, const char* caller)
 {
-	const CTeam* team = ParseTeam(L, __func__, 1);
+	const CTeam* team = ParseTeam(L, caller, 1);
 
 	if (team == nullptr || game == nullptr)
 		return 0;
@@ -1926,6 +1968,12 @@ int LuaSyncedRead::GetTeamUnitStats(lua_State* L)
 	return 6;
 }
 
+int LuaSyncedRead::GetTeamUnitStats(lua_State* L)
+{
+	// boundary-copy-served from draw context (sim|draw PR 26, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetTeamUnitStatsLive, &LuaSnapshotServe::GetTeamUnitStats);
+}
+
 
 /***
  *
@@ -1938,9 +1986,9 @@ int LuaSyncedRead::GetTeamUnitStats(lua_State* L)
  * @return number received
  * @return number sent
  */
-int LuaSyncedRead::GetTeamResourceStats(lua_State* L)
+static int GetTeamResourceStatsLive(lua_State* L, const char* caller)
 {
-	const CTeam* team = ParseTeam(L, __func__, 1);
+	const CTeam* team = ParseTeam(L, caller, 1);
 	if (team == nullptr || game == nullptr)
 		return 0;
 
@@ -1975,6 +2023,12 @@ int LuaSyncedRead::GetTeamResourceStats(lua_State* L)
 	return 0;
 }
 
+int LuaSyncedRead::GetTeamResourceStats(lua_State* L)
+{
+	// boundary-copy-served from draw context (sim|draw PR 26, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetTeamResourceStatsLive, &LuaSnapshotServe::GetTeamResourceStats);
+}
+
 
 /*** Gets team damage dealt/received totals
  *
@@ -1987,9 +2041,9 @@ int LuaSyncedRead::GetTeamResourceStats(lua_State* L)
  * @return number damageDealt
  * @return number damageReceived
  */
-int LuaSyncedRead::GetTeamDamageStats(lua_State* L)
+static int GetTeamDamageStatsLive(lua_State* L, const char* caller)
 {
-	const CTeam* team = ParseTeam(L, __func__, 1);
+	const CTeam* team = ParseTeam(L, caller, 1);
 	if (team == nullptr || game == nullptr)
 		return 0;
 
@@ -2004,6 +2058,12 @@ int LuaSyncedRead::GetTeamDamageStats(lua_State* L)
 	lua_pushnumber(L, stats.damageReceived);
 
 	return 2;
+}
+
+int LuaSyncedRead::GetTeamDamageStats(lua_State* L)
+{
+	// boundary-copy-served from draw context (sim|draw PR 26, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetTeamDamageStatsLive, &LuaSnapshotServe::GetTeamDamageStats);
 }
 
 
@@ -2207,7 +2267,7 @@ int LuaSyncedRead::GetTeamMaxUnits(lua_State* L)
  * @return {[string]: string} playerOpts when playerOpts is true
  * @return boolean desynced
  */
-int LuaSyncedRead::GetPlayerInfo(lua_State* L)
+static int GetPlayerInfoLive(lua_State* L, const char* caller)
 {
 	const int playerID = luaL_checkint(L, 1);
 	if (!playerHandler.IsValidPlayer(playerID))
@@ -2251,6 +2311,12 @@ int LuaSyncedRead::GetPlayerInfo(lua_State* L)
 	lua_pushboolean(L, player->desynced);
 
 	return 12;
+}
+
+int LuaSyncedRead::GetPlayerInfo(lua_State* L)
+{
+	// boundary-copy-served from draw context (sim|draw PR 26, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetPlayerInfoLive, &LuaSnapshotServe::GetPlayerInfo);
 }
 
 
@@ -2891,13 +2957,13 @@ int LuaSyncedRead::GetTeamUnitDefCount(lua_State* L)
  * @param teamID integer
  * @return number? count
  */
-int LuaSyncedRead::GetTeamUnitCount(lua_State* L)
+static int GetTeamUnitCountLive(lua_State* L, const char* caller)
 {
 	if (CLuaHandle::GetHandleReadAllyTeam(L) == CEventClient::NoAccessTeam)
 		return 0;
 
 	// parse the team
-	const CTeam* team = ParseTeam(L, __func__, 1);
+	const CTeam* team = ParseTeam(L, caller, 1);
 
 	if (team == nullptr)
 		return 0;
@@ -2917,6 +2983,12 @@ int LuaSyncedRead::GetTeamUnitCount(lua_State* L)
 
 	lua_pushnumber(L, unitCount);
 	return 1;
+}
+
+int LuaSyncedRead::GetTeamUnitCount(lua_State* L)
+{
+	// boundary-copy-served from draw context (sim|draw PR 26, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetTeamUnitCountLive, &LuaSnapshotServe::GetTeamUnitCount);
 }
 
 

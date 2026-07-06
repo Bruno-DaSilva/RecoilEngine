@@ -83,8 +83,10 @@ namespace SnapshotHash {
 	void FlushPartial();
 
 	// hash one completed sim frame's snapshot rows (units + synced projectiles +
-	// features; the projectile and feature sections fold into the root hash) and
-	// append its lines to the buffer; no-op unless armed and frameNum is inside
-	// the window. Driven from SimSnapshot::HashCompletedFrame (CGame::SimFrame).
-	void HashFrame(int frameNum, const SimSnapshot::UnitRows& rows, const SimSnapshot::ProjectileRows& projRows, const SimSnapshot::FeatureRows& featRows);
+	// features + the synced per-team block; the projectile/feature/team sections
+	// fold into the root hash) and append its lines to the buffer; no-op unless
+	// armed and frameNum is inside the window. Driven from
+	// SimSnapshot::HashCompletedFrame (CGame::SimFrame). Player rows are not
+	// hashed (net-layer state, not per-sim-frame synced state).
+	void HashFrame(int frameNum, const SimSnapshot::UnitRows& rows, const SimSnapshot::ProjectileRows& projRows, const SimSnapshot::FeatureRows& featRows, const SimSnapshot::TeamRows& teamRows);
 }

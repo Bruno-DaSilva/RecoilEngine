@@ -2,11 +2,16 @@
 
 #pragma once
 
+#include <array>
 #include <cassert>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "Sim/Misc/CollisionVolume.h"
+#include "Sim/Misc/Resource.h"
+#include "Sim/Misc/TeamStatistics.h"
+#include "System/UnorderedMap.hpp"
 #include "System/float3.h"
 #include "System/float4.h"
 
@@ -364,6 +369,99 @@ public:
 		// CFeature::IsInLosForAllyTeam mirror; caller must have checked Valid()
 		bool IsInLosForAllyTeam(int id, int argAllyTeam) const;
 	};
+
+	/**
+	 * Team boundary copy (PR 26, the section-E.3 player/team field spec).
+	 * Serves the (b)-tier team-table callouts (GetTeamInfo/GetTeamList/
+	 * GetTeamResources/GetTeamUnitCount fast path/the TeamStatistics stats
+	 * callouts/GetTeamColor/GetGaiaTeamID) via the LuaSnapshotServe twins.
+	 * Indexed by teamID in [0, activeTeams); the team set is fixed at game
+	 * start, so there is no validity row -- ValidTeam() mirrors
+	 * teamHandler.IsValidTeam and team slots are never null.
+	 *
+	 * Unlike the unit/projectile/feature rows this copy is NOT due-checked:
+	 * net messages mutate the tables *between* sim frames (share/resign
+	 * transfers, PLAYERINFO ping/cpu at net rate -- the class of mutation
+	 * MarkMutatedOutsideFrame() was added for), so Update() re-extracts it
+	 * unconditionally every boundary; the whole copy is KBs.
+	 *
+	 * Deliberately NOT copied (class (d), stale/nil or dirty-versioned
+	 * later): modParams (GetTeamRulesParams) and statHistory
+	 * (GetTeamStatsHistory) -- unbounded containers.
+	 */
+	struct TeamRows {
+		// global block
+		int32_t activeTeams = 0;
+		int32_t activeAllyTeams = 0;
+		int32_t gaiaTeamID = -1;   // teamHandler.GaiaTeamID()
+		uint8_t useLuaGaia = 0;    // gs->useLuaGaia (GetGaiaTeamID gate)
+		uint8_t gameOver = 0;      // game->IsGameOver() (stats callouts' spectator gate)
+
+		// per-team rows
+		std::vector<int32_t> leader;
+		std::vector<uint8_t> isDead;
+		std::vector<uint8_t> hasAIs;             // skirmishAIHandler.HasSkirmishAIsInTeam
+		std::vector<int32_t> allyTeam;           // teamHandler.AllyTeam(t)
+		std::vector<float> incomeMultiplier;
+		std::vector<int32_t> numUnits;           // unitHandler.NumUnitsByTeam(t)
+		// UNSYNCED-mutable (Spring.SetTeamColor); excluded from SnapshotHash
+		// like selVol, covered by the diff gate
+		std::vector<std::array<uint8_t, 4>> color;
+		std::vector<std::array<uint8_t, 4>> origColor;
+		std::vector<std::string> sideName;
+		std::vector<TeamStatistics> currentStats; // team->GetCurrentStats() (statHistory.back())
+		// the GetTeamResources pack set, in its push order
+		std::vector<SResourcePack> res;
+		std::vector<SResourcePack> resStorage;
+		std::vector<SResourcePack> resPrevPull;
+		std::vector<SResourcePack> resPrevIncome;
+		std::vector<SResourcePack> resPrevExpense;
+		std::vector<SResourcePack> resShare;
+		std::vector<SResourcePack> resPrevSent;
+		std::vector<SResourcePack> resPrevReceived;
+		std::vector<SResourcePack> resPrevExcess;
+		std::vector<spring::unordered_map<std::string, std::string>> customOpts;
+
+		// teamHandler.IsValidTeam mirror
+		bool ValidTeam(int teamID) const { return (teamID >= 0 && teamID < activeTeams); }
+
+		// LuaUtils::IsAlliedTeam mirror; readAllyTeam/fullRead are the handle POV
+		bool PovAlliedTeam(int teamID, int readAllyTeam, bool fullRead) const {
+			if (readAllyTeam < 0)
+				return fullRead;
+
+			return (allyTeam[teamID] == readAllyTeam);
+		}
+	};
+
+	/**
+	 * Player boundary copy (PR 26, section E.3). Serves GetPlayerInfo /
+	 * GetPlayerList. Indexed by playerID in [0, activePlayers); player slots
+	 * are never null (playerHandler.Player returns &players[id]). Same
+	 * unconditional per-boundary re-extraction as TeamRows: ping/cpuUsage
+	 * arrive via NETMSG_PLAYERINFO between sim frames. Entirely excluded from
+	 * the synced-desync SnapshotHash -- player state is net-layer, not
+	 * per-sim-frame synced state.
+	 */
+	struct PlayerRows {
+		int32_t activePlayers = 0;
+		uint8_t hostDemo = 0;   // gameSetup->hostDemo (the IsPlayerUnsynced gate input)
+
+		std::vector<std::string> name;
+		std::vector<std::string> countryCode;
+		std::vector<int32_t> team;
+		std::vector<int32_t> rank;
+		std::vector<int32_t> ping;
+		std::vector<float> cpuUsage;
+		std::vector<uint8_t> active;
+		std::vector<uint8_t> spectator;
+		std::vector<uint8_t> isFromDemo;
+		std::vector<uint8_t> desynced;
+		std::vector<spring::unordered_map<std::string, std::string>> customOpts;
+
+		// playerHandler.IsValidPlayer mirror
+		bool ValidPlayer(int playerID) const { return (playerID >= 0 && playerID < activePlayers); }
+	};
 public:
 	/// extract-if-due + publish; called once per draw frame from CGame::Draw,
 	/// after the render-event drain (see the timing contract above)
@@ -394,11 +492,15 @@ public:
 	const UnitRows& Read() const { return *front; }
 	const ProjectileRows& ReadProjectiles() const { return *projFront; }
 	const FeatureRows& ReadFeatures() const { return *featFront; }
+	const TeamRows& ReadTeams() const { return *teamFront; }
+	const PlayerRows& ReadPlayers() const { return *playerFront; }
 	uint32_t Generation() const { return generation; }
 private:
 	void Extract(UnitRows& rows);
 	void ExtractProjectiles(ProjectileRows& rows);
 	void ExtractFeatures(FeatureRows& rows);
+	void ExtractTeams(TeamRows& rows);
+	void ExtractPlayers(PlayerRows& rows);
 	static void Resize(UnitRows& rows, size_t maxUnits, int numAllyTeams);
 private:
 	UnitRows buffers[2];
@@ -413,11 +515,20 @@ private:
 	FeatureRows* featFront = &featBuffers[0];
 	FeatureRows* featBack = &featBuffers[1];
 
+	TeamRows teamBuffers[2];
+	TeamRows* teamFront = &teamBuffers[0];
+	TeamRows* teamBack = &teamBuffers[1];
+
+	PlayerRows playerBuffers[2];
+	PlayerRows* playerFront = &playerBuffers[0];
+	PlayerRows* playerBack = &playerBuffers[1];
+
 	// PR 16: scratch rows for per-sim-frame hashing; never published, kept only
 	// to avoid reallocating its arrays every armed frame
 	UnitRows hashScratch;
 	ProjectileRows hashProjScratch;
 	FeatureRows hashFeatScratch;
+	TeamRows hashTeamScratch;
 
 	uint32_t generation = 0;
 

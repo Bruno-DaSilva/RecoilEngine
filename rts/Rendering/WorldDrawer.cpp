@@ -208,7 +208,8 @@ void CWorldDrawer::Update(bool newSimFrame)
 	SCOPED_TIMER("Update::WorldDrawer");
 
 	LuaObjectDrawer::Update(numUpdates == 0);
-	readMap->UpdateDraw(numUpdates == 0);
+	// readMap->UpdateDraw (the heightmap dirty-rect drain) moved to
+	// CGame::SimDrawBarrier (PR 26): it is boundary work, sim owns the queue
 
 	if (globalRendering->drawGround) {
 		ZoneScopedN("GroundDrawer::Update");

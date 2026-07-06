@@ -10,6 +10,7 @@
 #include "LuaInclude.h"
 
 #include "Game/Camera.h"
+#include "Game/Game.h" // the stats callouts' live `game` null-check
 #include "Rendering/Common/SimSnapshot.h"
 #include "Rendering/Common/SnapshotDiffGate.h"
 #include "Rendering/Units/UnitDrawer.h"
@@ -47,6 +48,43 @@ namespace {
 			luaL_error(L, "%s(): unitID not a number", caller);
 
 		return lua_toint(L, index);
+	}
+
+	// LuaSyncedRead's ParseTeam argument semantics (error text included). The
+	// live helper's teamHandler.Team() result is never null, so the callers'
+	// null-checks are inert and the twins skip them.
+	inline int ParseTeamIDSynced(lua_State* L, const char* caller, int index, const SimSnapshot::TeamRows& rows)
+	{
+		const int teamID = luaL_checkint(L, index);
+
+		if (!rows.ValidTeam(teamID))
+			luaL_error(L, "Bad teamID in %s\n", caller);
+
+		return teamID;
+	}
+
+	// LuaSyncedRead's IsPlayerUnsynced mirror (hostDemo/isFromDemo from the
+	// player boundary copy); trivially false for the unsynced handles the
+	// redirect serves, mirrored anyway for line-by-line fidelity
+	inline bool IsPlayerUnsyncedMirror(lua_State* L, const SimSnapshot::PlayerRows& rows, int playerID)
+	{
+		const bool syncedHandle = CLuaHandle::GetHandleSynced(L);
+		const bool onlyFromDemo = syncedHandle && (rows.hostDemo != 0);
+
+		return (onlyFromDemo && rows.isFromDemo[playerID] == 0);
+	}
+
+	// the customOpts push loop GetTeamInfo/GetPlayerInfo share; table CONTENT
+	// matches the live push regardless of map iteration order
+	inline void PushOptsTable(lua_State* L, const spring::unordered_map<std::string, std::string>& opts)
+	{
+		lua_createtable(L, 0, opts.size());
+
+		for (const auto& pair: opts) {
+			lua_pushsstring(L, pair.first);
+			lua_pushsstring(L, pair.second);
+			lua_rawset(L, -3);
+		}
 	}
 
 	bool SlotsEqual(lua_State* L, int a, int b);
@@ -140,6 +178,17 @@ bool LuaSnapshotServe::ShouldServe(lua_State* L)
 int LuaSnapshotServe::Route(lua_State* L, const char* caller, ServeFn liveFn, ServeFn snapFn)
 {
 	if (!ShouldServe(L))
+		return liveFn(L, caller);
+
+	// The snapshot publishes at the first CGame::Draw boundary, but draw
+	// callins run before that: LuaIntro's DrawLoadScreen (its __func__ starts
+	// with "Draw", so the PR-2 bracket arms) fires while the game is still
+	// loading. There the live tables already exist -- teams and players from
+	// the start script, units spawning on the load thread -- so an empty
+	// snapshot would serve nil where master serves values (first hit by the
+	// PR-26 team/player family; load screens list players/teams). Pre-publish,
+	// serve live: identical to master by construction, single-threaded still.
+	if (simSnapshot.Generation() == 0)
 		return liveFn(L, caller);
 
 	if (!snapshotDiffGate.Armed())
@@ -566,4 +615,398 @@ int LuaSnapshotServe::GetProjectileOwnerID(lua_State* L, const char* caller)
 
 	lua_pushnumber(L, unitID);
 	return 1;
+}
+
+
+/******************************************************************************
+ * Team/player-table family (PR 26). Served from the TeamRows/PlayerRows
+ * boundary copy (re-extracted every boundary, section E.3); allied-POV gates
+ * via TeamRows::PovAlliedTeam, the LuaUtils::IsAlliedTeam mirror. UnitDef-free
+ * family: the only live globals the twins touch are the handle POV and the
+ * draw-owned `game` pointer null-check the stats callouts perform.
+ ******************************************************************************/
+
+// mirror of LuaSyncedRead::GetGaiaTeamID
+int LuaSnapshotServe::GetGaiaTeamID(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.ReadTeams();
+
+	if (rows.useLuaGaia == 0)
+		return 0;
+
+	lua_pushnumber(L, rows.gaiaTeamID);
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetAllyTeamList
+int LuaSnapshotServe::GetAllyTeamList(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.ReadTeams();
+
+	lua_createtable(L, rows.activeAllyTeams, 0);
+
+	unsigned int allyCount = 1;
+
+	for (int at = 0; at < rows.activeAllyTeams; at++) {
+		lua_pushnumber(L, at);
+		lua_rawseti(L, -2, allyCount++);
+	}
+
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetTeamList (team slots are never null, so the
+// live null-skip is inert)
+int LuaSnapshotServe::GetTeamList(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.ReadTeams();
+
+	int allyTeamID = -1;
+
+	const int args = lua_gettop(L); // number of arguments
+
+	// peek the first argument, but gracefully ignore the rest
+	if (args >= 1) {
+		allyTeamID = luaL_checkinteger(L, 1);
+		// teamHandler.IsValidAllyTeam mirror
+		if (!(allyTeamID >= 0 && allyTeamID < rows.activeAllyTeams))
+			return 0;
+	}
+
+	lua_createtable(L, rows.activeTeams, 0);
+
+	unsigned int teamCount = 1;
+
+	for (int t = 0; t < rows.activeTeams; t++) {
+		if ((allyTeamID >= 0) && (allyTeamID != rows.allyTeam[t]))
+			continue;
+
+		lua_pushnumber(L, t);
+		lua_rawseti(L, -2, teamCount++);
+	}
+
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetPlayerList (player slots are never null)
+int LuaSnapshotServe::GetPlayerList(lua_State* L, const char* caller)
+{
+	const auto& trows = simSnapshot.ReadTeams();
+	const auto& rows = simSnapshot.ReadPlayers();
+
+	int teamID = -1;
+	bool active = false;
+
+	if (lua_isnumber(L, 1)) {
+		teamID = lua_toint(L, 1);
+		active = lua_isboolean(L, 2)? lua_toboolean(L, 2): active;
+	}
+	else if (lua_isboolean(L, 1)) {
+		active = lua_toboolean(L, 1);
+		teamID = lua_isnumber(L, 2)? lua_toint(L, 2): teamID;
+	}
+
+	if (teamID >= trows.activeTeams)
+		return 0;
+
+	lua_createtable(L, rows.activePlayers, 0);
+
+	for (int p = 0, playerCount = 1; p < rows.activePlayers; p++) {
+		if (IsPlayerUnsyncedMirror(L, rows, p))
+			continue;
+
+		if (active && rows.active[p] == 0)
+			continue;
+
+		if (teamID >= 0) {
+			// exclude specs for normal team ID's
+			if (rows.spectator[p] != 0)
+				continue;
+			if (rows.team[p] != teamID)
+				continue;
+		}
+
+		lua_pushnumber(L, p);
+		lua_rawseti(L, -2, playerCount++);
+	}
+
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetTeamInfo
+int LuaSnapshotServe::GetTeamInfo(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.ReadTeams();
+
+	const int teamID = luaL_checkint(L, 1);
+	if (!rows.ValidTeam(teamID))
+		return 0;
+
+	// read before modifying stack
+	const bool getTeamOpts = luaL_optboolean(L, 2, true);
+
+	lua_pushnumber(L,  teamID); // live pushes team->teamNum == teamID
+	lua_pushnumber(L,  rows.leader[teamID]);
+	lua_pushboolean(L, rows.isDead[teamID]);
+	lua_pushboolean(L, rows.hasAIs[teamID]);
+	lua_pushsstring(L, rows.sideName[teamID]);
+	lua_pushnumber(L,  rows.allyTeam[teamID]);
+	lua_pushnumber(L, rows.incomeMultiplier[teamID]);
+
+	if (getTeamOpts)
+		PushOptsTable(L, rows.customOpts[teamID]);
+
+	return 7 + getTeamOpts;
+}
+
+// mirror of LuaSyncedRead::GetTeamAllyTeamID
+int LuaSnapshotServe::GetTeamAllyTeamID(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.ReadTeams();
+
+	const int teamID = luaL_checkint(L, 1);
+	if (!rows.ValidTeam(teamID))
+		return 0;
+
+	lua_pushnumber(L, rows.allyTeam[teamID]);
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetTeamResources
+int LuaSnapshotServe::GetTeamResources(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.ReadTeams();
+	const int teamID = ParseTeamIDSynced(L, caller, 1, rows);
+	const Pov pov = HandlePov(L);
+
+	if (!rows.PovAlliedTeam(teamID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	switch (luaL_checkstring(L, 2)[0]) {
+		case 'm': {
+			lua_pushnumber(L, rows.res[teamID].metal);
+			lua_pushnumber(L, rows.resStorage[teamID].metal);
+			lua_pushnumber(L, rows.resPrevPull[teamID].metal);
+			lua_pushnumber(L, rows.resPrevIncome[teamID].metal);
+			lua_pushnumber(L, rows.resPrevExpense[teamID].metal);
+			lua_pushnumber(L, rows.resShare[teamID].metal);
+			lua_pushnumber(L, rows.resPrevSent[teamID].metal);
+			lua_pushnumber(L, rows.resPrevReceived[teamID].metal);
+			lua_pushnumber(L, rows.resPrevExcess[teamID].metal);
+			return 9;
+		} break;
+		case 'e': {
+			lua_pushnumber(L, rows.res[teamID].energy);
+			lua_pushnumber(L, rows.resStorage[teamID].energy);
+			lua_pushnumber(L, rows.resPrevPull[teamID].energy);
+			lua_pushnumber(L, rows.resPrevIncome[teamID].energy);
+			lua_pushnumber(L, rows.resPrevExpense[teamID].energy);
+			lua_pushnumber(L, rows.resShare[teamID].energy);
+			lua_pushnumber(L, rows.resPrevSent[teamID].energy);
+			lua_pushnumber(L, rows.resPrevReceived[teamID].energy);
+			lua_pushnumber(L, rows.resPrevExcess[teamID].energy);
+			return 9;
+		} break;
+		default: {
+		} break;
+	}
+
+	return 0;
+}
+
+// mirror of LuaSyncedRead::GetTeamUnitStats
+int LuaSnapshotServe::GetTeamUnitStats(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.ReadTeams();
+	const int teamID = ParseTeamIDSynced(L, caller, 1, rows);
+
+	if (game == nullptr)
+		return 0;
+
+	const Pov pov = HandlePov(L);
+
+	if (!rows.PovAlliedTeam(teamID, pov.readAllyTeam, pov.fullRead) && rows.gameOver == 0)
+		return 0;
+
+	const TeamStatistics& stats = rows.currentStats[teamID];
+	lua_pushnumber(L, stats.unitsKilled);
+	lua_pushnumber(L, stats.unitsDied);
+	lua_pushnumber(L, stats.unitsCaptured);
+	lua_pushnumber(L, stats.unitsOutCaptured);
+	lua_pushnumber(L, stats.unitsReceived);
+	lua_pushnumber(L, stats.unitsSent);
+
+	return 6;
+}
+
+// mirror of LuaSyncedRead::GetTeamResourceStats
+int LuaSnapshotServe::GetTeamResourceStats(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.ReadTeams();
+	const int teamID = ParseTeamIDSynced(L, caller, 1, rows);
+
+	if (game == nullptr)
+		return 0;
+
+	const Pov pov = HandlePov(L);
+
+	if (!rows.PovAlliedTeam(teamID, pov.readAllyTeam, pov.fullRead) && rows.gameOver == 0)
+		return 0;
+
+	const TeamStatistics& stats = rows.currentStats[teamID];
+
+	switch (luaL_checkstring(L, 2)[0]) {
+		case 'm': {
+			lua_pushnumber(L, stats.metalUsed);
+			lua_pushnumber(L, stats.metalProduced);
+			lua_pushnumber(L, stats.metalExcess);
+			lua_pushnumber(L, stats.metalReceived);
+			lua_pushnumber(L, stats.metalSent);
+			return 5;
+		} break;
+		case 'e': {
+			lua_pushnumber(L, stats.energyUsed);
+			lua_pushnumber(L, stats.energyProduced);
+			lua_pushnumber(L, stats.energyExcess);
+			lua_pushnumber(L, stats.energyReceived);
+			lua_pushnumber(L, stats.energySent);
+			return 5;
+		} break;
+		default: {
+		} break;
+	}
+
+	return 0;
+}
+
+// mirror of LuaSyncedRead::GetTeamDamageStats
+int LuaSnapshotServe::GetTeamDamageStats(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.ReadTeams();
+	const int teamID = ParseTeamIDSynced(L, caller, 1, rows);
+
+	if (game == nullptr)
+		return 0;
+
+	const Pov pov = HandlePov(L);
+
+	if (!rows.PovAlliedTeam(teamID, pov.readAllyTeam, pov.fullRead) && rows.gameOver == 0)
+		return 0;
+
+	const TeamStatistics& stats = rows.currentStats[teamID];
+
+	lua_pushnumber(L, stats.damageDealt);
+	lua_pushnumber(L, stats.damageReceived);
+
+	return 2;
+}
+
+// mirror of LuaSyncedRead::GetTeamUnitCount
+int LuaSnapshotServe::GetTeamUnitCount(lua_State* L, const char* caller)
+{
+	if (CLuaHandle::GetHandleReadAllyTeam(L) == CEventClient::NoAccessTeam)
+		return 0;
+
+	// parse the team
+	const auto& rows = simSnapshot.ReadTeams();
+	const int teamID = ParseTeamIDSynced(L, caller, 1, rows);
+	const Pov pov = HandlePov(L);
+
+	// use the raw team count for allies
+	if (rows.PovAlliedTeam(teamID, pov.readAllyTeam, pov.fullRead)) {
+		lua_pushnumber(L, rows.numUnits[teamID]);
+		return 1;
+	}
+
+	// loop through the units for enemies: the live path walks
+	// unitHandler.GetUnitsByTeam counting LuaUtils::IsUnitVisible; the unit
+	// snapshot covers the identical unit set at this boundary and
+	// PovUnitVisible is the IsUnitVisible mirror (order-independent count)
+	const auto& urows = simSnapshot.Read();
+
+	unsigned int unitCount = 0;
+
+	for (size_t id = 0; id < urows.MaxUnits(); ++id) {
+		if (urows.valid[id] == 0 || urows.team[id] != static_cast<uint8_t>(teamID))
+			continue;
+
+		unitCount += int(urows.PovUnitVisible(static_cast<int>(id), pov.readAllyTeam, pov.fullRead));
+	}
+
+	lua_pushnumber(L, unitCount);
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetPlayerInfo
+int LuaSnapshotServe::GetPlayerInfo(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.ReadPlayers();
+	const auto& trows = simSnapshot.ReadTeams();
+
+	const int playerID = luaL_checkint(L, 1);
+	if (!rows.ValidPlayer(playerID))
+		return 0;
+
+	if (IsPlayerUnsyncedMirror(L, rows, playerID))
+		return 0;
+
+	// read before modifying stack
+	const bool getPlayerOpts = luaL_optboolean(L, 2, true);
+
+	// player->team is always a valid teamID in reachable states; the guards
+	// mirror what an out-of-range live read would make unreachable anyway
+	const int team = rows.team[playerID];
+
+	lua_pushsstring(L, rows.name[playerID]);
+	lua_pushboolean(L, rows.active[playerID]);
+	lua_pushboolean(L, rows.spectator[playerID]);
+	lua_pushnumber(L, team);
+	lua_pushnumber(L, trows.ValidTeam(team) ? trows.allyTeam[team] : -1);
+	lua_pushnumber(L, rows.ping[playerID] * 0.001f); // in seconds
+	lua_pushnumber(L, rows.cpuUsage[playerID]);
+	lua_pushsstring(L, rows.countryCode[playerID]);
+	lua_pushnumber(L, rows.rank[playerID]);
+	// same as select(4, GetTeamInfo(teamID=player->team))
+	lua_pushboolean(L, trows.ValidTeam(team) && trows.hasAIs[team] != 0);
+
+	if (getPlayerOpts) {
+		PushOptsTable(L, rows.customOpts[playerID]);
+	} else {
+		lua_pushnil(L);
+	}
+	lua_pushboolean(L, rows.desynced[playerID]);
+
+	return 12;
+}
+
+// mirror of LuaUnsyncedRead::GetTeamColor
+int LuaSnapshotServe::GetTeamColor(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.ReadTeams();
+
+	const int teamID = luaL_checkint(L, 1);
+	if ((teamID < 0) || (teamID >= rows.activeTeams))
+		return 0;
+
+	lua_pushnumber(L, rows.color[teamID][0] / 255.0f);
+	lua_pushnumber(L, rows.color[teamID][1] / 255.0f);
+	lua_pushnumber(L, rows.color[teamID][2] / 255.0f);
+	lua_pushnumber(L, rows.color[teamID][3] / 255.0f);
+	return 4;
+}
+
+// mirror of LuaUnsyncedRead::GetTeamOrigColor
+int LuaSnapshotServe::GetTeamOrigColor(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.ReadTeams();
+
+	const int teamID = luaL_checkint(L, 1);
+	if ((teamID < 0) || (teamID >= rows.activeTeams))
+		return 0;
+
+	lua_pushnumber(L, rows.origColor[teamID][0] / 255.0f);
+	lua_pushnumber(L, rows.origColor[teamID][1] / 255.0f);
+	lua_pushnumber(L, rows.origColor[teamID][2] / 255.0f);
+	lua_pushnumber(L, rows.origColor[teamID][3] / 255.0f);
+	return 4;
 }

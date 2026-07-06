@@ -88,7 +88,14 @@ protected:
 
 	Shader::IProgramObject* decalShader;
 
-	using DecalOwner = std::variant<const CSolidObject*, const GhostSolidObject*>;
+	// PR 26 (sim|draw): the last pointer-keyed drawer container (PR-14 note)
+	// went id-keyed. Solid objects key by CSolidObject::GetBlockingMapID()
+	// -- the engine's packed solid-object id space (units: id, features:
+	// id + unitHandler.MaxUnits()) -- and resolve back through the handlers
+	// at read sites (post-drain invariant: entries only name live objects,
+	// their add/remove is event-paired). Ghosts are draw-side objects owned
+	// by the unit drawer, not sim state, and keep their pointer key.
+	using DecalOwner = std::variant<int, const GhostSolidObject*>;
 	spring::unordered_map<DecalOwner, size_t, std::hash<DecalOwner>> decalOwners; // for tracks, plates and ghosts
 	spring::unordered_map<int, UnitMinMaxHeight> unitMinMaxHeights; // for tracks
 	spring::unordered_map<uint32_t, size_t> idToPos;

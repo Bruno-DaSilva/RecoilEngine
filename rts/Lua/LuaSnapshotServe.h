@@ -74,4 +74,22 @@ namespace LuaSnapshotServe {
 	int GetProjectileDefID(lua_State* L, const char* caller);
 	int GetProjectileTarget(lua_State* L, const char* caller);
 	int GetProjectileOwnerID(lua_State* L, const char* caller);
+
+	// team/player-table family (PR 26; served from the SimSnapshot team/player
+	// boundary copy, section E.3 field spec -- POV gates via the TeamRows
+	// IsAlliedTeam mirror)
+	int GetGaiaTeamID(lua_State* L, const char* caller);
+	int GetAllyTeamList(lua_State* L, const char* caller);
+	int GetTeamList(lua_State* L, const char* caller);
+	int GetPlayerList(lua_State* L, const char* caller);
+	int GetTeamInfo(lua_State* L, const char* caller);
+	int GetTeamAllyTeamID(lua_State* L, const char* caller);
+	int GetTeamResources(lua_State* L, const char* caller);
+	int GetTeamUnitStats(lua_State* L, const char* caller);
+	int GetTeamResourceStats(lua_State* L, const char* caller);
+	int GetTeamDamageStats(lua_State* L, const char* caller);
+	int GetTeamUnitCount(lua_State* L, const char* caller);
+	int GetPlayerInfo(lua_State* L, const char* caller);
+	int GetTeamColor(lua_State* L, const char* caller);     // LuaUnsyncedRead
+	int GetTeamOrigColor(lua_State* L, const char* caller); // LuaUnsyncedRead
 }
