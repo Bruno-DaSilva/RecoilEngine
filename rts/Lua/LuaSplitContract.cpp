@@ -317,15 +317,17 @@ void CountSanctionedPoke(lua_State* L, const char* caller)
 }
 
 
-void DrainBoundaryApplies()
+size_t DrainBoundaryApplies()
 {
 	if (queuedOps.empty())
-		return;
+		return 0;
 
 	// ops may not enqueue further ops (they are plain sim-state writes); a
 	// swap keeps the invariant checkable and the vector's capacity reusable
 	static std::vector<QueuedOp> draining;
 	std::swap(draining, queuedOps);
+
+	const size_t numApplied = draining.size();
 
 	for (const QueuedOp& q: draining) {
 		q.op();
@@ -333,6 +335,8 @@ void DrainBoundaryApplies()
 
 	draining.clear();
 	std::swap(draining, queuedOps); // hand the capacity back
+
+	return numApplied;
 }
 
 

@@ -89,8 +89,13 @@ namespace LuaSplitContract {
 	void CountSanctionedPoke(lua_State* L, const char* caller);
 
 	/// apply everything queued since the last barrier; called from
-	/// CGame::SimDrawBarrier (the pause window). No-op when empty.
-	void DrainBoundaryApplies();
+	/// CGame::SimDrawBarrier (the pause window). No-op when empty. Returns
+	/// the number of applied ops: a nonzero count mutated sim state OUTSIDE
+	/// any sim frame, so the caller must poke the snapshot's due-check
+	/// (SimSnapshot::MarkMutatedOutsideFrame) or the rows serve stale values
+	/// until the next sim frame (found by the windowed diff gate: queued
+	/// SetUnitNoSelect vs the noSelect row).
+	size_t DrainBoundaryApplies();
 
 	/// log the per-callout trip inventory (sanctioned live reads, denials,
 	/// queued pokes); `reason` tags the dump line. Used by the

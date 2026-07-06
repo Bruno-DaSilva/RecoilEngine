@@ -1630,7 +1630,12 @@ void CGame::SimDrawBarrier()
 	// this is the pause window, so the writes land while sim state is mutable
 	// and before the snapshot publish below makes them draw-visible. Empty
 	// (and free) unless the contract flag queued something last draw frame.
-	LuaSplitContract::DrainBoundaryApplies();
+	if (LuaSplitContract::DrainBoundaryApplies() > 0) {
+		// the applied pokes mutated sim state outside any sim frame -- the
+		// snapshot's frameNum-based due-check cannot see that (the same
+		// class as net-driven team transfers, see CUnit::ChangedTeam)
+		simSnapshot.MarkMutatedOutsideFrame();
+	}
 
 	// (3) publish the observable-state snapshot for draw-side consumers
 	// (contract in SimSnapshot.h; the team/player copy refreshes every call)
