@@ -702,7 +702,7 @@ bool CUnitDrawerData::UpdateUnitGhosts(const CUnit* unit, const GhostAllyMask& d
 
 		}
 
-		spring::VectorErase(savedData.liveGhostBuildings[allyTeam][MDL_TYPE(unit)], unit);
+		spring::VectorErase(savedData.liveGhostBuildings[allyTeam][MDL_TYPE(unit)], unit->id);
 	}
 	return addedOwnAllyTeam;
 }
@@ -715,6 +715,17 @@ void CUnitDrawerData::RenderUnitDestroyed(const CUnit* unit)
 	// LOS updating before parking it -- so the mask still reads the values
 	// the old synchronous dispatch saw
 	UpdateUnitGhosts(unit, unit->leavesGhost ? CalcDeadGhostAllyMask(unit) : GhostAllyMask{});
+
+	// container invariant (PR 14): a dead unit's id must leave the live-ghost
+	// lists even when UpdateUnitGhosts early-returned (ghostedBuildings off,
+	// but Lua can set leavesGhost regardless -- master left a stale pointer
+	// here that only mempool zeroing kept benign)
+	if (!gameSetup->ghostedBuildings && unit->model != nullptr) {
+		for (int allyTeam = 0; allyTeam < savedData.liveGhostBuildings.size(); ++allyTeam) {
+			spring::VectorErase(savedData.liveGhostBuildings[allyTeam][MDL_TYPE(unit)], unit->id);
+		}
+	}
+
 	// must happen after UpdateUnitGhosts()
 	IconStateRef(unit).currentIconIndex = icon::INVALID_ICON_INDEX;
 
@@ -767,7 +778,7 @@ void CUnitDrawerData::ApplyUnitEnteredLos(const CUnit* unit, int allyTeam, bool 
 	// records replay any later flips in order, so the live-ghost container ops
 	// mirror master's op-for-op
 	if (leavesGhostAtEvent)
-		spring::VectorErase(savedData.liveGhostBuildings[allyTeam][MDL_TYPE(unit)], unit);
+		spring::VectorErase(savedData.liveGhostBuildings[allyTeam][MDL_TYPE(unit)], unit->id);
 
 	if (allyTeam != gu->myAllyTeam)
 		return;
@@ -787,7 +798,7 @@ void CUnitDrawerData::UnitLeftLos(const CUnit* unit, int allyTeam)
 void CUnitDrawerData::ApplyUnitLeftLos(const CUnit* unit, int allyTeam, bool leavesGhostAtEvent)
 {
 	if (leavesGhostAtEvent)
-		spring::VectorInsertUnique(savedData.liveGhostBuildings[allyTeam][MDL_TYPE(unit)], unit, true);
+		spring::VectorInsertUnique(savedData.liveGhostBuildings[allyTeam][MDL_TYPE(unit)], unit->id, true);
 
 	if (allyTeam != gu->myAllyTeam)
 		return;

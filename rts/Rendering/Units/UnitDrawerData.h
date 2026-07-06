@@ -105,8 +105,10 @@ public:
 		/// buildings that were in LOS_PREVLOS when they died and not in LOS since
 		std::vector<std::array<std::vector<GhostSolidObject*>, MODELTYPE_CNT>> deadGhostBuildings;
 
-		/// buildings that left LOS but are still alive
-		std::vector<std::array<std::vector<const CUnit*>, MODELTYPE_CNT>> liveGhostBuildings;
+		/// buildings that left LOS but are still alive; unit ids (PR 14),
+		/// erased unconditionally at the destroy-record drain so every entry
+		/// resolves to a live unit
+		std::vector<std::array<std::vector<int>, MODELTYPE_CNT>> liveGhostBuildings;
 	};
 public:
 	CUnitDrawerData(bool& mtModelDrawer_);

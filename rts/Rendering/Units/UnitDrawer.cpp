@@ -890,8 +890,8 @@ void CUnitDrawerGLSL::DrawGhostedBuildings(int modelType) const
 		}
 	}
 
-	for (const CUnit* lgb : liveGhostedBuildings) {
-		DrawAlphaUnit(lgb, modelType, DrawFlags::SO_ALPHAF_FLAG, true);
+	for (const int unitID : liveGhostedBuildings) {
+		DrawAlphaUnit(DrawerGetObjectByID<CUnit>(unitID), modelType, DrawFlags::SO_ALPHAF_FLAG, true);
 	}
 }
 
@@ -1794,7 +1794,9 @@ void CUnitDrawerGL4::DrawAlphaObjects(int modelType, bool drawReflection, bool d
 
 		int prevModelType = -1;
 		int prevTexType = -1;
-		for (const auto* lgb : liveGhostedBuildings) {
+		for (const int unitID : liveGhostedBuildings) {
+			const CUnit* lgb = DrawerGetObjectByID<CUnit>(unitID);
+
 			if (!camera->InView(lgb->pos, lgb->model->GetDrawRadius()))
 				continue;
 
