@@ -53,6 +53,9 @@
 #include "Rendering/ModelsDataUploader.h"
 #include "Rendering/ShadowHandler.h"
 #include "Rendering/TeamHighlight.h"
+#include "Map/BaseGroundDrawer.h"
+#include "Rendering/Common/ModelDrawer.h"
+#include "Rendering/GL/LightHandler.h"
 #include "Rendering/Units/UnitDrawer.h"
 #include "Rendering/UniformConstants.h"
 #include "Rendering/Map/InfoTexture/IInfoTextureHandler.h"
@@ -134,7 +137,9 @@
 #include "System/LoadSave/DemoRecorder.h"
 #include "System/Log/ILog.h"
 #include "System/Platform/Misc.h"
+#include "lib/streflop/streflop_cond.h"
 #include "System/Platform/Watchdog.h"
+#include "System/Threading/SpringThreading.h"
 #include "System/Platform/errorhandler.h"
 #include "System/Sound/ISound.h"
 #include "System/Sound/ISoundChannels.h"
@@ -299,6 +304,10 @@ CGame::CGame(const std::string& mapFileName, const std::string& modFileName, ILo
 
 CGame::~CGame()
 {
+	// PR 27b: the sim thread must be gone before any teardown below touches
+	// state it consumes (handlers, net, Lua); no-op when the split is off
+	JoinSimThread();
+
 	ENTER_SYNCED_CODE();
 	LOG("[Game::%s][1]", __func__);
 
@@ -1203,8 +1212,10 @@ bool CGame::Update()
 	good_fpu_control_registers("CGame::Update");
 
 	// sim->render events fired below (ClientReadNet -> SimFrame) queue up as
-	// records; CGame::Draw drains them at the draw boundary
-	renderEventQueue.BeginSimPhase();
+	// records; CGame::Draw drains them at the draw boundary. Under the split
+	// the sim thread opens the phase itself, each loop iteration.
+	if (!SimDrawSplit::Enabled())
+		renderEventQueue.BeginSimPhase();
 
 	jobDispatcher.Update();
 	clientNet->Update();
@@ -1214,25 +1225,42 @@ bool CGame::Update()
 	if (playing && gameServer != nullptr && videoCapturing->AllowRecord())
 		gameServer->CreateNewFrame(false, true);
 
-	ENTER_SYNCED_CODE();
-	SendClientProcUsage();
-	{
-		// the sim phase (PR 27b): sim-fired unsynced work inside this bracket
-		// boundary-defers when the split flag is on; under the split the same
-		// bracket wraps the sim thread's ClientReadNet call instead
-		SimDrawSplit::ScopedSimPhase simPhase;
-		ClientReadNet(); // issues new SimFrame()s
+	if (SimDrawSplit::Enabled()) {
+		// PR 27b: the sim thread owns ClientReadNet -> SimFrames (spawned
+		// here so the whole CGame is constructed first). The main thread
+		// keeps connection upkeep -- every clientNet entry point used below
+		// locks -- and the CPU-usage report, which reads main-side data.
+		SpawnSimThread();
+		SendClientProcUsage();
+
+		if (!gameOver) {
+			if (clientNet->NeedsReconnect())
+				clientNet->AttemptReconnect(SpringVersion::GetSync(), Platform::GetPlatformStr());
+
+			if (clientNet->CheckTimeout(0, gs->PreSimFrame()))
+				GameEnd({}, true);
+		}
+	} else {
+		ENTER_SYNCED_CODE();
+		SendClientProcUsage();
+		{
+			// the sim phase (PR 27b): sim-fired unsynced work inside this
+			// bracket boundary-defers when the split flag is on; under the
+			// split the sim thread's loop opens the same bracket instead
+			SimDrawSplit::ScopedSimPhase simPhase;
+			ClientReadNet(); // issues new SimFrame()s
+		}
+
+		if (!gameOver) {
+			if (clientNet->NeedsReconnect())
+				clientNet->AttemptReconnect(SpringVersion::GetSync(), Platform::GetPlatformStr());
+
+			if (clientNet->CheckTimeout(0, gs->PreSimFrame()))
+				GameEnd({}, true);
+		}
+
+		LEAVE_SYNCED_CODE();
 	}
-
-	if (!gameOver) {
-		if (clientNet->NeedsReconnect())
-			clientNet->AttemptReconnect(SpringVersion::GetSync(), Platform::GetPlatformStr());
-
-		if (clientNet->CheckTimeout(0, gs->PreSimFrame()))
-			GameEnd({}, true);
-	}
-
-	LEAVE_SYNCED_CODE();
 
 	{
 		SLuaAllocError error = {};
@@ -1472,6 +1500,10 @@ bool CGame::UpdateUnsynced(const spring_time currentTime)
 	shadowHandler.Update();
 	{
 		worldDrawer.Update(newSimFrame);
+		// PR 27b: the drawer extraction (the pause window's second half, the
+		// PR-26 deferral) is complete -- everything below reads extracted or
+		// draw-owned storage only, so the sim may resume consuming
+		ReleaseSimPause();
 		transformsUploader.Update();
 		modelUniformsUploader.Update();
 	}
@@ -1549,10 +1581,21 @@ void CGame::SimDrawBarrier()
 	// destruction, LOS transitions) before any draw-side code reads the
 	// drawer containers
 	renderEventQueue.Drain();
+
+	// (1b) split only: deliver the drained destroys to the draw-owned death
+	// dependents (selection, wait-AI, tracked lights) -- they skip
+	// registering real death-dependences on sim objects under the split
+	// (SimDrawSplit.h), and this is their replacement notification
+	DeliverBoundaryDeaths();
+
 	// (2) the drain dispatched every queued destroy record: the draw side has
 	// acked those objects, so destruct their deferred shells and poison the
-	// slots; ReleaseAcked() at the end of this Draw returns them to the pools
-	deferredObjectDeleter.AckDrainedDestroys();
+	// slots; ReleaseAcked() at the end of this Draw returns them to the pools.
+	// Split only: the ack moves to the END of the barrier -- the deferred
+	// unsynced dispatches of step 7 hold shell pointers that must stay
+	// readable until they ran (and the release folds into the next ack).
+	if (!SimDrawSplit::Enabled())
+		deferredObjectDeleter.AckDrainedDestroys();
 
 	// (2b) apply the draw-side Lua contract's boundary-deferred sim pokes
 	// (LuaUnsyncedCtrl direct-sim-poke class under SplitDrawContract, PR 27a):
@@ -1617,10 +1660,195 @@ void CGame::SimDrawBarrier()
 	// are sanctioned boundary callins, the same class as the Render* event
 	// dispatches of step 1.
 	UnsyncedBoundaryQueue::Drain();
+
+	// (8) split only: the relocated shell ack (see step 2)
+	if (SimDrawSplit::Enabled())
+		deferredObjectDeleter.AckDrainedDestroys();
 }
 
+// PR 27b: see barrier step (1b). Also used by the pool-pressure valve
+// service in AcquireSimPause, which flushes destroys mid-frame.
+void CGame::DeliverBoundaryDeaths()
+{
+	if (!SimDrawSplit::Enabled())
+		return;
+
+	const auto& deadUnits = renderEventQueue.BoundaryDestroyedUnits();
+	const auto& deadProjs = renderEventQueue.BoundaryDestroyedProjectiles();
+
+	GL::LightHandler* groundLights = (readMap != nullptr && readMap->GetGroundDrawer() != nullptr) ? readMap->GetGroundDrawer()->GetLightHandler() : nullptr;
+	GL::LightHandler* modelLights = CModelDrawerConcept::GetLightHandler();
+
+	for (const CUnit* u: deadUnits) {
+		CUnit* unit = const_cast<CUnit*>(u);
+
+		selectedUnitsHandler.DependentDied(unit);
+		waitCommandsAI.DeliverBoundaryDeath(unit);
+
+		if (groundLights != nullptr)
+			groundLights->DeliverBoundaryDeath(unit);
+		if (modelLights != nullptr)
+			modelLights->DeliverBoundaryDeath(unit);
+	}
+
+	for (const CProjectile* p: deadProjs) {
+		if (groundLights != nullptr)
+			groundLights->DeliverBoundaryDeath(p);
+		if (modelLights != nullptr)
+			modelLights->DeliverBoundaryDeath(p);
+	}
+
+	renderEventQueue.ClearBoundaryDestroys();
+}
+
+// ---------------------------------------------------------------------------
+// PR 27b: the sim thread (active only with SimDrawSplit=1)
+// ---------------------------------------------------------------------------
+
+// joined by JoinSimThread; file-static so Game.h stays include-light
+static spring::thread simNetThread;
+
+__FORCE_ALIGN_STACK__
+void CGame::SimThreadProc()
+{
+	Threading::SetThreadName("sim");
+	// registers thread controls so watchdog/crash dumps can suspend us
+	Threading::SetSimThread();
+
+	// not needed to maintain sync (precision flags are per-process) but fpu
+	// exceptions are per-thread (the GameLoadThread pattern; sync risk #1)
+	streflop::streflop_init<streflop::Simple>();
+
+	Watchdog::RegisterThread(WDT_SIM);
+	SimDrawSplit::SetSimThreadRunning(true);
+
+	try {
+		while (!SimDrawSplit::SimThreadExitRequested() && !gu->globalQuit) {
+			Watchdog::ClearTimer(WDT_SIM);
+
+			// the frame-edge park point (the barrier handshake); the second
+			// one sits between packets inside ClientReadNet
+			SimDrawSplit::YieldIfPauseRequested();
+
+			if (SimDrawSplit::SimThreadExitRequested() || gu->globalQuit)
+				break;
+
+			good_fpu_control_registers("CGame::SimThreadProc");
+
+			{
+				// exactly the bracket the single-threaded path wraps around
+				// ClientReadNet in CGame::Update
+				renderEventQueue.BeginSimPhase();
+				SimDrawSplit::ScopedSimPhase simPhase;
+
+				ENTER_SYNCED_CODE();
+				ClientReadNet(); // issues new SimFrame()s
+				LEAVE_SYNCED_CODE();
+			}
+
+			// bounded nap; woken early by a pause request or exit
+			SimDrawSplit::SimIdleWait();
+		}
+	} CATCH_SPRING_ERRORS
+
+	SimDrawSplit::SetSimThreadRunning(false);
+	Watchdog::DeregisterThread(WDT_SIM);
+}
+
+void CGame::SpawnSimThread()
+{
+	if (simNetThread.joinable())
+		return;
+
+	// the sim thread interleaves Peek/GetData with main-thread Sends; the
+	// two unlocked queue ops take the connection lock from here on
+	clientNet->SetThreadSafeQueueOps(true);
+
+	SimDrawSplit::ResetSimThreadExit();
+	simNetThread = spring::thread(std::bind(&CGame::SimThreadProc, this));
+
+	LOG("[Game::%s] sim thread spawned (SimDrawSplit=1)", __func__);
+}
+
+void CGame::JoinSimThread()
+{
+	if (!simNetThread.joinable())
+		return;
+
+	SimDrawSplit::RequestSimThreadExit();
+	simNetThread.join();
+	Threading::ClearSimThread();
+
+	LOG("[Game::%s] sim thread joined", __func__);
+}
+
+void CGame::AcquireSimPause()
+{
+	if (!SimDrawSplit::Enabled() || !SimDrawSplit::SimThreadRunning())
+		return;
+
+	SimDrawSplit::RequestPause();
+
+	// pool-pressure valve service (the PR-13 valve became "sim waits for the
+	// boundary" under the split): the sim parked MID-frame out of pool
+	// headroom. Give its pages back: dispatch pending records in place
+	// (Flush keeps the deferral window open), deliver boundary deaths and
+	// run the deferred unsynced dispatches while the shells are readable,
+	// then destruct + release. Loops in case pressure recurs before the
+	// frame edge.
+	while (SimDrawSplit::ParkedAtValve()) {
+		// same live-read legality as the barrier (sim parked mid-frame)
+		LuaSplitContract::ScopedLiveException valveLive;
+
+		renderEventQueue.Flush();
+		DeliverBoundaryDeaths();
+		UnsyncedBoundaryQueue::Drain();
+		deferredObjectDeleter.AckDrainedDestroys();
+		deferredObjectDeleter.ReleaseAcked();
+		SimDrawSplit::ResumeFromValve();
+	}
+
+	simPauseHeld = true;
+}
+
+void CGame::ReleaseSimPause()
+{
+	if (!simPauseHeld)
+		return;
+
+	simPauseHeld = false;
+	SimDrawSplit::ReleasePause(gs->frameNum);
+}
+
+CGame::ScopedExternalSimPause::ScopedExternalSimPause()
+{
+	if (game == nullptr || game->simPauseHeld)
+		return;
+
+	game->AcquireSimPause();
+	acquired = game->simPauseHeld;
+}
+
+CGame::ScopedExternalSimPause::~ScopedExternalSimPause()
+{
+	if (acquired && game != nullptr)
+		game->ReleaseSimPause();
+}
+
+
 bool CGame::Draw() {
-	SimDrawBarrier();
+	// PR 27b: park the sim thread at a frame edge (servicing pool-pressure
+	// valve parks along the way); no-op when the split is off. The pause
+	// spans the barrier + UpdateUnsynced through the drawer extraction.
+	AcquireSimPause();
+
+	{
+		// the barrier's own dispatches (Render* events, deferred unsynced
+		// callins) legally read live sim state -- the sim is parked; the
+		// widget callins later in the frame stay contract-served
+		LuaSplitContract::ScopedLiveException barrierLive;
+		SimDrawBarrier();
+	}
 
 	// everything from here to the end of Draw is draw-thread context under
 	// the split contract (PR 27a): unsynced Lua ran below this line executes
@@ -1631,8 +1859,12 @@ bool CGame::Draw() {
 
 	const spring_time currentTimePreUpdate = spring_gettime();
 
-	if (UpdateUnsynced(currentTimePreUpdate))
+	if (UpdateUnsynced(currentTimePreUpdate)) {
+		// early-out paths (skipping 2Hz redraw etc.) exit before the normal
+		// release point inside UpdateUnsynced
+		ReleaseSimPause();
 		return false;
+	}
 
 	RmlGui::Update();
 	const spring_time currentTimePreDraw = spring_gettime();
@@ -1752,7 +1984,15 @@ bool CGame::Draw() {
 	lastDrawFrameTime = currentTimePostDraw;
 
 	// return the poisoned slots of this Draw's acked destroys to the pools
-	deferredObjectDeleter.ReleaseAcked();
+	// PR 27b: under the split the pools are sim-owned and the sim thread is
+	// running again here -- the release folds into the next barrier's ack
+	// (AckDrainedDestroys starts by releasing leftovers), per the PR-13 plan
+	if (!SimDrawSplit::Enabled())
+		deferredObjectDeleter.ReleaseAcked();
+
+	// safety net for any Draw exit path that skipped the normal release
+	// point (no-op when already released)
+	ReleaseSimPause();
 
 	return true;
 }

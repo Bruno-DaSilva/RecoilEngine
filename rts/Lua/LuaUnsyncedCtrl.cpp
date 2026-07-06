@@ -74,6 +74,7 @@
 #include "Sim/Units/UnitHandler.h"
 #include "System/Config/ConfigHandler.h"
 #include "System/EventHandler.h"
+#include "System/SimDrawSplit.h"
 #include "System/GlobalConfig.h"
 #include "System/Log/DefaultFilter.h"
 #include "System/Log/ILog.h"
@@ -1884,7 +1885,11 @@ static bool AddLightTrackingTarget(lua_State* L, GL::Light* light, bool trackEna
 		if (unit != nullptr) {
 			if (trackEnable) {
 				if (light->GetTrackObject() == nullptr) {
-					light->AddDeathDependence(unit, DEPENDENCE_LIGHT);
+					// PR 27b: no death-dependences on sim objects from the
+					// draw side under the split; the boundary nulls dead
+					// track objects (LightHandler::DeliverBoundaryDeath)
+					if (!SimDrawSplit::Enabled())
+						light->AddDeathDependence(unit, DEPENDENCE_LIGHT);
 					light->SetTrackObject(unit);
 					light->SetTrackType(GL::Light::TRACK_TYPE_UNIT);
 					ret = true;
@@ -1892,7 +1897,8 @@ static bool AddLightTrackingTarget(lua_State* L, GL::Light* light, bool trackEna
 			} else {
 				// assume <light> was tracking <unit>
 				if (light->GetTrackObject() == unit) {
-					light->DeleteDeathDependence(unit, DEPENDENCE_LIGHT);
+					if (!SimDrawSplit::Enabled())
+						light->DeleteDeathDependence(unit, DEPENDENCE_LIGHT);
 					light->SetTrackObject(nullptr);
 					ret = true;
 				}
@@ -1908,7 +1914,9 @@ static bool AddLightTrackingTarget(lua_State* L, GL::Light* light, bool trackEna
 		if (proj != nullptr) {
 			if (trackEnable) {
 				if (light->GetTrackObject() == nullptr) {
-					light->AddDeathDependence(proj, DEPENDENCE_LIGHT);
+					// PR 27b: see the unit branch
+					if (!SimDrawSplit::Enabled())
+						light->AddDeathDependence(proj, DEPENDENCE_LIGHT);
 					light->SetTrackObject(proj);
 					light->SetTrackType(GL::Light::TRACK_TYPE_PROJ);
 					ret = true;
@@ -1916,7 +1924,8 @@ static bool AddLightTrackingTarget(lua_State* L, GL::Light* light, bool trackEna
 			} else {
 				// assume <light> was tracking <proj>
 				if (light->GetTrackObject() == proj) {
-					light->DeleteDeathDependence(proj, DEPENDENCE_LIGHT);
+					if (!SimDrawSplit::Enabled())
+						light->DeleteDeathDependence(proj, DEPENDENCE_LIGHT);
 					light->SetTrackObject(nullptr);
 					ret = true;
 				}

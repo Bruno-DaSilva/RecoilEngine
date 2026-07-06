@@ -19,6 +19,8 @@
 #include "Sim/Weapons/PlasmaRepulser.h"
 #include "Sim/Weapons/Weapon.h"
 #include "System/UnorderedSet.hpp"
+#include "System/Log/ILog.h"
+#include "System/SimDrawSplit.h"
 
 static constexpr float4 DEFAULT_COLVOL_COLOR = float4(0.45f, 0.00f, 0.45f, 0.35f); // purple (light)
 static constexpr float4 DEFAULT_SELVOL_COLOR = float4(0.00f, 0.45f, 0.00f, 0.20f); // dark green
@@ -333,6 +335,16 @@ namespace DebugColVolDrawer
 	{
 		if (!enable)
 			return;
+	// PR 27b: this overlay walks live sim containers; under the running
+	// split that is a cross-thread race, so it stays dark (dev tool)
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
+		static bool warned = false;
+		if (!warned) {
+			LOG_L(L_WARNING, "[%s] debug overlay unavailable with SimDrawSplit=1", "DebugColVolDrawer");
+			warned = true;
+		}
+		return;
+	}
 
 		using namespace GL::State;
 		auto state = GL::SubState(

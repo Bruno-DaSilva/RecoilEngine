@@ -13,12 +13,19 @@
 #include "Sim/Units/UnitHandler.h"
 #include "System/EventHandler.h"
 #include "System/Log/ILog.h"
+#include "System/Platform/Threading.h"
+#include "System/SimDrawSplit.h"
 
 RenderEventQueue renderEventQueue;
 
 
 void RenderEventQueue::Push(const Record& record)
 {
+	// PR 27b: between barriers the record containers belong to the sim
+	// thread; a main-thread Push while it runs would race (game-load and
+	// boundary dispatches happen with the sim thread parked or not spawned)
+	assert(!SimDrawSplit::Enabled() || !SimDrawSplit::SimThreadRunning() || Threading::IsSimThread());
+
 	if (!deferring) {
 		// immediate mode is only ever active with an empty queue (Drain is
 		// what ends the sim phase), so dispatching in place preserves order
@@ -142,8 +149,16 @@ void RenderEventQueue::Dispatch(const Record& record)
 			eventHandler.RenderUnitCreated(ResolveUnit(record.id), record.arg1);
 		} break;
 		case T::UnitDestroyed: {
-			eventHandler.RenderUnitDestroyed(ResolveUnit(record.id));
+			const CUnit* unit = ResolveUnit(record.id);
+
+			eventHandler.RenderUnitDestroyed(unit);
 			PopDestroyShell(ShellKey(ObjKind::Unit, false, record.id));
+
+			// PR 27b: draw-owned dependents (selection, wait-AI, lights) get
+			// their death notifications from the boundary instead of
+			// death-dependences; CGame consumes this after the drain
+			if (SimDrawSplit::Enabled())
+				boundaryDestroyedUnits.push_back(unit);
 		} break;
 
 		case T::FeaturePreCreated: {
@@ -161,8 +176,14 @@ void RenderEventQueue::Dispatch(const Record& record)
 			eventHandler.RenderProjectileCreated(ResolveProjectile(record.id, record.syncedProj));
 		} break;
 		case T::ProjectileDestroyed: {
-			eventHandler.RenderProjectileDestroyed(ResolveProjectile(record.id, record.syncedProj));
+			const CProjectile* proj = ResolveProjectile(record.id, record.syncedProj);
+
+			eventHandler.RenderProjectileDestroyed(proj);
 			PopDestroyShell(ShellKey(ObjKind::Projectile, record.syncedProj, record.id));
+
+			// PR 27b: see the UnitDestroyed case (lights can track projectiles)
+			if (SimDrawSplit::Enabled())
+				boundaryDestroyedProjectiles.push_back(proj);
 		} break;
 
 		case T::UnitEnteredLos: {

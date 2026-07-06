@@ -108,6 +108,17 @@ public:
 	bool ActionPressed(const Action& action, bool isRepeat);
 	bool ActionReleased(const Action& action);
 
+	// PR 27b: external sim-quiescence bracket (game saves, Lua handler
+	// (re)loads, other whole-sim walks); no-op when the split is off, the
+	// game is null, or a pause is already held (nest-safe: only the
+	// outermost bracket releases)
+	struct ScopedExternalSimPause {
+		ScopedExternalSimPause();
+		~ScopedExternalSimPause();
+	private:
+		bool acquired = false;
+	};
+
 	const ActionList& GetLastActionList();
 private:
 	bool Draw() override;
@@ -116,6 +127,17 @@ private:
 
 	/// the sim|draw extract barrier (PR 26); called once, at the top of Draw()
 	void SimDrawBarrier();
+
+	// the sim|draw thread split (PR 27b; active only with SimDrawSplit=1):
+	// the sim thread runs SimThreadProc (ClientReadNet -> SimFrames); Draw
+	// brackets [barrier .. end of drawer extraction] with Acquire/Release
+	void SpawnSimThread();
+	void JoinSimThread();
+	void SimThreadProc();
+	void AcquireSimPause();
+	void ReleaseSimPause();
+	void DeliverBoundaryDeaths();
+	bool CanConsumeSimFrameNow() const;
 
 	void DrawSkip(bool blackscreen = true);
 	void DrawInputReceivers();
@@ -192,6 +214,10 @@ public:
 	// (was worldDrawer.numUpdates == 0 while the drain lived in
 	// CWorldDrawer::Update; CGame and the world drawer share lifetime)
 	bool firstUnsyncedHeightMapDrain = true;
+
+	// main-thread-only: Draw currently holds the sim thread parked (PR 27b);
+	// ReleaseSimPause is idempotent so every Draw exit path may call it
+	bool simPauseHeld = false;
 
 	/// Prevents spectator msgs from being seen by players
 	bool noSpectatorChat = false;

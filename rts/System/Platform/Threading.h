@@ -33,7 +33,8 @@ namespace Threading {
 		THREAD_IDX_SND  = 2,
 		THREAD_IDX_VFSI = 3,
 		THREAD_IDX_WDOG = 4,
-		THREAD_IDX_LAST = 5,
+		THREAD_IDX_SIM  = 5, // the sim|draw split's sim thread (PR 27b)
+		THREAD_IDX_LAST = 6,
 	};
 
 
@@ -144,6 +145,8 @@ namespace Threading {
 	void SetAudioThread();
 	void SetFileSysThread();
 	void SetWatchDogThread();
+	void SetSimThread();
+	void ClearSimThread();
 
 	bool IsMainThread();
 	bool IsMainThread(NativeThreadId threadID);
@@ -159,6 +162,9 @@ namespace Threading {
 
 	bool IsWatchDogThread();
 	bool IsWatchDogThread(NativeThreadId threadID);
+
+	bool IsSimThread();
+	bool IsSimThread(NativeThreadId threadID);
 
 	/**
 	 * Give the current thread a name (posix-only)

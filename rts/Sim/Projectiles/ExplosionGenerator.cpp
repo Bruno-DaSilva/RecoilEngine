@@ -476,7 +476,9 @@ bool CStdExplosionGenerator::Explosion(
 		lock.lock();
 	}
 	else {
-		assert(Threading::IsMainThread());
+		// PR 27b: under the split the unsynced projectile containers are
+		// sim-thread-owned (spawn from sim, update in SimFrame)
+		assert(Threading::IsMainThread() || Threading::IsSimThread());
 	}
 
 	projMemPool.alloc<CHeatCloudProjectile>(owner, npos, UpVector * 0.3f, 8.0f + sqrtDmg * 0.5f, 7 + damage * 2.8f);
@@ -1087,7 +1089,8 @@ bool CCustomExplosionGenerator::Explosion(
 		lock.lock();
 	}
 	else {
-		assert(Threading::IsMainThread() || Threading::IsGameLoadThread());
+		// PR 27b: see CStdExplosionGenerator::Explosion
+		assert(Threading::IsMainThread() || Threading::IsGameLoadThread() || Threading::IsSimThread());
 	}
 
 	for (int a = 0; a < spawnInfo.size(); a++) {

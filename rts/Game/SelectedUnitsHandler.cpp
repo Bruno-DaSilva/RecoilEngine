@@ -1,6 +1,8 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "SelectedUnitsHandler.h"
+
+#include "System/SimDrawSplit.h"
 #include "SelectedUnitsAI.h"
 #include "Camera.h"
 #include "GlobalUnsynced.h"
@@ -412,7 +414,11 @@ void CSelectedUnitsHandler::AddUnit(CUnit* unit)
 		return;
 
 	if (selectedUnits.insert(unit->id).second) {
-		AddDeathDependence(unit, DEPENDENCE_SELECTED);
+		// PR 27b: no death-dependences on sim objects from the draw side
+		// under the split; the boundary delivers deaths (DependentDied is
+		// called from CGame::DeliverBoundaryDeaths instead)
+		if (!SimDrawSplit::Enabled())
+			AddDeathDependence(unit, DEPENDENCE_SELECTED);
 
 		selectionChanged = true;
 		possibleCommandsChanged = true;
@@ -431,7 +437,8 @@ void CSelectedUnitsHandler::RemoveUnit(CUnit* unit)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (selectedUnits.erase(unit->id)) {
-		DeleteDeathDependence(unit, DEPENDENCE_SELECTED);
+		if (!SimDrawSplit::Enabled())
+			DeleteDeathDependence(unit, DEPENDENCE_SELECTED);
 
 		selectionChanged = true;
 		possibleCommandsChanged = true;
@@ -460,7 +467,9 @@ void CSelectedUnitsHandler::ClearSelected()
 		}
 
 		u->isSelected = false;
-		DeleteDeathDependence(u, DEPENDENCE_SELECTED);
+
+		if (!SimDrawSplit::Enabled())
+			DeleteDeathDependence(u, DEPENDENCE_SELECTED);
 	}
 
 	selectedUnits.clear();
@@ -497,7 +506,8 @@ void CSelectedUnitsHandler::SelectGroup(int num)
 		if (!u->noSelect) {
 			u->isSelected = true;
 			selectedUnits.insert(u->id);
-			AddDeathDependence(u, DEPENDENCE_SELECTED);
+			if (!SimDrawSplit::Enabled())
+				AddDeathDependence(u, DEPENDENCE_SELECTED);
 		}
 	}
 

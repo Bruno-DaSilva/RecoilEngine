@@ -3,6 +3,8 @@
 #include "3DModelPiece.hpp"
 #include "LocalModel.hpp"
 #include "Rendering/GL/myGL.h"
+#include "System/Platform/Threading.h"
+#include "System/SimDrawSplit.h"
 #include "System/Misc/TracyDefs.h"
 
 CR_BIND(LocalModelPiece, )
@@ -139,7 +141,14 @@ bool LocalModelPiece::SetPieceSpaceMatrix(const CMatrix44f& mat)
 
 const Transform& LocalModelPiece::GetModelSpaceTransform() const
 {
-	if (dirty)
+	// PR 27b: a MAIN-thread reader may not recompute in place while the sim
+	// runs -- the sim side owns piece mutation (script ticks, incl. its
+	// for_mt workers), and a concurrent recompute would write the cached
+	// matrices under it. Inside the pause window (sim parked: the barrier,
+	// the drawer extraction) recomputing stays legal, so eager extraction
+	// (PR 8) is unaffected; this only leaves out-of-LOS legacy draws (e.g.
+	// gl.Unit on a hidden unit) one recompute stale mid-frame.
+	if (dirty && !(SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() && Threading::IsMainThread() && !SimDrawSplit::IsSimParked()))
 		UpdateParentMatricesRec();
 
 	return modelSpaceTra;
@@ -147,7 +156,8 @@ const Transform& LocalModelPiece::GetModelSpaceTransform() const
 
 const CMatrix44f& LocalModelPiece::GetModelSpaceMatrix() const
 {
-	if (dirty)
+	// PR 27b: see GetModelSpaceTransform
+	if (dirty && !(SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() && Threading::IsMainThread() && !SimDrawSplit::IsSimParked()))
 		UpdateParentMatricesRec();
 
 	return modelSpaceMat;

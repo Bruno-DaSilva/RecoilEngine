@@ -11,6 +11,8 @@
 #include "System/EventHandler.h"
 #include "System/float3.h"
 #include "System/SafeUtil.h"
+#include "System/Log/ILog.h"
+#include "System/SimDrawSplit.h"
 
 using namespace SmoothHeightMeshNamespace;
 
@@ -43,6 +45,17 @@ void SmoothHeightMeshDrawer::DrawInMiniMap()
 {
 	if (!drawEnabled)
 		return;
+
+	// PR 27b: walks live sim state; dark under the running split (dev tool)
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
+		static bool warned = false;
+		if (!warned) {
+			LOG_L(L_WARNING, "[%s] debug overlay unavailable with SimDrawSplit=1", __func__);
+			warned = true;
+		}
+		return;
+	}
+
 
 	glMatrixMode(GL_PROJECTION);
 		glPushMatrix();
@@ -82,6 +95,17 @@ void SmoothHeightMeshDrawer::DrawInMiniMap()
 void SmoothHeightMeshDrawer::Draw(float yoffset) {
 	if (!drawEnabled)
 		return;
+
+	// PR 27b: walks live sim state; dark under the running split (dev tool)
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
+		static bool warned = false;
+		if (!warned) {
+			LOG_L(L_WARNING, "[%s] debug overlay unavailable with SimDrawSplit=1", __func__);
+			warned = true;
+		}
+		return;
+	}
+
 
 	glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
 	glLineWidth(1.0f);

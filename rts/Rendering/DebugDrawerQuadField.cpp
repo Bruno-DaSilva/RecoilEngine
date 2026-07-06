@@ -21,6 +21,8 @@
 #include "System/GlobalConfig.h"
 #include "System/Misc/TracyDefs.h"
 #include "System/SafeUtil.h"
+#include "System/Log/ILog.h"
+#include "System/SimDrawSplit.h"
 
 
 DebugDrawerQuadField* DebugDrawerQuadField::instance = nullptr;
@@ -59,6 +61,16 @@ void DebugDrawerQuadField::DrawInMiniMapBackground()
 void DebugDrawerQuadField::DrawAll() const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// PR 27b: this overlay walks live sim containers; under the running
+	// split that is a cross-thread race, so it stays dark (dev tool)
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
+		static bool warned = false;
+		if (!warned) {
+			LOG_L(L_WARNING, "[%s] debug overlay unavailable with SimDrawSplit=1", "DebugDrawerQuadField");
+			warned = true;
+		}
+		return;
+	}
 
 	DrawSelectionQuads();
 	DrawMouseRayQuads();

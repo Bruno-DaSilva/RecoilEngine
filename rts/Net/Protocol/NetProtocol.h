@@ -100,6 +100,10 @@ public:
 
 	void Close(bool flush = false);
 
+	/// PR 27b: take the connection lock in Peek/DeleteBufferPacketAt too
+	/// (sim thread consumes the queue while the main thread sends)
+	void SetThreadSafeQueueOps(bool b) { threadSafeQueueOps = b; }
+
 	void KeepUpdating(bool b) { keepUpdating = b; }
 
 	void SetDemoRecorder(CDemoRecorder&& r);
@@ -114,7 +118,12 @@ public:
 private:
 	std::atomic<bool> keepUpdating;
 
-	spring::spinlock serverConnMutex;
+	// mutable: Peek is const and must be lockable under the split (PR 27b)
+	mutable spring::spinlock serverConnMutex;
+
+	// PR 27b: serialize Peek/DeleteBufferPacketAt against Send/Update once
+	// the sim thread consumes the queue; set by CGame::SpawnSimThread
+	bool threadSafeQueueOps = false;
 
 	uint8_t serverConnMem[1024];
 	uint8_t demoRecordMem[ 512];

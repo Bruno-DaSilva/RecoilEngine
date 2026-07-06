@@ -9,6 +9,7 @@
 
 #include "System/TimeProfiler.h"
 #include "System/GlobalRNG.h"
+#include "System/SimDrawSplit.h"
 #include "System/StringHash.h"
 #include "System/Log/ILog.h"
 #include "System/Threading/SpringThreading.h"
@@ -566,7 +567,9 @@ const CTimeProfiler::TimeRecord& CTimeProfiler::GetTimeRecord(const char* name) 
 {
 	// if disabled, only special timers can pass AddTime
 	// all of those are non-threaded, so no need to lock
-	if (!enabled)
+	// (PR 27b: except under the split, where "Sim" writes from the sim
+	// thread -- see AddTime)
+	if (!enabled && !SimDrawSplit::Enabled())
 		return (GetTimeRecordRaw(name));
 
 	std::lock_guard<ProfileMutexType> lock(profileMutex);
@@ -591,6 +594,19 @@ void CTimeProfiler::AddTime(
 			return;
 
 		assert(!threadTimer);
+
+		// PR 27b: under the sim|draw split the "Sim" special timer pops on
+		// the sim thread while "Draw" pops on the main thread -- the
+		// non-threaded assumption behind this lock-free path only holds
+		// with the split off
+		if (SimDrawSplit::Enabled()) {
+			std::lock_guard<ProfileMutexType> lock(profileMutex);
+
+			AddTimeRaw(nameHash, startTime, deltaTime, selfTime, showGraph, threadTimer);
+			AddTimeRaw(hashString("Misc::Profiler::AddTime"), t0, spring_now() - t0, spring_now() - t0, false, false);
+			return;
+		}
+
 		AddTimeRaw(nameHash, startTime, deltaTime, selfTime, showGraph, threadTimer);
 		AddTimeRaw(hashString("Misc::Profiler::AddTime"), t0, spring_now() - t0, spring_now() - t0, false, false);
 		return;

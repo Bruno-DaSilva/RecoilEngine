@@ -43,6 +43,11 @@ class CWaitCommandsAI {
 		/// acknowledge a command received from the network
 		void AcknowledgeCommand(const Command& cmd);
 
+		/// PR 27b: boundary death notification for every wait (replaces the
+		/// death-dependences skipped under the split); no-op per wait for
+		/// objects it does not track
+		void DeliverBoundaryDeath(CObject* obj);
+
 		/// search a new unit's queue and add it to its wait commands
 		void AddLocalUnit(CUnit* unit, const CUnit* builder);
 
@@ -91,6 +96,14 @@ class CWaitCommandsAI {
 				bool IsWaitingOn(const CUnit* unit) const;
 				void SendCommand(const Command& cmd, const CUnitSet& unitSet);
 				void SendWaitCommand(const CUnitSet& unitSet);
+
+				// PR 27b: draw-owned waits may not (de)register death-
+				// dependences on sim objects under the split -- the boundary
+				// delivers deaths instead (DeliverBoundaryDeath); these
+				// wrappers no-op with the flag on and are the plain
+				// DEPENDENCE_WAITCMD calls with it off
+				void AddWaitDependence(CObject* obj);
+				void DelWaitDependence(CObject* obj);
 
 			protected:
 				float code;

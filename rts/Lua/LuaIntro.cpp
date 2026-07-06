@@ -31,6 +31,7 @@
 #include "System/StringUtil.h"
 
 #include "System/Misc/TracyDefs.h"
+#include "Game/Game.h" // ScopedExternalSimPause (PR 27b)
 
 
 CLuaIntro* luaIntro = nullptr;

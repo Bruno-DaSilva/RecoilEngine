@@ -14,6 +14,8 @@
 #include "Sim/Units/UnitMemPool.h"
 #include "System/Log/ILog.h"
 #include "System/MainDefines.h"
+#include "System/Platform/Threading.h"
+#include "System/SimDrawSplit.h"
 
 DeferredObjectDeleter deferredObjectDeleter;
 
@@ -59,14 +61,26 @@ void DeferredObjectDeleter::Park(ObjKind kind, void* obj)
 	if (freePages < EMERGENCY_HEADROOM_PAGES && !(pending.empty() && poisoned.empty())) {
 		// pool-pressure valve: a game near a pool cap must not run out of
 		// pages just because shells wait for a drain that has not happened
-		// yet (long catch-up burst); dispatch the queued records in order
-		// right here -- exactly what the queue did for every destroy before
-		// PR 13 -- and give all slots back
-		LOG_L(L_WARNING, "[DeferredObjectDeleter::%s] pool pressure (kind=%d, freePages=" _STPF_ "), emergency flush", __func__, int(kind), freePages);
+		// yet (long catch-up burst)
+		if (SimDrawSplit::Enabled() && Threading::IsSimThread()) {
+			// under the split the queue and the drawer containers belong to
+			// the draw side -- "sim waits for the boundary" (the PR-13 plan):
+			// park mid-frame; CGame::AcquireSimPause services the park by
+			// flushing + acking + releasing on the main thread, then resumes
+			// us with fresh pages
+			LOG_L(L_WARNING, "[DeferredObjectDeleter::%s] pool pressure (kind=%d, freePages=" _STPF_ "), parking for the boundary", __func__, int(kind), freePages);
 
-		renderEventQueue.Flush();
-		AckDrainedDestroys();
-		ReleaseAcked();
+			SimDrawSplit::ParkAtValve();
+		} else {
+			// dispatch the queued records in order right here -- exactly what
+			// the queue did for every destroy before PR 13 -- and give all
+			// slots back
+			LOG_L(L_WARNING, "[DeferredObjectDeleter::%s] pool pressure (kind=%d, freePages=" _STPF_ "), emergency flush", __func__, int(kind), freePages);
+
+			renderEventQueue.Flush();
+			AckDrainedDestroys();
+			ReleaseAcked();
+		}
 	}
 
 	pending.push_back({kind, obj});

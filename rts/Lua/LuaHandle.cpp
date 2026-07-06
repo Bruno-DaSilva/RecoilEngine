@@ -882,6 +882,18 @@ void CLuaHandle::GameFrame(int frameNum)
 		const std::string msg = GetName() + ((!killMsg.empty())? ": " + killMsg: "");
 
 		LOG("[%s] disabled %s", __func__, msg.c_str());
+
+		// PR 27b: a handle dying on the sim thread would rewire the shared
+		// eventHandler lists under the draw thread's dispatch loops -- hand
+		// the delete to the boundary (sim parked there); queued events that
+		// still target it are dropped by the drain's registry check
+		if (SimDrawSplit::DeferUnsyncedNow()) {
+			killMe = false; // do not re-queue next frame
+			CLuaHandle* dying = this;
+			UnsyncedBoundaryQueue::Defer([dying]() { delete dying; });
+			return;
+		}
+
 		delete this;
 		return;
 	}

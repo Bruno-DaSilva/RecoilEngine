@@ -279,6 +279,29 @@ float CGame::GetNetMessageProcessingTimeLimit() const
 	return std::clamp(simDrawRatio * gu->avgSimFrameTime, 5.0f, 1000.0f / globalConfig.minDrawFPS);
 }
 
+// PR 27b backpressure predicate (split only; see the loop in ClientReadNet).
+// True unless the next packet is a NEWFRAME/KEYFRAME that would advance the
+// sim past lastBoundaryFrame+1 while interpolation is active.
+bool CGame::CanConsumeSimFrameNow() const
+{
+	const std::shared_ptr<const netcode::RawPacket> pkt = clientNet->Peek(0);
+
+	if (pkt == nullptr || pkt->length == 0)
+		return true;
+	if (pkt->data[0] != NETMSG_NEWFRAME && pkt->data[0] != NETMSG_KEYFRAME)
+		return true;
+	if (gs->frameNum < SimDrawSplit::LastBoundaryFrame() + 1)
+		return true;
+
+	// free-run cases: fast-forward, demo skip, catch-up (no recent sim
+	// progress -- the same predicate that disables interpolation), and
+	// video capture's single-stepped server
+	if (gs->speedFactor > 1.01f || skipping || IsSimLagging() || videoCapturing->AllowRecord())
+		return true;
+
+	return false;
+}
+
 void CGame::ClientReadNet()
 {
 	// first look ahead so we can adapt consumeSpeedMult to network fluctuations
@@ -298,6 +321,19 @@ void CGame::ClientReadNet()
 			break;
 		if (spring_gettime() > msgProcEndTime)
 			break;
+
+		// PR 27b (split only): park promptly at a frame edge when the draw
+		// side requested the barrier, and hold the sim at most one frame
+		// ahead of the last published boundary during interpolated play
+		// (free-running under fast-forward / catch-up / skip / capture) --
+		// budget and order below are untouched, so consumption stays
+		// bit-for-bit the master logic
+		if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
+			if (SimDrawSplit::PauseRequested())
+				break;
+			if (!CanConsumeSimFrameNow())
+				break;
+		}
 
 		lastNetPacketProcessTime = spring_gettime();
 

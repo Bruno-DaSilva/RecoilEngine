@@ -11,6 +11,8 @@
 
 #include "System/Config/ConfigHandler.h"
 #include "System/Log/ILog.h"
+#include "System/Platform/Threading.h"
+#include "System/SimDrawSplit.h"
 #include "System/UnorderedMap.hpp"
 #include "System/UnorderedSet.hpp"
 
@@ -218,7 +220,9 @@ namespace {
 bool Enabled()
 {
 	Init();
-	return (mode > 0);
+	// PR 27b: the running split implies the contract -- unsynced Lua on the
+	// main thread executes against the snapshot while the sim advances
+	return (mode > 0 || (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()));
 }
 
 bool InDrawWindow() { return (tlDrawWindowDepth > 0); }
@@ -228,6 +232,19 @@ bool Enforced(lua_State* L)
 {
 	if (!Enabled())
 		return false;
+
+	// PR 27b: with the sim thread live, EVERY unsynced-handle execution on a
+	// non-sim thread is draw-thread context -- input callins included, not
+	// just the CGame::Draw window. The barrier and its sanctioned boundary
+	// dispatches suppress enforcement via ScopedLiveException (live reads
+	// are legal there: the sim is parked).
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
+		if (tlLiveExceptionDepth > 0 || Threading::IsSimThread())
+			return false;
+
+		return !CLuaHandle::GetHandleSynced(L);
+	}
+
 	if (tlDrawWindowDepth <= 0 || tlLiveExceptionDepth > 0)
 		return false;
 

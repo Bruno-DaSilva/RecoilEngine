@@ -103,15 +103,25 @@ std::string CNetProtocol::ConnectionStr() const
 
 std::shared_ptr<const netcode::RawPacket> CNetProtocol::Peek(unsigned ahead) const
 {
-	// not called while client is loading
-	// std::lock_guard<spring::spinlock> lock(serverConnMutex);
+	// PR 27b: with the sim thread consuming the queue while the main thread
+	// sends and pumps Update(), these two ops must serialize against them;
+	// flag off they stay lock-free ("not called while client is loading")
+	if (threadSafeQueueOps) {
+		std::lock_guard<spring::spinlock> lock(serverConnMutex);
+		return serverConnPtr->Peek(ahead);
+	}
+
 	return serverConnPtr->Peek(ahead);
 }
 
 void CNetProtocol::DeleteBufferPacketAt(unsigned index)
 {
-	// not called while client is loading
-	// std::lock_guard<spring::spinlock> lock(serverConnMutex);
+	// see Peek
+	if (threadSafeQueueOps) {
+		std::lock_guard<spring::spinlock> lock(serverConnMutex);
+		return serverConnPtr->DeleteBufferPacketAt(index);
+	}
+
 	return serverConnPtr->DeleteBufferPacketAt(index);
 }
 

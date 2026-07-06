@@ -130,7 +130,21 @@ public:
 		records.clear();
 		ghostMasks.clear();
 		pendingDestroyShells.clear();
+		boundaryDestroyedUnits.clear();
+		boundaryDestroyedProjectiles.clear();
 		deferring = false;
+	}
+
+	// PR 27b: shells of the objects whose destroy records dispatched since
+	// the last consume -- the boundary replacement for draw-side death-
+	// dependences (selection, wait-AI, tracked lights). Only populated when
+	// the split flag is on; consumed by CGame right after the drain (the
+	// shells stay readable until the barrier's ack).
+	const std::vector<const CUnit*>& BoundaryDestroyedUnits() const { return boundaryDestroyedUnits; }
+	const std::vector<const CProjectile*>& BoundaryDestroyedProjectiles() const { return boundaryDestroyedProjectiles; }
+	void ClearBoundaryDestroys() {
+		boundaryDestroyedUnits.clear();
+		boundaryDestroyedProjectiles.clear();
 	}
 
 	bool Empty() const { return records.empty(); }
@@ -204,6 +218,9 @@ private:
 	const CProjectile* ResolveProjectile(int32_t id, bool synced) const;
 private:
 	std::vector<Record> records;
+	// PR 27b boundary death relay (see BoundaryDestroyedUnits)
+	std::vector<const CUnit*> boundaryDestroyedUnits;
+	std::vector<const CProjectile*> boundaryDestroyedProjectiles;
 	// side pool for the rare records that carry a per-allyteam mask; indexed
 	// by Record::arg1, cleared together with <records>
 	std::vector<GhostAllyMask> ghostMasks;
