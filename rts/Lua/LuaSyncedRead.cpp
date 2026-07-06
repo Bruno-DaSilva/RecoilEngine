@@ -623,7 +623,18 @@ static inline CUnit* ParseRawUnit(lua_State* L, const char* caller, int index)
 	if (LuaSplitContract::DenyLiveRead(L, caller))
 		return nullptr;
 
-	return (unitHandler.GetUnit(lua_toint(L, index)));
+	const int unitID = lua_toint(L, index);
+
+	CUnit* unit = unitHandler.GetUnit(unitID);
+
+	// boundary drain window (PR 27b): deferred handlers replaying events for
+	// a unit that died later in the same sim burst resolve its still-readable
+	// shell -- master ran them mid-frame with the unit alive. Read-only use
+	// (this file), hence the const_cast.
+	if (unit == nullptr)
+		unit = const_cast<CUnit*>(SimDrawSplit::ShellFallbackUnit(unitID));
+
+	return unit;
 }
 
 static inline const CUnit* ParseUnit(lua_State* L, const char* caller, int index)
@@ -692,7 +703,13 @@ static const CFeature* ParseFeature(lua_State* L, const char* caller, int index)
 	if (LuaSplitContract::DenyLiveRead(L, caller))
 		return nullptr;
 
-	const CFeature* feature = featureHandler.GetFeature(lua_toint(L, index));
+	const int featureID = lua_toint(L, index);
+
+	const CFeature* feature = featureHandler.GetFeature(featureID);
+
+	// boundary drain window (PR 27b): see ParseRawUnit
+	if (feature == nullptr)
+		feature = SimDrawSplit::ShellFallbackFeature(featureID);
 
 	if (feature == nullptr)
 		return nullptr;

@@ -54,9 +54,12 @@ CQuadField quadField;
 
 int DefaultQuadFieldQueryOwner()
 {
-	// see the declaration comment (PR 27b)
+#ifndef UNIT_TEST
+	// see the declaration comment (PR 27b); test builds have no sim thread
+	// (and link neither Threading.cpp nor the split machinery)
 	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() && Threading::IsMainThread())
 		return ThreadPool::MAIN_SPLIT_SCRATCH_SLOT;
+#endif
 
 	return 0;
 }

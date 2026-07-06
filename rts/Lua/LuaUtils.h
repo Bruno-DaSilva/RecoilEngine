@@ -15,6 +15,7 @@
 #include "LuaDefs.h"
 // FIXME: use fwd-decls
 #include "System/EventClient.h"
+#include "System/SimDrawSplit.h" // drain-window shell resolution (IdToObject)
 #include "Sim/Units/CommandAI/Command.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Misc/CollisionVolume.h"
@@ -484,13 +485,27 @@ static inline LocalModelPiece* ParseObjectLocalModelPiece(lua_State* L, CSolidOb
 template<>
 const inline CUnit* LuaUtils::IdToObject(int id, const char* func)
 {
-	return unitHandler.GetUnit(id);
+	const CUnit* unit = unitHandler.GetUnit(id);
+
+	// boundary drain window (PR 27b): deferred handlers replaying events for
+	// an object that died later in the same sim burst (gl.SetUnitBufferUniforms
+	// from a deferred UnitCreated etc.) resolve its still-readable shell
+	if (unit == nullptr)
+		unit = SimDrawSplit::ShellFallbackUnit(id);
+
+	return unit;
 }
 
 template<>
 const inline CFeature* LuaUtils::IdToObject(int id, const char* func)
 {
-	return featureHandler.GetFeature(id);
+	const CFeature* feature = featureHandler.GetFeature(id);
+
+	// see the CUnit specialization
+	if (feature == nullptr)
+		feature = SimDrawSplit::ShellFallbackFeature(id);
+
+	return feature;
 }
 
 template<>

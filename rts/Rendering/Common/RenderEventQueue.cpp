@@ -165,8 +165,10 @@ void RenderEventQueue::Dispatch(const Record& record)
 			// PR 27b: draw-owned dependents (selection, wait-AI, lights) get
 			// their death notifications from the boundary instead of
 			// death-dependences; CGame consumes this after the drain
-			if (SimDrawSplit::Enabled())
+			if (SimDrawSplit::Enabled()) {
 				boundaryDestroyedUnits.push_back(unit);
+				boundaryDeadUnits[record.id] = unit; // drain-window shell resolution
+			}
 		} break;
 
 		case T::FeaturePreCreated: {
@@ -176,8 +178,14 @@ void RenderEventQueue::Dispatch(const Record& record)
 			eventHandler.RenderFeatureCreated(ResolveFeature(record.id));
 		} break;
 		case T::FeatureDestroyed: {
-			eventHandler.RenderFeatureDestroyed(ResolveFeature(record.id));
+			const CFeature* feature = ResolveFeature(record.id);
+
+			eventHandler.RenderFeatureDestroyed(feature);
 			PopDestroyShell(ShellKey(ObjKind::Feature, false, record.id));
+
+			// PR 27b: drain-window shell resolution (see the unit case)
+			if (SimDrawSplit::Enabled())
+				boundaryDeadFeatures[record.id] = feature;
 		} break;
 
 		case T::ProjectileCreated: {

@@ -29,16 +29,41 @@
  * now", regardless of which commit landed. Deferral predicates key on it, NOT
  * on thread identity, precisely so the semantics are testable single-threaded.
  */
+#include <atomic>
+
+class CUnit;
+class CFeature;
+
 namespace SimDrawSplit {
 	/// cached `SimDrawSplit` config var; stable for the whole game session
-	/// (read once at CGame construction -- changing it mid-game is unsupported)
-	bool Enabled();
+	/// (read once at CGame construction -- changing it mid-game is unsupported).
+	/// Header-inline (C++17 inline variable) so TUs like TimeProfiler.cpp that
+	/// only gate on the flag link into test executables without dragging
+	/// SimDrawSplit.cpp's config/rendering dependencies along.
+	inline bool g_splitEnabled = false;
+
+	inline bool Enabled() { return g_splitEnabled; }
 
 	/// (re)read the config var; called from the CGame ctor
 	void UpdateConfig();
 
 	/// game teardown reset (thread-locals are per-thread and die with them)
 	void Clear();
+
+	// ---- boundary drain window (PR 27b, died-in-burst shell serving) ----
+	// True while the barrier (or the valve service) replays deferred
+	// dispatches whose objects may have died later in the same sim burst:
+	// the deferred-deletion shells are still readable (the ack comes after),
+	// so id resolution falls back to them instead of returning nil -- master
+	// ran those handlers mid-frame with the object alive. Main thread only;
+	// MUST be false again before the ack poisons the shells.
+	void SetBoundaryShellWindow(bool active);
+	bool BoundaryShellWindowActive();
+
+	// resolver fallbacks for the window (nullptr outside it / on a miss);
+	// implemented over RenderEventQueue's dispatch-time id->shell maps
+	const CUnit* ShellFallbackUnit(int unitID);
+	const CFeature* ShellFallbackFeature(int featureID);
 
 	/// true while this thread executes the sim phase (ClientReadNet/SimFrame)
 	bool InSimPhase();
@@ -100,10 +125,16 @@ namespace SimDrawSplit {
 	void SimIdleWait();
 	int  LastBoundaryFrame();
 
-	// sim-thread lifecycle (main sets exit + joins; the thread proc brackets
-	// itself with SetSimThreadRunning)
+	// sim-thread lifecycle (main sets running BEFORE spawning -- the pause
+	// handshake must see the thread from the very first Draw -- and exit+join
+	// at teardown; the thread proc clears running on exit).
+	// Header-inline like Enabled() so TUs that only gate on it (QuadField's
+	// scratch-slot owner) link into test executables without SimDrawSplit.cpp.
+	inline std::atomic<bool> g_simThreadRunning = {false};
+
+	inline bool SimThreadRunning() { return g_simThreadRunning.load(); }
+
 	void SetSimThreadRunning(bool b);
-	bool SimThreadRunning();
 	void RequestSimThreadExit();
 	bool SimThreadExitRequested();
 	void ResetSimThreadExit();

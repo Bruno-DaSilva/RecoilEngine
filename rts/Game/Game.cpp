@@ -1590,7 +1590,14 @@ void CGame::SimDrawBarrier()
 	// boundary-cost telemetry (the PR-27b gate's fine-print number)
 	SCOPED_TIMER("Misc::SimDrawBarrier");
 
-	// (0) split only: run the GL upload half of any sim-thread model loads
+	// (0) split only: open the boundary drain window -- the destroy records
+	// about to dispatch populate the id->shell fallback that lets step 7's
+	// deferred handlers resolve objects that died later in the same burst
+	// (closed again at step 8, before the ack poisons the shells)
+	if (SimDrawSplit::Enabled())
+		SimDrawSplit::SetBoundaryShellWindow(true);
+
+	// (0b) split only: run the GL upload half of any sim-thread model loads
 	// BEFORE the drain -- the creation records about to dispatch may
 	// register objects with these models (PR 27b commit c)
 	modelLoader.ServiceQueuedUploads();
@@ -1691,12 +1698,20 @@ void CGame::SimDrawBarrier()
 	// so their callin bodies read this boundary's frame. Empty (and free)
 	// unless the split flag deferred something since the last barrier. These
 	// are sanctioned boundary callins, the same class as the Render* event
-	// dispatches of step 1.
-	UnsyncedBoundaryQueue::Drain();
+	// dispatches of step 1. A non-empty drain may have poked sim state
+	// directly (live exception, post-snapshot) -- mark, or a no-new-frame
+	// boundary serves stale rows.
+	if (UnsyncedBoundaryQueue::Drain() > 0)
+		simSnapshot.MarkMutatedOutsideFrame();
 
-	// (8) split only: the relocated shell ack (see step 2)
-	if (SimDrawSplit::Enabled())
+	// (8) split only: the relocated shell ack (see step 2). The drain window
+	// closes first -- the ack poisons the shells the window's id->shell
+	// fallback serves from (died-in-burst resolution for step 7's dispatches)
+	if (SimDrawSplit::Enabled()) {
+		SimDrawSplit::SetBoundaryShellWindow(false);
+		renderEventQueue.ClearBoundaryDeadShells();
 		deferredObjectDeleter.AckDrainedDestroys();
+	}
 }
 
 // PR 27b: see barrier step (1b). Also used by the pool-pressure valve
@@ -1740,6 +1755,10 @@ void CGame::DeliverBoundaryDeaths()
 
 // joined by JoinSimThread; file-static so Game.h stays include-light
 static spring::thread simNetThread;
+
+// when the current pause window parked the sim thread (RequestPause return);
+// ReleaseSimPause emits it as the /debug frame grapher's "Parked" slice
+static spring_time simPauseBeginTime;
 
 __FORCE_ALIGN_STACK__
 void CGame::SimThreadProc()
@@ -1839,6 +1858,9 @@ void CGame::AcquireSimPause()
 		SimDrawSplit::RequestPause();
 	}
 
+	// the sim thread is parked (frame edge or valve) from here to ReleasePause
+	simPauseBeginTime = spring_now();
+
 	// pool-pressure valve service (the PR-13 valve became "sim waits for the
 	// boundary" under the split): the sim parked MID-frame out of pool
 	// headroom. Give its pages back: dispatch pending records in place
@@ -1850,6 +1872,9 @@ void CGame::AcquireSimPause()
 		// same live-read legality as the barrier (sim parked mid-frame)
 		LuaSplitContract::ScopedLiveException valveLive;
 
+		// same drain-window bracket as the barrier (steps 0 / 8)
+		SimDrawSplit::SetBoundaryShellWindow(true);
+
 		modelLoader.ServiceQueuedUploads();
 		renderEventQueue.Flush();
 		DeliverBoundaryDeaths();
@@ -1859,7 +1884,13 @@ void CGame::AcquireSimPause()
 		CFeatureDrawer::BuildSplitResolveCache();
 		projectileDrawer->BuildSplitResolveCache();
 
-		UnsyncedBoundaryQueue::Drain();
+		// see barrier step 7: a non-empty drain may have poked sim state
+		if (UnsyncedBoundaryQueue::Drain() > 0)
+			simSnapshot.MarkMutatedOutsideFrame();
+
+		SimDrawSplit::SetBoundaryShellWindow(false);
+		renderEventQueue.ClearBoundaryDeadShells();
+
 		deferredObjectDeleter.AckDrainedDestroys();
 		deferredObjectDeleter.ReleaseAcked();
 		SimDrawSplit::ResumeFromValve();
@@ -1875,6 +1906,9 @@ void CGame::ReleaseSimPause()
 
 	simPauseHeld = false;
 	SimDrawSplit::ReleasePause(gs->frameNum);
+
+	// gate telemetry for the /debug frame grapher (sim-row "Parked" slice)
+	eventHandler.DbgTimingInfo(TIMING_SIM_PARKED, simPauseBeginTime, spring_now());
 }
 
 CGame::ScopedExternalSimPause::ScopedExternalSimPause()
@@ -1894,6 +1928,8 @@ CGame::ScopedExternalSimPause::~ScopedExternalSimPause()
 
 
 bool CGame::Draw() {
+	const spring_time currentTimePreBarrier = spring_now();
+
 	// PR 27b: park the sim thread at a frame edge (servicing pool-pressure
 	// valve parks along the way); no-op when the split is off. The pause
 	// spans the barrier + UpdateUnsynced through the drawer extraction.
@@ -1906,6 +1942,11 @@ bool CGame::Draw() {
 		LuaSplitContract::ScopedLiveException barrierLive;
 		SimDrawBarrier();
 	}
+
+	// gate telemetry for the /debug frame grapher (draw-row "Gate" slice):
+	// the pause-wait + valve service + barrier span no other category covers
+	if (SimDrawSplit::Enabled())
+		eventHandler.DbgTimingInfo(TIMING_BARRIER, currentTimePreBarrier, spring_now());
 
 	// everything from here to the end of Draw is draw-thread context under
 	// the split contract (PR 27a): unsynced Lua ran below this line executes

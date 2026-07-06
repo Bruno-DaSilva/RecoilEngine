@@ -46,9 +46,11 @@ void DeferFor(const CEventClient* ec, std::function<void()>&& fn)
 	entries.emplace_back(Entry{ec, std::move(fn)});
 }
 
-void Drain()
+size_t Drain()
 {
 	assert(!SimDrawSplit::InSimPhase());
+
+	size_t numDispatched = 0;
 
 	while (!entries.empty()) {
 		draining.clear();
@@ -59,10 +61,18 @@ void Drain()
 				continue;
 
 			e.fn();
+			numDispatched += 1;
 		}
 	}
 
 	draining.clear();
+
+	// nonzero: some handler may have poked sim state directly (the barrier's
+	// live exception applies class-C ctrl writes immediately, and the drain
+	// runs AFTER the snapshot publish) -- the caller must mark the snapshot
+	// mutated-outside-frame or a no-new-frame boundary serves stale rows
+	// (found by the armed field gate: noSelect / feat:blockingBits)
+	return numDispatched;
 }
 
 bool Empty() { return entries.empty(); }

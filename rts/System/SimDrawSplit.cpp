@@ -2,6 +2,8 @@
 
 #include "SimDrawSplit.h"
 
+#include "Rendering/Common/RenderEventQueue.h" // drain-window shell resolution
+
 #include <atomic>
 #include <cassert>
 #include <chrono>
@@ -17,28 +19,49 @@ CONFIG(int, SimDrawSplit)
 namespace SimDrawSplit {
 
 namespace {
-	bool enabled = false;
-
 	// see the header: keyed on execution context, not thread identity, so the
 	// pre-thread-spawn commits are a faithful single-threaded dress rehearsal
 	thread_local int tlSimPhaseDepth = 0;
-}
 
-bool Enabled() { return enabled; }
+	// boundary drain window (died-in-burst shell serving); main thread only
+	bool boundaryShellWindow = false;
+}
 
 void UpdateConfig()
 {
-	enabled = (configHandler != nullptr && configHandler->GetInt("SimDrawSplit") != 0);
+	g_splitEnabled = (configHandler != nullptr && configHandler->GetInt("SimDrawSplit") != 0);
 }
 
 void Clear()
 {
-	enabled = false;
+	g_splitEnabled = false;
+	boundaryShellWindow = false;
+}
+
+// main-thread only (set inside the pause window, read by the Lua/GL id
+// resolvers, which execute on the main thread during the drains)
+void SetBoundaryShellWindow(bool active) { boundaryShellWindow = active; }
+bool BoundaryShellWindowActive() { return boundaryShellWindow; }
+
+const CUnit* ShellFallbackUnit(int unitID)
+{
+	if (!boundaryShellWindow)
+		return nullptr;
+
+	return renderEventQueue.ResolveBoundaryDeadUnit(unitID);
+}
+
+const CFeature* ShellFallbackFeature(int featureID)
+{
+	if (!boundaryShellWindow)
+		return nullptr;
+
+	return renderEventQueue.ResolveBoundaryDeadFeature(featureID);
 }
 
 bool InSimPhase() { return (tlSimPhaseDepth > 0); }
 
-bool DeferUnsyncedNow() { return (enabled && InSimPhase()); }
+bool DeferUnsyncedNow() { return (g_splitEnabled && InSimPhase()); }
 
 ScopedSimPhase::ScopedSimPhase() { ++tlSimPhaseDepth; }
 ScopedSimPhase::~ScopedSimPhase() { assert(tlSimPhaseDepth > 0); --tlSimPhaseDepth; }
@@ -63,21 +86,20 @@ namespace {
 	bool valveServed = false;    // guarded by hsMtx
 
 	std::atomic<int> lastBoundaryFrame = {-1};
-	std::atomic<bool> simRunning = {false};
 	std::atomic<bool> simExit = {false};
 }
 
 
 void RequestPause()
 {
-	if (!simRunning.load())
+	if (!g_simThreadRunning.load())
 		return;
 
 	std::unique_lock<std::mutex> lock(hsMtx);
 
 	pauseRequested.store(true);
 	cvSim.notify_all();
-	cvMain.wait(lock, []() { return (parkKind != PARK_NONE || !simRunning.load()); });
+	cvMain.wait(lock, []() { return (parkKind != PARK_NONE || !g_simThreadRunning.load()); });
 }
 
 bool ParkedAtValve()
@@ -96,7 +118,7 @@ void ResumeFromValve()
 	cvSim.notify_all();
 	// pauseRequested is still set; wait for the frame-edge park (or a
 	// repeat valve park, which the caller's loop services again)
-	cvMain.wait(lock, []() { return (parkKind != PARK_NONE || !simRunning.load()); });
+	cvMain.wait(lock, []() { return (parkKind != PARK_NONE || !g_simThreadRunning.load()); });
 }
 
 void ReleasePause(int boundaryFrame)
@@ -163,7 +185,7 @@ void SetSimThreadRunning(bool b)
 {
 	{
 		std::unique_lock<std::mutex> lock(hsMtx);
-		simRunning.store(b);
+		g_simThreadRunning.store(b);
 
 		if (!b)
 			parkKind = PARK_NONE;
@@ -172,8 +194,6 @@ void SetSimThreadRunning(bool b)
 	// a dying sim thread must unblock a main thread waiting for a park
 	cvMain.notify_all();
 }
-
-bool SimThreadRunning() { return simRunning.load(); }
 
 void RequestSimThreadExit()
 {

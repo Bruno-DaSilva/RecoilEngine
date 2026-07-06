@@ -47,6 +47,8 @@ static std::deque<TimeSlice> lgcFrames;
 static std::deque<TimeSlice> sgcFrames;
 static std::deque<TimeSlice> swpFrames;
 static std::deque<TimeSlice> uusFrames;
+static std::deque<TimeSlice> gteFrames;
+static std::deque<TimeSlice> prkFrames;
 
 
 ProfileDrawer::ProfileDrawer()
@@ -272,15 +274,28 @@ static void DrawFrameBarcode(TypedRenderBuffer<VA_TYPE_C   >& rb)
 		rb.AddVertex({ {drawArea[0] - 10.0f * globalRendering->pixelX, drawArea[1] - 10.0f * globalRendering->pixelY, 0.0f}, barColor }); // tl
 	}
 
+	const bool splitRows = SimDrawSplit::Enabled();
+
 	// title and legend
-	font->glFormat(drawArea[0], drawArea[3] + 10 * globalRendering->pixelY, 0.7f, FONT_TOP | DBG_FONT_FLAGS | FONT_BUFFERED,
+	constexpr const char* legendSingleRow =
+		"Frame Grapher (%.2fsec)"
+		"\xff\xff\x80\xff  GC"
+		"\xff\xff\xff\x01  Unsynced"
+		"\xff\x01\x01\xff  Swap"
+		"\xff\x01\xff\x01  Video"
+		"\xff\xff\x01\x01  Sim";
+	constexpr const char* legendSplitRows =
 		"Frame Grapher (%.2fsec)"
 		"\xff\xff\x80\xff  GC"
 		"\xff\xff\xff\x01  Unsynced"
 		"\xff\x01\x01\xff  Swap"
 		"\xff\x01\xff\x01  Video"
 		"\xff\xff\x01\x01  Sim"
-		, MAX_FRAMES_HIST_TIME
+		"\xff\xff\x80\x01  Gate"
+		"\xff\xb4\xb4\xb4  Parked";
+
+	font->glFormat(drawArea[0], drawArea[3] + 10 * globalRendering->pixelY, 0.7f, FONT_TOP | DBG_FONT_FLAGS | FONT_BUFFERED,
+		splitRows ? legendSplitRows : legendSingleRow, MAX_FRAMES_HIST_TIME
 	);
 
 	// under the sim|draw split the sim phase runs on its own thread, so its
@@ -289,7 +304,7 @@ static void DrawFrameBarcode(TypedRenderBuffer<VA_TYPE_C   >& rb)
 	float4 drawRow = {drawArea[0], drawArea[1], drawArea[2], drawArea[3]};
 	float4 simRow  = drawRow;
 
-	if (SimDrawSplit::Enabled()) {
+	if (splitRows) {
 		const float rowGap = 2.0f * globalRendering->pixelY;
 		const float rowMid = (drawArea[1] + drawArea[3]) * 0.5f;
 
@@ -300,14 +315,18 @@ static void DrawFrameBarcode(TypedRenderBuffer<VA_TYPE_C   >& rb)
 		font->glFormat(drawArea[2] + 12.0f * globalRendering->pixelX,  simRow.w, 0.5f, FONT_TOP | DBG_FONT_FLAGS | FONT_BUFFERED, "sim");
 	}
 
-	// draw-thread row (everything but the sim phase)
+	// draw-thread row (everything but the sim phase); the gate slice is the
+	// split's sync cost on this side: pause-wait + valve service + barrier
+	DrawTimeSlices(gteFrames, maxTime, drawRow, {1.0f, 0.5f, 0.0f, 0.55f}); // sim|draw gate
 	DrawTimeSlices(lgcFrames, maxTime, drawRow, {1.0f, 0.5f, 1.0f, 0.55f}); // gc frames
 	DrawTimeSlices(uusFrames, maxTime, drawRow, {1.0f, 1.0f, 0.0f, 0.90f}); // unsynced-update frames
 	DrawTimeSlices(swpFrames, maxTime, drawRow, {0.0f, 0.0f, 1.0f, 0.55f}); // video swap frames
 	DrawTimeSlices(vidFrames, maxTime, drawRow, {0.0f, 1.0f, 0.0f, 0.55f}); // video frames
 
 	// sim-thread row (sim frames + synced-handle GC); same row as everything
-	// else when the split is off
+	// else when the split is off. The parked slice is the pause window the
+	// gate holds the sim thread for -- any remaining gap is genuinely idle.
+	DrawTimeSlices(prkFrames, maxTime,  simRow, {0.7f, 0.7f, 0.7f, 0.35f}); // sim parked at the gate
 	DrawTimeSlices(sgcFrames, maxTime,  simRow, {1.0f, 0.5f, 1.0f, 0.55f}); // gc frames (sim phase)
 	DrawTimeSlices(simFrames, maxTime,  simRow, {1.0f, 0.0f, 0.0f, 0.55f}); // sim frames
 
@@ -668,6 +687,12 @@ void ProfileDrawer::DbgTimingInfo(DbgTimingInfoType type, const spring_time star
 		case TIMING_GC_SIM: {
 			sgcFrames.emplace_back(start, end);
 		} break;
+		case TIMING_BARRIER: {
+			gteFrames.emplace_back(start, end);
+		} break;
+		case TIMING_SIM_PARKED: {
+			prkFrames.emplace_back(start, end);
+		} break;
 		case TIMING_SWAP: {
 			swpFrames.emplace_back(start, end);
 		} break;
@@ -704,6 +729,8 @@ void ProfileDrawer::Update()
 	DiscardOldTimeSlices(swpFrames, curTime, maxTime);
 	DiscardOldTimeSlices(vidFrames, curTime, maxTime);
 	DiscardOldTimeSlices(simFrames, curTime, maxTime);
+	DiscardOldTimeSlices(gteFrames, curTime, maxTime);
+	DiscardOldTimeSlices(prkFrames, curTime, maxTime);
 
 	// old ThreadProfile records get cleaned up inside TimeProfiler and DrawThreadBarcode
 }

@@ -65,7 +65,10 @@ namespace UnsyncedBoundaryQueue {
 	void DeferFor(const CEventClient* ec, std::function<void()>&& fn);
 
 	/// replay everything in fire order; SimDrawBarrier step (sim parked)
-	void Drain();
+	/// returns the number of dispatched entries; nonzero means a handler may
+	/// have mutated sim state post-snapshot (see the .cpp comment) -- the
+	/// caller marks the snapshot mutated-outside-frame
+	size_t Drain();
 
 	bool Empty();
 
