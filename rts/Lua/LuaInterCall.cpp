@@ -35,6 +35,12 @@ static CLuaHandle* GetLuaHandle(lua_State* L, int index)
 			if (luaRules == nullptr)
 				return nullptr;
 
+			// NB (split contract, PR 27a): target selection is keyed on the
+			// CALLER's synced flag, so XCall never crosses the synced|unsynced
+			// domain boundary -- an unsynced caller always reaches the unsynced
+			// half. This is the invariant that keeps Script.LuaRules.*() legal
+			// on the draw thread under the sim|draw split; do not change it to
+			// a caller-independent target.
 			return (CLuaHandle::GetHandleSynced(L)) ? static_cast<CLuaHandle*>(&luaRules->syncedLuaHandle) : static_cast<CLuaHandle*>(&luaRules->unsyncedLuaHandle);
 		case LUA_GAIA:
 			// handle is not currently active

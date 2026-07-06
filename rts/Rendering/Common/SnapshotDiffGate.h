@@ -123,6 +123,14 @@ private:
 		F_INVOID,
 		F_SELVOL,
 		F_INRADAR,
+		// PR 27a unit rows
+		F_STATEFLAGS,   // isDead / neutral / activated / isCloaked / armoredState
+		F_HEADINGFACING,// heading / buildFacing
+		F_UNITSCALARS,  // height / mass / maxRange / seismicSignature / armoredMultiple / experience / limExperience
+		F_UNITECO,      // resourcesMake/Use, harvested/harvestStorage, cost, buildTime
+		F_SENSORRADII,  // the seven per-unit sensor radii
+		F_UNITMISCINTS, // selfDCountdown / moveDefID
+		F_BLOCKINGBITS, // GetSolidObjectBlocking's seven booleans
 		// projectile rows (second family)
 		P_VALIDITY,
 		P_POS,
@@ -133,10 +141,16 @@ private:
 		P_WDEFID,
 		P_TARGET,
 		P_INLOS,
+		// PR 27a projectile rows
+		P_DIR,
+		P_GRAVITY,
+		P_TEAMID,
+		P_TTLFLAGS,     // ttl / intercepted / isPiece
 		// feature rows (PR 25 family)
 		FT_VALIDITY,
 		FT_POS,
 		FT_MIDPOS,
+		FT_AIMPOS,
 		FT_RELMIDPOS,
 		FT_RADIUS,
 		FT_ALLYTEAM,
@@ -144,6 +158,14 @@ private:
 		FT_FLAGS,       // alwaysVisible / noSelect / inVoid
 		FT_SELVOL,
 		FT_INLOS,
+		// PR 27a feature rows
+		FT_TEAM,
+		FT_SCALARS,     // health / resurrectProgress / height / mass / heading / buildFacing
+		FT_SPEED,
+		FT_DIRMAT,      // transMatrix direction columns
+		FT_RESOURCES,   // resources / defResources / reclaimLeft / reclaimTime
+		FT_BLOCKINGBITS,
+		FT_RESURRECT,   // resurrectDefID
 		FT_GLOBALS,     // featureVisibility / gaiaAllyTeam
 		// team/player boundary copy (PR 26, section E.3)
 		T_GLOBALS,      // activeTeams / activeAllyTeams / gaiaTeamID / useLuaGaia / gameOver
@@ -157,6 +179,13 @@ private:
 		PL_STATE,       // active / spectator / team / desynced
 		PL_NET,         // ping / cpuUsage
 		PL_OPTS,        // customOpts
+		// global-scalar boundary copy (PR 27a)
+		G_FRAME,        // luaSimFrame
+		G_SPEED,        // wantedSpeedFactor / speedFactor / paused
+		G_FLAGS,        // cheat/god/editDefs/noHelperAIs/noCost + game state flags
+		G_WIND,         // windVec / windDir / windStrength
+		G_HEIGHTS,      // init/curr ground extremes
+		G_GLOBALLOS,    // per-allyteam globalLOS
 		F_COUNT
 	};
 
@@ -164,11 +193,12 @@ private:
 	// LOG_L(L_ERROR) line for this mismatch (mismatch and under the per-field cap)
 	bool Bump(FieldCounter& fc, bool equal);
 
-	// projectile-row / feature-row / team+player halves of the field pass
-	// (from CheckBoundary)
+	// projectile-row / feature-row / team+player / global halves of the field
+	// pass (from CheckBoundary)
 	void CheckProjectileRows();
 	void CheckFeatureRows();
 	void CheckTeamPlayerRows();
+	void CheckGlobalRows();
 
 	void Report(const char* reason) const;
 	void ResetCounters();

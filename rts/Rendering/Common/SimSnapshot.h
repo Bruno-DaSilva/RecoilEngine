@@ -61,6 +61,18 @@
  *    Piece-tree selection volumes (usePieceSelectionVolumes) are deliberately
  *    NOT served here -- unused in BAR; picking falls back to a live sim read
  *    for those objects, to be removed at split-enable (see TraceRay.cpp).
+ *  - PR 27a (split-contract serving pass) additions: the remaining
+ *    row-backable per-object callout reads. Units gained the status/eco
+ *    scalar tail (isDead/neutral/activated/isCloaked, armoredState +
+ *    armoredMultiple, heading/buildFacing, height/mass/maxRange/
+ *    seismicSignature, experience/limExperience, selfDCountdown, the seven
+ *    sensor radii, moveDefID, resourcesMake/Use, harvested/harvestStorage,
+ *    cost/buildTime, blockingBits). Features gained their live tail (team,
+ *    health/resurrectProgress, height/mass, speed, heading/buildFacing, the
+ *    transMatrix direction columns, resources/defResources + reclaimLeft/
+ *    reclaimTime, blockingBits, resurrectDefID). Projectiles gained dir,
+ *    mygravity, teamID, isPiece and the weapon-projectile ttl/intercepted
+ *    pair. All of it is synced sim state (hashed + diff-gated).
  *
  * Validity rules:
  *  - Valid(id) mirrors membership in unitHandler's active-unit list at the
@@ -181,6 +193,41 @@ public:
 		std::vector<uint8_t> noSelect;       // CSolidObject::noSelect
 		std::vector<uint8_t> inVoid;         // CSolidObject::IsInVoid()
 
+		// PR 27a: remaining row-backable per-unit callout reads
+		std::vector<uint8_t> isDead;         // CUnit::isDead (dying units stay valid, see the validity contract)
+		std::vector<uint8_t> neutral;
+		std::vector<uint8_t> activated;
+		std::vector<uint8_t> isCloaked;
+		std::vector<uint8_t> armoredState;
+		std::vector<float> armoredMultiple;
+		std::vector<int16_t> heading;        // CSolidObject::heading (SyncedSshort)
+		std::vector<int16_t> buildFacing;    // CSolidObject::buildFacing (SyncedSshort)
+		std::vector<float> height;
+		std::vector<float> mass;
+		std::vector<float> maxRange;
+		std::vector<float> seismicSignature;
+		std::vector<float> experience;
+		std::vector<float> limExperience;
+		std::vector<int32_t> selfDCountdown;
+		std::vector<int32_t> losRadius;
+		std::vector<int32_t> airLosRadius;
+		std::vector<int32_t> radarRadius;
+		std::vector<int32_t> sonarRadius;
+		std::vector<int32_t> seismicRadius;
+		std::vector<int32_t> jammerRadius;
+		std::vector<int32_t> sonarJamRadius;
+		std::vector<int32_t> moveDefID;      // moveDef ? pathType : -1 (the name is immutable MoveDef data)
+		std::vector<SResourcePack> resourcesMake;
+		std::vector<SResourcePack> resourcesUse;
+		std::vector<SResourcePack> harvested;
+		std::vector<SResourcePack> harvestStorage;
+		std::vector<SResourcePack> cost;
+		std::vector<float> buildTime;
+		// GetSolidObjectBlocking's seven pushed booleans, bit i = push slot i:
+		// blocking, solidObjectsCollidable, projectilesCollidable,
+		// raySegmentsCollidable, crushable, blockEnemyPushing, blockHeightChanges
+		std::vector<uint8_t> blockingBits;
+
 		// object-space basis + relative midpoint (drawer midpos math, GetUnitVectors-class reads)
 		std::vector<float3> relMidPos;
 		std::vector<float3> frontdir;
@@ -240,6 +287,39 @@ public:
 			return Valid(unitID) ? selVol[unitID] : def;
 		}
 
+		// PR 27a accessors (stale/nil contract defaults)
+		bool IsDead(int unitID) const { return Valid(unitID) && isDead[unitID] != 0; }
+		bool Neutral(int unitID) const { return Valid(unitID) && neutral[unitID] != 0; }
+		bool Activated(int unitID) const { return Valid(unitID) && activated[unitID] != 0; }
+		bool IsCloaked(int unitID) const { return Valid(unitID) && isCloaked[unitID] != 0; }
+		bool ArmoredState(int unitID) const { return Valid(unitID) && armoredState[unitID] != 0; }
+		float ArmoredMultiple(int unitID) const { return Valid(unitID) ? armoredMultiple[unitID] : 0.0f; }
+		int Heading(int unitID) const { return Valid(unitID) ? heading[unitID] : 0; }
+		int BuildFacing(int unitID) const { return Valid(unitID) ? buildFacing[unitID] : 0; }
+		float Height(int unitID) const { return Valid(unitID) ? height[unitID] : 0.0f; }
+		float Mass(int unitID) const { return Valid(unitID) ? mass[unitID] : 0.0f; }
+		float MaxRange(int unitID) const { return Valid(unitID) ? maxRange[unitID] : 0.0f; }
+		float SeismicSignature(int unitID) const { return Valid(unitID) ? seismicSignature[unitID] : 0.0f; }
+		float Experience(int unitID) const { return Valid(unitID) ? experience[unitID] : 0.0f; }
+		float LimExperience(int unitID) const { return Valid(unitID) ? limExperience[unitID] : 0.0f; }
+		int SelfDCountdown(int unitID) const { return Valid(unitID) ? selfDCountdown[unitID] : 0; }
+		int LosRadius(int unitID) const { return Valid(unitID) ? losRadius[unitID] : 0; }
+		int AirLosRadius(int unitID) const { return Valid(unitID) ? airLosRadius[unitID] : 0; }
+		int RadarRadius(int unitID) const { return Valid(unitID) ? radarRadius[unitID] : 0; }
+		int SonarRadius(int unitID) const { return Valid(unitID) ? sonarRadius[unitID] : 0; }
+		int SeismicRadius(int unitID) const { return Valid(unitID) ? seismicRadius[unitID] : 0; }
+		int JammerRadius(int unitID) const { return Valid(unitID) ? jammerRadius[unitID] : 0; }
+		int SonarJamRadius(int unitID) const { return Valid(unitID) ? sonarJamRadius[unitID] : 0; }
+		// -1 doubles as the "no moveDef" encoding the live body maps to false
+		int MoveDefID(int unitID) const { return Valid(unitID) ? moveDefID[unitID] : -1; }
+		SResourcePack ResourcesMake(int unitID) const { return Valid(unitID) ? resourcesMake[unitID] : SResourcePack{}; }
+		SResourcePack ResourcesUse(int unitID) const { return Valid(unitID) ? resourcesUse[unitID] : SResourcePack{}; }
+		SResourcePack Harvested(int unitID) const { return Valid(unitID) ? harvested[unitID] : SResourcePack{}; }
+		SResourcePack HarvestStorage(int unitID) const { return Valid(unitID) ? harvestStorage[unitID] : SResourcePack{}; }
+		SResourcePack Cost(int unitID) const { return Valid(unitID) ? cost[unitID] : SResourcePack{}; }
+		float BuildTime(int unitID) const { return Valid(unitID) ? buildTime[unitID] : 0.0f; }
+		uint8_t BlockingBits(int unitID) const { return Valid(unitID) ? blockingBits[unitID] : uint8_t(0); }
+
 		// ---- serving-layer masking helpers (PR 18) ----
 		// Bit-for-bit mirrors of the live formulas, computed from extracted
 		// inputs only; the Lua serving twins (LuaSnapshotServe) and the diff
@@ -258,12 +338,13 @@ public:
 				return fullRead;
 			return (allyTeam[unitID] == readAllyTeam);
 		}
-		// LuaUtils::IsUnitVisible / IsUnitInLos mirrors. A readAllyTeam that
-		// is negative without fullRead indexes losStatus out of bounds on the
-		// live path (cannot arise for real handles); here it reads as a
-		// deterministic not-visible.
+		// LuaUtils::IsUnitVisible / IsUnitInLos / IsUnitTyped mirrors. A
+		// readAllyTeam that is negative without fullRead indexes losStatus out
+		// of bounds on the live path (cannot arise for real handles); here it
+		// reads as a deterministic not-visible.
 		bool PovUnitVisible(int unitID, int readAllyTeam, bool fullRead) const;
 		bool PovUnitInLos(int unitID, int readAllyTeam, bool fullRead) const;
+		bool PovUnitTyped(int unitID, int readAllyTeam, bool fullRead) const;
 
 		// CUnit::GetErrorVector / GetLuaErrorVector mirrors
 		float3 ErrorVector(int unitID, int argAllyTeam) const;
@@ -298,6 +379,13 @@ public:
 		std::vector<uint8_t> targetType;  // 0 = none/not-a-weapon; 'g'/'u'/'f'/'p' as in GetProjectileTarget
 		std::vector<int32_t> targetID;    // for 'u'/'f'/'p'
 		std::vector<float3> targetPos;    // for 'g'
+		// PR 27a: remaining row-backable per-projectile callout reads
+		std::vector<uint8_t> isPiece;     // CProjectile::piece
+		std::vector<float3> dir;
+		std::vector<float> mygravity;
+		std::vector<int32_t> teamID;      // CProjectile::GetTeamID()
+		std::vector<int32_t> ttl;         // CWeaponProjectile::GetTimeToLive(); 0 when !isWeapon
+		std::vector<uint8_t> intercepted; // CWeaponProjectile::IsBeingIntercepted(); 0 when !isWeapon
 		std::vector<uint8_t> inLosAll;    // [numAllyTeams * MaxSlots()], row-major by allyteam
 
 		bool Valid(int projID) const {
@@ -335,6 +423,9 @@ public:
 		std::vector<uint8_t> valid;
 		std::vector<float3> pos;
 		std::vector<float3> midPos;
+		// aimPos can diverge from midPos (Spring.SetFeatureMidAndAimPos); the
+		// GetFeaturePosition twin's optional third return needs the real value
+		std::vector<float3> aimPos;
 		std::vector<float3> relMidPos;
 		std::vector<float> radius;
 		std::vector<int32_t> allyTeam;   // CFeature::allyteam (may be -1)
@@ -343,6 +434,26 @@ public:
 		std::vector<uint8_t> noSelect;
 		std::vector<uint8_t> inVoid;
 		std::vector<CollisionVolume> selVol;
+		// PR 27a: remaining row-backable per-feature callout reads
+		std::vector<int32_t> team;           // CSolidObject::team
+		std::vector<float> health;
+		std::vector<float> resurrectProgress;
+		std::vector<float> height;
+		std::vector<float> mass;
+		std::vector<float4> speed;
+		// CFeature::transMatrix direction columns, exactly as GetFeatureDirection
+		// reads them (front = Z, right = X, up = Y)
+		std::vector<float3> matXdir;
+		std::vector<float3> matYdir;
+		std::vector<float3> matZdir;
+		std::vector<int16_t> heading;        // CSolidObject::heading (SyncedSshort)
+		std::vector<int16_t> buildFacing;    // CSolidObject::buildFacing (SyncedSshort)
+		std::vector<SResourcePack> resources;
+		std::vector<SResourcePack> defResources;
+		std::vector<float> reclaimLeft;
+		std::vector<float> reclaimTime;
+		std::vector<uint8_t> blockingBits;   // same bit layout as UnitRows::blockingBits
+		std::vector<int32_t> resurrectDefID; // udef ? udef->id : -1 (the name is immutable UnitDef data)
 		std::vector<uint8_t> inLosAll;   // [numAllyTeams * MaxSlots()], row-major by allyteam
 
 		bool Valid(int id) const {
@@ -352,6 +463,7 @@ public:
 
 		float3 Pos(int id) const { return Valid(id) ? pos[id] : float3{}; }
 		float3 MidPos(int id) const { return Valid(id) ? midPos[id] : float3{}; }
+		float3 AimPos(int id) const { return Valid(id) ? aimPos[id] : float3{}; }
 		float Radius(int id) const { return Valid(id) ? radius[id] : 0.0f; }
 		int AllyTeam(int id) const { return Valid(id) ? allyTeam[id] : -1; }
 		int DefID(int id) const { return Valid(id) ? defID[id] : 0; }
@@ -361,6 +473,25 @@ public:
 			static const CollisionVolume def;
 			return Valid(id) ? selVol[id] : def;
 		}
+
+		// PR 27a accessors (stale/nil contract defaults)
+		int Team(int id) const { return Valid(id) ? team[id] : -1; }
+		float Health(int id) const { return Valid(id) ? health[id] : 0.0f; }
+		float ResurrectProgress(int id) const { return Valid(id) ? resurrectProgress[id] : 0.0f; }
+		float Height(int id) const { return Valid(id) ? height[id] : 0.0f; }
+		float Mass(int id) const { return Valid(id) ? mass[id] : 0.0f; }
+		float4 Speed(int id) const { return Valid(id) ? speed[id] : float4{}; }
+		float3 MatXdir(int id) const { return Valid(id) ? matXdir[id] : float3{}; }
+		float3 MatYdir(int id) const { return Valid(id) ? matYdir[id] : float3{}; }
+		float3 MatZdir(int id) const { return Valid(id) ? matZdir[id] : float3{}; }
+		int Heading(int id) const { return Valid(id) ? heading[id] : 0; }
+		int BuildFacing(int id) const { return Valid(id) ? buildFacing[id] : 0; }
+		SResourcePack Resources(int id) const { return Valid(id) ? resources[id] : SResourcePack{}; }
+		SResourcePack DefResources(int id) const { return Valid(id) ? defResources[id] : SResourcePack{}; }
+		float ReclaimLeft(int id) const { return Valid(id) ? reclaimLeft[id] : 0.0f; }
+		float ReclaimTime(int id) const { return Valid(id) ? reclaimTime[id] : 0.0f; }
+		uint8_t BlockingBits(int id) const { return Valid(id) ? blockingBits[id] : uint8_t(0); }
+		int ResurrectDefID(int id) const { return Valid(id) ? resurrectDefID[id] : -1; }
 
 		bool InLos(int id, int argAllyTeam) const {
 			return (argAllyTeam >= 0 && argAllyTeam < numAllyTeams &&
@@ -462,6 +593,56 @@ public:
 		// playerHandler.IsValidPlayer mirror
 		bool ValidPlayer(int playerID) const { return (playerID >= 0 && playerID < activePlayers); }
 	};
+
+	/**
+	 * Global-scalar boundary copy (PR 27a, the split-contract serving pass):
+	 * the sim-global reads the hot no-object callouts need at draw time --
+	 * GetGameFrame/GetGameSeconds(Interpolated) (census: 3.2 + 0.9 per draw
+	 * frame), GetGameSpeed/GetGameState, GetWind, the gs cheat/debug flags,
+	 * GetGroundExtremes, GetGlobalLos. Same lifecycle as TeamRows/PlayerRows:
+	 * re-extracted unconditionally every boundary (net messages mutate
+	 * speed/pause/cheat state between sim frames; wind moves per frame), the
+	 * whole copy is a few dozen bytes. Excluded from SnapshotHash: every
+	 * synced field here is a pure global whose divergence localizes nothing
+	 * (any unit-row divergence pinpoints better, and frameNum is the dump key
+	 * itself); correctness is covered by the diff gate's field pass + the
+	 * serving dual-runs.
+	 */
+	struct GlobalRows {
+		// GetGameFrame / GetGameSeconds / GetGameSecondsInterpolated
+		int32_t luaSimFrame = 0;         // gs->GetLuaSimFrame()
+		// GetGameSpeed + the gs inputs of GetGameState's IsSimLagging
+		float wantedSpeedFactor = 1.0f;  // gs->wantedSpeedFactor
+		float speedFactor = 1.0f;        // gs->speedFactor
+		uint8_t paused = 0;              // gs->paused
+		// synced cheat/debug flags
+		uint8_t cheatEnabled = 0;        // gs->cheatEnabled
+		int32_t godMode = 0;             // gs->godMode (GODMODE_*_BIT mask)
+		uint8_t editDefsEnabled = 0;     // gs->editDefsEnabled
+		uint8_t noHelperAIs = 0;         // gs->noHelperAIs
+		uint8_t defsNoCost = 0;          // unitDefHandler->GetNoCost()
+		// GetGameState flags (doneLoading/savedGame are load-time-stable,
+		// clientPaused arrives via net)
+		uint8_t doneLoading = 0;         // game->IsDoneLoading()
+		uint8_t savedGame = 0;           // game->IsSavedGame()
+		uint8_t clientPaused = 0;        // game->IsClientPaused()
+		// GetWind (current values move every sim frame)
+		float3 windVec;                  // envResHandler.GetCurrentWindVec()
+		float3 windDir;                  // envResHandler.GetCurrentWindDir()
+		float windStrength = 0.0f;       // envResHandler.GetCurrentWindStrength()
+		// GetGroundExtremes (init pair is constant; captured so the twin is
+		// snapshot-only, curr pair mutates on terraform)
+		float initMinHeight = 0.0f;
+		float initMaxHeight = 0.0f;
+		float currMinHeight = 0.0f;
+		float currMaxHeight = 0.0f;
+		// GetGlobalLos, one byte per allyteam
+		int32_t numAllyTeams = 0;
+		std::vector<uint8_t> globalLos;
+
+		// teamHandler.IsValidAllyTeam mirror
+		bool ValidAllyTeam(int allyTeam) const { return (allyTeam >= 0 && allyTeam < numAllyTeams); }
+	};
 public:
 	/// extract-if-due + publish; called once per draw frame from CGame::Draw,
 	/// after the render-event drain (see the timing contract above)
@@ -494,6 +675,7 @@ public:
 	const FeatureRows& ReadFeatures() const { return *featFront; }
 	const TeamRows& ReadTeams() const { return *teamFront; }
 	const PlayerRows& ReadPlayers() const { return *playerFront; }
+	const GlobalRows& ReadGlobals() const { return *globFront; }
 	uint32_t Generation() const { return generation; }
 private:
 	void Extract(UnitRows& rows);
@@ -501,6 +683,7 @@ private:
 	void ExtractFeatures(FeatureRows& rows);
 	void ExtractTeams(TeamRows& rows);
 	void ExtractPlayers(PlayerRows& rows);
+	void ExtractGlobals(GlobalRows& rows);
 	static void Resize(UnitRows& rows, size_t maxUnits, int numAllyTeams);
 private:
 	UnitRows buffers[2];
@@ -522,6 +705,10 @@ private:
 	PlayerRows playerBuffers[2];
 	PlayerRows* playerFront = &playerBuffers[0];
 	PlayerRows* playerBack = &playerBuffers[1];
+
+	GlobalRows globBuffers[2];
+	GlobalRows* globFront = &globBuffers[0];
+	GlobalRows* globBack = &globBuffers[1];
 
 	// PR 16: scratch rows for per-sim-frame hashing; never published, kept only
 	// to avoid reallocating its arrays every armed frame

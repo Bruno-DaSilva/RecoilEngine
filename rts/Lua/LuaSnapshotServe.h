@@ -78,6 +78,88 @@ namespace LuaSnapshotServe {
 	// team/player-table family (PR 26; served from the SimSnapshot team/player
 	// boundary copy, section E.3 field spec -- POV gates via the TeamRows
 	// IsAlliedTeam mirror)
+	// global-scalar family (PR 27a; served from SimSnapshot::GlobalRows --
+	// the no-object callouts hot at draw time: game clock, speed, wind,
+	// cheat flags, ground extremes, global LOS)
+	int GetGameFrame(lua_State* L, const char* caller);
+	int GetGameSeconds(lua_State* L, const char* caller);
+	int GetGameSecondsInterpolated(lua_State* L, const char* caller); // LuaUnsyncedRead
+	int GetGameSpeed(lua_State* L, const char* caller);               // LuaUnsyncedRead
+	int GetWind(lua_State* L, const char* caller);
+	int IsCheatingEnabled(lua_State* L, const char* caller);
+	int IsGodModeEnabled(lua_State* L, const char* caller);
+	int IsEditDefsEnabled(lua_State* L, const char* caller);
+	int AreHelperAIsEnabled(lua_State* L, const char* caller);
+	int IsNoCostEnabled(lua_State* L, const char* caller);
+	int IsGameOver(lua_State* L, const char* caller);
+	int GetGroundExtremes(lua_State* L, const char* caller);
+	int GetGlobalLos(lua_State* L, const char* caller);
+
+	// PR 27a row-backed tail: the remaining per-object callouts whose live
+	// reads are fully covered by the PR-27a SimSnapshot rows (unit status/eco
+	// scalars, the feature tail, the projectile tail). Same §E.2 recipe as the
+	// families above; parse-gate mirrors follow each live body's parse helper.
+	int ValidUnitID(lua_State* L, const char* caller);
+	int GetUnitDefID(lua_State* L, const char* caller);
+	int GetUnitTeam(lua_State* L, const char* caller);
+	int GetUnitAllyTeam(lua_State* L, const char* caller);
+	int GetUnitNeutral(lua_State* L, const char* caller);
+	int GetUnitIsDead(lua_State* L, const char* caller);
+	int GetUnitIsBeingBuilt(lua_State* L, const char* caller);
+	int GetUnitVelocity(lua_State* L, const char* caller);
+	int GetUnitDirection(lua_State* L, const char* caller);
+	int GetUnitHeading(lua_State* L, const char* caller);
+	int GetUnitVectors(lua_State* L, const char* caller);
+	int GetUnitRadius(lua_State* L, const char* caller);
+	int GetUnitHeight(lua_State* L, const char* caller);
+	int GetUnitMass(lua_State* L, const char* caller);
+	int GetUnitExperience(lua_State* L, const char* caller);
+	int GetUnitIsActive(lua_State* L, const char* caller);
+	int GetUnitIsCloaked(lua_State* L, const char* caller);
+	int GetUnitMaxRange(lua_State* L, const char* caller);
+	int GetUnitBuildFacing(lua_State* L, const char* caller);
+	int GetUnitSensorRadius(lua_State* L, const char* caller);
+	int GetUnitSeismicSignature(lua_State* L, const char* caller);
+	int GetUnitSelfDTime(lua_State* L, const char* caller);
+	int GetUnitArmored(lua_State* L, const char* caller);
+	int GetUnitResources(lua_State* L, const char* caller);
+	int GetUnitHarvestStorage(lua_State* L, const char* caller);
+	int GetUnitCosts(lua_State* L, const char* caller);
+	int GetUnitCostTable(lua_State* L, const char* caller);
+	int GetUnitMoveDefID(lua_State* L, const char* caller);
+	int GetUnitBlocking(lua_State* L, const char* caller);
+	int GetUnitLeavesGhost(lua_State* L, const char* caller);
+	int GetUnitSeparation(lua_State* L, const char* caller);
+	int GetUnitFeatureSeparation(lua_State* L, const char* caller);
+	int IsUnitInRadar(lua_State* L, const char* caller); // inRadarAll IS the live InRadar(unit, at) answer
+	int IsUnitAllied(lua_State* L, const char* caller);  // LuaUnsyncedRead
+
+	int ValidFeatureID(lua_State* L, const char* caller);
+	int GetFeatureDefID(lua_State* L, const char* caller);
+	int GetFeatureTeam(lua_State* L, const char* caller);
+	int GetFeatureAllyTeam(lua_State* L, const char* caller);
+	int GetFeatureHealth(lua_State* L, const char* caller);
+	int GetFeatureHeight(lua_State* L, const char* caller);
+	int GetFeatureRadius(lua_State* L, const char* caller);
+	int GetFeaturePosition(lua_State* L, const char* caller);
+	int GetFeatureMass(lua_State* L, const char* caller);
+	int GetFeatureDirection(lua_State* L, const char* caller);
+	int GetFeatureVelocity(lua_State* L, const char* caller);
+	int GetFeatureHeading(lua_State* L, const char* caller);
+	int GetFeatureResources(lua_State* L, const char* caller);
+	int GetFeatureBlocking(lua_State* L, const char* caller);
+	int GetFeatureNoSelect(lua_State* L, const char* caller);
+	int GetFeatureResurrect(lua_State* L, const char* caller);
+	int GetFeatureSeparation(lua_State* L, const char* caller);
+
+	int GetProjectileDirection(lua_State* L, const char* caller);
+	int GetProjectileGravity(lua_State* L, const char* caller);
+	int GetProjectileTeamID(lua_State* L, const char* caller);
+	int GetProjectileAllyTeamID(lua_State* L, const char* caller);
+	int GetProjectileType(lua_State* L, const char* caller);
+	int GetProjectileTimeToLive(lua_State* L, const char* caller);
+	int GetProjectileIsIntercepted(lua_State* L, const char* caller);
+
 	int GetGaiaTeamID(lua_State* L, const char* caller);
 	int GetAllyTeamList(lua_State* L, const char* caller);
 	int GetTeamList(lua_State* L, const char* caller);

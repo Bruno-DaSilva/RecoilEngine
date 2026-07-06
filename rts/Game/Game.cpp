@@ -63,6 +63,7 @@
 #include "Lua/LuaMenu.h"
 #include "Lua/LuaRules.h"
 #include "Lua/LuaOpenGL.h"
+#include "Lua/LuaSplitContract.h"
 #include "Lua/LuaParser.h"
 #include "Lua/LuaSyncedRead.h"
 #include "Lua/LuaUI.h"
@@ -336,6 +337,11 @@ void CGame::AddTimedJobs()
 
 			// SimFrame handles gc when not paused, this all other cases
 			// do not check the global synced state, never true in demos
+			// TODO(27b, split contract): this job runs on the main thread and
+			// CollectGarbage iterates ALL handles incl. the synced ones -- a
+			// draw-thread lua_gc on the sim-thread-owned synced state. At the
+			// split, restrict the job to unsynced handles (sim keeps GCing its
+			// own via SimFrame) or move the synced half behind the barrier.
 			if (luaGCControl == 1 || simFrameDeltaTime > gcForcedDeltaTime)
 				eventHandler.CollectGarbage(false);
 
@@ -1020,6 +1026,9 @@ void CGame::KillRendering()
 	renderEventQueue.Clear();
 	simSnapshot.Clear();
 	snapshotPickGrid.Clear();
+	// dumps the draw-contract trip inventory into the infolog before reset
+	// (the PR-27a gate artifact; no-op when the contract never tripped)
+	LuaSplitContract::Clear();
 	icon::iconHandler.Kill();
 	spring::SafeDelete(geometricObjects);
 	worldDrawer.Kill();
@@ -1528,6 +1537,13 @@ void CGame::SimDrawBarrier()
 	// slots; ReleaseAcked() at the end of this Draw returns them to the pools
 	deferredObjectDeleter.AckDrainedDestroys();
 
+	// (2b) apply the draw-side Lua contract's boundary-deferred sim pokes
+	// (LuaUnsyncedCtrl direct-sim-poke class under SplitDrawContract, PR 27a):
+	// this is the pause window, so the writes land while sim state is mutable
+	// and before the snapshot publish below makes them draw-visible. Empty
+	// (and free) unless the contract flag queued something last draw frame.
+	LuaSplitContract::DrainBoundaryApplies();
+
 	// (3) publish the observable-state snapshot for draw-side consumers
 	// (contract in SimSnapshot.h; the team/player copy refreshes every call)
 	simSnapshot.Update();
@@ -1579,6 +1595,13 @@ void CGame::SimDrawBarrier()
 
 bool CGame::Draw() {
 	SimDrawBarrier();
+
+	// everything from here to the end of Draw is draw-thread context under
+	// the split contract (PR 27a): unsynced Lua ran below this line executes
+	// on the draw thread at 27b while sim advances. The barrier above is
+	// deliberately OUTSIDE the window -- it is the sim-pause bracket, where
+	// live reads (the Render* event dispatches) stay legal.
+	LuaSplitContract::ScopedDrawWindow splitContractWindow;
 
 	const spring_time currentTimePreUpdate = spring_gettime();
 

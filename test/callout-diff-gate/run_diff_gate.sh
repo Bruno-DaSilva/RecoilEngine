@@ -24,6 +24,8 @@
 #                    (masking coverage; 0 = never)       (default 6000)
 #   DG_POV_SPAN      POV segment length in frames        (default 6000)
 #   DG_POV_TEAM      team to spectate (-1 = auto)        (default -1)
+#   DG_SPLIT_CONTRACT      SplitDrawContract mode: 0 off, 1 count, 2 strict (PR 27a)
+#   DG_SPLIT_CONTRACT_WARN once-per-callout trip warnings (default 1)
 
 set -euo pipefail
 
@@ -80,6 +82,8 @@ DiffGateExercise = ${DG_EXERCISE:-1}
 DiffGatePovFrame = ${DG_POV_FRAME:-6000}
 DiffGatePovSpan = ${DG_POV_SPAN:-6000}
 DiffGatePovTeam = ${DG_POV_TEAM:--1}
+SplitDrawContract = ${DG_SPLIT_CONTRACT:-0}
+SplitDrawContractWarn = ${DG_SPLIT_CONTRACT_WARN:-1}
 WorkerThreadCount = ${WORKERS:--1}
 EOF
 

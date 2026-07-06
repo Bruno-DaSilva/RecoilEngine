@@ -13,11 +13,15 @@
 #include "Sim/Features/Feature.h"
 #include "Sim/Features/FeatureDef.h"
 #include "Sim/Features/FeatureHandler.h"
+#include "Map/ReadMap.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/LosHandler.h"
 #include "Sim/Misc/ModInfo.h"
 #include "Sim/Misc/Team.h"
 #include "Sim/Misc/TeamHandler.h"
+#include "Sim/Misc/Wind.h"
+#include "Sim/MoveTypes/MoveDefHandler.h"
+#include "Sim/Units/UnitDefHandler.h"
 #include "Sim/Projectiles/ProjectileHandler.h"
 #include "Sim/Projectiles/WeaponProjectiles/WeaponProjectile.h"
 #include "Sim/Units/Unit.h"
@@ -64,6 +68,20 @@ static inline void CopyOpts(spring::unordered_map<std::string, std::string>& dst
 		dst = src;
 }
 
+// GetSolidObjectBlocking's seven pushed booleans as one byte, bit i = push
+// slot i (see the UnitRows::blockingBits layout comment)
+static inline uint8_t PackBlockingBits(const CSolidObject* o)
+{
+	return static_cast<uint8_t>(
+		(o->HasPhysicalStateBit(CSolidObject::PSTATE_BIT_BLOCKING)       << 0) |
+		(o->HasCollidableStateBit(CSolidObject::CSTATE_BIT_SOLIDOBJECTS) << 1) |
+		(o->HasCollidableStateBit(CSolidObject::CSTATE_BIT_PROJECTILES ) << 2) |
+		(o->HasCollidableStateBit(CSolidObject::CSTATE_BIT_QUADMAPRAYS ) << 3) |
+		(o->crushable          << 4) |
+		(o->blockEnemyPushing  << 5) |
+		(o->blockHeightChanges << 6));
+}
+
 bool SimSnapshot::UnitRows::PovUnitVisible(int unitID, int readAllyTeam, bool fullRead) const
 {
 	if (PovAlliedUnit(unitID, readAllyTeam, fullRead))
@@ -82,6 +100,21 @@ bool SimSnapshot::UnitRows::PovUnitInLos(int unitID, int readAllyTeam, bool full
 		return false;
 
 	return ((losStatusAll[readAllyTeam * MaxUnits() + unitID] & LOS_INLOS) != 0);
+}
+
+bool SimSnapshot::UnitRows::PovUnitTyped(int unitID, int readAllyTeam, bool fullRead) const
+{
+	if (PovAlliedUnit(unitID, readAllyTeam, fullRead))
+		return true;
+	if (readAllyTeam < 0 || readAllyTeam >= numAllyTeams)
+		return false;
+
+	// LuaUtils::IsUnitTyped mirror: currently in LOS, or not lost from radar
+	// since last being visible
+	const uint8_t losStatus = losStatusAll[readAllyTeam * MaxUnits() + unitID];
+	constexpr uint8_t prevMask = (LOS_PREVLOS | LOS_CONTRADAR);
+
+	return ((losStatus & LOS_INLOS) != 0 || (losStatus & prevMask) == prevMask);
 }
 
 float3 SimSnapshot::UnitRows::ErrorVector(int unitID, int argAllyTeam) const
@@ -140,8 +173,12 @@ void SimSnapshot::Update()
 	// invisibly to the frameNum/aliveCount checks below, and the copy is KBs
 	ExtractTeams(*teamBack);
 	ExtractPlayers(*playerBack);
+	// global-scalar copy (PR 27a): same unconditional lifecycle -- speed/
+	// pause/cheat state mutates via net between frames, and it is ~100 bytes
+	ExtractGlobals(*globBack);
 	std::swap(teamFront, teamBack);
 	std::swap(playerFront, playerBack);
+	std::swap(globFront, globBack);
 
 	const bool due =
 		mutatedOutsideFrame ||
@@ -204,7 +241,19 @@ void SimSnapshot::Clear()
 			(r.health.size() + r.maxHealth.size() + r.paralyzeDamage.size() +
 			 r.captureProgress.size() + r.buildProgress.size() + r.radius.size()) * sizeof(float) +
 			r.defID.size() * sizeof(int32_t) +
-			r.noSelect.size() + r.inVoid.size() + r.selVol.size() * sizeof(CollisionVolume);
+			r.noSelect.size() + r.inVoid.size() + r.selVol.size() * sizeof(CollisionVolume) +
+			// PR 27a rows
+			r.isDead.size() + r.neutral.size() + r.activated.size() +
+			r.isCloaked.size() + r.armoredState.size() + r.blockingBits.size() +
+			(r.heading.size() + r.buildFacing.size()) * sizeof(int16_t) +
+			(r.armoredMultiple.size() + r.height.size() + r.mass.size() +
+			 r.maxRange.size() + r.seismicSignature.size() + r.experience.size() +
+			 r.limExperience.size() + r.buildTime.size()) * sizeof(float) +
+			(r.selfDCountdown.size() + r.losRadius.size() + r.airLosRadius.size() +
+			 r.radarRadius.size() + r.sonarRadius.size() + r.seismicRadius.size() +
+			 r.jammerRadius.size() + r.sonarJamRadius.size() + r.moveDefID.size()) * sizeof(int32_t) +
+			(r.resourcesMake.size() + r.resourcesUse.size() + r.harvested.size() +
+			 r.harvestStorage.size() + r.cost.size()) * sizeof(SResourcePack);
 		LOG("[SimSnapshot] extractions=%u avgMs=%.4f maxMs=%.4f peakUnits=%d memKB=%.1f projSlots=%d featSlots=%d",
 			numExtractions, sumExtractMs / numExtractions, maxExtractMs, peakAliveCount,
 			(2.0f * bufBytes) / 1024.0f, int(projFront->MaxSlots()), int(featFront->MaxSlots()));
@@ -256,6 +305,36 @@ void SimSnapshot::Resize(UnitRows& rows, size_t maxUnits, int numAllyTeams)
 	rows.selVol.resize(maxUnits);
 	rows.noSelect.resize(maxUnits);
 	rows.inVoid.resize(maxUnits);
+	rows.isDead.resize(maxUnits);
+	rows.neutral.resize(maxUnits);
+	rows.activated.resize(maxUnits);
+	rows.isCloaked.resize(maxUnits);
+	rows.armoredState.resize(maxUnits);
+	rows.armoredMultiple.resize(maxUnits);
+	rows.heading.resize(maxUnits);
+	rows.buildFacing.resize(maxUnits);
+	rows.height.resize(maxUnits);
+	rows.mass.resize(maxUnits);
+	rows.maxRange.resize(maxUnits);
+	rows.seismicSignature.resize(maxUnits);
+	rows.experience.resize(maxUnits);
+	rows.limExperience.resize(maxUnits);
+	rows.selfDCountdown.resize(maxUnits);
+	rows.losRadius.resize(maxUnits);
+	rows.airLosRadius.resize(maxUnits);
+	rows.radarRadius.resize(maxUnits);
+	rows.sonarRadius.resize(maxUnits);
+	rows.seismicRadius.resize(maxUnits);
+	rows.jammerRadius.resize(maxUnits);
+	rows.sonarJamRadius.resize(maxUnits);
+	rows.moveDefID.resize(maxUnits);
+	rows.resourcesMake.resize(maxUnits);
+	rows.resourcesUse.resize(maxUnits);
+	rows.harvested.resize(maxUnits);
+	rows.harvestStorage.resize(maxUnits);
+	rows.cost.resize(maxUnits);
+	rows.buildTime.resize(maxUnits);
+	rows.blockingBits.resize(maxUnits);
 	rows.relMidPos.resize(maxUnits);
 	rows.frontdir.resize(maxUnits);
 	rows.updir.resize(maxUnits);
@@ -309,6 +388,36 @@ void SimSnapshot::Extract(UnitRows& rows)
 		rows.selVol[id] = u->selectionVolume;
 		rows.noSelect[id] = u->noSelect;
 		rows.inVoid[id] = u->IsInVoid();
+		rows.isDead[id] = u->isDead;
+		rows.neutral[id] = u->neutral;
+		rows.activated[id] = u->activated;
+		rows.isCloaked[id] = u->isCloaked;
+		rows.armoredState[id] = u->armoredState;
+		rows.armoredMultiple[id] = u->armoredMultiple;
+		rows.heading[id] = u->heading;
+		rows.buildFacing[id] = u->buildFacing;
+		rows.height[id] = u->height;
+		rows.mass[id] = u->mass;
+		rows.maxRange[id] = u->maxRange;
+		rows.seismicSignature[id] = u->seismicSignature;
+		rows.experience[id] = u->experience;
+		rows.limExperience[id] = u->limExperience;
+		rows.selfDCountdown[id] = u->selfDCountdown;
+		rows.losRadius[id] = u->losRadius;
+		rows.airLosRadius[id] = u->airLosRadius;
+		rows.radarRadius[id] = u->radarRadius;
+		rows.sonarRadius[id] = u->sonarRadius;
+		rows.seismicRadius[id] = u->seismicRadius;
+		rows.jammerRadius[id] = u->jammerRadius;
+		rows.sonarJamRadius[id] = u->sonarJamRadius;
+		rows.moveDefID[id] = (u->moveDef != nullptr) ? static_cast<int32_t>(u->moveDef->pathType) : -1;
+		rows.resourcesMake[id] = u->resourcesMake;
+		rows.resourcesUse[id] = u->resourcesUse;
+		rows.harvested[id] = u->harvested;
+		rows.harvestStorage[id] = u->harvestStorage;
+		rows.cost[id] = u->cost;
+		rows.buildTime[id] = u->buildTime;
+		rows.blockingBits[id] = PackBlockingBits(u);
 		rows.relMidPos[id] = u->relMidPos;
 		rows.frontdir[id] = u->frontdir;
 		rows.updir[id] = u->updir;
@@ -353,6 +462,12 @@ void SimSnapshot::ExtractProjectiles(ProjectileRows& rows)
 		rows.targetType.resize(n);
 		rows.targetID.resize(n);
 		rows.targetPos.resize(n);
+		rows.isPiece.resize(n);
+		rows.dir.resize(n);
+		rows.mygravity.resize(n);
+		rows.teamID.resize(n);
+		rows.ttl.resize(n);
+		rows.intercepted.resize(n);
 		rows.inLosAll.resize(size_t(numAllyTeams) * n);
 	}
 
@@ -370,10 +485,16 @@ void SimSnapshot::ExtractProjectiles(ProjectileRows& rows)
 		rows.allyTeam[id] = p->GetAllyteamID();
 		rows.ownerID[id] = p->GetOwnerID();
 		rows.isWeapon[id] = p->weapon;
+		rows.isPiece[id] = p->piece;
+		rows.dir[id] = p->dir;
+		rows.mygravity[id] = p->mygravity;
+		rows.teamID[id] = static_cast<int32_t>(p->GetTeamID());
 		rows.weaponDefID[id] = -1;
 		rows.targetType[id] = 0;
 		rows.targetID[id] = 0;
 		rows.targetPos[id] = ZeroVector;
+		rows.ttl[id] = 0;
+		rows.intercepted[id] = 0;
 
 		if (p->weapon) {
 			const CWeaponProjectile* wpro = static_cast<const CWeaponProjectile*>(p);
@@ -381,6 +502,8 @@ void SimSnapshot::ExtractProjectiles(ProjectileRows& rows)
 			const CWorldObject* wtgt = wpro->GetTargetObject();
 
 			rows.weaponDefID[id] = (wdef != nullptr) ? wdef->id : -1;
+			rows.ttl[id] = wpro->GetTimeToLive();
+			rows.intercepted[id] = wpro->IsBeingIntercepted();
 
 			// same type resolution as LuaSyncedRead::GetProjectileTarget
 			if (wtgt == nullptr) {
@@ -422,6 +545,7 @@ void SimSnapshot::ExtractFeatures(FeatureRows& rows)
 		rows.valid.resize(n, 0);
 		rows.pos.resize(n);
 		rows.midPos.resize(n);
+		rows.aimPos.resize(n);
 		rows.relMidPos.resize(n);
 		rows.radius.resize(n);
 		rows.allyTeam.resize(n);
@@ -430,6 +554,23 @@ void SimSnapshot::ExtractFeatures(FeatureRows& rows)
 		rows.noSelect.resize(n);
 		rows.inVoid.resize(n);
 		rows.selVol.resize(n);
+		rows.team.resize(n);
+		rows.health.resize(n);
+		rows.resurrectProgress.resize(n);
+		rows.height.resize(n);
+		rows.mass.resize(n);
+		rows.speed.resize(n);
+		rows.matXdir.resize(n);
+		rows.matYdir.resize(n);
+		rows.matZdir.resize(n);
+		rows.heading.resize(n);
+		rows.buildFacing.resize(n);
+		rows.resources.resize(n);
+		rows.defResources.resize(n);
+		rows.reclaimLeft.resize(n);
+		rows.reclaimTime.resize(n);
+		rows.blockingBits.resize(n);
+		rows.resurrectDefID.resize(n);
 		rows.inLosAll.resize(size_t(numAllyTeams) * n);
 	}
 
@@ -448,6 +589,7 @@ void SimSnapshot::ExtractFeatures(FeatureRows& rows)
 		rows.valid[id] = 1;
 		rows.pos[id] = f->pos;
 		rows.midPos[id] = f->midPos;
+		rows.aimPos[id] = f->aimPos;
 		rows.relMidPos[id] = f->relMidPos;
 		rows.radius[id] = f->radius;
 		rows.allyTeam[id] = f->allyteam;
@@ -456,6 +598,26 @@ void SimSnapshot::ExtractFeatures(FeatureRows& rows)
 		rows.noSelect[id] = f->noSelect;
 		rows.inVoid[id] = f->IsInVoid();
 		rows.selVol[id] = f->selectionVolume;
+		rows.team[id] = f->team;
+		rows.health[id] = f->health;
+		rows.resurrectProgress[id] = f->resurrectProgress;
+		rows.height[id] = f->height;
+		rows.mass[id] = f->mass;
+		rows.speed[id] = f->speed;
+		{
+			const CMatrix44f& fm = f->GetTransformMatrixRef();
+			rows.matXdir[id] = fm.GetX();
+			rows.matYdir[id] = fm.GetY();
+			rows.matZdir[id] = fm.GetZ();
+		}
+		rows.heading[id] = f->heading;
+		rows.buildFacing[id] = f->buildFacing;
+		rows.resources[id] = f->resources;
+		rows.defResources[id] = f->defResources;
+		rows.reclaimLeft[id] = f->reclaimLeft;
+		rows.reclaimTime[id] = f->reclaimTime;
+		rows.blockingBits[id] = PackBlockingBits(f);
+		rows.resurrectDefID[id] = (f->udef != nullptr) ? f->udef->id : -1;
 
 		for (int at = 0; at < numAllyTeams; ++at)
 			rows.inLosAll[at * slots + id] = losHandler->InLos(f->pos, at);
@@ -557,5 +719,40 @@ void SimSnapshot::ExtractPlayers(PlayerRows& rows)
 		rows.isFromDemo[p] = player->isFromDemo;
 		rows.desynced[p] = player->desynced;
 		CopyOpts(rows.customOpts[p], player->GetAllValues());
+	}
+}
+
+void SimSnapshot::ExtractGlobals(GlobalRows& rows)
+{
+	rows.luaSimFrame = gs->GetLuaSimFrame();
+
+	rows.wantedSpeedFactor = gs->wantedSpeedFactor;
+	rows.speedFactor = gs->speedFactor;
+	rows.paused = gs->paused;
+
+	rows.cheatEnabled = gs->cheatEnabled;
+	rows.godMode = gs->godMode;
+	rows.editDefsEnabled = gs->editDefsEnabled;
+	rows.noHelperAIs = gs->noHelperAIs;
+	rows.defsNoCost = (unitDefHandler != nullptr && unitDefHandler->GetNoCost());
+
+	rows.doneLoading = (game != nullptr && game->IsDoneLoading());
+	rows.savedGame = (game != nullptr && game->IsSavedGame());
+	rows.clientPaused = (game != nullptr && game->IsClientPaused());
+
+	rows.windVec = envResHandler.GetCurrentWindVec();
+	rows.windDir = envResHandler.GetCurrentWindDir();
+	rows.windStrength = envResHandler.GetCurrentWindStrength();
+
+	rows.initMinHeight = readMap->GetInitMinHeight();
+	rows.initMaxHeight = readMap->GetInitMaxHeight();
+	rows.currMinHeight = readMap->GetCurrMinHeight();
+	rows.currMaxHeight = readMap->GetCurrMaxHeight();
+
+	const int numAllyTeams = teamHandler.ActiveAllyTeams();
+	rows.numAllyTeams = numAllyTeams;
+	rows.globalLos.resize(numAllyTeams);
+	for (int at = 0; at < numAllyTeams; ++at) {
+		rows.globalLos[at] = losHandler->GetGlobalLOS(at);
 	}
 }

@@ -6,6 +6,7 @@
 #include "LuaInclude.h"
 #include "LuaHandle.h"
 #include "LuaSnapshotServe.h"
+#include "LuaSplitContract.h"
 #include "LuaHashString.h"
 #include "LuaUtils.h"
 #include "LuaRules.h"
@@ -336,6 +337,10 @@ static inline CUnit* ParseUnit(lua_State* L, const char* caller, int index)
 		return nullptr;
 	}
 
+	// split-contract gate (PR 27a); nullptr = the "no such unit" shape
+	if (LuaSplitContract::DenyLiveRead(L, caller))
+		return nullptr;
+
 	CUnit* unit = unitHandler.GetUnit(lua_toint(L, index));
 
 	if (unit == nullptr)
@@ -358,6 +363,10 @@ static inline CFeature* ParseFeature(lua_State* L, const char* caller, int index
 		luaL_error(L, "%s(): Bad featureID", caller);
 		return nullptr;
 	}
+
+	// split-contract gate (PR 27a); nullptr = the "no such feature" shape
+	if (LuaSplitContract::DenyLiveRead(L, caller))
+		return nullptr;
 
 	CFeature* feature = featureHandler.GetFeature(lua_toint(L, index));
 
@@ -1225,10 +1234,16 @@ int LuaUnsyncedRead::GetFrameTimeOffset(lua_State* L)
  *
  * @return number game time in seconds
  */
-int LuaUnsyncedRead::GetGameSecondsInterpolated(lua_State* L)
+static int GetGameSecondsInterpolatedLive(lua_State* L, const char* caller)
 {
 	lua_pushnumber(L, (gs->GetLuaSimFrame() + globalRendering->timeOffset) / GAME_SPEED);
 	return 1;
+}
+
+int LuaUnsyncedRead::GetGameSecondsInterpolated(lua_State* L)
+{
+	// globals-served from draw context (sim|draw PR 27a, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetGameSecondsInterpolatedLive, &LuaSnapshotServe::GetGameSecondsInterpolated);
 }
 
 /***
@@ -1269,9 +1284,9 @@ int LuaUnsyncedRead::GetVideoCapturingMode(lua_State* L)
  * @param unitID integer
  * @return boolean? isAllied nil with unitID cannot be parsed
  */
-int LuaUnsyncedRead::IsUnitAllied(lua_State* L)
+static int IsUnitAlliedLive(lua_State* L, const char* caller)
 {
-	CUnit* unit = ParseUnit(L, __func__, 1);
+	CUnit* unit = ParseUnit(L, caller, 1);
 
 	if (unit == nullptr)
 		return 0;
@@ -1284,6 +1299,12 @@ int LuaUnsyncedRead::IsUnitAllied(lua_State* L)
 	}
 
 	return 1;
+}
+
+int LuaUnsyncedRead::IsUnitAllied(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27a, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &IsUnitAlliedLive, &LuaSnapshotServe::IsUnitAllied);
 }
 
 
@@ -2067,6 +2088,12 @@ public:
  */
 int LuaUnsyncedRead::GetVisibleUnits(lua_State* L)
 {
+	// split-contract gate (PR 27a): walks live quadfield unit lists + losStatus directly
+	if (LuaSplitContract::DenyLiveRead(L, __func__)) {
+		lua_createtable(L, 0, 0);
+		return 1;
+	}
+
 	// arg 1 - teamID
 	int teamID = luaL_optint(L, 1, -1);
 	int allyTeamID = CLuaHandle::GetHandleReadAllyTeam(L);
@@ -2166,6 +2193,12 @@ int LuaUnsyncedRead::GetVisibleUnits(lua_State* L)
  */
 int LuaUnsyncedRead::GetVisibleFeatures(lua_State* L)
 {
+	// split-contract gate (PR 27a): walks live quadfield feature lists + LOS state directly
+	if (LuaSplitContract::DenyLiveRead(L, __func__)) {
+		lua_createtable(L, 0, 0);
+		return 1;
+	}
+
 	// arg 1 - allyTeamID
 	int allyTeamID = luaL_optint(L, 1, -1);
 
@@ -2247,6 +2280,12 @@ int LuaUnsyncedRead::GetVisibleFeatures(lua_State* L)
  */
 int LuaUnsyncedRead::GetVisibleProjectiles(lua_State* L)
 {
+	// split-contract gate (PR 27a): walks live quadfield projectile lists + losHandler directly
+	if (LuaSplitContract::DenyLiveRead(L, __func__)) {
+		lua_createtable(L, 0, 0);
+		return 1;
+	}
+
 	int allyTeamID = luaL_optint(L, 1, -1);
 
 	if (allyTeamID >= 0) {
@@ -2542,6 +2581,12 @@ int LuaUnsyncedRead::GetUnitsInScreenRectangle(lua_State* L)
 	if (l > r) std::swap(l, r);
 	if (t > b) std::swap(t, b);
 
+	// split-contract gate (PR 27a): walks live quadfield unit lists directly (no ParseUnit)
+	if (LuaSplitContract::DenyLiveRead(L, __func__)) {
+		lua_createtable(L, 0, 0);
+		return 1;
+	}
+
 	static CVisUnitQuadDrawer unitQuadIter;
 
 	unitQuadIter.ResetState();
@@ -2625,6 +2670,12 @@ int LuaUnsyncedRead::GetFeaturesInScreenRectangle(lua_State* L)
 
 	if (l > r) std::swap(l, r);
 	if (t > b) std::swap(t, b);
+
+	// split-contract gate (PR 27a): walks live quadfield feature lists directly (no ParseFeature)
+	if (LuaSplitContract::DenyLiveRead(L, __func__)) {
+		lua_createtable(L, 0, 0);
+		return 1;
+	}
 
 	static CVisFeatureQuadDrawer featureQuadIter;
 
@@ -2739,6 +2790,14 @@ int LuaUnsyncedRead::GetSelectedUnits(lua_State* L)
  */
 int LuaUnsyncedRead::GetSelectedUnitsSorted(lua_State* L)
 {
+	// split-contract gate (PR 27a): derefs live units (unitHandler.GetUnit -> unitDef) to
+	// sort the draw-owned selection ids; deny mirrors the empty-selection result
+	if (LuaSplitContract::DenyLiveRead(L, __func__)) {
+		lua_createtable(L, 0, 0);
+		lua_pushnumber(L, 0);
+		return 2;
+	}
+
 	const auto numDefKeys = PushUnitListSortedByDef(L, selectedUnitsHandler.selectedUnits);
 	lua_pushnumber(L, numDefKeys);
 
@@ -2755,6 +2814,14 @@ int LuaUnsyncedRead::GetSelectedUnitsSorted(lua_State* L)
  */
 int LuaUnsyncedRead::GetSelectedUnitsCounts(lua_State* L)
 {
+	// split-contract gate (PR 27a): derefs live units (unitHandler.GetUnit -> unitDef) to
+	// tally the draw-owned selection ids; deny mirrors the empty-selection result
+	if (LuaSplitContract::DenyLiveRead(L, __func__)) {
+		lua_createtable(L, 0, 0);
+		lua_pushnumber(L, 0);
+		return 2;
+	}
+
 	const auto numDefKeys = PushSparseUnitTallyByDef(L, selectedUnitsHandler.selectedUnits);
 	lua_pushnumber(L, numDefKeys);
 
@@ -3224,6 +3291,7 @@ int LuaUnsyncedRead::WorldToScreenCoords(lua_State* L)
  */
 int LuaUnsyncedRead::TraceScreenRay(lua_State* L)
 {
+	// split contract: pick path is snapshot-served since PR 25; terminal id->object resolution is the documented 27b seam
 	// window coordinates
 	const int mx = luaL_checkint(L, 1);
 	const int my = luaL_checkint(L, 2);
@@ -3616,12 +3684,18 @@ int LuaUnsyncedRead::GetFPS(lua_State* L)
  * @return number speedFactor
  * @return boolean paused
  */
-int LuaUnsyncedRead::GetGameSpeed(lua_State* L)
+static int GetGameSpeedLive(lua_State* L, const char* caller)
 {
 	lua_pushnumber(L, gs->wantedSpeedFactor);
 	lua_pushnumber(L, gs->speedFactor);
 	lua_pushboolean(L, gs->paused);
 	return 3;
+}
+
+int LuaUnsyncedRead::GetGameSpeed(lua_State* L)
+{
+	// globals-served from draw context (sim|draw PR 27a, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetGameSpeedLive, &LuaSnapshotServe::GetGameSpeed);
 }
 
 /***
@@ -3636,6 +3710,10 @@ int LuaUnsyncedRead::GetGameSpeed(lua_State* L)
 int LuaUnsyncedRead::GetGameState(lua_State* L)
 {
   const float maxLatency = luaL_optfloat(L, 1, 500.0f);
+
+	// split-contract gate (PR 27a): reads game->'s mutable load/pause/lag state directly
+	if (LuaSplitContract::DenyLiveRead(L, __func__))
+		return 0;
 
 	lua_pushboolean(L, game->IsDoneLoading());
 	lua_pushboolean(L, game->IsSavedGame());
@@ -4481,6 +4559,13 @@ int LuaUnsyncedRead::GetGroupUnitsSorted(lua_State* L)
 	if (!group)
 		return 0;
 
+	// split-contract gate (PR 27a): derefs live units (unitHandler.GetUnit -> unitDef) to sort
+	// the draw-owned group ids; deny mirrors the empty-group result (bare table, no count)
+	if (LuaSplitContract::DenyLiveRead(L, __func__)) {
+		lua_createtable(L, 0, 0);
+		return 1;
+	}
+
 	PushUnitListSortedByDef(L, group->units);
 	return 1;
 }
@@ -4497,6 +4582,13 @@ int LuaUnsyncedRead::GetGroupUnitsCounts(lua_State* L)
 	const auto group = GetGroupFromArg(L, 1);
 	if (!group)
 		return 0;
+
+	// split-contract gate (PR 27a): derefs live units (unitHandler.GetUnit -> unitDef) to tally
+	// the draw-owned group ids; deny mirrors the empty-group result (bare table, no count)
+	if (LuaSplitContract::DenyLiveRead(L, __func__)) {
+		lua_createtable(L, 0, 0);
+		return 1;
+	}
 
 	PushSparseUnitTallyByDef(L, group->units);
 	return 1;
@@ -4588,6 +4680,10 @@ int LuaUnsyncedRead::GetPlayerTraffic(lua_State* L)
 	const int playerID = luaL_checkint(L, 1);
 	const int packetID = (int)luaL_optnumber(L, 2, -1);
 
+	// split-contract gate (PR 27a): reads game->'s mutable per-player traffic map directly
+	if (LuaSplitContract::DenyLiveRead(L, __func__))
+		return 0;
+
 	const auto& traffic = game->GetPlayerTraffic();
 	const auto it = traffic.find(playerID);
 
@@ -4641,6 +4737,11 @@ int LuaUnsyncedRead::GetPlayerTraffic(lua_State* L)
 int LuaUnsyncedRead::GetPlayerStatistics(lua_State* L)
 {
 	const int playerID = luaL_checkint(L, 1);
+
+	// split-contract gate (PR 27a): reads playerHandler + the player's live stats directly
+	if (LuaSplitContract::DenyLiveRead(L, __func__))
+		return 0;
+
 	if (!playerHandler.IsValidPlayer(playerID))
 		return 0;
 
@@ -5289,6 +5390,11 @@ int LuaUnsyncedRead::GetGroundDecalType(lua_State* L)
  * @return number? GC values are expressed in Kbytes: #bytes/2^10
  */
 int LuaUnsyncedRead::GetSyncedGCInfo(lua_State* L) {
+	// cross-hop ban (PR 27a): this reads -- and with the collect arg fully
+	// GCs -- the synced lua_State, which the sim thread owns under the split.
+	// TODO(27b): decide a served alternative (boundary-sampled GC counter?)
+	LuaSplitContract::ErrorOnCrossHop(L, "GetSyncedGCInfo");
+
 	if (luaRules == nullptr)
 		return 0;
 

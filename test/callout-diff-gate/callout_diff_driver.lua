@@ -168,8 +168,107 @@ end
 local mapSizeX = Game.mapSizeX
 local mapSizeZ = Game.mapSizeZ
 
+-- PR 27a: the row-backed tail families are wide (~35 unit + ~18 feature
+-- callouts), so they are exercised on a rotating 1-in-8 sample per draw frame
+-- (full coverage every 8 frames) instead of every object every frame -- the
+-- armed dual-run doubles every call, and full-cross would dominate the run
+local exerciseTick = 0
+local TAIL_STRIDE = 8
+
+local function ExerciseUnitTail(uid, prevUid, fid)
+	Spring.ValidUnitID(uid)
+	Spring.GetUnitDefID(uid)
+	Spring.GetUnitTeam(uid)
+	Spring.GetUnitAllyTeam(uid)
+	Spring.GetUnitNeutral(uid)
+	Spring.GetUnitIsDead(uid)
+	Spring.GetUnitIsBeingBuilt(uid)
+	Spring.GetUnitVelocity(uid)
+	Spring.GetUnitDirection(uid)
+	Spring.GetUnitHeading(uid)
+	Spring.GetUnitHeading(uid, true)
+	Spring.GetUnitVectors(uid)
+	Spring.GetUnitRadius(uid)
+	Spring.GetUnitHeight(uid)
+	Spring.GetUnitMass(uid)
+	Spring.GetUnitExperience(uid)
+	Spring.GetUnitIsActive(uid)
+	Spring.GetUnitIsCloaked(uid)
+	Spring.GetUnitMaxRange(uid)
+	Spring.GetUnitBuildFacing(uid)
+	Spring.GetUnitSensorRadius(uid, "los")
+	Spring.GetUnitSensorRadius(uid, "radar")
+	Spring.GetUnitSensorRadius(uid, "sonar")
+	Spring.GetUnitSeismicSignature(uid)
+	Spring.GetUnitSelfDTime(uid)
+	Spring.GetUnitArmored(uid)
+	Spring.GetUnitResources(uid)
+	Spring.GetUnitHarvestStorage(uid)
+	Spring.GetUnitCosts(uid)
+	Spring.GetUnitCostTable(uid)
+	Spring.GetUnitMoveDefID(uid)
+	Spring.GetUnitBlocking(uid)
+	Spring.GetUnitLeavesGhost(uid)
+	Spring.IsUnitInRadar(uid)
+	Spring.IsUnitAllied(uid)
+	if prevUid ~= nil then
+		Spring.GetUnitSeparation(uid, prevUid)
+		Spring.GetUnitSeparation(uid, prevUid, true)
+	end
+	if fid ~= nil then
+		Spring.GetUnitFeatureSeparation(uid, fid)
+	end
+end
+
+local function ExerciseFeatureTail(fid, prevFid)
+	Spring.ValidFeatureID(fid)
+	Spring.GetFeatureDefID(fid)
+	Spring.GetFeatureTeam(fid)
+	Spring.GetFeatureAllyTeam(fid)
+	Spring.GetFeatureHealth(fid)
+	Spring.GetFeatureHeight(fid)
+	Spring.GetFeatureRadius(fid)
+	Spring.GetFeaturePosition(fid, true, true)
+	Spring.GetFeatureMass(fid)
+	Spring.GetFeatureDirection(fid)
+	Spring.GetFeatureVelocity(fid)
+	Spring.GetFeatureHeading(fid)
+	Spring.GetFeatureResources(fid)
+	Spring.GetFeatureBlocking(fid)
+	Spring.GetFeatureNoSelect(fid)
+	Spring.GetFeatureResurrect(fid)
+	if prevFid ~= nil then
+		Spring.GetFeatureSeparation(fid, prevFid)
+	end
+end
+
+local function ExerciseGlobals()
+	Spring.GetGameFrame()
+	Spring.GetGameSeconds()
+	Spring.GetGameSecondsInterpolated()
+	Spring.GetGameSpeed()
+	Spring.GetWind()
+	Spring.IsCheatingEnabled()
+	Spring.IsGodModeEnabled()
+	Spring.IsEditDefsEnabled()
+	Spring.AreHelperAIsEnabled()
+	Spring.IsNoCostEnabled()
+	Spring.IsGameOver()
+	Spring.GetGroundExtremes()
+	Spring.GetGlobalLos()
+	local allyTeams = Spring.GetAllyTeamList()
+	for i = 1, #allyTeams do
+		Spring.GetGlobalLos(allyTeams[i])
+	end
+end
+
 local function ExerciseFamily()
+	exerciseTick = (exerciseTick + 1) % TAIL_STRIDE
+
+	ExerciseGlobals()
+
 	local units = Spring.GetAllUnits()
+	local feats = Spring.GetAllFeatures()
 	for i = 1, #units do
 		local uid = units[i]
 		Spring.GetUnitPosition(uid, true, true)
@@ -183,6 +282,12 @@ local function ExerciseFamily()
 		Spring.GetUnitLosState(uid)
 		Spring.GetUnitLosState(uid, nil, true)
 	end
+	for i = 1 + exerciseTick, #units, TAIL_STRIDE do
+		ExerciseUnitTail(units[i], units[i > 1 and (i - 1) or #units], feats[1])
+	end
+	for i = 1 + exerciseTick, #feats, TAIL_STRIDE do
+		ExerciseFeatureTail(feats[i], feats[i > 1 and (i - 1) or #feats])
+	end
 
 	-- projectile family (second family): headless projectile-visual widgets
 	-- self-disable, so the driver must generate this surface itself
@@ -194,6 +299,14 @@ local function ExerciseFamily()
 		Spring.GetProjectileDefID(pid)
 		Spring.GetProjectileTarget(pid)
 		Spring.GetProjectileOwnerID(pid)
+		-- PR 27a projectile tail
+		Spring.GetProjectileDirection(pid)
+		Spring.GetProjectileGravity(pid)
+		Spring.GetProjectileTeamID(pid)
+		Spring.GetProjectileAllyTeamID(pid)
+		Spring.GetProjectileType(pid)
+		Spring.GetProjectileTimeToLive(pid)
+		Spring.GetProjectileIsIntercepted(pid)
 	end
 
 	-- team/player-table family (PR 26): served from the TeamRows/PlayerRows

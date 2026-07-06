@@ -54,6 +54,7 @@
 #include "Game/UI/PlayerRoster.h"
 
 #include "Lua/LuaOpenGL.h"
+#include "Lua/LuaSplitContract.h"
 #include "Lua/LuaUI.h"
 #include "Lua/LuaUtils.h"
 #include "Lua/LuaMenu.h"
@@ -1642,6 +1643,21 @@ public:
 		}
 
 		LOG("[/calloutcensus] wrote %u callout rows to %s", unsigned(rows.size()), path.c_str());
+		return true;
+	}
+};
+
+
+class SplitContractDumpActionExecutor : public IUnsyncedActionExecutor {
+public:
+	SplitContractDumpActionExecutor() : IUnsyncedActionExecutor(
+		"SplitContractDump",
+		"Log the SplitDrawContract trip inventory (PR 27a): every callout that read live sim state, "
+		"was denied, or had a sim poke boundary-queued from draw-thread context. Needs SplitDrawContract >= 1."
+	) {}
+
+	bool Execute(const UnsyncedAction& action) const final {
+		LuaSplitContract::DumpInventory("/splitcontractdump");
 		return true;
 	}
 };
@@ -4285,6 +4301,7 @@ void UnsyncedGameCommands::AddDefaultActionExecutors()
 	AddActionExecutor(AllocActionExecutor<BoundaryDumpActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<SnapHashDumpActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<CalloutCensusActionExecutor>());
+	AddActionExecutor(AllocActionExecutor<SplitContractDumpActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<SnapshotDiffGateActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<DebugCubeMapActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<DebugQuadFieldActionExecutor>());

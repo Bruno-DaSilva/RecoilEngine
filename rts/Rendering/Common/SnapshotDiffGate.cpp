@@ -14,15 +14,19 @@
 #include "Sim/Features/Feature.h"
 #include "Sim/Features/FeatureDef.h"
 #include "Sim/Features/FeatureHandler.h"
+#include "Map/ReadMap.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/LosHandler.h"
 #include "Sim/Misc/ModInfo.h"
 #include "Sim/Misc/Team.h"
 #include "Sim/Misc/TeamHandler.h"
+#include "Sim/Misc/Wind.h"
+#include "Sim/MoveTypes/MoveDefHandler.h"
 #include "Sim/Projectiles/ProjectileHandler.h"
 #include "Sim/Projectiles/WeaponProjectiles/WeaponProjectile.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitDef.h"
+#include "Sim/Units/UnitDefHandler.h"
 #include "Sim/Units/UnitHandler.h"
 #include "Sim/Weapons/WeaponDef.h"
 #include "System/Log/ILog.h"
@@ -68,6 +72,13 @@ static constexpr const char* FIELD_NAMES[] = {
 	"inVoid",
 	"selVol",
 	"inRadarAll",
+	"stateFlags",
+	"heading/buildFacing",
+	"unitScalars",
+	"unitEco",
+	"sensorRadii",
+	"unitMiscInts",
+	"blockingBits",
 	"proj:validity",
 	"proj:pos",
 	"proj:speed",
@@ -77,9 +88,14 @@ static constexpr const char* FIELD_NAMES[] = {
 	"proj:weaponDefID",
 	"proj:target",
 	"proj:inLosAll",
+	"proj:dir",
+	"proj:gravity",
+	"proj:teamID",
+	"proj:ttlFlags",
 	"feat:validity",
 	"feat:pos",
 	"feat:midPos",
+	"feat:aimPos",
 	"feat:relMidPos",
 	"feat:radius",
 	"feat:allyTeam",
@@ -87,6 +103,13 @@ static constexpr const char* FIELD_NAMES[] = {
 	"feat:flags",
 	"feat:selVol",
 	"feat:inLosAll",
+	"feat:team",
+	"feat:scalars",
+	"feat:speed",
+	"feat:dirMatrix",
+	"feat:resources",
+	"feat:blockingBits",
+	"feat:resurrect",
 	"feat:globals",
 	"team:globals",
 	"team:state",
@@ -99,6 +122,12 @@ static constexpr const char* FIELD_NAMES[] = {
 	"player:state",
 	"player:net",
 	"player:opts",
+	"glob:frame",
+	"glob:speed",
+	"glob:flags",
+	"glob:wind",
+	"glob:heights",
+	"glob:globalLos",
 };
 
 // structural compare for the copied customOpts maps (emilib::HashMap has no
@@ -116,6 +145,20 @@ static bool OptsEqual(const spring::unordered_map<std::string, std::string>& a,
 	}
 
 	return true;
+}
+
+// GetSolidObjectBlocking's seven pushed booleans as one byte, bit i = push
+// slot i; must stay identical to SimSnapshot.cpp's extraction-side twin
+static uint8_t PackBlockingBits(const CSolidObject* o)
+{
+	return static_cast<uint8_t>(
+		(o->HasPhysicalStateBit(CSolidObject::PSTATE_BIT_BLOCKING)       << 0) |
+		(o->HasCollidableStateBit(CSolidObject::CSTATE_BIT_SOLIDOBJECTS) << 1) |
+		(o->HasCollidableStateBit(CSolidObject::CSTATE_BIT_PROJECTILES ) << 2) |
+		(o->HasCollidableStateBit(CSolidObject::CSTATE_BIT_QUADMAPRAYS ) << 3) |
+		(o->crushable          << 4) |
+		(o->blockEnemyPushing  << 5) |
+		(o->blockHeightChanges << 6));
 }
 
 // field-wise CollisionVolume compare over exactly the params the hit-test reads
@@ -171,6 +214,9 @@ void SnapshotDiffGate::FlushPartial()
 
 void SnapshotDiffGate::ResetCounters()
 {
+	// a name/enum drift would silently mislabel every report row
+	static_assert(sizeof(FIELD_NAMES) / sizeof(FIELD_NAMES[0]) == F_COUNT, "FIELD_NAMES out of sync with the field enum");
+
 	boundaryChecks = 0;
 
 	for (int f = 0; f < F_COUNT; ++f)
@@ -332,6 +378,71 @@ void SnapshotDiffGate::CheckBoundary()
 			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=selVol mismatch (type snap=%d live=%d)",
 				gs->frameNum, id, rows.selVol[i].GetVolumeType(), u->selectionVolume.GetVolumeType());
 
+		// PR 27a unit rows (grouped counters, see the enum comments)
+		{
+			const bool stateEqual =
+				(rows.isDead[i] == uint8_t(u->isDead)) &&
+				(rows.neutral[i] == uint8_t(u->neutral)) &&
+				(rows.activated[i] == uint8_t(u->activated)) &&
+				(rows.isCloaked[i] == uint8_t(u->isCloaked)) &&
+				(rows.armoredState[i] == uint8_t(u->armoredState));
+			if (Bump(fields[F_STATEFLAGS], stateEqual))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=stateFlags mismatch", gs->frameNum, id);
+
+			const bool headingEqual =
+				(rows.heading[i] == int16_t(u->heading)) &&
+				(rows.buildFacing[i] == int16_t(u->buildFacing));
+			if (Bump(fields[F_HEADINGFACING], headingEqual))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=heading/buildFacing snap=%d/%d live=%d/%d",
+					gs->frameNum, id, int(rows.heading[i]), int(rows.buildFacing[i]), int(u->heading), int(u->buildFacing));
+
+			const bool scalarsEqual =
+				BitEqual(rows.height[i], u->height) &&
+				BitEqual(rows.mass[i], u->mass) &&
+				BitEqual(rows.maxRange[i], u->maxRange) &&
+				BitEqual(rows.seismicSignature[i], u->seismicSignature) &&
+				BitEqual(rows.armoredMultiple[i], u->armoredMultiple) &&
+				BitEqual(rows.experience[i], u->experience) &&
+				BitEqual(rows.limExperience[i], u->limExperience);
+			if (Bump(fields[F_UNITSCALARS], scalarsEqual))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=unitScalars mismatch", gs->frameNum, id);
+
+			const auto packEqual = [](const SResourcePack& a, const SResourcePack& b) {
+				return BitEqual(a.metal, b.metal) && BitEqual(a.energy, b.energy);
+			};
+			const bool ecoEqual =
+				packEqual(rows.resourcesMake[i], u->resourcesMake) &&
+				packEqual(rows.resourcesUse[i], u->resourcesUse) &&
+				packEqual(rows.harvested[i], u->harvested) &&
+				packEqual(rows.harvestStorage[i], u->harvestStorage) &&
+				packEqual(rows.cost[i], u->cost) &&
+				BitEqual(rows.buildTime[i], u->buildTime);
+			if (Bump(fields[F_UNITECO], ecoEqual))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=unitEco mismatch", gs->frameNum, id);
+
+			const bool sensorsEqual =
+				(rows.losRadius[i] == u->losRadius) &&
+				(rows.airLosRadius[i] == u->airLosRadius) &&
+				(rows.radarRadius[i] == u->radarRadius) &&
+				(rows.sonarRadius[i] == u->sonarRadius) &&
+				(rows.seismicRadius[i] == u->seismicRadius) &&
+				(rows.jammerRadius[i] == u->jammerRadius) &&
+				(rows.sonarJamRadius[i] == u->sonarJamRadius);
+			if (Bump(fields[F_SENSORRADII], sensorsEqual))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=sensorRadii mismatch", gs->frameNum, id);
+
+			const bool intsEqual =
+				(rows.selfDCountdown[i] == u->selfDCountdown) &&
+				(rows.moveDefID[i] == ((u->moveDef != nullptr) ? int32_t(u->moveDef->pathType) : -1));
+			if (Bump(fields[F_UNITMISCINTS], intsEqual))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=unitMiscInts mismatch (selfD snap=%d live=%d)",
+					gs->frameNum, id, rows.selfDCountdown[i], u->selfDCountdown);
+
+			if (Bump(fields[F_BLOCKINGBITS], rows.blockingBits[i] == PackBlockingBits(u)))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=blockingBits snap=0x%02x live=0x%02x",
+					gs->frameNum, id, int(rows.blockingBits[i]), int(PackBlockingBits(u)));
+		}
+
 		// per-allyteam stride rows + the masked-value sweep: for every POV,
 		// UnitRows::ErrorVector is the exact masking function the Lua serving
 		// twins apply (SimSnapshot.h masking policy) -- diff it against the
@@ -364,6 +475,7 @@ void SnapshotDiffGate::CheckBoundary()
 	CheckProjectileRows();
 	CheckFeatureRows();
 	CheckTeamPlayerRows();
+	CheckGlobalRows();
 }
 
 void SnapshotDiffGate::CheckProjectileRows()
@@ -411,6 +523,36 @@ void SnapshotDiffGate::CheckProjectileRows()
 		if (Bump(fields[P_ISWEAPON], rows.isWeapon[id] == uint8_t(p->weapon)))
 			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d proj=%d field=proj:isWeapon snap=%d live=%d",
 				gs->frameNum, id, int(rows.isWeapon[id]), int(p->weapon));
+
+		// PR 27a projectile rows
+		if (Bump(fields[P_DIR], BitEqual(rows.dir[id], p->dir)))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d proj=%d field=proj:dir snap=(%.9g,%.9g,%.9g) live=(%.9g,%.9g,%.9g)",
+				gs->frameNum, id, rows.dir[id].x, rows.dir[id].y, rows.dir[id].z, p->dir.x, p->dir.y, p->dir.z);
+
+		if (Bump(fields[P_GRAVITY], BitEqual(rows.mygravity[id], p->mygravity)))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d proj=%d field=proj:gravity snap=%.9g live=%.9g",
+				gs->frameNum, id, rows.mygravity[id], p->mygravity);
+
+		if (Bump(fields[P_TEAMID], rows.teamID[id] == static_cast<int32_t>(p->GetTeamID())))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d proj=%d field=proj:teamID snap=%d live=%d",
+				gs->frameNum, id, rows.teamID[id], int(p->GetTeamID()));
+
+		{
+			int32_t liveTtl = 0;
+			uint8_t liveIntercepted = 0;
+			if (p->weapon) {
+				const CWeaponProjectile* wpro = static_cast<const CWeaponProjectile*>(p);
+				liveTtl = wpro->GetTimeToLive();
+				liveIntercepted = wpro->IsBeingIntercepted();
+			}
+			const bool ttlFlagsEqual =
+				(rows.ttl[id] == liveTtl) &&
+				(rows.intercepted[id] == liveIntercepted) &&
+				(rows.isPiece[id] == uint8_t(p->piece));
+			if (Bump(fields[P_TTLFLAGS], ttlFlagsEqual))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d proj=%d field=proj:ttlFlags mismatch (ttl snap=%d live=%d)",
+					gs->frameNum, id, rows.ttl[id], liveTtl);
+		}
 
 		if (p->weapon) {
 			const CWeaponProjectile* wpro = static_cast<const CWeaponProjectile*>(p);
@@ -510,6 +652,8 @@ void SnapshotDiffGate::CheckFeatureRows()
 
 		if (Bump(fields[FT_MIDPOS], BitEqual(rows.midPos[id], f->midPos)))
 			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d feat=%d field=feat:midPos", gs->frameNum, id);
+		if (Bump(fields[FT_AIMPOS], BitEqual(rows.aimPos[id], f->aimPos)))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d feat=%d field=feat:aimPos", gs->frameNum, id);
 
 		if (Bump(fields[FT_RELMIDPOS], BitEqual(rows.relMidPos[id], static_cast<float3>(f->relMidPos))))
 			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d feat=%d field=feat:relMidPos", gs->frameNum, id);
@@ -535,6 +679,52 @@ void SnapshotDiffGate::CheckFeatureRows()
 
 		if (Bump(fields[FT_SELVOL], ColVolEqual(rows.selVol[id], f->selectionVolume)))
 			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d feat=%d field=feat:selVol mismatch", gs->frameNum, id);
+
+		// PR 27a feature rows (grouped counters, see the enum comments)
+		if (Bump(fields[FT_TEAM], rows.team[id] == f->team))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d feat=%d field=feat:team snap=%d live=%d",
+				gs->frameNum, id, rows.team[id], f->team);
+
+		const bool scalarsEqual =
+			BitEqual(rows.health[id], f->health) &&
+			BitEqual(rows.resurrectProgress[id], f->resurrectProgress) &&
+			BitEqual(rows.height[id], f->height) &&
+			BitEqual(rows.mass[id], f->mass) &&
+			(rows.heading[id] == int16_t(f->heading)) &&
+			(rows.buildFacing[id] == int16_t(f->buildFacing));
+		if (Bump(fields[FT_SCALARS], scalarsEqual))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d feat=%d field=feat:scalars mismatch", gs->frameNum, id);
+
+		if (Bump(fields[FT_SPEED], BitEqual(rows.speed[id], f->speed)))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d feat=%d field=feat:speed", gs->frameNum, id);
+
+		{
+			const CMatrix44f& fm = f->GetTransformMatrixRef();
+			const bool dirMatEqual =
+				BitEqual(rows.matXdir[id], fm.GetX()) &&
+				BitEqual(rows.matYdir[id], fm.GetY()) &&
+				BitEqual(rows.matZdir[id], fm.GetZ());
+			if (Bump(fields[FT_DIRMAT], dirMatEqual))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d feat=%d field=feat:dirMatrix mismatch", gs->frameNum, id);
+		}
+
+		const bool resourcesEqual =
+			BitEqual(rows.resources[id].metal, f->resources.metal) &&
+			BitEqual(rows.resources[id].energy, f->resources.energy) &&
+			BitEqual(rows.defResources[id].metal, f->defResources.metal) &&
+			BitEqual(rows.defResources[id].energy, f->defResources.energy) &&
+			BitEqual(rows.reclaimLeft[id], f->reclaimLeft) &&
+			BitEqual(rows.reclaimTime[id], f->reclaimTime);
+		if (Bump(fields[FT_RESOURCES], resourcesEqual))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d feat=%d field=feat:resources mismatch", gs->frameNum, id);
+
+		if (Bump(fields[FT_BLOCKINGBITS], rows.blockingBits[id] == PackBlockingBits(f)))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d feat=%d field=feat:blockingBits snap=0x%02x live=0x%02x",
+				gs->frameNum, id, int(rows.blockingBits[id]), int(PackBlockingBits(f)));
+
+		if (Bump(fields[FT_RESURRECT], rows.resurrectDefID[id] == ((f->udef != nullptr) ? f->udef->id : -1)))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d feat=%d field=feat:resurrect snap=%d live=%d",
+				gs->frameNum, id, rows.resurrectDefID[id], (f->udef != nullptr) ? f->udef->id : -1);
 
 		for (int at = 0; at < numAllyTeams; ++at) {
 			const bool snapLos = (rows.inLosAll[at * slots + id] != 0);
@@ -660,4 +850,60 @@ void SnapshotDiffGate::CheckTeamPlayerRows()
 		if (Bump(fields[PL_OPTS], OptsEqual(prows.customOpts[p], player->GetAllValues())))
 			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d player=%d field=player:opts mismatch", gs->frameNum, p);
 	}
+}
+
+void SnapshotDiffGate::CheckGlobalRows()
+{
+	// global-scalar boundary copy (PR 27a): re-extracted unconditionally right
+	// before this check, so every compare must trivially pass -- the pass
+	// verifies the extraction copies every scalar the serving twins read
+	const SimSnapshot::GlobalRows& grows = simSnapshot.ReadGlobals();
+
+	if (Bump(fields[G_FRAME], grows.luaSimFrame == gs->GetLuaSimFrame()))
+		LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=glob:frame mismatch (snap=%d live=%d)",
+			gs->frameNum, grows.luaSimFrame, gs->GetLuaSimFrame());
+
+	const bool speedEqual =
+		BitEqual(grows.wantedSpeedFactor, gs->wantedSpeedFactor) &&
+		BitEqual(grows.speedFactor, gs->speedFactor) &&
+		(bool(grows.paused) == gs->paused);
+	if (Bump(fields[G_SPEED], speedEqual))
+		LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=glob:speed mismatch", gs->frameNum);
+
+	const bool flagsEqual =
+		(bool(grows.cheatEnabled) == gs->cheatEnabled) &&
+		(grows.godMode == gs->godMode) &&
+		(bool(grows.editDefsEnabled) == gs->editDefsEnabled) &&
+		(bool(grows.noHelperAIs) == gs->noHelperAIs) &&
+		(bool(grows.defsNoCost) == (unitDefHandler != nullptr && unitDefHandler->GetNoCost())) &&
+		(bool(grows.doneLoading) == (game != nullptr && game->IsDoneLoading())) &&
+		(bool(grows.savedGame) == (game != nullptr && game->IsSavedGame())) &&
+		(bool(grows.clientPaused) == (game != nullptr && game->IsClientPaused()));
+	if (Bump(fields[G_FLAGS], flagsEqual))
+		LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=glob:flags mismatch", gs->frameNum);
+
+	const bool windEqual =
+		BitEqual(grows.windVec.x, envResHandler.GetCurrentWindVec().x) &&
+		BitEqual(grows.windVec.y, envResHandler.GetCurrentWindVec().y) &&
+		BitEqual(grows.windVec.z, envResHandler.GetCurrentWindVec().z) &&
+		BitEqual(grows.windDir.x, envResHandler.GetCurrentWindDir().x) &&
+		BitEqual(grows.windDir.y, envResHandler.GetCurrentWindDir().y) &&
+		BitEqual(grows.windDir.z, envResHandler.GetCurrentWindDir().z) &&
+		BitEqual(grows.windStrength, envResHandler.GetCurrentWindStrength());
+	if (Bump(fields[G_WIND], windEqual))
+		LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=glob:wind mismatch", gs->frameNum);
+
+	const bool heightsEqual =
+		BitEqual(grows.initMinHeight, readMap->GetInitMinHeight()) &&
+		BitEqual(grows.initMaxHeight, readMap->GetInitMaxHeight()) &&
+		BitEqual(grows.currMinHeight, readMap->GetCurrMinHeight()) &&
+		BitEqual(grows.currMaxHeight, readMap->GetCurrMaxHeight());
+	if (Bump(fields[G_HEIGHTS], heightsEqual))
+		LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=glob:heights mismatch", gs->frameNum);
+
+	bool losEqual = (grows.numAllyTeams == teamHandler.ActiveAllyTeams());
+	for (int at = 0; losEqual && at < grows.numAllyTeams; ++at)
+		losEqual = (bool(grows.globalLos[at]) == losHandler->GetGlobalLOS(at));
+	if (Bump(fields[G_GLOBALLOS], losEqual))
+		LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=glob:globalLos mismatch", gs->frameNum);
 }

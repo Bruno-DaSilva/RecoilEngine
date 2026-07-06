@@ -6,6 +6,7 @@
 
 #include "LuaHandleSynced.h"
 #include "LuaHashString.h"
+#include "LuaSplitContract.h"
 #include "LuaUtils.h"
 
 
@@ -19,6 +20,14 @@ static int SyncTableIndex(lua_State* dstL)
 {
 	if (lua_isnoneornil(dstL, -1))
 		return 0;
+
+	// cross-hop ban (PR 27a): the read below walks the synced lua_State's
+	// globals and allocates in its heap -- the state the sim thread owns
+	// under the split. This is THE unsynced->synced hop (single entry point,
+	// see the research doc cross-hop audit); there is no serveable fallback.
+	// TODO(27b): decide a replacement story (SendToUnsynced mirroring is the
+	// documented alternative games already use).
+	LuaSplitContract::ErrorOnCrossHop(dstL, "SYNCED table read");
 
 	auto slh = CSplitLuaHandle::GetSyncedHandle(dstL);
 	if (!slh->IsValid())

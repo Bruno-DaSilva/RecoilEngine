@@ -76,6 +76,8 @@ S0ProfLen = ${S0_PROF_LEN:-900}
 S0QuitFrame = ${S0_QUIT_FRAME:-0}
 S0FastForward = ${S0_FF:-1}
 WorkerThreadCount = ${WORKERS:--1}
+SplitDrawContract = ${SPLIT_CONTRACT:-0}
+SplitDrawContractWarn = ${SPLIT_CONTRACT_WARN:-1}
 EOF
 
 DEMO_ABS="$(cd "$(dirname "$DEMO")" && pwd)/$(basename "$DEMO")"

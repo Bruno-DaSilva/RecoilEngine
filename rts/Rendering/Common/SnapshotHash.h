@@ -20,12 +20,13 @@
  * floats as their IEEE-754 bit patterns -- no padding, no pointers, so the hash
  * is deterministic across runs and platforms for identical snapshot content):
  *
- *   unit  : one hash per *valid* SimSnapshot row, over exactly the v1 field set
- *           in a fixed order (see HashUnitRow in the .cpp): unitID, pos.xyz,
- *           speed.xyzw, health, maxHealth, {team,allyTeam,losStatus} packed,
- *           defID, buildProgress. Including unitID makes a shifted/misaligned
- *           id-set detectable; skipping invalid rows makes a validity change
- *           show up as a bucket/root difference.
+ *   unit  : one hash per *valid* SimSnapshot row, over the full extracted
+ *           synced field set in a fixed order (see HashUnitRow in the .cpp;
+ *           grown per snapshot PR -- v1 core, PR 18 status/masking rows, PR 25
+ *           picking gates, PR 27a status/eco scalar tail). Unsynced-mutable
+ *           fields (selVol) are excluded. Including unitID makes a
+ *           shifted/misaligned id-set detectable; skipping invalid rows makes
+ *           a validity change show up as a bucket/root difference.
  *   bucket : fixed-size id-range buckets (BUCKET_SIZE ids each). Each valid
  *           unit's hash is folded into its bucket in ascending-id order. Empty
  *           buckets are seeded by index so an emptied bucket still differs.

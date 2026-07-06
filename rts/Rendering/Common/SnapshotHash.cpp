@@ -44,8 +44,12 @@ static inline uint64_t HashUnitRow(const SimSnapshot::UnitRows& r, int id)
 		w[1] = std::bit_cast<uint32_t>(v.y);
 		w[2] = std::bit_cast<uint32_t>(v.z);
 	};
+	const auto pack = [](uint32_t* w, const SResourcePack& p) {
+		w[0] = std::bit_cast<uint32_t>(p.metal);
+		w[1] = std::bit_cast<uint32_t>(p.energy);
+	};
 
-	uint32_t w[41];
+	uint32_t w[71];
 	w[0]  = static_cast<uint32_t>(id);
 	f3(&w[1], r.pos[id]);
 	w[4]  = std::bit_cast<uint32_t>(r.speed[id].x);
@@ -90,6 +94,38 @@ static inline uint64_t HashUnitRow(const SimSnapshot::UnitRows& r, int id)
 	w[40] = static_cast<uint32_t>(r.noSelect[id])
 	      | (static_cast<uint32_t>(r.inVoid[id]) << 8);
 
+	// PR 27a rows, fixed order appended after the PR 25 words; all synced state
+	w[41] = static_cast<uint32_t>(r.isDead[id])
+	      | (static_cast<uint32_t>(r.neutral[id])   << 8)
+	      | (static_cast<uint32_t>(r.activated[id]) << 16)
+	      | (static_cast<uint32_t>(r.isCloaked[id]) << 24);
+	w[42] = static_cast<uint32_t>(static_cast<uint16_t>(r.heading[id]))
+	      | (static_cast<uint32_t>(static_cast<uint16_t>(r.buildFacing[id])) << 16);
+	w[43] = static_cast<uint32_t>(r.armoredState[id])
+	      | (static_cast<uint32_t>(r.blockingBits[id]) << 8);
+	w[44] = std::bit_cast<uint32_t>(r.armoredMultiple[id]);
+	w[45] = std::bit_cast<uint32_t>(r.height[id]);
+	w[46] = std::bit_cast<uint32_t>(r.mass[id]);
+	w[47] = std::bit_cast<uint32_t>(r.maxRange[id]);
+	w[48] = std::bit_cast<uint32_t>(r.seismicSignature[id]);
+	w[49] = std::bit_cast<uint32_t>(r.experience[id]);
+	w[50] = std::bit_cast<uint32_t>(r.limExperience[id]);
+	w[51] = static_cast<uint32_t>(r.selfDCountdown[id]);
+	w[52] = static_cast<uint32_t>(r.losRadius[id]);
+	w[53] = static_cast<uint32_t>(r.airLosRadius[id]);
+	w[54] = static_cast<uint32_t>(r.radarRadius[id]);
+	w[55] = static_cast<uint32_t>(r.sonarRadius[id]);
+	w[56] = static_cast<uint32_t>(r.seismicRadius[id]);
+	w[57] = static_cast<uint32_t>(r.jammerRadius[id]);
+	w[58] = static_cast<uint32_t>(r.sonarJamRadius[id]);
+	w[59] = static_cast<uint32_t>(r.moveDefID[id]);
+	pack(&w[60], r.resourcesMake[id]);
+	pack(&w[62], r.resourcesUse[id]);
+	pack(&w[64], r.harvested[id]);
+	pack(&w[66], r.harvestStorage[id]);
+	pack(&w[68], r.cost[id]);
+	w[70] = std::bit_cast<uint32_t>(r.buildTime[id]);
+
 	return Mix(w, sizeof(w), UNIT_SEED);
 }
 
@@ -97,7 +133,13 @@ static inline uint64_t HashUnitRow(const SimSnapshot::UnitRows& r, int id)
 // section. selVol excluded for the same reason as the unit rows.
 static inline uint64_t HashFeatureRow(const SimSnapshot::FeatureRows& r, int id)
 {
-	uint32_t w[16];
+	const auto f3 = [](uint32_t* w, const float3& v) {
+		w[0] = std::bit_cast<uint32_t>(v.x);
+		w[1] = std::bit_cast<uint32_t>(v.y);
+		w[2] = std::bit_cast<uint32_t>(v.z);
+	};
+
+	uint32_t w[46];
 	w[0]  = static_cast<uint32_t>(id);
 	w[1]  = std::bit_cast<uint32_t>(r.pos[id].x);
 	w[2]  = std::bit_cast<uint32_t>(r.pos[id].y);
@@ -120,6 +162,31 @@ static inline uint64_t HashFeatureRow(const SimSnapshot::FeatureRows& r, int id)
 		losAcc = (losAcc ^ r.inLosAll[at * r.MaxSlots() + id]) * 16777619u;
 	w[14] = losAcc;
 	w[15] = static_cast<uint32_t>(r.numAllyTeams);
+
+	// PR 27a rows, fixed order appended; all synced state
+	w[16] = static_cast<uint32_t>(r.team[id]);
+	w[17] = std::bit_cast<uint32_t>(r.health[id]);
+	w[18] = std::bit_cast<uint32_t>(r.resurrectProgress[id]);
+	w[19] = std::bit_cast<uint32_t>(r.height[id]);
+	w[20] = std::bit_cast<uint32_t>(r.mass[id]);
+	w[21] = std::bit_cast<uint32_t>(r.speed[id].x);
+	w[22] = std::bit_cast<uint32_t>(r.speed[id].y);
+	w[23] = std::bit_cast<uint32_t>(r.speed[id].z);
+	w[24] = std::bit_cast<uint32_t>(r.speed[id].w);
+	f3(&w[25], r.matXdir[id]);
+	f3(&w[28], r.matYdir[id]);
+	f3(&w[31], r.matZdir[id]);
+	w[34] = static_cast<uint32_t>(static_cast<uint16_t>(r.heading[id]))
+	      | (static_cast<uint32_t>(static_cast<uint16_t>(r.buildFacing[id])) << 16);
+	w[35] = std::bit_cast<uint32_t>(r.resources[id].metal);
+	w[36] = std::bit_cast<uint32_t>(r.resources[id].energy);
+	w[37] = std::bit_cast<uint32_t>(r.defResources[id].metal);
+	w[38] = std::bit_cast<uint32_t>(r.defResources[id].energy);
+	w[39] = std::bit_cast<uint32_t>(r.reclaimLeft[id]);
+	w[40] = std::bit_cast<uint32_t>(r.reclaimTime[id]);
+	w[41] = static_cast<uint32_t>(r.blockingBits[id]);
+	w[42] = static_cast<uint32_t>(r.resurrectDefID[id]);
+	f3(&w[43], r.aimPos[id]);
 
 	return Mix(w, sizeof(w), UNIT_SEED);
 }
@@ -184,7 +251,7 @@ static inline uint64_t HashTeamRow(const SimSnapshot::TeamRows& r, int t)
 // job, projectile rows just extend divergence *detection* coverage.
 static inline uint64_t HashProjectileRow(const SimSnapshot::ProjectileRows& r, int id)
 {
-	uint32_t w[17];
+	uint32_t w[24];
 	w[0]  = static_cast<uint32_t>(id);
 	w[1]  = std::bit_cast<uint32_t>(r.pos[id].x);
 	w[2]  = std::bit_cast<uint32_t>(r.pos[id].y);
@@ -207,6 +274,16 @@ static inline uint64_t HashProjectileRow(const SimSnapshot::ProjectileRows& r, i
 	for (int at = 0; at < r.numAllyTeams; ++at)
 		losAcc = (losAcc ^ r.inLosAll[at * r.MaxSlots() + id]) * 16777619u;
 	w[16] = losAcc;
+
+	// PR 27a rows, fixed order appended; all synced state
+	w[17] = std::bit_cast<uint32_t>(r.dir[id].x);
+	w[18] = std::bit_cast<uint32_t>(r.dir[id].y);
+	w[19] = std::bit_cast<uint32_t>(r.dir[id].z);
+	w[20] = std::bit_cast<uint32_t>(r.mygravity[id]);
+	w[21] = static_cast<uint32_t>(r.teamID[id]);
+	w[22] = static_cast<uint32_t>(r.ttl[id]);
+	w[23] = static_cast<uint32_t>(r.isPiece[id])
+	      | (static_cast<uint32_t>(r.intercepted[id]) << 8);
 
 	return Mix(w, sizeof(w), UNIT_SEED);
 }
