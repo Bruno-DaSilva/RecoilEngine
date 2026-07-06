@@ -1390,7 +1390,15 @@ int LuaUnsyncedRead::GetUnitDrawFlag(lua_State* L)
 	// live-legal where the generic deny would nil it -- BAR's cus_gl4 feeds
 	// its whole bookkeeping from this).
 	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
-		const CUnit* unit = DrawerGetObjectByID<CUnit>(luaL_checkint(L, 1));
+		const int unitID = luaL_checkint(L, 1);
+
+		const CUnit* unit = DrawerGetObjectByID<CUnit>(unitID);
+
+		// died-in-burst: the drain already removed it from the drawer
+		// containers, but a deferred UnitCreated/Finished/Given handler may
+		// legally ask (master answered mid-frame); the shell keeps the flag
+		if (unit == nullptr)
+			unit = SimDrawSplit::ShellFallbackUnit(unitID);
 
 		if (unit == nullptr || !LuaUtils::IsUnitVisible(L, unit))
 			return 0;
@@ -1736,7 +1744,13 @@ int LuaUnsyncedRead::GetFeatureDrawFlag(lua_State* L)
 {
 	// see GetUnitDrawFlag
 	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
-		const CFeature* feature = DrawerGetObjectByID<CFeature>(luaL_checkint(L, 1));
+		const int featureID = luaL_checkint(L, 1);
+
+		const CFeature* feature = DrawerGetObjectByID<CFeature>(featureID);
+
+		// see GetUnitDrawFlag (died-in-burst shell)
+		if (feature == nullptr)
+			feature = SimDrawSplit::ShellFallbackFeature(featureID);
 
 		if (feature == nullptr || !LuaUtils::IsFeatureVisible(L, feature))
 			return 0;

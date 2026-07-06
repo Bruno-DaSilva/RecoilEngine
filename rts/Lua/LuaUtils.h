@@ -16,6 +16,11 @@
 // FIXME: use fwd-decls
 #include "System/EventClient.h"
 #include "System/SimDrawSplit.h" // drain-window shell resolution (IdToObject)
+
+// Rendering/Common/ModelDrawerData.h; boundary-consistent id resolution for
+// IdToObject under the running split (specialized for CUnit / CFeature)
+template<typename T>
+const T* DrawerGetObjectByID(int id);
 #include "Sim/Units/CommandAI/Command.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Misc/CollisionVolume.h"
@@ -485,11 +490,26 @@ static inline LocalModelPiece* ParseObjectLocalModelPiece(lua_State* L, CSolidOb
 template<>
 const inline CUnit* LuaUtils::IdToObject(int id, const char* func)
 {
+	// PR 27b: with the sim thread running, the live handler walk both races
+	// the sim's own container mutation AND disagrees with the snapshot view
+	// callers guard with (spValidUnitID says boundary-N, the walk says
+	// mid-burst) -- resolve through the drawer's boundary cache instead,
+	// with the deferred-deletion shell as the died-in-burst fallback
+	// (deferred UnitCreated handlers calling gl.SetUnitBufferUniforms).
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
+		const CUnit* unit = DrawerGetObjectByID<CUnit>(id);
+
+		if (unit == nullptr)
+			unit = SimDrawSplit::ShellFallbackUnit(id);
+
+		return unit;
+	}
+
 	const CUnit* unit = unitHandler.GetUnit(id);
 
 	// boundary drain window (PR 27b): deferred handlers replaying events for
-	// an object that died later in the same sim burst (gl.SetUnitBufferUniforms
-	// from a deferred UnitCreated etc.) resolve its still-readable shell
+	// an object that died later in the same sim burst resolve its
+	// still-readable shell
 	if (unit == nullptr)
 		unit = SimDrawSplit::ShellFallbackUnit(id);
 
@@ -499,9 +519,18 @@ const inline CUnit* LuaUtils::IdToObject(int id, const char* func)
 template<>
 const inline CFeature* LuaUtils::IdToObject(int id, const char* func)
 {
+	// see the CUnit specialization
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
+		const CFeature* feature = DrawerGetObjectByID<CFeature>(id);
+
+		if (feature == nullptr)
+			feature = SimDrawSplit::ShellFallbackFeature(id);
+
+		return feature;
+	}
+
 	const CFeature* feature = featureHandler.GetFeature(id);
 
-	// see the CUnit specialization
 	if (feature == nullptr)
 		feature = SimDrawSplit::ShellFallbackFeature(id);
 
