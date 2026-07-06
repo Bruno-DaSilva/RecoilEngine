@@ -11,6 +11,7 @@
 #include "Rendering/LuaObjectDrawer.h"
 #include "Rendering/ShadowHandler.h"
 #include "Rendering/Common/ModelDrawerHelpers.h"
+#include "Rendering/Common/RenderEventQueue.h"
 
 #include "System/Misc/TracyDefs.h"
 
@@ -24,11 +25,17 @@ CONFIG(float, FeatureFadeDistance)
 .minimumValue(0.0f)
 .description("Distance at which features will begin to fade from view.");
 
-// id resolution for the drawer-side containers (see ModelDrawerData.h)
+// id resolution for the drawer-side containers (see ModelDrawerData.h).
+// Pending-destroy fallback: same mid-sim-phase container-read window as the
+// CUnit resolver (see UnitDrawerData.cpp / RenderEventQueue.h)
 template<>
 const CFeature* DrawerGetObjectByID<CFeature>(int id)
 {
 	const CFeature* feature = featureHandler.GetFeature(id);
+
+	if (feature == nullptr)
+		feature = renderEventQueue.FindPendingDestroyFeature(id);
+
 	assert(feature != nullptr);
 	return feature;
 }

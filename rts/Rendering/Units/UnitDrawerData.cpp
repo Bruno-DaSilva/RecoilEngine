@@ -32,11 +32,21 @@
 
 static FixedDynMemPoolT<MAX_UNITS / 1000, MAX_UNITS / 32, GhostSolidObject> ghostMemPool;
 
-// id resolution for the drawer-side containers (see ModelDrawerData.h)
+// id resolution for the drawer-side containers (see ModelDrawerData.h).
+// The pending-destroy fallback covers container reads *inside* the sim phase
+// (PlayerChanged, Lua GetRenderUnits from sim-context handlers): a unit that
+// died since the last drain is out of unitHandler but its id is still in the
+// containers and its shell still readable (see RenderEventQueue.h). Handler
+// lookup first -- the fallback map is empty in the post-drain window every
+// draw pass runs in, so hot loops never pay for it.
 template<>
 const CUnit* DrawerGetObjectByID<CUnit>(int id)
 {
 	const CUnit* unit = unitHandler.GetUnit(id);
+
+	if (unit == nullptr)
+		unit = renderEventQueue.FindPendingDestroyUnit(id);
+
 	assert(unit != nullptr);
 	return unit;
 }

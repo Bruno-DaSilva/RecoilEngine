@@ -108,6 +108,25 @@ public:
 	}
 	auto& GetObjectTransformMemAlloc(const T* o) { return scTransMemAllocMap[o->id]; }
 
+	// lazy registration for mid-sim-phase queries (PR 12/14): Lua handlers
+	// driven by synced events (FeatureCreated, selection changes) can query a
+	// just-created object's transform offset before the boundary drain runs
+	// AddObject -- pre-PR-12 registration was synchronous with creation, so
+	// those queries always hit. Allocates the same block AddObject would (its
+	// emplace then no-ops on the existing entry); the uniforms storage has
+	// auto-added on first query since before the split work, this is the
+	// transforms-side symmetric behavior.
+	const ScopedTransformMemAlloc& GetOrCreateTransformMemAlloc(const T* o) {
+		const auto it = scTransMemAllocMap.find(o->id);
+
+		if (it != scTransMemAllocMap.end())
+			return it->second;
+
+		const uint32_t numMatrices = ((o->model ? o->model->numPieces : 0) + 1u) * 2;
+		transformsExtractionPending = true; // fill the new block before the next sim frame
+		return scTransMemAllocMap.emplace(o->id, ScopedTransformMemAlloc(numMatrices)).first->second;
+	}
+
 	// render-owned interpolated draw positions (sim/draw decoupling §A: these were
 	// fields on the sim objects, authored at draw rate — evicted to drawer storage).
 	// Keyed by object id (ids are dense and bounded); slots are zeroed on AddObject,

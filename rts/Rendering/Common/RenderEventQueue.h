@@ -140,6 +140,24 @@ public:
 	/// the same in-place dispatch every destroy performed before PR 13)
 	void Flush();
 
+	// mid-sim-phase resolution of drawer-container ids (PR 14): the post-drain
+	// invariant (every id in a drawer container resolves to a live object)
+	// only holds between the boundary drain and the next sim phase. Event
+	// handlers that run *inside* the sim phase and read drawer containers
+	// (CUnitDrawerData::PlayerChanged via net-message processing, Lua
+	// Spring.GetRenderUnits from unsynced gadget sim-context handlers) can
+	// meet ids whose owner died since the last drain -- deregistered from the
+	// handler, destroy record pending, shell parked (PR 13). These return
+	// that shell (readable until the drain by the PR-13 contract), preserving
+	// master's semantics where the container held the still-readable pointer.
+	// nullptr when no such shell is pending.
+	const CUnit* FindPendingDestroyUnit(int32_t id) const {
+		return static_cast<const CUnit*>(FindDestroyShell(ShellKey(ObjKind::Unit, false, id)));
+	}
+	const CFeature* FindPendingDestroyFeature(int32_t id) const {
+		return static_cast<const CFeature*>(FindDestroyShell(ShellKey(ObjKind::Feature, false, id)));
+	}
+
 	// sim-side fire sites call these instead of eventHandler.Render*
 	void RenderUnitPreCreated(const CUnit* unit);
 	void RenderUnitCreated(const CUnit* unit, int cloaked);

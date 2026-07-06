@@ -48,7 +48,9 @@ local function writeCensusAndQuit(reason)
 end
 
 function widget:Initialize()
-	if not Spring.IsReplay() then
+	-- S0AllowLive: run in a live (non-replay) game too -- used for the
+	-- live-GL callout census, where a real render surface is needed
+	if not Spring.IsReplay() and Spring.GetConfigInt("S0AllowLive", 0) == 0 then
 		announce("not a replay - driver disabled")
 		widgetHandler:RemoveWidget(self)
 		return
@@ -68,6 +70,13 @@ function widget:Initialize()
 	if fastForward ~= 0 then
 		Spring.SendCommands("setspeed 20")
 		Spring.SendCommands("speedcontrol 0")
+	end
+
+	-- S0Overview: pull the camera out to the whole-map overview so the scene
+	-- is actually in view during an unattended run (draw-callout counts scale
+	-- with what is on screen)
+	if Spring.GetConfigInt("S0Overview", 0) ~= 0 then
+		Spring.SendCommands("toggleoverview")
 	end
 end
 
