@@ -706,6 +706,12 @@ void CEventHandler::StockpileChanged(const CUnit* unit, const CWeapon* weapon, i
 
 void CEventHandler::DbgTimingInfo(DbgTimingInfoType type, const spring_time start, const spring_time end)
 {
+	// thread-attribute GC slices at emit time: the dispatch to unsynced
+	// clients may be deferred to the main thread (sim-fired -> boundary),
+	// where the sim-phase TLS bracket reads false again
+	if (type == TIMING_GC && SimDrawSplit::InSimPhase())
+		type = TIMING_GC_SIM;
+
 	ITERATE_EVENTCLIENTLIST(DbgTimingInfo, type, start, end);
 }
 

@@ -47,7 +47,8 @@ enum DbgTimingInfoType {
 	TIMING_SIM,
 	TIMING_GC,
 	TIMING_SWAP,
-	TIMING_UNSYNCED
+	TIMING_UNSYNCED,
+	TIMING_GC_SIM // TIMING_GC emitted from the sim phase (synced-handle GC)
 };
 
 

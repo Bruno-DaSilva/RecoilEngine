@@ -21,6 +21,7 @@
 #include "Sim/Projectiles/ProjectileMemPool.h"
 #include "Sim/Weapons/WeaponMemPool.h"
 #include "System/EventHandler.h"
+#include "System/SimDrawSplit.h"
 #include "System/TimeProfiler.h"
 #include "System/Threading/ThreadPool.h"
 #include "System/SafeUtil.h"
@@ -43,6 +44,7 @@ typedef std::pair<spring_time, spring_time> TimeSlice;
 static std::deque<TimeSlice> vidFrames;
 static std::deque<TimeSlice> simFrames;
 static std::deque<TimeSlice> lgcFrames;
+static std::deque<TimeSlice> sgcFrames;
 static std::deque<TimeSlice> swpFrames;
 static std::deque<TimeSlice> uusFrames;
 
@@ -281,11 +283,33 @@ static void DrawFrameBarcode(TypedRenderBuffer<VA_TYPE_C   >& rb)
 		, MAX_FRAMES_HIST_TIME
 	);
 
-	DrawTimeSlices(lgcFrames, maxTime, drawArea, {1.0f, 0.5f, 1.0f, 0.55f}); // gc frames
-	DrawTimeSlices(uusFrames, maxTime, drawArea, {1.0f, 1.0f, 0.0f, 0.90f}); // unsynced-update frames
-	DrawTimeSlices(swpFrames, maxTime, drawArea, {0.0f, 0.0f, 1.0f, 0.55f}); // video swap frames
-	DrawTimeSlices(vidFrames, maxTime, drawArea, {0.0f, 1.0f, 0.0f, 0.55f}); // video frames
-	DrawTimeSlices(simFrames, maxTime, drawArea, {1.0f, 0.0f, 0.0f, 0.55f}); // sim frames
+	// under the sim|draw split the sim phase runs on its own thread, so its
+	// slices overlap the draw-thread ones in wall-clock time; give each
+	// thread its own row instead of interleaving everything in one
+	float4 drawRow = {drawArea[0], drawArea[1], drawArea[2], drawArea[3]};
+	float4 simRow  = drawRow;
+
+	if (SimDrawSplit::Enabled()) {
+		const float rowGap = 2.0f * globalRendering->pixelY;
+		const float rowMid = (drawArea[1] + drawArea[3]) * 0.5f;
+
+		drawRow.y = rowMid + rowGap; // draw thread on top
+		simRow.w  = rowMid - rowGap; // sim thread below
+
+		font->glFormat(drawArea[2] + 12.0f * globalRendering->pixelX, drawRow.w, 0.5f, FONT_TOP | DBG_FONT_FLAGS | FONT_BUFFERED, "draw");
+		font->glFormat(drawArea[2] + 12.0f * globalRendering->pixelX,  simRow.w, 0.5f, FONT_TOP | DBG_FONT_FLAGS | FONT_BUFFERED, "sim");
+	}
+
+	// draw-thread row (everything but the sim phase)
+	DrawTimeSlices(lgcFrames, maxTime, drawRow, {1.0f, 0.5f, 1.0f, 0.55f}); // gc frames
+	DrawTimeSlices(uusFrames, maxTime, drawRow, {1.0f, 1.0f, 0.0f, 0.90f}); // unsynced-update frames
+	DrawTimeSlices(swpFrames, maxTime, drawRow, {0.0f, 0.0f, 1.0f, 0.55f}); // video swap frames
+	DrawTimeSlices(vidFrames, maxTime, drawRow, {0.0f, 1.0f, 0.0f, 0.55f}); // video frames
+
+	// sim-thread row (sim frames + synced-handle GC); same row as everything
+	// else when the split is off
+	DrawTimeSlices(sgcFrames, maxTime,  simRow, {1.0f, 0.5f, 1.0f, 0.55f}); // gc frames (sim phase)
+	DrawTimeSlices(simFrames, maxTime,  simRow, {1.0f, 0.0f, 0.0f, 0.55f}); // sim frames
 
 	{
 		// draw 'feeder' (indicates current time pos)
@@ -641,6 +665,9 @@ void ProfileDrawer::DbgTimingInfo(DbgTimingInfoType type, const spring_time star
 		case TIMING_GC: {
 			lgcFrames.emplace_back(start, end);
 		} break;
+		case TIMING_GC_SIM: {
+			sgcFrames.emplace_back(start, end);
+		} break;
 		case TIMING_SWAP: {
 			swpFrames.emplace_back(start, end);
 		} break;
@@ -672,6 +699,7 @@ void ProfileDrawer::Update()
 
 	// cleanup old frame records
 	DiscardOldTimeSlices(lgcFrames, curTime, maxTime);
+	DiscardOldTimeSlices(sgcFrames, curTime, maxTime);
 	DiscardOldTimeSlices(uusFrames, curTime, maxTime);
 	DiscardOldTimeSlices(swpFrames, curTime, maxTime);
 	DiscardOldTimeSlices(vidFrames, curTime, maxTime);
