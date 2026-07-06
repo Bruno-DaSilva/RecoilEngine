@@ -67,6 +67,7 @@ public:
 	static uint8_t GetPreviousDrawFlag(const CUnit* unit) { return modelDrawerData->GetPreviousDrawFlag(unit); }
 	static bool HasDrawFlag(const CUnit* unit, DrawFlags f) { return modelDrawerData->HasDrawFlag(unit, f); }
 	static bool GetIsIcon(const CUnit* unit) { return modelDrawerData->GetUnitIsIcon(unit); }
+	static bool GetIsIcon(int unitID) { return modelDrawerData->GetUnitIsIcon(unitID); }
 
 	static void ClearPreviousDrawFlags() { modelDrawerData->ClearPreviousDrawFlags(); }
 	static void UnitLeavesGhostChanged(const CUnit* unit, const bool leaveDeadGhost) { modelDrawerData->UnitLeavesGhostChanged(unit, leaveDeadGhost); }

@@ -61,4 +61,17 @@ namespace LuaSnapshotServe {
 	int GetUnitHealth(lua_State* L, const char* caller);
 	int GetUnitIsStunned(lua_State* L, const char* caller);
 	int GetUnitViewPosition(lua_State* L, const char* caller);  // LuaUnsyncedRead
+
+	// unit-family stragglers surfaced by the E.1b census (LosState is the
+	// non-spectating hot one; Visible/Icon read drawer + camera + snapshot)
+	int GetUnitLosState(lua_State* L, const char* caller);
+	int IsUnitVisible(lua_State* L, const char* caller);        // LuaUnsyncedRead
+	int IsUnitIcon(lua_State* L, const char* caller);           // LuaUnsyncedRead
+
+	// projectile family (E.1b order: second family)
+	int GetProjectilePosition(lua_State* L, const char* caller);
+	int GetProjectileVelocity(lua_State* L, const char* caller);
+	int GetProjectileDefID(lua_State* L, const char* caller);
+	int GetProjectileTarget(lua_State* L, const char* caller);
+	int GetProjectileOwnerID(lua_State* L, const char* caller);
 }

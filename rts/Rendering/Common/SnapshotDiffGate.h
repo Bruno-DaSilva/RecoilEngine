@@ -107,6 +107,7 @@ private:
 		F_BUILDPROGRESS,
 		F_BEINGBUILT,
 		F_STUNNED,
+		F_RADIUS,
 		F_RELMIDPOS,
 		F_FRONTDIR,
 		F_UPDIR,
@@ -117,12 +118,25 @@ private:
 		F_POSERRORBIT,
 		F_GLOBALS,
 		F_MASKEDERRVEC,
+		// projectile rows (second family)
+		P_VALIDITY,
+		P_POS,
+		P_SPEED,
+		P_ALLYTEAM,
+		P_OWNERID,
+		P_ISWEAPON,
+		P_WDEFID,
+		P_TARGET,
+		P_INLOS,
 		F_COUNT
 	};
 
 	// counter bump + log-gate: returns true iff the caller should emit a
 	// LOG_L(L_ERROR) line for this mismatch (mismatch and under the per-field cap)
 	bool Bump(FieldCounter& fc, bool equal);
+
+	// projectile-row half of the field pass (called from CheckBoundary)
+	void CheckProjectileRows();
 
 	void Report(const char* reason) const;
 	void ResetCounters();

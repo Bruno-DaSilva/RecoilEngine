@@ -6,15 +6,18 @@
 #include <cstring>
 
 #include "LuaHandle.h"
+#include "LuaHashString.h" // HSTR_PUSH_BOOL
 #include "LuaInclude.h"
 
+#include "Game/Camera.h"
 #include "Rendering/Common/SimSnapshot.h"
 #include "Rendering/Common/SnapshotDiffGate.h"
 #include "Rendering/Units/UnitDrawer.h"
 #include "Sim/Misc/CollisionVolume.h" // WORLD_TO_OBJECT_SPACE
-#include "Sim/Units/Unit.h" // LOS_INLOS / LOS_INRADAR bits
+#include "Sim/Units/Unit.h" // LOS_* bits
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Units/UnitDefHandler.h"
+#include "System/EventClient.h" // CEventClient special-team constants
 #include "System/TimeProfiler.h" // ScopedDrawCallinContext
 
 namespace {
@@ -46,9 +49,51 @@ namespace {
 		return lua_toint(L, index);
 	}
 
+	bool SlotsEqual(lua_State* L, int a, int b);
+
+	// structural compare for the plain result tables some callouts return
+	// ({x,y,z} arrays, {los=,radar=,typed=} maps): lua_rawequal is identity,
+	// so two structurally-identical fresh tables would always "differ".
+	// Shallow key sweep both ways (values recurse through SlotsEqual; nesting
+	// here is scalar-only in practice).
+	bool TablesEqual(lua_State* L, int a, int b)
+	{
+		a = luaS_absIndex(L, a);
+		b = luaS_absIndex(L, b);
+
+		// every key of a maps to an equal value in b
+		lua_pushnil(L);
+		while (lua_next(L, a) != 0) {
+			// stack: ... key value
+			lua_pushvalue(L, -2);
+			lua_rawget(L, b); // ... key aValue bValue
+			const bool eq = SlotsEqual(L, -2, -1);
+			lua_pop(L, 2); // ... key
+			if (!eq) {
+				lua_pop(L, 1);
+				return false;
+			}
+		}
+
+		// and b has no keys a lacks
+		lua_pushnil(L);
+		while (lua_next(L, b) != 0) {
+			lua_pushvalue(L, -2);
+			lua_rawget(L, a); // ... key bValue aValue
+			const bool present = !lua_isnil(L, -1);
+			lua_pop(L, 2);
+			if (!present) {
+				lua_pop(L, 1);
+				return false;
+			}
+		}
+
+		return true;
+	}
+
 	// dual-run slot compare: both paths push plain values (numbers, booleans,
-	// nils), compared bit-exactly; lua_tostring is avoided since it would
-	// convert number slots in place
+	// nils, small result tables), compared bit-exactly; lua_tostring is
+	// avoided since it would convert number slots in place
 	bool SlotsEqual(lua_State* L, int a, int b)
 	{
 		const int ta = lua_type(L, a);
@@ -67,6 +112,8 @@ namespace {
 				return (lua_toboolean(L, a) == lua_toboolean(L, b));
 			case LUA_TNIL:
 				return true;
+			case LUA_TTABLE:
+				return TablesEqual(L, a, b);
 			default:
 				return (lua_rawequal(L, a, b) != 0);
 		}
@@ -251,6 +298,72 @@ int LuaSnapshotServe::GetUnitIsStunned(lua_State* L, const char* caller)
 	return 3;
 }
 
+// mirror of LuaSyncedRead::GetUnitLosState (incl. its GetEffectiveLosAllyTeam
+// helper, which can raise "Invalid allyTeam" exactly like the live path)
+int LuaSnapshotServe::GetUnitLosState(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// ParseUnit mirror
+	if (!rows.Valid(unitID) || !rows.PovUnitVisible(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	// GetEffectiveLosAllyTeam mirror (teamHandler.IsValidAllyTeam == in [0, numAllyTeams))
+	int allyTeamID = 0;
+	if (lua_isnoneornil(L, 2)) {
+		allyTeamID = pov.readAllyTeam;
+	} else {
+		const int aat = luaL_optint(L, 2, CEventClient::MinSpecialTeam - 1);
+
+		if (aat == CEventClient::NoAccessTeam) {
+			allyTeamID = aat;
+		} else if (pov.fullRead && (aat >= 0 && aat < rows.numAllyTeams)) {
+			allyTeamID = aat;
+		} else if (pov.fullRead && aat == CEventClient::AllAccessTeam) {
+			allyTeamID = aat;
+		} else if (!pov.fullRead && aat == pov.readAllyTeam) {
+			allyTeamID = aat;
+		} else {
+			return luaL_argerror(L, 2, "Invalid allyTeam");
+		}
+	}
+
+	unsigned short losStatus;
+	if (allyTeamID < 0) {
+		losStatus = (allyTeamID == CEventClient::AllAccessTeam) ? (LOS_ALL_MASK_BITS | LOS_ALL_BITS) : 0;
+	} else {
+		losStatus = rows.losStatusAll[allyTeamID * rows.MaxUnits() + unitID];
+	}
+
+	constexpr int currMask = LOS_INLOS   | LOS_INRADAR;
+	constexpr int prevMask = LOS_PREVLOS | LOS_CONTRADAR;
+
+	const bool isTyped = ((losStatus & prevMask) == prevMask);
+
+	if (luaL_optboolean(L, 3, false)) {
+		// return a numeric value
+		if (!pov.fullRead)
+			losStatus &= ((prevMask * isTyped) | currMask);
+
+		lua_pushnumber(L, losStatus);
+		return 1;
+	}
+
+	lua_createtable(L, 0, 3);
+	if (losStatus & LOS_INLOS) {
+		HSTR_PUSH_BOOL(L, "los", true);
+	}
+	if (losStatus & LOS_INRADAR) {
+		HSTR_PUSH_BOOL(L, "radar", true);
+	}
+	if ((losStatus & LOS_INLOS) || isTyped) {
+		HSTR_PUSH_BOOL(L, "typed", true);
+	}
+	return 1;
+}
+
 // mirror of LuaUnsyncedRead::GetUnitViewPosition; the draw position itself is
 // drawer-owned (id-keyed) state, only the gate/mask reads were live sim state
 int LuaSnapshotServe::GetUnitViewPosition(lua_State* L, const char* caller)
@@ -285,4 +398,172 @@ int LuaSnapshotServe::GetUnitViewPosition(lua_State* L, const char* caller)
 	lua_pushnumber(L, unitPos.y + errorVec.y);
 	lua_pushnumber(L, unitPos.z + errorVec.z);
 	return 3;
+}
+
+// mirror of LuaUnsyncedRead::IsUnitVisible (camera and icon state are
+// draw-side already; the losStatus gates and radius default were sim reads)
+int LuaSnapshotServe::IsUnitVisible(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDUnsynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// LuaUnsyncedRead::ParseUnit gate mirror
+	if (!rows.Valid(unitID))
+		return 0;
+	if (pov.readAllyTeam < 0) {
+		if (!pov.fullRead)
+			return 0;
+	} else if ((rows.LosStatus(unitID, pov.readAllyTeam) & (LOS_INLOS | LOS_INRADAR)) == 0) {
+		return 0;
+	}
+
+	const float radius = luaL_optnumber(L, 2, rows.radius[unitID]);
+	const bool checkIcon = lua_toboolean(L, 3);
+
+	if (pov.readAllyTeam < 0) {
+		// the gate above guarantees fullRead here
+		lua_pushboolean(L,
+			(!checkIcon || !CUnitDrawer::GetIsIcon(unitID)) &&
+			camera->InView(rows.midPos[unitID], radius));
+	} else {
+		if ((rows.LosStatus(unitID, pov.readAllyTeam) & LOS_INLOS) == 0) {
+			lua_pushboolean(L, false);
+		} else {
+			lua_pushboolean(L,
+				(!checkIcon || !CUnitDrawer::GetIsIcon(unitID)) &&
+				camera->InView(rows.midPos[unitID], radius));
+		}
+	}
+	return 1;
+}
+
+// mirror of LuaUnsyncedRead::IsUnitIcon (drawer-owned state; only the
+// ParseUnit gate was a sim read)
+int LuaSnapshotServe::IsUnitIcon(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDUnsynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	if (!rows.Valid(unitID))
+		return 0;
+	if (pov.readAllyTeam < 0) {
+		if (!pov.fullRead)
+			return 0;
+	} else if ((rows.LosStatus(unitID, pov.readAllyTeam) & (LOS_INLOS | LOS_INRADAR)) == 0) {
+		return 0;
+	}
+
+	lua_pushboolean(L, CUnitDrawer::GetIsIcon(unitID));
+	return 1;
+}
+
+
+/******************************************************************************
+ * Projectile family (E.1b second family). ParseProjectile arg semantics are
+ * luaL_checkint; visibility is ProjectileRows::PovVisible (the extraction-time
+ * positional-LOS answer + own-allyteam bypass, mirroring IsProjectileVisible).
+ ******************************************************************************/
+
+// mirror of LuaSyncedRead::GetProjectilePosition
+int LuaSnapshotServe::GetProjectilePosition(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.ReadProjectiles();
+	const int projID = luaL_checkint(L, 1);
+	const Pov pov = HandlePov(L);
+
+	if (!rows.Valid(projID) || !rows.PovVisible(projID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	lua_pushnumber(L, rows.pos[projID].x);
+	lua_pushnumber(L, rows.pos[projID].y);
+	lua_pushnumber(L, rows.pos[projID].z);
+	return 3;
+}
+
+// mirror of LuaSyncedRead::GetProjectileVelocity (GetWorldObjectVelocity shape)
+int LuaSnapshotServe::GetProjectileVelocity(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.ReadProjectiles();
+	const int projID = luaL_checkint(L, 1);
+	const Pov pov = HandlePov(L);
+
+	if (!rows.Valid(projID) || !rows.PovVisible(projID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	lua_pushnumber(L, rows.speed[projID].x);
+	lua_pushnumber(L, rows.speed[projID].y);
+	lua_pushnumber(L, rows.speed[projID].z);
+	lua_pushnumber(L, rows.speed[projID].w);
+	return 4;
+}
+
+// mirror of LuaSyncedRead::GetProjectileDefID
+int LuaSnapshotServe::GetProjectileDefID(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.ReadProjectiles();
+	const int projID = luaL_checkint(L, 1);
+	const Pov pov = HandlePov(L);
+
+	if (!rows.Valid(projID) || !rows.PovVisible(projID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+	if (!rows.isWeapon[projID])
+		return 0;
+	if (rows.weaponDefID[projID] < 0) // no WeaponDef
+		return 0;
+
+	lua_pushnumber(L, rows.weaponDefID[projID]);
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetProjectileTarget
+int LuaSnapshotServe::GetProjectileTarget(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.ReadProjectiles();
+	const int projID = luaL_checkint(L, 1);
+	const Pov pov = HandlePov(L);
+
+	if (!rows.Valid(projID) || !rows.PovVisible(projID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+	if (!rows.isWeapon[projID])
+		return 0;
+
+	const uint8_t targetType = rows.targetType[projID];
+
+	if (targetType == 'g') {
+		lua_pushnumber(L, int('g'));
+		lua_createtable(L, 3, 0);
+		lua_pushnumber(L, rows.targetPos[projID].x); lua_rawseti(L, -2, 1);
+		lua_pushnumber(L, rows.targetPos[projID].y); lua_rawseti(L, -2, 2);
+		lua_pushnumber(L, rows.targetPos[projID].z); lua_rawseti(L, -2, 3);
+		return 2;
+	}
+	if (targetType == 'u' || targetType == 'f' || targetType == 'p') {
+		lua_pushnumber(L, int(targetType));
+		lua_pushnumber(L, rows.targetID[projID]);
+		return 2;
+	}
+
+	// live path asserts unreachable here; deterministic nil mirrors its return 0
+	return 0;
+}
+
+// mirror of LuaSyncedRead::GetProjectileOwnerID
+int LuaSnapshotServe::GetProjectileOwnerID(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.ReadProjectiles();
+	const int projID = luaL_checkint(L, 1);
+	const Pov pov = HandlePov(L);
+
+	if (!rows.Valid(projID) || !rows.PovVisible(projID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	// unitHandler.MaxUnits() mirror: the unit rows are sized to exactly that
+	const int unitID = rows.ownerID[projID];
+	if ((unitID < 0) || (static_cast<size_t>(unitID) >= simSnapshot.Read().MaxUnits()))
+		return 0;
+
+	lua_pushnumber(L, unitID);
+	return 1;
 }

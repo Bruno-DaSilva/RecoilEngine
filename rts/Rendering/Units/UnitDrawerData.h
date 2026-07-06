@@ -170,6 +170,7 @@ public:
 	// icon state lives in the drawFlag storage (SO_DRICON_FLAG); moved off CUnit
 	// with the flags (sim/draw §A, PR 4). Read via CUnitDrawer::GetIsIcon.
 	bool GetUnitIsIcon(const CUnit* u) const { return HasDrawFlag(u, DrawFlags::SO_DRICON_FLAG); }
+	bool GetUnitIsIcon(int unitID) const { return HasDrawFlag(unitID, DrawFlags::SO_DRICON_FLAG); }
 	void SetUnitIsIcon(const CUnit* u, bool b) {
 		if (b)
 			AddDrawFlag(u, DrawFlags::SO_DRICON_FLAG);

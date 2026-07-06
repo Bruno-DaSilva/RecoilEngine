@@ -69,7 +69,8 @@ static inline uint64_t HashUnitRow(const SimSnapshot::UnitRows& r, int id)
 	f3(&w[27], r.updir[id]);
 	f3(&w[30], r.rightdir[id]);
 	f3(&w[33], r.posErrorVector[id]);
-	w[36] = static_cast<uint32_t>(r.leavesGhost[id]);
+	w[36] = static_cast<uint32_t>(r.leavesGhost[id])
+	      | (std::bit_cast<uint32_t>(r.radius[id]) & 0xffffff00u); // low byte free for the flag
 
 	uint32_t losAcc = 2166136261u;
 	uint32_t errAcc = 2166136261u;
@@ -80,6 +81,38 @@ static inline uint64_t HashUnitRow(const SimSnapshot::UnitRows& r, int id)
 	w[37] = losAcc;
 	w[38] = errAcc;
 	w[39] = static_cast<uint32_t>(r.numAllyTeams);
+
+	return Mix(w, sizeof(w), UNIT_SEED);
+}
+
+// Per-projectile row hash (second snapshot family); folded into the root hash
+// as one section word -- localization to unit granularity stays the unit rows'
+// job, projectile rows just extend divergence *detection* coverage.
+static inline uint64_t HashProjectileRow(const SimSnapshot::ProjectileRows& r, int id)
+{
+	uint32_t w[17];
+	w[0]  = static_cast<uint32_t>(id);
+	w[1]  = std::bit_cast<uint32_t>(r.pos[id].x);
+	w[2]  = std::bit_cast<uint32_t>(r.pos[id].y);
+	w[3]  = std::bit_cast<uint32_t>(r.pos[id].z);
+	w[4]  = std::bit_cast<uint32_t>(r.speed[id].x);
+	w[5]  = std::bit_cast<uint32_t>(r.speed[id].y);
+	w[6]  = std::bit_cast<uint32_t>(r.speed[id].z);
+	w[7]  = std::bit_cast<uint32_t>(r.speed[id].w);
+	w[8]  = static_cast<uint32_t>(r.allyTeam[id]);
+	w[9]  = static_cast<uint32_t>(r.ownerID[id]);
+	w[10] = static_cast<uint32_t>(r.isWeapon[id])
+	      | (static_cast<uint32_t>(r.targetType[id]) << 8);
+	w[11] = static_cast<uint32_t>(r.weaponDefID[id]);
+	w[12] = static_cast<uint32_t>(r.targetID[id]);
+	w[13] = std::bit_cast<uint32_t>(r.targetPos[id].x);
+	w[14] = std::bit_cast<uint32_t>(r.targetPos[id].y);
+	w[15] = std::bit_cast<uint32_t>(r.targetPos[id].z);
+
+	uint32_t losAcc = 2166136261u;
+	for (int at = 0; at < r.numAllyTeams; ++at)
+		losAcc = (losAcc ^ r.inLosAll[at * r.MaxSlots() + id]) * 16777619u;
+	w[16] = losAcc;
 
 	return Mix(w, sizeof(w), UNIT_SEED);
 }
@@ -177,7 +210,7 @@ void FlushPartial()
 	WriteOut();
 }
 
-void HashFrame(int frameNum, const SimSnapshot::UnitRows& rows)
+void HashFrame(int frameNum, const SimSnapshot::UnitRows& rows, const SimSnapshot::ProjectileRows& projRows)
 {
 	if (!dumpActive)
 		return;
@@ -218,6 +251,18 @@ void HashFrame(int frameNum, const SimSnapshot::UnitRows& rows)
 	uint64_t rootHash = ROOT_SEED;
 	for (uint32_t b = 0; b < numBuckets; ++b)
 		rootHash = Mix(&bucketHash[b], sizeof(bucketHash[b]), rootHash);
+
+	// projectile section: one word folded into the root (ascending id order)
+	{
+		uint64_t projHash = Mix(&ROOT_SEED, sizeof(ROOT_SEED), BUCKET_SEED);
+		for (size_t id = 0; id < projRows.MaxSlots(); ++id) {
+			if (projRows.valid[id] == 0)
+				continue;
+			const uint64_t ph = HashProjectileRow(projRows, static_cast<int>(id));
+			projHash = Mix(&ph, sizeof(ph), projHash);
+		}
+		rootHash = Mix(&projHash, sizeof(projHash), rootHash);
+	}
 
 	char rb[64];
 	const int rn = std::snprintf(rb, sizeof(rb), "R\t%d\t%u\t%016llx\n",

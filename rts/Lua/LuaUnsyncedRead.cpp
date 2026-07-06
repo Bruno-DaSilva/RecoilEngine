@@ -1840,9 +1840,9 @@ int LuaUnsyncedRead::IsUnitInView(lua_State* L)
  * @param checkIcon boolean
  * @return boolean? isVisible nil when unitID cannot be parsed
  */
-int LuaUnsyncedRead::IsUnitVisible(lua_State* L)
+static int IsUnitVisibleLive(lua_State* L, const char* caller)
 {
-	CUnit* unit = ParseUnit(L, __func__, 1);
+	CUnit* unit = ParseUnit(L, caller, 1);
 
 	if (unit == nullptr)
 		return 0;
@@ -1873,6 +1873,12 @@ int LuaUnsyncedRead::IsUnitVisible(lua_State* L)
 	return 1;
 }
 
+int LuaUnsyncedRead::IsUnitVisible(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 18, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &IsUnitVisibleLive, &LuaSnapshotServe::IsUnitVisible);
+}
+
 
 /***
  *
@@ -1880,15 +1886,21 @@ int LuaUnsyncedRead::IsUnitVisible(lua_State* L)
  * @param unitID integer
  * @return boolean? isUnitIcon nil when unitID cannot be parsed
  */
-int LuaUnsyncedRead::IsUnitIcon(lua_State* L)
+static int IsUnitIconLive(lua_State* L, const char* caller)
 {
-	CUnit* unit = ParseUnit(L, __func__, 1);
+	CUnit* unit = ParseUnit(L, caller, 1);
 
 	if (unit == nullptr)
 		return 0;
 
 	lua_pushboolean(L, CUnitDrawer::GetIsIcon(unit));
 	return 1;
+}
+
+int LuaUnsyncedRead::IsUnitIcon(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 18, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &IsUnitIconLive, &LuaSnapshotServe::IsUnitIcon);
 }
 
 

@@ -3,14 +3,19 @@
 #include "SnapshotDiffGate.h"
 
 #include <cstring>
+#include <vector>
 
 #include "SimSnapshot.h"
+#include "Sim/Features/Feature.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/LosHandler.h"
 #include "Sim/Misc/TeamHandler.h"
+#include "Sim/Projectiles/ProjectileHandler.h"
+#include "Sim/Projectiles/WeaponProjectiles/WeaponProjectile.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Units/UnitHandler.h"
+#include "Sim/Weapons/WeaponDef.h"
 #include "System/Log/ILog.h"
 
 SnapshotDiffGate snapshotDiffGate;
@@ -39,6 +44,7 @@ static constexpr const char* FIELD_NAMES[] = {
 	"buildProgress",
 	"beingBuilt",
 	"stunned",
+	"radius",
 	"relMidPos",
 	"frontdir",
 	"updir",
@@ -49,6 +55,15 @@ static constexpr const char* FIELD_NAMES[] = {
 	"posErrorBits",
 	"globals",
 	"maskedErrorVec",
+	"proj:validity",
+	"proj:pos",
+	"proj:speed",
+	"proj:allyTeam",
+	"proj:ownerID",
+	"proj:isWeapon",
+	"proj:weaponDefID",
+	"proj:target",
+	"proj:inLosAll",
 };
 
 
@@ -235,6 +250,7 @@ void SnapshotDiffGate::CheckBoundary()
 		checkF(F_BUILDPROGRESS, rows.buildProgress[i], u->buildProgress);
 		checkI(F_BEINGBUILT, rows.beingBuilt[i], int(u->beingBuilt));
 		checkI(F_STUNNED, rows.stunned[i], int(u->IsStunned()));
+		checkF(F_RADIUS, rows.radius[i], u->radius);
 		checkF3(F_RELMIDPOS, rows.relMidPos[i], u->relMidPos);
 		checkF3(F_FRONTDIR, rows.frontdir[i], u->frontdir);
 		checkF3(F_UPDIR, rows.updir[i], u->updir);
@@ -265,5 +281,110 @@ void SnapshotDiffGate::CheckBoundary()
 				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=maskedErrorVec[ally %d] snap=(%.9g,%.9g,%.9g) live=(%.9g,%.9g,%.9g)",
 					gs->frameNum, id, at, snapErr.x, snapErr.y, snapErr.z, liveErr.x, liveErr.y, liveErr.z);
 		}
+	}
+
+	CheckProjectileRows();
+}
+
+void SnapshotDiffGate::CheckProjectileRows()
+{
+	const SimSnapshot::ProjectileRows& rows = simSnapshot.ReadProjectiles();
+	const size_t slots = rows.MaxSlots();
+	const int numAllyTeams = rows.numAllyTeams;
+
+	// validity both ways: every valid row must resolve to a live synced
+	// projectile and every live one must have a valid row (checked via its id)
+	std::vector<uint8_t> liveSeen(slots, 0);
+	const auto& pc = projectileHandler.GetActiveProjectiles(true);
+
+	for (size_t i = 0; i < pc.size(); ++i) {
+		const CProjectile* p = pc[i];
+		const int id = p->id;
+
+		if (static_cast<size_t>(id) < slots)
+			liveSeen[id] = 1;
+
+		const bool snapValid = rows.Valid(id);
+
+		if (Bump(fields[P_VALIDITY], snapValid))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d proj=%d field=proj:validity snap=0 live=1",
+				gs->frameNum, id);
+
+		if (!snapValid)
+			continue;
+
+		if (Bump(fields[P_POS], BitEqual(rows.pos[id], p->pos)))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d proj=%d field=proj:pos snap=(%.9g,%.9g,%.9g) live=(%.9g,%.9g,%.9g)",
+				gs->frameNum, id, rows.pos[id].x, rows.pos[id].y, rows.pos[id].z, p->pos.x, p->pos.y, p->pos.z);
+
+		if (Bump(fields[P_SPEED], BitEqual(rows.speed[id], p->speed)))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d proj=%d field=proj:speed", gs->frameNum, id);
+
+		if (Bump(fields[P_ALLYTEAM], rows.allyTeam[id] == p->GetAllyteamID()))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d proj=%d field=proj:allyTeam snap=%d live=%d",
+				gs->frameNum, id, rows.allyTeam[id], p->GetAllyteamID());
+
+		if (Bump(fields[P_OWNERID], rows.ownerID[id] == p->GetOwnerID()))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d proj=%d field=proj:ownerID snap=%d live=%d",
+				gs->frameNum, id, rows.ownerID[id], p->GetOwnerID());
+
+		if (Bump(fields[P_ISWEAPON], rows.isWeapon[id] == uint8_t(p->weapon)))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d proj=%d field=proj:isWeapon snap=%d live=%d",
+				gs->frameNum, id, int(rows.isWeapon[id]), int(p->weapon));
+
+		if (p->weapon) {
+			const CWeaponProjectile* wpro = static_cast<const CWeaponProjectile*>(p);
+			const WeaponDef* wdef = wpro->GetWeaponDef();
+			const int liveWdefID = (wdef != nullptr) ? wdef->id : -1;
+
+			if (Bump(fields[P_WDEFID], rows.weaponDefID[id] == liveWdefID))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d proj=%d field=proj:weaponDefID snap=%d live=%d",
+					gs->frameNum, id, rows.weaponDefID[id], liveWdefID);
+
+			// same type resolution as the extraction / the live callout
+			const CWorldObject* wtgt = wpro->GetTargetObject();
+			uint8_t liveType = 0;
+			int liveID = 0;
+			float3 livePos;
+			if (wtgt == nullptr) {
+				liveType = 'g';
+				livePos = wpro->GetTargetPos();
+			} else if (dynamic_cast<const CUnit*>(wtgt) != nullptr) {
+				liveType = 'u'; liveID = wtgt->id;
+			} else if (dynamic_cast<const CFeature*>(wtgt) != nullptr) {
+				liveType = 'f'; liveID = wtgt->id;
+			} else if (dynamic_cast<const CWeaponProjectile*>(wtgt) != nullptr) {
+				liveType = 'p'; liveID = wtgt->id;
+			}
+
+			const bool targetEqual =
+				(rows.targetType[id] == liveType) &&
+				(rows.targetID[id] == liveID || liveType == 'g') &&
+				(BitEqual(rows.targetPos[id], livePos) || liveType != 'g');
+
+			if (Bump(fields[P_TARGET], targetEqual))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d proj=%d field=proj:target snapType=%d liveType=%d",
+					gs->frameNum, id, int(rows.targetType[id]), int(liveType));
+		}
+
+		// masking input: the extraction-time positional-LOS answer per allyteam
+		for (int at = 0; at < numAllyTeams; ++at) {
+			const bool snapLos = (rows.inLosAll[at * slots + id] != 0);
+			const bool liveLos = losHandler->InLos(p->pos, at);
+
+			if (Bump(fields[P_INLOS], snapLos == liveLos))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d proj=%d field=proj:inLosAll[ally %d] snap=%d live=%d",
+					gs->frameNum, id, at, int(snapLos), int(liveLos));
+		}
+	}
+
+	// reverse validity: valid rows with no live projectile
+	for (size_t id = 0; id < slots; ++id) {
+		if (rows.valid[id] == 0 || liveSeen[id] != 0)
+			continue;
+
+		if (Bump(fields[P_VALIDITY], false))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d proj=%d field=proj:validity snap=1 live=0",
+				gs->frameNum, int(id));
 	}
 }

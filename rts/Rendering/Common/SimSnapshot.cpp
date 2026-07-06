@@ -3,12 +3,16 @@
 #include "SimSnapshot.h"
 
 #include "SnapshotHash.h"
+#include "Sim/Features/Feature.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/LosHandler.h"
 #include "Sim/Misc/TeamHandler.h"
+#include "Sim/Projectiles/ProjectileHandler.h"
+#include "Sim/Projectiles/WeaponProjectiles/WeaponProjectile.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Units/UnitHandler.h"
+#include "Sim/Weapons/WeaponDef.h"
 #include "System/Log/ILog.h"
 #include "System/Misc/SpringTime.h"
 #include "System/TimeProfiler.h"
@@ -77,7 +81,9 @@ void SimSnapshot::Update()
 	const spring_time t0 = spring_gettime();
 
 	Extract(*back);
+	ExtractProjectiles(*projBack);
 	std::swap(front, back);
+	std::swap(projFront, projBack);
 	generation += 1;
 
 	const float dt = (spring_gettime() - t0).toMilliSecsf();
@@ -97,7 +103,8 @@ void SimSnapshot::HashCompletedFrame(int frameNum)
 	// gs->frameNum, which equals frameNum here). front/back and generation are
 	// untouched, so nothing draw-side observes this.
 	Extract(hashScratch);
-	SnapshotHash::HashFrame(frameNum, hashScratch);
+	ExtractProjectiles(hashProjScratch);
+	SnapshotHash::HashFrame(frameNum, hashScratch, hashProjScratch);
 }
 
 void SimSnapshot::Clear()
@@ -114,17 +121,19 @@ void SimSnapshot::Clear()
 			 r.posErrorVector.size()) * sizeof(float3) +
 			r.speed.size() * sizeof(float4) +
 			(r.health.size() + r.maxHealth.size() + r.paralyzeDamage.size() +
-			 r.captureProgress.size() + r.buildProgress.size()) * sizeof(float) +
+			 r.captureProgress.size() + r.buildProgress.size() + r.radius.size()) * sizeof(float) +
 			r.defID.size() * sizeof(int32_t);
-		LOG("[SimSnapshot] extractions=%u avgMs=%.4f maxMs=%.4f peakUnits=%d memKB=%.1f",
+		LOG("[SimSnapshot] extractions=%u avgMs=%.4f maxMs=%.4f peakUnits=%d memKB=%.1f projSlots=%d",
 			numExtractions, sumExtractMs / numExtractions, maxExtractMs, peakAliveCount,
-			(2.0f * bufBytes) / 1024.0f);
+			(2.0f * bufBytes) / 1024.0f, int(projFront->MaxSlots()));
 	}
 
 	for (UnitRows& rows : buffers) {
 		rows.simFrame = -1;
 		rows.aliveCount = 0;
 	}
+	for (ProjectileRows& rows : projBuffers)
+		std::fill(rows.valid.begin(), rows.valid.end(), 0);
 
 	generation = 0;
 	mutatedOutsideFrame = false;
@@ -155,6 +164,7 @@ void SimSnapshot::Resize(UnitRows& rows, size_t maxUnits, int numAllyTeams)
 	rows.buildProgress.resize(maxUnits);
 	rows.beingBuilt.resize(maxUnits);
 	rows.stunned.resize(maxUnits);
+	rows.radius.resize(maxUnits);
 	rows.relMidPos.resize(maxUnits);
 	rows.frontdir.resize(maxUnits);
 	rows.updir.resize(maxUnits);
@@ -203,6 +213,7 @@ void SimSnapshot::Extract(UnitRows& rows)
 		rows.buildProgress[id] = u->buildProgress;
 		rows.beingBuilt[id] = u->beingBuilt;
 		rows.stunned[id] = u->IsStunned();
+		rows.radius[id] = u->radius;
 		rows.relMidPos[id] = u->relMidPos;
 		rows.frontdir[id] = u->frontdir;
 		rows.updir[id] = u->updir;
@@ -218,4 +229,80 @@ void SimSnapshot::Extract(UnitRows& rows)
 
 	rows.simFrame = gs->frameNum;
 	rows.aliveCount = static_cast<int32_t>(activeUnits.size());
+}
+
+void SimSnapshot::ExtractProjectiles(ProjectileRows& rows)
+{
+	const int numAllyTeams = teamHandler.ActiveAllyTeams();
+	const auto& pc = projectileHandler.GetActiveProjectiles(true);
+
+	// synced projectile ids are free-list ints; rows grow-only to the max id
+	// seen so slot indices stay stable across extractions
+	int maxID = -1;
+	for (size_t i = 0; i < pc.size(); ++i)
+		maxID = std::max(maxID, pc[i]->id);
+
+	const size_t wantSlots = static_cast<size_t>(maxID + 1);
+
+	if (rows.valid.size() < wantSlots || rows.numAllyTeams != numAllyTeams) {
+		const size_t n = std::max(wantSlots, rows.valid.size());
+		rows.numAllyTeams = numAllyTeams;
+		rows.valid.resize(n, 0);
+		rows.pos.resize(n);
+		rows.speed.resize(n);
+		rows.allyTeam.resize(n);
+		rows.ownerID.resize(n);
+		rows.isWeapon.resize(n);
+		rows.weaponDefID.resize(n);
+		rows.targetType.resize(n);
+		rows.targetID.resize(n);
+		rows.targetPos.resize(n);
+		rows.inLosAll.resize(size_t(numAllyTeams) * n);
+	}
+
+	std::fill(rows.valid.begin(), rows.valid.end(), 0);
+
+	const size_t slots = rows.MaxSlots();
+
+	for (size_t i = 0; i < pc.size(); ++i) {
+		const CProjectile* p = pc[i];
+		const int id = p->id;
+
+		rows.valid[id] = 1;
+		rows.pos[id] = p->pos;
+		rows.speed[id] = p->speed;
+		rows.allyTeam[id] = p->GetAllyteamID();
+		rows.ownerID[id] = p->GetOwnerID();
+		rows.isWeapon[id] = p->weapon;
+		rows.weaponDefID[id] = -1;
+		rows.targetType[id] = 0;
+		rows.targetID[id] = 0;
+		rows.targetPos[id] = ZeroVector;
+
+		if (p->weapon) {
+			const CWeaponProjectile* wpro = static_cast<const CWeaponProjectile*>(p);
+			const WeaponDef* wdef = wpro->GetWeaponDef();
+			const CWorldObject* wtgt = wpro->GetTargetObject();
+
+			rows.weaponDefID[id] = (wdef != nullptr) ? wdef->id : -1;
+
+			// same type resolution as LuaSyncedRead::GetProjectileTarget
+			if (wtgt == nullptr) {
+				rows.targetType[id] = 'g';
+				rows.targetPos[id] = wpro->GetTargetPos();
+			} else if (dynamic_cast<const CUnit*>(wtgt) != nullptr) {
+				rows.targetType[id] = 'u';
+				rows.targetID[id] = wtgt->id;
+			} else if (dynamic_cast<const CFeature*>(wtgt) != nullptr) {
+				rows.targetType[id] = 'f';
+				rows.targetID[id] = wtgt->id;
+			} else if (dynamic_cast<const CWeaponProjectile*>(wtgt) != nullptr) {
+				rows.targetType[id] = 'p';
+				rows.targetID[id] = wtgt->id;
+			}
+		}
+
+		for (int at = 0; at < numAllyTeams; ++at)
+			rows.inLosAll[at * slots + id] = losHandler->InLos(p->pos, at);
+	}
 }

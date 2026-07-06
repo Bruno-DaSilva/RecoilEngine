@@ -93,6 +93,10 @@ public:
 	uint8_t GetPreviousDrawFlag(const T* o) const { return GetDrawFlagState(o).prev; }
 	bool HasDrawFlag(const T* o, DrawFlags f) const { return (GetDrawFlag(o) & f) == f; }
 
+	// id-keyed variants for snapshot-serving consumers (PR 18 Lua callout twins)
+	uint8_t GetDrawFlag(int id) const { return GetDrawFlagState(id).flag; }
+	bool HasDrawFlag(int id, DrawFlags f) const { return (GetDrawFlag(id) & f) == f; }
+
 	// mutators; only valid for registered objects (id slot exists), as UpdateObjectDrawFlags
 	// and the icon-state pass are the sole writers — matching the old member's always-present
 	void ResetDrawFlag(const T* o) { DrawFlagRef(o).flag = DrawFlags::SO_NODRAW_FLAG; }
@@ -167,9 +171,10 @@ protected:
 		uint8_t prev = DrawFlags::SO_NODRAW_FLAG;
 	};
 
-	const DrawFlagState& GetDrawFlagState(const T* o) const {
+	const DrawFlagState& GetDrawFlagState(const T* o) const { return GetDrawFlagState(o->id); }
+	const DrawFlagState& GetDrawFlagState(int id) const {
 		static const DrawFlagState zero = {};
-		return (o->id < drawFlags.size()) ? drawFlags[o->id] : zero;
+		return (static_cast<size_t>(id) < drawFlags.size()) ? drawFlags[id] : zero;
 	}
 	DrawFlagState& DrawFlagRef(const T* o) { return drawFlags[o->id]; }
 

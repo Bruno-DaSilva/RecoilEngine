@@ -7190,9 +7190,9 @@ int LuaSyncedRead::GetFeatureSmokeTime(lua_State* L)
  * @return number? posY
  * @return number? posZ
  */
-int LuaSyncedRead::GetProjectilePosition(lua_State* L)
+static int GetProjectilePositionLive(lua_State* L, const char* caller)
 {
-	const CProjectile* pro = ParseProjectile(L, __func__, 1);
+	const CProjectile* pro = ParseProjectile(L, caller, 1);
 
 	if (pro == nullptr)
 		return 0;
@@ -7201,6 +7201,12 @@ int LuaSyncedRead::GetProjectilePosition(lua_State* L)
 	lua_pushnumber(L, pro->pos.y);
 	lua_pushnumber(L, pro->pos.z);
 	return 3;
+}
+
+int LuaSyncedRead::GetProjectilePosition(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 18, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetProjectilePositionLive, &LuaSnapshotServe::GetProjectilePosition);
 }
 
 /***
@@ -7233,9 +7239,15 @@ int LuaSyncedRead::GetProjectileDirection(lua_State* L)
  * @return number? velZ
  * @return number? velW
  */
+static int GetProjectileVelocityLive(lua_State* L, const char* caller)
+{
+	return (GetWorldObjectVelocity(L, ParseProjectile(L, caller, 1)));
+}
+
 int LuaSyncedRead::GetProjectileVelocity(lua_State* L)
 {
-	return (GetWorldObjectVelocity(L, ParseProjectile(L, __func__, 1)));
+	// snapshot-served from draw context (sim|draw PR 18, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetProjectileVelocityLive, &LuaSnapshotServe::GetProjectileVelocity);
 }
 
 
@@ -7299,9 +7311,9 @@ int LuaSyncedRead::GetPieceProjectileParams(lua_State* L)
  * string.byte('p') := PROJECTILE
  * @return number|float3 target targetID or targetPos when targetTypeInt == string.byte('g')
  */
-int LuaSyncedRead::GetProjectileTarget(lua_State* L)
+static int GetProjectileTargetLive(lua_State* L, const char* caller)
 {
-	const CProjectile* pro = ParseProjectile(L, __func__, 1);
+	const CProjectile* pro = ParseProjectile(L, caller, 1);
 
 	if (pro == nullptr || !pro->weapon)
 		return 0;
@@ -7337,6 +7349,12 @@ int LuaSyncedRead::GetProjectileTarget(lua_State* L)
 	// projectile target cannot be anything else
 	assert(false);
 	return 0;
+}
+
+int LuaSyncedRead::GetProjectileTarget(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 18, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetProjectileTargetLive, &LuaSnapshotServe::GetProjectileTarget);
 }
 
 
@@ -7386,9 +7404,9 @@ int LuaSyncedRead::GetProjectileTimeToLive(lua_State* L)
  * @param projectileID integer
  * @return number?
  */
-int LuaSyncedRead::GetProjectileOwnerID(lua_State* L)
+static int GetProjectileOwnerIDLive(lua_State* L, const char* caller)
 {
-	const CProjectile* pro = ParseProjectile(L, __func__, 1);
+	const CProjectile* pro = ParseProjectile(L, caller, 1);
 
 	if (pro == nullptr)
 		return 0;
@@ -7399,6 +7417,12 @@ int LuaSyncedRead::GetProjectileOwnerID(lua_State* L)
 
 	lua_pushnumber(L, unitID);
 	return 1;
+}
+
+int LuaSyncedRead::GetProjectileOwnerID(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 18, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetProjectileOwnerIDLive, &LuaSnapshotServe::GetProjectileOwnerID);
 }
 
 
@@ -7471,9 +7495,9 @@ int LuaSyncedRead::GetProjectileType(lua_State* L)
  * @param projectileID integer
  * @return number?
  */
-int LuaSyncedRead::GetProjectileDefID(lua_State* L)
+static int GetProjectileDefIDLive(lua_State* L, const char* caller)
 {
-	const CProjectile* pro = ParseProjectile(L, __func__, 1);
+	const CProjectile* pro = ParseProjectile(L, caller, 1);
 
 	if (pro == nullptr)
 		return 0;
@@ -7488,6 +7512,12 @@ int LuaSyncedRead::GetProjectileDefID(lua_State* L)
 
 	lua_pushnumber(L, wdef->id);
 	return 1;
+}
+
+int LuaSyncedRead::GetProjectileDefID(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 18, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetProjectileDefIDLive, &LuaSnapshotServe::GetProjectileDefID);
 }
 
 /*** Returns the name of the model piece from which a piece projectile was spawned. Returns nil for other projectiles including weapons
@@ -8247,9 +8277,9 @@ int LuaSyncedRead::IsPosInAirLos(lua_State* L)
  * @param raw false? Return a table.
  * @return table<"los"|"radar"|"typed",boolean>? los A table of LOS state names as keys and booleans as values, or `nil` if `unitID` is invalid.
  */
-int LuaSyncedRead::GetUnitLosState(lua_State* L)
+static int GetUnitLosStateLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseUnit(L, __func__, 1);
+	const CUnit* unit = ParseUnit(L, caller, 1);
 	if (unit == nullptr)
 		return 0;
 
@@ -8286,6 +8316,12 @@ int LuaSyncedRead::GetUnitLosState(lua_State* L)
 		HSTR_PUSH_BOOL(L, "typed", true);
 	}
 	return 1;
+}
+
+int LuaSyncedRead::GetUnitLosState(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 18, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitLosStateLive, &LuaSnapshotServe::GetUnitLosState);
 }
 
 

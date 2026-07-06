@@ -155,6 +155,9 @@ local function AnnounceOnce(tag)
 	end
 end
 
+local mapSizeX = Game.mapSizeX
+local mapSizeZ = Game.mapSizeZ
+
 local function ExerciseFamily()
 	local units = Spring.GetAllUnits()
 	for i = 1, #units do
@@ -166,6 +169,21 @@ local function ExerciseFamily()
 		Spring.GetUnitViewPosition(uid)
 		Spring.GetUnitViewPosition(uid, true)
 		Spring.IsUnitVisible(uid)
+		Spring.IsUnitIcon(uid)
+		Spring.GetUnitLosState(uid)
+		Spring.GetUnitLosState(uid, nil, true)
+	end
+
+	-- projectile family (second family): headless projectile-visual widgets
+	-- self-disable, so the driver must generate this surface itself
+	local projs = Spring.GetProjectilesInRectangle(0, 0, mapSizeX, mapSizeZ)
+	for i = 1, #projs do
+		local pid = projs[i]
+		Spring.GetProjectilePosition(pid)
+		Spring.GetProjectileVelocity(pid)
+		Spring.GetProjectileDefID(pid)
+		Spring.GetProjectileTarget(pid)
+		Spring.GetProjectileOwnerID(pid)
 	end
 end
 

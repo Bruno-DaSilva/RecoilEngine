@@ -35,6 +35,12 @@
  *    math for the drawer-based midpos variants), posErrorVector, leavesGhost,
  *    per-allyteam stride rows losStatusAll / posErrorBits, and a per-buffer
  *    global block (numAllyTeams, radar-error scalars, alliance matrix).
+ *    Second family (projectiles) added radius (IsUnitVisible default) and the
+ *    ProjectileRows namespace below: synced projectiles keyed by synced
+ *    projectile id (free-list ints, bounded by the high-water concurrent
+ *    count -- rows grow-only to the max id seen), same buffer/publish
+ *    lifecycle as the unit rows. Unsynced projectiles are draw-side state and
+ *    are not Lua-visible through the synced callouts, so they have no rows.
  *
  * Validity rules:
  *  - Valid(id) mirrors membership in unitHandler's active-unit list at the
@@ -147,6 +153,7 @@ public:
 		std::vector<float> buildProgress;
 		std::vector<uint8_t> beingBuilt;
 		std::vector<uint8_t> stunned;        // CUnit::IsStunned()
+		std::vector<float> radius;           // IsUnitVisible's default sphere
 
 		// object-space basis + relative midpoint (drawer midpos math, GetUnitVectors-class reads)
 		std::vector<float3> relMidPos;
@@ -218,6 +225,47 @@ public:
 			return ((frontdir[unitID] * v.z) + (rightdir[unitID] * v.x) + (updir[unitID] * v.y));
 		}
 	};
+
+	/**
+	 * Synced-projectile rows (second callout family). Keyed by synced
+	 * projectile id; slots grow-only to the max id seen (ids are free-list
+	 * ints bounded by the high-water concurrent count). Same validity and
+	 * stale/nil contract as UnitRows. Masking input is inLosAll -- the
+	 * positional LOS-map answer losHandler->InLos(pro->pos, allyTeam)
+	 * captured at extraction for every allyteam -- plus allyTeam for the
+	 * own-projectile bypass; PovVisible mirrors LuaUtils::IsProjectileVisible.
+	 */
+	struct ProjectileRows {
+		int32_t numAllyTeams = 0;
+
+		std::vector<uint8_t> valid;
+		std::vector<float3> pos;
+		std::vector<float4> speed;
+		std::vector<int32_t> allyTeam;    // CProjectile::GetAllyteamID(); may be -1
+		std::vector<int32_t> ownerID;     // CProjectile::GetOwnerID(), raw (serving replicates the range check)
+		std::vector<uint8_t> isWeapon;    // CProjectile::weapon
+		std::vector<int32_t> weaponDefID; // -1 = no WeaponDef (nil shape); only meaningful when isWeapon
+		std::vector<uint8_t> targetType;  // 0 = none/not-a-weapon; 'g'/'u'/'f'/'p' as in GetProjectileTarget
+		std::vector<int32_t> targetID;    // for 'u'/'f'/'p'
+		std::vector<float3> targetPos;    // for 'g'
+		std::vector<uint8_t> inLosAll;    // [numAllyTeams * MaxSlots()], row-major by allyteam
+
+		bool Valid(int projID) const {
+			return (static_cast<size_t>(projID) < valid.size() && valid[projID] != 0);
+		}
+		size_t MaxSlots() const { return valid.size(); }
+
+		bool InLos(int projID, int argAllyTeam) const {
+			return (argAllyTeam >= 0 && argAllyTeam < numAllyTeams &&
+				inLosAll[argAllyTeam * MaxSlots() + projID] != 0);
+		}
+		// LuaUtils::IsProjectileVisible mirror; caller must have checked Valid()
+		bool PovVisible(int projID, int readAllyTeam, bool fullRead) const {
+			if (readAllyTeam < 0)
+				return fullRead;
+			return !((readAllyTeam != allyTeam[projID]) && !InLos(projID, readAllyTeam));
+		}
+	};
 public:
 	/// extract-if-due + publish; called once per draw frame from CGame::Draw,
 	/// after the render-event drain (see the timing contract above)
@@ -246,18 +294,25 @@ public:
 	void HashCompletedFrame(int frameNum);
 
 	const UnitRows& Read() const { return *front; }
+	const ProjectileRows& ReadProjectiles() const { return *projFront; }
 	uint32_t Generation() const { return generation; }
 private:
 	void Extract(UnitRows& rows);
+	void ExtractProjectiles(ProjectileRows& rows);
 	static void Resize(UnitRows& rows, size_t maxUnits, int numAllyTeams);
 private:
 	UnitRows buffers[2];
 	UnitRows* front = &buffers[0];
 	UnitRows* back = &buffers[1];
 
+	ProjectileRows projBuffers[2];
+	ProjectileRows* projFront = &projBuffers[0];
+	ProjectileRows* projBack = &projBuffers[1];
+
 	// PR 16: scratch rows for per-sim-frame hashing; never published, kept only
 	// to avoid reallocating its arrays every armed frame
 	UnitRows hashScratch;
+	ProjectileRows hashProjScratch;
 
 	uint32_t generation = 0;
 
