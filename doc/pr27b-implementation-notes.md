@@ -55,6 +55,22 @@ First full-length clean flag-ON resim: Rosetta f=44537, 0 DESYNC, wall 4:22 (com
 4. **Sanctioned-live ends at the flip** — with the sim thread running, sanctioned live reads walk containers under mutation (crash-class). `DenyLiveRead` now denies every unserved live read while the sim thread runs; commit (d) serves the hot families back. The armed diff-gate dual-run disables itself under the running split (its live leg's quiescence premise is void; the barrier field passes stay armed).
 5. `CheckStack` diagnostics on the synced states skip while the sim thread owns them.
 
+## Windowed dogfood findings (user sessions, 2026-07-06)
+
+- **FIXED**: boundary-applied ctrl pokes (queued SetUnitNoSelect) served stale snapshot rows until the next sim frame — DrainBoundaryApplies now pokes MarkMutatedOutsideFrame (commit `933d570e38`).
+- **Known tier-(a) deviation, documented**: deferred unsynced unit events (e.g. LuaRules-unsynced UnitDamaged in BAR's api_damage_stats) hit the dead-id nil shape when the unit died later in the same burst — master ran the handler mid-frame with the unit alive, so `GetUnitHealth`-class reads return nil where master returned numbers, and un-nil-checked gadget code errors (caught per-callin, no crash; death-frame damage missing from stats). Quality follow-up if games need it: serve died-in-burst ids from their deferred-deletion shells during the barrier drain window (shells stay readable until the ack — the machinery half-exists as the boundary death-delivery list). Game-side fix is a nil-check.
+- The SplitDrawContract live-read warnings for GetUnitCommandCount/GetUnitCommands/GetTeamLuaAI/GetGameRulesParam are the expected count-mode inventory for the not-yet-served families (the next serving batch: command queues, rules params, weapon state, positional LOS).
+
+## TSan triage (Rosetta flag-ON segment to f=6000, 2026-07-06)
+
+2490 warnings, 0 use-after-free, 0 in the split's own machinery (UnsyncedBoundaryQueue / handshake / resolve caches / LuaMemPool clean after the spawn-race + mailbox fixes). Residual classes, by count:
+
+- **Pre-existing sim-internal fork-join races** (exist flag-off; the QTPFS coopsched work targets this space): LosMap AddRaycast scratch (~210), QTPFS PathSearch (~60+), MoveType/float3 math on workers, CFeature::EmitGeoSmoke, CWeapon::UpdateWeaponVectors.
+- **Pre-existing infrastructure internals**: spring_time::operator+= (the global timer estimator, 295), spring_futex/linux_signal internals (~490 — TSan can't see through the futex protocol), ThreadPool scheduling heuristics, CSyncChecker counter.
+- **Tolerated §C torn-read families (documented policy)**: LocalModelPiece transform reads (17, the stale-serve gate keeps recompute out), projectile visual scalars, Camera read from sim-side unsynced code (~96 — audit says LOD/listener uses; keep an eye on it), guRNG stream shared by sim-side unsynced consumers and the GetTeamUnitsByDefs twin shuffle.
+- **TimeProfiler AddTimeRaw (~87)**: the special-timer lock covers the "Sim"/"Draw" pops; the residual is the ScopedMtTimer threadProfiles path under a disabled profiler across the two orchestrators — cosmetic counters, follow-up.
+- **One real pre-existing (PR-12-era) find, follow-up**: RenderEventQueue::Push append race between an orchestrator slice and a worker slice when MT feature/projectile passes spawn projectiles concurrently (geo smoke vs particle spawns). Present flag-off since PR 12; wants the append under CProjectile::mut or main-slice-only spawning.
+
 ## Commit plan
 
 - (a0) boundary deferral for sim-fired unsynced work [flag-inert when off]
