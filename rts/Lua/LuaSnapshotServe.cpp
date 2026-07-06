@@ -2,19 +2,23 @@
 
 #include "LuaSnapshotServe.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 #include "LuaHandle.h"
 #include "LuaHashString.h" // HSTR_PUSH_BOOL
 #include "LuaInclude.h"
 #include "LuaSplitContract.h"
+#include "LuaUtils.h" // allegiance constants (spatial-list twins)
 
 #include "Game/Camera.h"
 #include "Game/Game.h" // the stats callouts' live `game` null-check
 #include "Game/GlobalUnsynced.h" // gu->myAllyTeam (IsUnitAllied's fullRead answer)
 #include "Rendering/Common/SimSnapshot.h"
 #include "Rendering/Common/SnapshotDiffGate.h"
+#include "Rendering/Common/SnapshotPickGrid.h"
 #include "Rendering/GlobalRendering.h" // timeOffset (draw-owned)
 #include "Rendering/Units/UnitDrawer.h"
 #include "Sim/Features/FeatureDef.h"
@@ -26,12 +30,16 @@
 #include "Sim/Units/Unit.h" // LOS_* bits
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Units/UnitDefHandler.h"
+#include "System/AABB.hpp" // GetUnitsInBox's boxCheck
+#include "System/ContainerUtil.h" // spring::VectorSortUnique (GetTeamUnitsByDefs)
+#include "System/Cpp11Compat.hpp" // spring::random_shuffle (GetTeamUnitsByDefs)
 #include "System/Log/ILog.h"
 #include "System/SimDrawSplit.h"
 #include "System/EventClient.h" // CEventClient special-team constants
 #include "System/SpringMath.h" // ClampRadPi (GetUnitHeading)
 #include "System/StringHash.h" // hashString (GetUnitSensorRadius)
 #include "System/TimeProfiler.h" // ScopedDrawCallinContext
+#include "System/UnorderedSet.hpp"
 
 namespace {
 	struct Pov {
@@ -216,6 +224,80 @@ namespace {
 			default:           snprintf(buf, n, "<%s>", lua_typename(L, lua_type(L, idx))); break;
 		}
 	}
+
+	// PR 27b: the list-returning spatial/team twins deliberately serve
+	// ascending-id order instead of master's quadfield-walk / creation order
+	// (and GetTeamUnitsByDefs re-shuffles its groups live), so an
+	// element-for-element table compare would always "fail" on order. These
+	// callouts opt in to a set-mode compare: (numeric key -> numeric value)
+	// entries -- the id array slots -- match as multisets ignoring their
+	// positions, everything else ("n"/"unknown"/defID keys) matches by key,
+	// sub-tables recursing in set mode.
+	bool CompareTablesAsIdSet(const char* caller)
+	{
+		static const spring::unordered_set<std::string> idSetCallouts = {
+			"GetAllUnits", "GetTeamUnits", "GetTeamUnitsSorted",
+			"GetTeamUnitsByDefs",
+			"GetUnitsInRectangle", "GetUnitsInBox",
+			"GetUnitsInCylinder", "GetUnitsInSphere",
+			"GetFeaturesInRectangle", "GetFeaturesInSphere",
+			"GetFeaturesInCylinder", "GetProjectilesInRectangle",
+		};
+		return (idSetCallouts.find(caller) != idSetCallouts.end());
+	}
+
+	bool TablesEqualIdSet(lua_State* L, int a, int b)
+	{
+		a = luaS_absIndex(L, a);
+		b = luaS_absIndex(L, b);
+
+		std::vector<double> aNums;
+		std::vector<double> bNums;
+
+		// a's entries: array slots into the multiset, the rest matched in b
+		lua_pushnil(L);
+		while (lua_next(L, a) != 0) {
+			// stack: ... key value
+			if (lua_type(L, -2) == LUA_TNUMBER && lua_type(L, -1) == LUA_TNUMBER) {
+				aNums.push_back(lua_tonumber(L, -1));
+				lua_pop(L, 1);
+				continue;
+			}
+
+			lua_pushvalue(L, -2);
+			lua_rawget(L, b); // ... key aValue bValue
+			const bool eq = (lua_type(L, -2) == LUA_TTABLE && lua_type(L, -1) == LUA_TTABLE) ?
+				TablesEqualIdSet(L, -2, -1) : SlotsEqual(L, -2, -1);
+			lua_pop(L, 2); // ... key
+			if (!eq) {
+				lua_pop(L, 1);
+				return false;
+			}
+		}
+
+		// b's entries: gather its multiset, catch keys a lacks
+		lua_pushnil(L);
+		while (lua_next(L, b) != 0) {
+			if (lua_type(L, -2) == LUA_TNUMBER && lua_type(L, -1) == LUA_TNUMBER) {
+				bNums.push_back(lua_tonumber(L, -1));
+				lua_pop(L, 1);
+				continue;
+			}
+
+			lua_pushvalue(L, -2);
+			lua_rawget(L, a);
+			const bool present = !lua_isnil(L, -1);
+			lua_pop(L, 2);
+			if (!present) {
+				lua_pop(L, 1);
+				return false;
+			}
+		}
+
+		std::sort(aNums.begin(), aNums.end());
+		std::sort(bNums.begin(), bNums.end());
+		return (aNums == bNums);
+	}
 }
 
 
@@ -308,12 +390,19 @@ int LuaSnapshotServe::Route(lua_State* L, const char* caller, ServeFn liveFn, Se
 	bool equal = (liveN == snapN);
 	char detail[160] = "";
 
+	// list callouts with the documented ascending-id order deviation compare
+	// their result tables as ID sets (see CompareTablesAsIdSet)
+	const bool idSetMode = CompareTablesAsIdSet(caller);
+
 	if (!equal) {
 		snprintf(detail, sizeof(detail), "return counts differ: live=%d snap=%d", liveN, snapN);
 	} else {
 		for (int i = 1; i <= liveN; ++i) {
 			lua_rawgeti(L, tbl, i); // live value i at tbl+1
-			const bool slotEqual = SlotsEqual(L, tbl + 1, base + i);
+			const bool slotEqual =
+				(idSetMode && lua_type(L, tbl + 1) == LUA_TTABLE && lua_type(L, base + i) == LUA_TTABLE) ?
+				TablesEqualIdSet(L, tbl + 1, base + i) :
+				SlotsEqual(L, tbl + 1, base + i);
 
 			if (!slotEqual && equal) {
 				equal = false;
@@ -2370,4 +2459,986 @@ int LuaSnapshotServe::GetGlobalLos(lua_State* L, const char* caller)
 
 	lua_pushboolean(L, rows.globalLos[allyTeam]);
 	return 1;
+}
+
+
+/******************************************************************************
+ * Spatial-query + team-unit-list families (PR 27b). The spatial twins take
+ * coarse candidates from the SnapshotPickGrid (rebuilt per boundary from the
+ * same front buffers they read) and re-apply the live bodies' exact filters:
+ * first the quadfield coarse bounds/distance math on raw pos (that check is
+ * part of the live result set, not just its broadphase), then the allegiance/
+ * visibility/region filters via the Pov mirrors. The list twins serve from a
+ * per-boundary team-unit index derived lazily from the front UnitRows.
+ *
+ * DOCUMENTED DEVIATION (decided): result order is ascending-id, not master's
+ * quadfield-walk / active-list / creation order (unreproducible without the
+ * live containers). Sets and counts are identical; the armed dual-run
+ * compares these callouts as ID sets (CompareTablesAsIdSet).
+ ******************************************************************************/
+
+namespace {
+	// scratch reused across calls (single-threaded draw context; the twins run
+	// no Lua, so no reentrancy -- same pattern as the live gtuObjectIDs)
+	std::vector<int> sqCandidateIDs;
+	std::vector<int> sqObjectIDs;
+	std::vector<int> snapGtuObjectIDs;
+	std::vector< std::pair<int, int> > snapGtuDefCounts;
+
+	/**
+	 * Per-boundary team-unit index: the snapshot-side equivalent of
+	 * unitHandler's per-team / per-(team, def) unit lists the team-list family
+	 * walks. Derived lazily on first use per generation by one pass over the
+	 * front UnitRows (validity + team + defID) -- no extraction-time work.
+	 * Id vectors ascend by construction (the pass ascends).
+	 */
+	struct TeamUnitIndex {
+		uint32_t generation = 0;
+		bool built = false;
+
+		std::vector<int> allIDs;                                             // every valid id
+		std::vector<std::vector<int>> idsByTeam;                             // [teamID]
+		std::vector<spring::unordered_map<int, std::vector<int>>> idsByTeamAndDef; // [teamID][defID]
+	};
+	TeamUnitIndex teamUnitIndex;
+
+	const TeamUnitIndex& GetTeamUnitIndex()
+	{
+		TeamUnitIndex& idx = teamUnitIndex;
+		const uint32_t gen = simSnapshot.Generation();
+
+		if (idx.built && idx.generation == gen)
+			return idx;
+
+		const auto& urows = simSnapshot.Read();
+		const auto& trows = simSnapshot.ReadTeams();
+
+		idx.allIDs.clear();
+		idx.idsByTeam.resize(trows.activeTeams);
+		idx.idsByTeamAndDef.resize(trows.activeTeams);
+		for (auto& v: idx.idsByTeam)
+			v.clear();
+		for (auto& m: idx.idsByTeamAndDef)
+			m.clear();
+
+		for (size_t id = 0; id < urows.MaxUnits(); ++id) {
+			if (urows.valid[id] == 0)
+				continue;
+
+			const int unitID = static_cast<int>(id);
+			const int teamID = urows.team[id];
+
+			idx.allIDs.push_back(unitID);
+
+			if (teamID >= 0 && teamID < trows.activeTeams) {
+				idx.idsByTeam[teamID].push_back(unitID);
+				idx.idsByTeamAndDef[teamID][urows.defID[id]].push_back(unitID);
+			}
+		}
+
+		idx.built = true;
+		idx.generation = gen;
+		return idx;
+	}
+
+	// unitHandler.GetUnitsByTeamAndDef mirror shape: empty vector for defs the
+	// team has no units of
+	const std::vector<int>& IdsByTeamAndDef(const TeamUnitIndex& idx, int teamID, int unitDefID)
+	{
+		static const std::vector<int> empty;
+
+		const auto& defMap = idx.idsByTeamAndDef[teamID];
+		const auto it = defMap.find(unitDefID);
+
+		return (it == defMap.end()) ? empty : it->second;
+	}
+
+	// LuaUtils::ParseAllegiance mirror (identical error text); the only live
+	// read is teamHandler.ActiveTeams() -> the team boundary copy
+	inline int ParseAllegianceMirror(lua_State* L, const char* caller, int index)
+	{
+		if (!lua_isnumber(L, index))
+			return LuaUtils::AllUnits;
+
+		const int teamID = lua_toint(L, index);
+
+		// MyUnits, AllyUnits, and EnemyUnits do not apply to fullRead
+		if (CLuaHandle::GetHandleFullRead(L) && (teamID < 0))
+			return LuaUtils::AllUnits;
+
+		if (teamID < LuaUtils::EnemyUnits) {
+			luaL_error(L, "Bad teamID in %s (%d)", caller, teamID);
+		}
+		else if (teamID >= simSnapshot.ReadTeams().activeTeams) {
+			luaL_error(L, "Bad teamID in %s (%d)", caller, teamID);
+		}
+
+		return teamID;
+	}
+
+	// LuaSyncedRead's ApplyPlanarTeamError mirror; the live reads are
+	// teamHandler.AllyTeam (TeamRows) and losHandler->GetAllyTeamRadarErrorSize
+	// (the UnitRows radar-error scalars). Only reached when !fullRead; a
+	// negative readAllyTeam cannot arise for a real non-fullRead handle (the
+	// live path would index radarErrorSizes out of bounds there), so it reads
+	// as no expansion -- every unit fails the visibility filters anyway
+	inline void ApplyPlanarTeamErrorMirror(lua_State* L, int allegiance, float3& mins, float3& maxs)
+	{
+		const Pov pov = HandlePov(L);
+		const auto& trows = simSnapshot.ReadTeams();
+
+		if ((allegiance >= 0 && !trows.PovAlliedTeam(allegiance, pov.readAllyTeam, pov.fullRead)) ||
+		   !(allegiance == LuaUtils::MyUnits || allegiance == LuaUtils::AllyUnits)) {
+			const auto& urows = simSnapshot.Read();
+
+			if (pov.readAllyTeam < 0 || pov.readAllyTeam >= urows.numAllyTeams)
+				return;
+
+			const float allyTeamError = urows.radarErrorSizes[pov.readAllyTeam];
+			const float3 allyTeamError3(allyTeamError, 0.0f, allyTeamError);
+			mins -= allyTeamError3;
+			maxs += allyTeamError3;
+		}
+	}
+
+	// CQuadField::GetUnitsExact(mins, maxs) mirror over the pick grid: coarse
+	// superset from the grid cells, then the exact raw-pos bounds the live
+	// query applies -- the candidate SET matches live, only its order deviates
+	const std::vector<int>& QuadfieldUnitsExactMirror(const SimSnapshot::UnitRows& rows, const float3& mins, const float3& maxs)
+	{
+		snapshotPickGrid.QueryUnitsInRect(mins, maxs, sqCandidateIDs);
+
+		sqObjectIDs.clear();
+
+		for (const int unitID: sqCandidateIDs) {
+			const float3& pos = rows.pos[unitID];
+			if (pos.x < mins.x || pos.x > maxs.x)
+				continue;
+			if (pos.z < mins.z || pos.z > maxs.z)
+				continue;
+
+			sqObjectIDs.push_back(unitID);
+		}
+
+		return sqObjectIDs;
+	}
+
+	// LuaSyncedRead's GetFilteredUnits mirror: identical allegiance
+	// disqualifier branches and the same midPos + GetLuaErrorVector position
+	// input; candidates arrive pre-filtered by QuadfieldUnitsExactMirror
+	template<typename InRegion>
+	void GetFilteredUnitsSnap(lua_State* L, const SimSnapshot::UnitRows& rows,
+		int allegiance, const std::vector<int>& unitIDs, InRegion inRegion)
+	{
+		const int readTeam = CLuaHandle::GetHandleReadTeam(L);
+		const int readAllyTeam = CLuaHandle::GetHandleReadAllyTeam(L);
+		const bool fullRead = CLuaHandle::GetHandleFullRead(L);
+
+		auto runLoop = [&](auto disqualifier) {
+			unsigned int count = 0;
+			for (const int unitID : unitIDs) {
+				if (disqualifier(unitID))
+					continue;
+
+				float3 pos = rows.midPos[unitID] + rows.LuaErrorVector(unitID, readAllyTeam, fullRead);
+				if (!inRegion(unitID, pos))
+					continue;
+
+				lua_pushnumber(L, unitID);
+				lua_rawseti(L, -2, ++count);
+			}
+		};
+
+		switch (allegiance) {
+			case LuaUtils::AllUnits:
+				runLoop([&](int u) { return !rows.PovUnitVisible(u, readAllyTeam, fullRead); });
+				break;
+			case LuaUtils::MyUnits:
+				runLoop([&](int u) { return rows.team[u] != readTeam || !rows.PovUnitVisible(u, readAllyTeam, fullRead); });
+				break;
+			case LuaUtils::AllyUnits:
+				runLoop([&](int u) { return rows.allyTeam[u] != readAllyTeam || !rows.PovUnitVisible(u, readAllyTeam, fullRead); });
+				break;
+			case LuaUtils::EnemyUnits:
+				runLoop([&](int u) { return rows.allyTeam[u] == readAllyTeam || !rows.PovUnitVisible(u, readAllyTeam, fullRead); });
+				break;
+			default:
+				runLoop([&](int u) { return rows.team[u] != allegiance || !rows.PovUnitVisible(u, readAllyTeam, fullRead); });
+				break;
+		}
+	}
+
+	// LuaSyncedRead's ProcessFeatures mirror: same branch structure, the
+	// IsFeatureVisible gate via PovFeatureVisible
+	void ProcessFeaturesSnap(lua_State* L, const SimSnapshot::FeatureRows& rows, const std::vector<int>& featureIDs)
+	{
+		const unsigned int featureCount = featureIDs.size();
+		unsigned int arrayIndex = 1;
+
+		lua_createtable(L, featureCount, 0);
+
+		if (CLuaHandle::GetHandleReadAllyTeam(L) < 0) {
+			if (CLuaHandle::GetHandleFullRead(L)) {
+				for (unsigned int i = 0; i < featureCount; i++) {
+					lua_pushnumber(L, featureIDs[i]);
+					lua_rawseti(L, -2, arrayIndex++);
+				}
+			}
+		} else {
+			const Pov pov = HandlePov(L);
+
+			for (unsigned int i = 0; i < featureCount; i++) {
+				const int featureID = featureIDs[i];
+
+				if (!PovFeatureVisible(rows, featureID, pov)) {
+					continue;
+				}
+
+				lua_pushnumber(L, featureID);
+				lua_rawseti(L, -2, arrayIndex++);
+			}
+		}
+	}
+
+	// LuaSyncedRead's GetProjectilesLuaTable mirror; candidates are synced by
+	// construction (only synced projectiles have rows -- the !pro->synced skip)
+	void GetProjectilesLuaTableSnap(lua_State* L, const SimSnapshot::ProjectileRows& rows,
+		const std::vector<int>& projectileIDs, bool excludeWeaponProjectiles, bool excludePieceProjectiles)
+	{
+		int arrayIndex = 1;
+
+		lua_createtable(L, static_cast<int>(projectileIDs.size()), 0);
+
+		if (CLuaHandle::GetHandleReadAllyTeam(L) < 0) {
+			if (CLuaHandle::GetHandleFullRead(L)) {
+				for (const int projID : projectileIDs) {
+					if (rows.isWeapon[projID] && excludeWeaponProjectiles)
+						continue;
+					if (rows.isPiece[projID] && excludePieceProjectiles)
+						continue;
+
+					lua_pushinteger(L, projID);
+					lua_rawseti(L, -2, arrayIndex++);
+				}
+			}
+		} else {
+			const Pov pov = HandlePov(L);
+
+			for (const int projID : projectileIDs) {
+				if (rows.isWeapon[projID] && excludeWeaponProjectiles)
+					continue;
+				if (rows.isPiece[projID] && excludePieceProjectiles)
+					continue;
+
+				if (!rows.PovVisible(projID, pov.readAllyTeam, pov.fullRead))
+					continue;
+
+				lua_pushinteger(L, projID);
+				lua_rawseti(L, -2, arrayIndex++);
+			}
+		}
+	}
+
+	// LuaSyncedRead's PushVisibleUnits mirror (GetTeamUnitsSorted's enemy
+	// tally); unknown-typed ids collect in snapGtuObjectIDs like gtuObjectIDs
+	bool PushVisibleUnitsSnap(
+		lua_State* L,
+		const SimSnapshot::UnitRows& rows,
+		const Pov& pov,
+		const std::vector<int>& defUnitIDs,
+		int unitDefID,
+		unsigned int* unitCount,
+		unsigned int* defCount
+	) {
+		bool createdTable = false;
+
+		for (const int unitID: defUnitIDs) {
+			if (!rows.PovUnitVisible(unitID, pov.readAllyTeam, pov.fullRead))
+				continue;
+
+			if (!rows.PovUnitTyped(unitID, pov.readAllyTeam, pov.fullRead)) {
+				snapGtuObjectIDs.push_back(unitID);
+				continue;
+			}
+
+			// push new table for first unit of type <unitDefID> to be visible
+			if (!createdTable) {
+				createdTable = true;
+
+				lua_pushnumber(L, unitDefID);
+				lua_createtable(L, defUnitIDs.size(), 0);
+
+				(*defCount)++;
+			}
+
+			// add count-th unitID to table
+			lua_pushnumber(L, unitID);
+			lua_rawseti(L, -2, (*unitCount)++);
+		}
+
+		return createdTable;
+	}
+
+	// LuaSyncedRead's InsertSearchUnitDefs mirror (immutable def data)
+	inline void InsertSearchUnitDefsSnap(const UnitDef* ud, bool allied)
+	{
+		if (ud == nullptr)
+			return;
+
+		if (!allied && ud->decoyDef)
+			return;
+
+		snapGtuObjectIDs.push_back(ud->id);
+	}
+}
+
+
+// mirror of LuaSyncedRead::GetAllUnits
+int LuaSnapshotServe::GetAllUnits(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const TeamUnitIndex& idx = GetTeamUnitIndex();
+	const Pov pov = HandlePov(L);
+
+	// DEVIATION: ascending ids (master lists unitHandler's active-unit order)
+	lua_createtable(L, idx.allIDs.size(), 0);
+
+	unsigned int unitCount = 1;
+	if (pov.fullRead) {
+		for (const int unitID: idx.allIDs) {
+			lua_pushnumber(L, unitID);
+			lua_rawseti(L, -2, unitCount++);
+		}
+	} else {
+		for (const int unitID: idx.allIDs) {
+			if (!rows.PovUnitVisible(unitID, pov.readAllyTeam, pov.fullRead))
+				continue;
+
+			lua_pushnumber(L, unitID);
+			lua_rawseti(L, -2, unitCount++);
+		}
+	}
+
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetTeamUnits
+int LuaSnapshotServe::GetTeamUnits(lua_State* L, const char* caller)
+{
+	if (CLuaHandle::GetHandleReadAllyTeam(L) == CEventClient::NoAccessTeam)
+		return 0;
+
+	// parse the team
+	const auto& trows = simSnapshot.ReadTeams();
+	const int teamID = ParseTeamIDSynced(L, caller, 1, trows);
+	const Pov pov = HandlePov(L);
+
+	const auto& urows = simSnapshot.Read();
+	const TeamUnitIndex& idx = GetTeamUnitIndex();
+	const std::vector<int>& teamUnitIDs = idx.idsByTeam[teamID];
+
+	unsigned int unitCount = 1;
+
+	// raw push for allies -- DEVIATION: ascending ids, not creation order
+	if (trows.PovAlliedTeam(teamID, pov.readAllyTeam, pov.fullRead)) {
+		lua_createtable(L, teamUnitIDs.size(), 0);
+
+		for (const int unitID: teamUnitIDs) {
+			lua_pushnumber(L, unitID);
+			lua_rawseti(L, -2, unitCount++);
+		}
+
+		return 1;
+	}
+
+	// check visibility for enemies
+	lua_createtable(L, teamUnitIDs.size(), 0);
+
+	for (const int unitID: teamUnitIDs) {
+		if (!urows.PovUnitVisible(unitID, pov.readAllyTeam, pov.fullRead))
+			continue;
+		lua_pushnumber(L, unitID);
+		lua_rawseti(L, -2, unitCount++);
+	}
+
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetTeamUnitsSorted (NB the live quirk: unitCount is
+// cumulative across the allied branch's def tables, so their array keys are
+// not 1-based per table -- mirrored, the keys must match; only the within-def
+// id order deviates)
+int LuaSnapshotServe::GetTeamUnitsSorted(lua_State* L, const char* caller)
+{
+	if (CLuaHandle::GetHandleReadAllyTeam(L) == CEventClient::NoAccessTeam)
+		return 0;
+
+	// parse the team
+	const auto& trows = simSnapshot.ReadTeams();
+	const int teamID = ParseTeamIDSynced(L, caller, 1, trows);
+	const Pov pov = HandlePov(L);
+
+	const auto& urows = simSnapshot.Read();
+	const TeamUnitIndex& idx = GetTeamUnitIndex();
+
+	unsigned int defCount = 0;
+	unsigned int unitCount = 1;
+
+	// table = {[unitDefID] = {[1] = unitID, [2] = unitID, ...}}
+	lua_createtable(L, unitDefHandler->NumUnitDefs(), 0);
+
+	if (trows.PovAlliedTeam(teamID, pov.readAllyTeam, pov.fullRead)) {
+		// tally for allies -- DEVIATION: ascending ids inside each def table
+		for (unsigned int i = 0, n = unitDefHandler->NumUnitDefs(); i < n; i++) {
+			const std::vector<int>& unitsByDef = IdsByTeamAndDef(idx, teamID, i + 1);
+
+			if (unitsByDef.empty())
+				continue;
+
+			lua_pushnumber(L, i + 1);
+			lua_createtable(L, unitsByDef.size(), 0);
+			defCount++;
+
+			for (const int unitID: unitsByDef) {
+				lua_pushnumber(L, unitID);
+				lua_rawseti(L, -2, unitCount++);
+			}
+			lua_rawset(L, -3);
+		}
+	} else {
+		// tally for enemies
+		snapGtuObjectIDs.clear();
+		snapGtuObjectIDs.reserve(16);
+
+		for (unsigned int i = 0, n = unitDefHandler->NumUnitDefs(); i < n; i++) {
+			const unsigned int unitDefID = i + 1;
+
+			const UnitDef* ud = unitDefHandler->GetUnitDefByID(unitDefID);
+
+			// we deal with decoys later
+			if (ud->decoyDef != nullptr)
+				continue;
+
+			bool createdTable = PushVisibleUnitsSnap(L, urows, pov, IdsByTeamAndDef(idx, teamID, unitDefID), unitDefID, &unitCount, &defCount);
+
+			// for all decoy-defs of unitDefID, add decoy units under the same ID
+			const auto& decoyMap = unitDefHandler->GetDecoyDefIDs();
+			const auto decoyMapIt = decoyMap.find(unitDefID);
+
+			if (decoyMapIt != decoyMap.end()) {
+				for (int decoyDefID: decoyMapIt->second) {
+					createdTable |= PushVisibleUnitsSnap(L, urows, pov, IdsByTeamAndDef(idx, teamID, decoyDefID), unitDefID, &unitCount, &defCount);
+				}
+			}
+
+			if (createdTable)
+				lua_rawset(L, -3);
+
+		}
+
+		if (!snapGtuObjectIDs.empty()) {
+			HSTR_PUSH(L, "unknown");
+
+			defCount += 1;
+			unitCount = 1;
+
+			lua_createtable(L, snapGtuObjectIDs.size(), 0);
+
+			for (int unitID: snapGtuObjectIDs) {
+				lua_pushnumber(L, unitID);
+				lua_rawseti(L, -2, unitCount++);
+			}
+			lua_rawset(L, -3);
+		}
+	}
+
+	// UnitDef ID keys are not consecutive, so add the "n"
+	HSTR_PUSH_NUMBER(L, "n", defCount);
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetTeamUnitsCounts
+int LuaSnapshotServe::GetTeamUnitsCounts(lua_State* L, const char* caller)
+{
+	if (CLuaHandle::GetHandleReadAllyTeam(L) == CEventClient::NoAccessTeam)
+		return 0;
+
+	// parse the team
+	const auto& trows = simSnapshot.ReadTeams();
+	const int teamID = ParseTeamIDSynced(L, caller, 1, trows);
+	const Pov pov = HandlePov(L);
+
+	const auto& urows = simSnapshot.Read();
+	const TeamUnitIndex& idx = GetTeamUnitIndex();
+
+	unsigned int unknownCount = 0;
+	unsigned int defCount = 0;
+
+	// send the raw unitsByDefs counts for allies
+	if (trows.PovAlliedTeam(teamID, pov.readAllyTeam, pov.fullRead)) {
+		lua_createtable(L, unitDefHandler->NumUnitDefs(), 0);
+
+		for (unsigned int i = 0, n = unitDefHandler->NumUnitDefs(); i < n; i++) {
+			const unsigned int unitDefID = i + 1;
+			const unsigned int unitCount = IdsByTeamAndDef(idx, teamID, unitDefID).size();
+
+			if (unitCount == 0)
+				continue;
+
+			lua_pushnumber(L, unitCount);
+			lua_rawseti(L, -2, unitDefID);
+			defCount++;
+		}
+
+		// keys are not necessarily consecutive here due to
+		// the unitCount check, so add the "n" key manually
+		HSTR_PUSH_NUMBER(L, "n", defCount);
+		return 1;
+	}
+
+	// tally the counts for enemies
+	snapGtuDefCounts.clear();
+	snapGtuDefCounts.resize(unitDefHandler->NumUnitDefs() + 1, {0, 0});
+
+	for (const int unitID: idx.idsByTeam[teamID]) {
+		if (!urows.PovUnitVisible(unitID, pov.readAllyTeam, pov.fullRead))
+			continue;
+
+		if (!urows.PovUnitTyped(unitID, pov.readAllyTeam, pov.fullRead)) {
+			unknownCount++;
+		} else {
+			// LuaUtils::EffectiveUnitDef mirror (immutable def data)
+			const UnitDef* ud = unitDefHandler->GetUnitDefByID(urows.defID[unitID]);
+			const UnitDef* unitDef = (urows.PovAlliedUnit(unitID, pov.readAllyTeam, pov.fullRead) || ud->decoyDef == nullptr) ? ud : ud->decoyDef;
+
+			snapGtuDefCounts[unitDef->id].first = unitDef->id;
+			snapGtuDefCounts[unitDef->id].second += 1;
+		}
+	}
+
+	// push the counts
+	lua_createtable(L, 0, snapGtuDefCounts.size());
+
+	for (const auto& gtuDefCount: snapGtuDefCounts) {
+		if (gtuDefCount.second == 0)
+			continue;
+		lua_pushnumber(L, gtuDefCount.second);
+		lua_rawseti(L, -2, gtuDefCount.first);
+		defCount++;
+	}
+	if (unknownCount > 0) {
+		HSTR_PUSH_NUMBER(L, "unknown", unknownCount);
+		defCount++;
+	}
+
+	// unitDef->id is used for ordering, so not consecutive
+	HSTR_PUSH_NUMBER(L, "n", defCount);
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetTeamUnitsByDefs
+int LuaSnapshotServe::GetTeamUnitsByDefs(lua_State* L, const char* caller)
+{
+	if (CLuaHandle::GetHandleReadAllyTeam(L) == CEventClient::NoAccessTeam)
+		return 0;
+
+	const auto& trows = simSnapshot.ReadTeams();
+	const int teamID = ParseTeamIDSynced(L, caller, 1, trows);
+	const Pov pov = HandlePov(L);
+
+	const bool allied = trows.PovAlliedTeam(teamID, pov.readAllyTeam, pov.fullRead);
+
+	// parse the unitDefs
+	snapGtuObjectIDs.clear();
+	snapGtuObjectIDs.reserve(16);
+
+	if (lua_isnumber(L, 2)) {
+		InsertSearchUnitDefsSnap(unitDefHandler->GetUnitDefByID(lua_toint(L, 2)), allied);
+	} else if (lua_istable(L, 2)) {
+		const int tableIdx = 2;
+
+		for (lua_pushnil(L); lua_next(L, tableIdx) != 0; lua_pop(L, 1)) {
+			if (!lua_isnumber(L, LUA_TABLE_VALUE_INDEX))
+				continue;
+
+			InsertSearchUnitDefsSnap(unitDefHandler->GetUnitDefByID(lua_toint(L, LUA_TABLE_VALUE_INDEX)), allied);
+		}
+	} else {
+		luaL_error(L, "Incorrect arguments to GetTeamUnitsByDefs()");
+	}
+
+	// sort the ID's so duplicates can be skipped
+	spring::VectorSortUnique(snapGtuObjectIDs);
+
+	const auto& urows = simSnapshot.Read();
+	const TeamUnitIndex& idx = GetTeamUnitIndex();
+	const std::vector<int>& teamUnitIDs = idx.idsByTeam[teamID];
+
+	std::vector<int> unitIDs;
+	size_t lastOfsset = 0;
+	bool isCalledFromSynced = CLuaHandle::GetHandleSynced(L);
+
+	for (const int unitDefID: snapGtuObjectIDs) {
+		for (const int unitID: teamUnitIDs) {
+			if (!allied && !urows.PovUnitTyped(unitID, pov.readAllyTeam, pov.fullRead))
+				continue;
+
+			// immutable def data (the unit->unitDef deref)
+			const UnitDef* ud = unitDefHandler->GetUnitDefByID(urows.defID[unitID]);
+
+			if (ud->id == unitDefID || (!allied && ud->decoyDef && ud->decoyDef->id == unitDefID)) {
+				unitIDs.emplace_back(unitID);
+			}
+		}
+
+		if (isCalledFromSynced)
+			continue;
+
+		/* kept from the live body: the per-def groups are shuffled so the
+		 * result order reveals nothing (ascending id would leak creation
+		 * order); the armed dual-run compares this callout as an ID set */
+		spring::random_shuffle(unitIDs.begin() + lastOfsset, unitIDs.end(), guRNG);
+		lastOfsset = unitIDs.size();
+	}
+
+	lua_createtable(L, unitIDs.size(), 0);
+
+	for (int i = 0; i < unitIDs.size(); ++i) {
+		lua_pushnumber(L, unitIDs[i]);
+		lua_rawseti(L, -2, i + 1);
+	}
+
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetTeamUnitDefCount
+int LuaSnapshotServe::GetTeamUnitDefCount(lua_State* L, const char* caller)
+{
+	if (CLuaHandle::GetHandleReadAllyTeam(L) == CEventClient::NoAccessTeam)
+		return 0;
+
+	// parse the team
+	const auto& trows = simSnapshot.ReadTeams();
+	const int teamID = ParseTeamIDSynced(L, caller, 1, trows);
+	const Pov pov = HandlePov(L);
+
+	const UnitDef* unitDef = unitDefHandler->GetUnitDefByID(luaL_checkint(L, 2));
+
+	if (unitDef == nullptr)
+		luaL_error(L, "Bad unitDefID in GetTeamUnitDefCount()");
+
+	const auto& urows = simSnapshot.Read();
+	const TeamUnitIndex& idx = GetTeamUnitIndex();
+
+	// use the unitsByDefs count for allies
+	if (trows.PovAlliedTeam(teamID, pov.readAllyTeam, pov.fullRead)) {
+		lua_pushnumber(L, IdsByTeamAndDef(idx, teamID, unitDef->id).size());
+		return 1;
+	}
+
+	// you can never count enemy decoys
+	if (unitDef->decoyDef != nullptr) {
+		lua_pushnumber(L, 0);
+		return 1;
+	}
+
+	unsigned int unitCount = 0;
+
+	// tally the given unitDef units
+	for (const int unitID: IdsByTeamAndDef(idx, teamID, unitDef->id)) {
+		unitCount += (urows.PovUnitTyped(unitID, pov.readAllyTeam, pov.fullRead));
+	}
+
+	// tally the decoy units for the given unitDef
+	const auto& decoyMap = unitDefHandler->GetDecoyDefIDs();
+	const auto decoyMapIt = decoyMap.find(unitDef->id);
+
+	if (decoyMapIt != decoyMap.end()) {
+		for (const int udID: decoyMapIt->second) {
+			for (const int unitID: IdsByTeamAndDef(idx, teamID, udID)) {
+				unitCount += (urows.PovUnitTyped(unitID, pov.readAllyTeam, pov.fullRead));
+			}
+		}
+	}
+
+	lua_pushnumber(L, unitCount);
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetUnitsInRectangle
+int LuaSnapshotServe::GetUnitsInRectangle(lua_State* L, const char* caller)
+{
+	const float xmin = luaL_checkfloat(L, 1);
+	const float zmin = luaL_checkfloat(L, 2);
+	const float xmax = luaL_checkfloat(L, 3);
+	const float zmax = luaL_checkfloat(L, 4);
+
+	float3 mins(xmin, 0.0f, zmin);
+	float3 maxs(xmax, 0.0f, zmax);
+
+	const int allegiance = ParseAllegianceMirror(L, caller, 5);
+
+	const auto rectangleCheck = [&](int unitID, const float3 &pos) {
+		if((pos.x < xmin) || (pos.x > xmax))
+			return false;
+		if((pos.z < zmin) || (pos.z > zmax))
+			return false;
+		return true;
+	};
+
+	const bool fullRead = CLuaHandle::GetHandleFullRead(L);
+	if (!fullRead)
+		ApplyPlanarTeamErrorMirror(L, allegiance, mins, maxs);
+
+	const auto& rows = simSnapshot.Read();
+	const std::vector<int>& units = QuadfieldUnitsExactMirror(rows, mins, maxs);
+
+	lua_createtable(L, units.size(), 0);
+
+	GetFilteredUnitsSnap(L, rows, allegiance, units, rectangleCheck);
+
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetUnitsInBox
+int LuaSnapshotServe::GetUnitsInBox(lua_State* L, const char* caller)
+{
+	const float xmin = luaL_checkfloat(L, 1);
+	const float ymin = luaL_checkfloat(L, 2);
+	const float zmin = luaL_checkfloat(L, 3);
+	const float xmax = luaL_checkfloat(L, 4);
+	const float ymax = luaL_checkfloat(L, 5);
+	const float zmax = luaL_checkfloat(L, 6);
+
+	float3 mins(xmin, 0.0f, zmin);
+	float3 maxs(xmax, 0.0f, zmax);
+
+	const int allegiance = ParseAllegianceMirror(L, caller, 7);
+
+	const auto boxCheck = [&](int unitID, float3 pos) {
+		return AABB(float3(xmin, ymin, zmin), float3(xmax, ymax, zmax)).Contains(pos);
+	};
+
+	const bool fullRead = CLuaHandle::GetHandleFullRead(L);
+	if (!fullRead)
+		ApplyPlanarTeamErrorMirror(L, allegiance, mins, maxs);
+
+	const auto& rows = simSnapshot.Read();
+	const std::vector<int>& units = QuadfieldUnitsExactMirror(rows, mins, maxs);
+
+	lua_createtable(L, units.size(), 0);
+
+	GetFilteredUnitsSnap(L, rows, allegiance, units, boxCheck);
+
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetUnitsInCylinder
+int LuaSnapshotServe::GetUnitsInCylinder(lua_State* L, const char* caller)
+{
+	const float x      = luaL_checkfloat(L, 1);
+	const float z      = luaL_checkfloat(L, 2);
+	const float radius = luaL_checkfloat(L, 3);
+	const float radSqr = (radius * radius);
+
+	float3 mins(x - radius, 0.0f, z - radius);
+	float3 maxs(x + radius, 0.0f, z + radius);
+
+	const int allegiance = ParseAllegianceMirror(L, caller, 4);
+
+	const auto cylinderCheck = [&](int unitID, const float3 &p) {
+		return p.SqDistance2D(float3{x, 0.0, z}) <= radSqr;
+	};
+
+	const bool fullRead = CLuaHandle::GetHandleFullRead(L);
+	if (!fullRead)
+		ApplyPlanarTeamErrorMirror(L, allegiance, mins, maxs);
+
+	const auto& rows = simSnapshot.Read();
+	const std::vector<int>& units = QuadfieldUnitsExactMirror(rows, mins, maxs);
+
+	lua_createtable(L, units.size(), 0);
+
+	GetFilteredUnitsSnap(L, rows, allegiance, units, cylinderCheck);
+
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetUnitsInSphere
+int LuaSnapshotServe::GetUnitsInSphere(lua_State* L, const char* caller)
+{
+	const float x      = luaL_checkfloat(L, 1);
+	const float y      = luaL_checkfloat(L, 2);
+	const float z      = luaL_checkfloat(L, 3);
+	const float radius = luaL_checkfloat(L, 4);
+	const float radSqr = (radius * radius);
+
+	float3 mins(x - radius, 0.0f, z - radius);
+	float3 maxs(x + radius, 0.0f, z + radius);
+
+	const int allegiance = ParseAllegianceMirror(L, caller, 5);
+
+	const auto sphereCheck = [&](int unitID, const float3 &p) {
+		return p.SqDistance(float3(x, y, z)) <= radSqr;
+	};
+
+	const bool fullRead = CLuaHandle::GetHandleFullRead(L);
+	if (!fullRead)
+		ApplyPlanarTeamErrorMirror(L, allegiance, mins, maxs);
+
+	const auto& rows = simSnapshot.Read();
+	const std::vector<int>& units = QuadfieldUnitsExactMirror(rows, mins, maxs);
+
+	lua_createtable(L, units.size(), 0);
+
+	GetFilteredUnitsSnap(L, rows, allegiance, units, sphereCheck);
+
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetFeaturesInRectangle
+int LuaSnapshotServe::GetFeaturesInRectangle(lua_State* L, const char* caller)
+{
+	const float xmin = luaL_checkfloat(L, 1);
+	const float zmin = luaL_checkfloat(L, 2);
+	const float xmax = luaL_checkfloat(L, 3);
+	const float zmax = luaL_checkfloat(L, 4);
+
+	const float3 mins(xmin, 0.0f, zmin);
+	const float3 maxs(xmax, 0.0f, zmax);
+
+	const auto& rows = simSnapshot.ReadFeatures();
+
+	// CQuadField::GetFeaturesExact(mins, maxs) mirror: grid superset + the
+	// exact raw-pos bounds
+	snapshotPickGrid.QueryFeaturesInRect(mins, maxs, sqCandidateIDs);
+
+	sqObjectIDs.clear();
+
+	for (const int featureID: sqCandidateIDs) {
+		const float3& pos = rows.pos[featureID];
+		if (pos.x < mins.x || pos.x > maxs.x)
+			continue;
+		if (pos.z < mins.z || pos.z > maxs.z)
+			continue;
+
+		sqObjectIDs.push_back(featureID);
+	}
+
+	ProcessFeaturesSnap(L, rows, sqObjectIDs);
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetFeaturesInSphere
+int LuaSnapshotServe::GetFeaturesInSphere(lua_State* L, const char* caller)
+{
+	const float x = luaL_checkfloat(L, 1);
+	const float y = luaL_checkfloat(L, 2);
+	const float z = luaL_checkfloat(L, 3);
+	const float rad = luaL_checkfloat(L, 4);
+
+	const float3 pos(x, y, z);
+
+	const auto& rows = simSnapshot.ReadFeatures();
+
+	// CQuadField::GetFeaturesExact(pos, rad, true) mirror: the live gather
+	// clamps its centre in-bounds (GetQuads) but tests distance against the
+	// raw pos, with the search radius widened per candidate by its own radius
+	snapshotPickGrid.QueryFeaturesInRadius(pos.cClampInBounds(), rad, sqCandidateIDs);
+
+	sqObjectIDs.clear();
+
+	for (const int featureID: sqCandidateIDs) {
+		const float totRad   = rad + rows.radius[featureID];
+		const float totRadSq = totRad * totRad;
+		const float posDstSq = pos.SqDistance(rows.pos[featureID]);
+
+		if (posDstSq >= totRadSq)
+			continue;
+
+		sqObjectIDs.push_back(featureID);
+	}
+
+	ProcessFeaturesSnap(L, rows, sqObjectIDs);
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetFeaturesInCylinder
+int LuaSnapshotServe::GetFeaturesInCylinder(lua_State* L, const char* caller)
+{
+	const float x = luaL_checkfloat(L, 1);
+	const float z = luaL_checkfloat(L, 2);
+	const float rad = luaL_checkfloat(L, 3);
+
+	const float3 pos(x, 0, z);
+
+	const auto& rows = simSnapshot.ReadFeatures();
+
+	// CQuadField::GetFeaturesExact(pos, rad, false) mirror (2D distance)
+	snapshotPickGrid.QueryFeaturesInRadius(pos.cClampInBounds(), rad, sqCandidateIDs);
+
+	sqObjectIDs.clear();
+
+	for (const int featureID: sqCandidateIDs) {
+		const float totRad   = rad + rows.radius[featureID];
+		const float totRadSq = totRad * totRad;
+		const float posDstSq = pos.SqDistance2D(rows.pos[featureID]);
+
+		if (posDstSq >= totRadSq)
+			continue;
+
+		sqObjectIDs.push_back(featureID);
+	}
+
+	ProcessFeaturesSnap(L, rows, sqObjectIDs);
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetProjectilesInRectangle
+int LuaSnapshotServe::GetProjectilesInRectangle(lua_State* L, const char* caller)
+{
+	const float xmin = luaL_checkfloat(L, 1);
+	const float zmin = luaL_checkfloat(L, 2);
+	const float xmax = luaL_checkfloat(L, 3);
+	const float zmax = luaL_checkfloat(L, 4);
+
+	const bool excludeWeaponProjectiles = luaL_optboolean(L, 5, false);
+	const bool excludePieceProjectiles = luaL_optboolean(L, 6, false);
+
+	const float3 mins(xmin, 0.0f, zmin);
+	const float3 maxs(xmax, 0.0f, zmax);
+
+	const auto& rows = simSnapshot.ReadProjectiles();
+
+	// CQuadField::GetProjectilesExact(mins, maxs) mirror by linear scan (no
+	// projectile grid rows): validity + the exact raw-pos bounds
+	sqObjectIDs.clear();
+
+	for (size_t projID = 0; projID < rows.MaxSlots(); ++projID) {
+		if (rows.valid[projID] == 0)
+			continue;
+
+		const float3& pos = rows.pos[projID];
+		if (pos.x < mins.x || pos.x > maxs.x)
+			continue;
+		if (pos.z < mins.z || pos.z > maxs.z)
+			continue;
+
+		sqObjectIDs.push_back(static_cast<int>(projID));
+	}
+
+	GetProjectilesLuaTableSnap(L, rows, sqObjectIDs, excludeWeaponProjectiles, excludePieceProjectiles);
+	return 1;
+}
+
+
+void LuaSnapshotServe::ClearCaches()
+{
+	teamUnitIndex.built = false;
+	teamUnitIndex.generation = 0;
+	teamUnitIndex.allIDs.clear();
+	for (auto& v: teamUnitIndex.idsByTeam)
+		v.clear();
+	for (auto& m: teamUnitIndex.idsByTeamAndDef)
+		m.clear();
 }

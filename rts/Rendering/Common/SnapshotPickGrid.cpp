@@ -225,6 +225,11 @@ void SnapshotPickGrid::QueryRay(const float3& start, const float3& dir, float le
 
 void SnapshotPickGrid::QueryUnitsInRadius(const float3& pos, float radius, std::vector<int>& unitIDs)
 {
+	QueryUnitsInRect(float3(pos.x - radius, 0.0f, pos.z - radius), float3(pos.x + radius, 0.0f, pos.z + radius), unitIDs);
+}
+
+void SnapshotPickGrid::QueryUnitsInRect(const float3& mins, const float3& maxs, std::vector<int>& unitIDs)
+{
 	unitIDs.clear();
 
 	EnsureCurrent();
@@ -233,10 +238,10 @@ void SnapshotPickGrid::QueryUnitsInRadius(const float3& pos, float radius, std::
 
 	++queryStamp;
 
-	const int cx0 = std::clamp(static_cast<int>(std::floor((pos.x - radius) / cellWorld)), 0, numX - 1);
-	const int cx1 = std::clamp(static_cast<int>(std::floor((pos.x + radius) / cellWorld)), 0, numX - 1);
-	const int cz0 = std::clamp(static_cast<int>(std::floor((pos.z - radius) / cellWorld)), 0, numZ - 1);
-	const int cz1 = std::clamp(static_cast<int>(std::floor((pos.z + radius) / cellWorld)), 0, numZ - 1);
+	const int cx0 = std::clamp(static_cast<int>(std::floor(mins.x / cellWorld)), 0, numX - 1);
+	const int cx1 = std::clamp(static_cast<int>(std::floor(maxs.x / cellWorld)), 0, numX - 1);
+	const int cz0 = std::clamp(static_cast<int>(std::floor(mins.z / cellWorld)), 0, numZ - 1);
+	const int cz1 = std::clamp(static_cast<int>(std::floor(maxs.z / cellWorld)), 0, numZ - 1);
 
 	for (int cz = cz0; cz <= cz1; ++cz) {
 		for (int cx = cx0; cx <= cx1; ++cx) {
@@ -250,4 +255,38 @@ void SnapshotPickGrid::QueryUnitsInRadius(const float3& pos, float radius, std::
 	}
 
 	std::sort(unitIDs.begin(), unitIDs.end());
+}
+
+void SnapshotPickGrid::QueryFeaturesInRect(const float3& mins, const float3& maxs, std::vector<int>& featureIDs)
+{
+	featureIDs.clear();
+
+	EnsureCurrent();
+	if (!built || numX <= 0 || numZ <= 0)
+		return;
+
+	++queryStamp;
+
+	const int cx0 = std::clamp(static_cast<int>(std::floor(mins.x / cellWorld)), 0, numX - 1);
+	const int cx1 = std::clamp(static_cast<int>(std::floor(maxs.x / cellWorld)), 0, numX - 1);
+	const int cz0 = std::clamp(static_cast<int>(std::floor(mins.z / cellWorld)), 0, numZ - 1);
+	const int cz1 = std::clamp(static_cast<int>(std::floor(maxs.z / cellWorld)), 0, numZ - 1);
+
+	for (int cz = cz0; cz <= cz1; ++cz) {
+		for (int cx = cx0; cx <= cx1; ++cx) {
+			for (const int id : featureCells[cz * numX + cx]) {
+				if (featureSlotStamp[id] == queryStamp)
+					continue;
+				featureSlotStamp[id] = queryStamp;
+				featureIDs.push_back(id);
+			}
+		}
+	}
+
+	std::sort(featureIDs.begin(), featureIDs.end());
+}
+
+void SnapshotPickGrid::QueryFeaturesInRadius(const float3& pos, float radius, std::vector<int>& featureIDs)
+{
+	QueryFeaturesInRect(float3(pos.x - radius, 0.0f, pos.z - radius), float3(pos.x + radius, 0.0f, pos.z + radius), featureIDs);
 }

@@ -69,6 +69,7 @@
 #include "Lua/LuaMenu.h"
 #include "Lua/LuaRules.h"
 #include "Lua/LuaOpenGL.h"
+#include "Lua/LuaSnapshotServe.h"
 #include "Lua/LuaSplitContract.h"
 #include "System/SimDrawSplit.h"
 #include "System/UnsyncedBoundaryQueue.h"
@@ -1045,6 +1046,8 @@ void CGame::KillRendering()
 	SimDrawSplit::Clear();
 	simSnapshot.Clear();
 	snapshotPickGrid.Clear();
+	// per-generation serving caches (the generation counter resets with the snapshot)
+	LuaSnapshotServe::ClearCaches();
 	// dumps the draw-contract trip inventory into the infolog before reset
 	// (the PR-27a gate artifact; no-op when the contract never tripped)
 	LuaSplitContract::Clear();
@@ -1584,6 +1587,9 @@ bool CGame::UpdateUnsynced(const spring_time currentTime)
  */
 void CGame::SimDrawBarrier()
 {
+	// boundary-cost telemetry (the PR-27b gate's fine-print number)
+	SCOPED_TIMER("Misc::SimDrawBarrier");
+
 	// (0) split only: run the GL upload half of any sim-thread model loads
 	// BEFORE the drain -- the creation records about to dispatch may
 	// register objects with these models (PR 27b commit c)
@@ -1768,6 +1774,12 @@ void CGame::SimThreadProc()
 				LEAVE_SYNCED_CODE();
 			}
 
+			// keep consuming without a nap while budget and packets remain
+			// (ClientReadNet returns on its per-call wall-time cap during
+			// catch-up; napping there throttles fast-forward to ~half speed)
+			if (msgProcTimeLeft > 0.0f && clientNet->Peek(0) != nullptr)
+				continue;
+
 			// bounded nap; woken early by a pause request or exit
 			SimDrawSplit::SimIdleWait();
 		}
@@ -1809,7 +1821,12 @@ void CGame::AcquireSimPause()
 	if (!SimDrawSplit::Enabled() || !SimDrawSplit::SimThreadRunning())
 		return;
 
-	SimDrawSplit::RequestPause();
+	{
+		// how long the draw side waits for the sim to reach a frame edge
+		// (the other half of the boundary cost; worst case one sim frame)
+		SCOPED_TIMER("Misc::SimPauseWait");
+		SimDrawSplit::RequestPause();
+	}
 
 	// pool-pressure valve service (the PR-13 valve became "sim waits for the
 	// boundary" under the split): the sim parked MID-frame out of pool

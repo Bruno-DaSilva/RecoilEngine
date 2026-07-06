@@ -78,9 +78,10 @@ namespace {
 	 *    copies (mutation-rate cost)
 	 *  - pieces/scripts: piece transforms are extracted since PR 8; the
 	 *    callout surface needs id-keyed piece-tree serving on top
-	 *  - spatial/list queries: SnapshotPickGrid + rows can serve the SET,
-	 *    but not master's quadfield/active-list ORDER -- serving needs the
-	 *    documented order deviation + set-equality dual-run comparison
+	 *  - spatial/list queries: core family SERVED in PR 27b (SnapshotPickGrid
+	 *    + team-unit index, ascending-id order deviation, set-mode dual-run
+	 *    comparison); the remainder below is screen-space/selection/nearest
+	 *    composites and reads without rows (projectile radius)
 	 *  - pathing: sim-owned pathManager; reads need boundary copies,
 	 *    RequestPath is a mutation (boundary-apply or contract-error)
 	 */
@@ -143,14 +144,10 @@ namespace {
 		"GetFeaturePieceMatrix", "GetFeatureCollisionVolumeData",
 		"GetFeaturePieceCollisionVolumeData", "GetFeatureLastAttackedPiece",
 		"GetPieceProjectileParams", "GetPieceProjectileName",
-		// spatial/list queries (grid+rows serving with order deviation pending)
-		"GetAllUnits", "GetTeamUnits", "GetTeamUnitsSorted",
-		"GetTeamUnitsCounts", "GetTeamUnitsByDefs", "GetTeamUnitDefCount",
-		"GetUnitsInRectangle", "GetUnitsInBox", "GetUnitsInPlanes",
-		"GetUnitsInSphere", "GetUnitsInCylinder", "GetUnitArrayCentroid",
-		"GetUnitMapCentroid", "GetFeaturesInRectangle", "GetFeaturesInSphere",
-		"GetFeaturesInCylinder", "GetAllProjectiles",
-		"GetProjectilesInRectangle", "GetProjectilesInSphere",
+		// spatial/list-query remainder (the core family is served, PR 27b)
+		"GetUnitsInPlanes", "GetUnitArrayCentroid", "GetUnitMapCentroid",
+		"GetAllProjectiles",
+		"GetProjectilesInSphere", // exact filter needs p->radius; no snapshot row
 		"GetUnitNearestAlly", "GetUnitNearestEnemy", "GetAllFeatures",
 		"GetVisibleUnits", "GetVisibleFeatures", "GetVisibleProjectiles",
 		"GetUnitsInScreenRectangle", "GetFeaturesInScreenRectangle",

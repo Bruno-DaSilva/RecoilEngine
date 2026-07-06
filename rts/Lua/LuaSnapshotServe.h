@@ -160,6 +160,32 @@ namespace LuaSnapshotServe {
 	int GetProjectileTimeToLive(lua_State* L, const char* caller);
 	int GetProjectileIsIntercepted(lua_State* L, const char* caller);
 
+	// spatial-query + team-unit-list families (PR 27b): list twins served from
+	// SnapshotPickGrid rect/radius queries (spatial) and a per-boundary
+	// team-unit index derived lazily from the UnitRows front buffer (lists).
+	// DOCUMENTED DEVIATION: result order is ascending-id, not master's
+	// quadfield-walk / creation order; the armed dual-run compares these
+	// callouts' result tables as ID sets (see CompareTablesAsIdSet).
+	int GetAllUnits(lua_State* L, const char* caller);
+	int GetTeamUnits(lua_State* L, const char* caller);
+	int GetTeamUnitsSorted(lua_State* L, const char* caller);
+	int GetTeamUnitsCounts(lua_State* L, const char* caller);
+	int GetTeamUnitsByDefs(lua_State* L, const char* caller);
+	int GetTeamUnitDefCount(lua_State* L, const char* caller);
+	int GetUnitsInRectangle(lua_State* L, const char* caller);
+	int GetUnitsInBox(lua_State* L, const char* caller);
+	int GetUnitsInCylinder(lua_State* L, const char* caller);
+	int GetUnitsInSphere(lua_State* L, const char* caller);
+	int GetFeaturesInRectangle(lua_State* L, const char* caller);
+	int GetFeaturesInSphere(lua_State* L, const char* caller);
+	int GetFeaturesInCylinder(lua_State* L, const char* caller);
+	int GetProjectilesInRectangle(lua_State* L, const char* caller);
+
+	/// game teardown: drop the per-generation serving caches (the team-unit
+	/// index); SimSnapshot's generation counter resets across games, so a
+	/// stale cache could otherwise alias a fresh generation number
+	void ClearCaches();
+
 	int GetGaiaTeamID(lua_State* L, const char* caller);
 	int GetAllyTeamList(lua_State* L, const char* caller);
 	int GetTeamList(lua_State* L, const char* caller);

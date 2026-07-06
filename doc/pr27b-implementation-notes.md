@@ -33,6 +33,28 @@ Status: design settled 2026-07-06 after the full prerequisite audit; implementat
 - FPU: streflop init per-thread (`GameLoadThread.cpp:36-38`), `good_fpu_control_registers` checks per-thread; "Spring1" control word is the SimFrame one.
 - ThreadPool: for_mt pushes to per-worker queues only (global queue never holds fork-join groups → no cross-stealing); external waiters are tid 0; `SyncChecker.cpp:26` asserts tid==0 (sim thread passes).
 
+## Commit (b) resolution: ThreadPool needs no partition
+
+The plan offered two pools / partition / fork-join-instance-local scratch. The audit shows the third option is already ~true and the first two would cost worker capacity for nothing:
+
+- Work distribution is MPMC-safe as-is: for_mt uses per-call-site recycled group pools with atomic slice counters (`ForTaskGroup::ctr.fetch_add`), pushes only to per-worker moodycamel queues (the global queue never holds fork-join groups, so the two orchestrators cannot steal each other's slices), and the orchestrator participates via WaitForFinished with its thread-local tid. Two concurrent fork-joins interleave per-worker *sequentially* — a worker runs one slice at a time — so `GetThreadNum()`-indexed scratch is only hazarded when the same array is concurrently owned by fork-joins from both threads.
+- The scratch census (LosMap tables, HAPFS/QTPFS per-thread state, MoveMath::blockMaps, QuadField temp vectors, gs/WorldObject mtTempNum) shows every sim-scratch consumer reachable from draw code sits inside the pause window (infotex updates, the drawer extraction) or is flag-gated dark (debug drawers) — side-exclusive by construction. Draw-side fork-joins outside the window (RoamMeshDrawer, particle sorting, font gen) touch draw-owned data only.
+- The two genuine cross-thread instances were fixed directly in commit (a): TimeProfiler's lock-free special-timer path (the "Sim"/"Draw" pops now lock under the split; the tid-0 threadProfiles writes were already under profileMutex whenever they can happen) and GetTimeRecord's unlocked read.
+- `CSyncChecker::inSyncedCode` moves to the sim thread; the worker-side read in DoTask is a scheduling heuristic (benign). The tid==0 assert in `CSyncChecker::debugSyncCheckThreading` holds (the sim thread's threadnum is 0, same as any orchestrator).
+- `IsInMultiThreadedSection` is thread-local and keeps its meaning per the research doc.
+
+Deliberately NOT given a distinct threadnum: giving the sim thread a reserved tid would index past arrays sized by `GetNumThreads()` (HAPFS maxResPFs et al). tid 0 is correct — both orchestrators use slot 0 of *different* (side-exclusive) scratch arrays.
+
+## Flag-ON shakeout log (2026-07-06)
+
+First full-length clean flag-ON resim: Rosetta f=44537, 0 DESYNC, wall 4:22 (commit `b929576261`). Defects found by iterating the crashing runs, each now fixed:
+
+1. **Pregame LuaUI VM corruption** — NETMSG_LUAMSG ran `luaUI->RecvLuaMsg` on the sim thread (BAR floods LuaUI messages at gamestart); crashed a concurrent DrawScreen inside `luaV_execute`. Boundary-deferred, gate decision captured at fire time. Same class: `ShockFront` from `CGameHelper::Explosion`, the unsynced leg of `/luarules` chat (`CSplitLuaHandle::GotChatMsg`).
+2. **Post-release id→object resolution through sim-owned tables** — the draw passes resolve drawer-container ids per pass (`ResolveProjectileHandle` reads `FreeListMapCompact` maps the sim rehashes; unit/feature handler slots null at sim-time destroy while bins still hold the id). Fixed with boundary-built resolve caches (ModelDrawerData splitResolveCache + ProjectileDrawer twin), rebuilt with the sim parked right after every drain.
+3. **The tid-0 scratch collision is real** — the commit-(b) audit's "side-exclusive by construction" claim missed the still-live Lua spatial walks: `GetUnitsIn*` from draw context uses quadfield scratch slot `GetThreadNum()==0`, colliding with the sim thread's own queries; the corrupted GetQuads scratch crashed `CQuadField::MovedUnit` ON THE SIM THREAD. Main-thread queries under the running split now take a reserved extra slot (`ThreadPool::MAIN_SPLIT_SCRATCH_SLOT`; quadfield caches + gs/WorldObject mtTempNum arrays grew by one). The commit-(b) section above stands corrected by this entry.
+4. **Sanctioned-live ends at the flip** — with the sim thread running, sanctioned live reads walk containers under mutation (crash-class). `DenyLiveRead` now denies every unserved live read while the sim thread runs; commit (d) serves the hot families back. The armed diff-gate dual-run disables itself under the running split (its live leg's quiescence premise is void; the barrier field passes stay armed).
+5. `CheckStack` diagnostics on the synced states skip while the sim thread owns them.
+
 ## Commit plan
 
 - (a0) boundary deferral for sim-fired unsynced work [flag-inert when off]

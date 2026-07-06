@@ -2648,14 +2648,8 @@ int LuaSyncedRead::ArePlayersAllied(lua_State* L)
  *
  * @return number[] unitIDs
  */
-int LuaSyncedRead::GetAllUnits(lua_State* L)
+static int GetAllUnitsLive(lua_State* L, const char* caller)
 {
-	// split-contract gate (PR 27a): iterates unitHandler's live active-unit list directly
-	if (LuaSplitContract::DenyLiveRead(L, __func__)) {
-		lua_createtable(L, 0, 0);
-		return 1;
-	}
-
 	lua_createtable(L, (unitHandler.GetActiveUnits()).size(), 0);
 
 	unsigned int unitCount = 1;
@@ -2677,6 +2671,12 @@ int LuaSyncedRead::GetAllUnits(lua_State* L)
 	return 1;
 }
 
+int LuaSyncedRead::GetAllUnits(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetAllUnitsLive, &LuaSnapshotServe::GetAllUnits);
+}
+
 
 /***
  *
@@ -2684,13 +2684,13 @@ int LuaSyncedRead::GetAllUnits(lua_State* L)
  * @param teamID integer
  * @return number[]? unitIDs
  */
-int LuaSyncedRead::GetTeamUnits(lua_State* L)
+static int GetTeamUnitsLive(lua_State* L, const char* caller)
 {
 	if (CLuaHandle::GetHandleReadAllyTeam(L) == CEventClient::NoAccessTeam)
 		return 0;
 
 	// parse the team
-	const CTeam* team = ParseTeam(L, __func__, 1);
+	const CTeam* team = ParseTeam(L, caller, 1);
 	if (team == nullptr)
 		return 0;
 
@@ -2721,6 +2721,12 @@ int LuaSyncedRead::GetTeamUnits(lua_State* L)
 	}
 
 	return 1;
+}
+
+int LuaSyncedRead::GetTeamUnits(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetTeamUnitsLive, &LuaSnapshotServe::GetTeamUnits);
 }
 
 
@@ -2784,13 +2790,13 @@ static inline void InsertSearchUnitDefs(const UnitDef* ud, bool allied)
  * @param teamID integer
  * @return table<integer,integer> unitsByDef A table where keys are unitDefIDs and values are unitIDs
  */
-int LuaSyncedRead::GetTeamUnitsSorted(lua_State* L)
+static int GetTeamUnitsSortedLive(lua_State* L, const char* caller)
 {
 	if (CLuaHandle::GetHandleReadAllyTeam(L) == CEventClient::NoAccessTeam)
 		return 0;
 
 	// parse the team
-	const CTeam* team = ParseTeam(L, __func__, 1);
+	const CTeam* team = ParseTeam(L, caller, 1);
 
 	if (team == nullptr)
 		return 0;
@@ -2873,6 +2879,12 @@ int LuaSyncedRead::GetTeamUnitsSorted(lua_State* L)
 	return 1;
 }
 
+int LuaSyncedRead::GetTeamUnitsSorted(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetTeamUnitsSortedLive, &LuaSnapshotServe::GetTeamUnitsSorted);
+}
+
 
 /***
  *
@@ -2880,13 +2892,13 @@ int LuaSyncedRead::GetTeamUnitsSorted(lua_State* L)
  * @param teamID integer
  * @return table<number,number>? countByUnit A table where keys are unitDefIDs and values are counts.
  */
-int LuaSyncedRead::GetTeamUnitsCounts(lua_State* L)
+static int GetTeamUnitsCountsLive(lua_State* L, const char* caller)
 {
 	if (CLuaHandle::GetHandleReadAllyTeam(L) == CEventClient::NoAccessTeam)
 		return 0;
 
 	// parse the team
-	const CTeam* team = ParseTeam(L, __func__, 1);
+	const CTeam* team = ParseTeam(L, caller, 1);
 
 	if (team == nullptr)
 		return 0;
@@ -2956,6 +2968,12 @@ int LuaSyncedRead::GetTeamUnitsCounts(lua_State* L)
 	return 1;
 }
 
+int LuaSyncedRead::GetTeamUnitsCounts(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetTeamUnitsCountsLive, &LuaSnapshotServe::GetTeamUnitsCounts);
+}
+
 
 /***
  *
@@ -2964,12 +2982,12 @@ int LuaSyncedRead::GetTeamUnitsCounts(lua_State* L)
  * @param unitDefIDs number|number[]
  * @return number[]? unitIDs
  */
-int LuaSyncedRead::GetTeamUnitsByDefs(lua_State* L)
+static int GetTeamUnitsByDefsLive(lua_State* L, const char* caller)
 {
 	if (CLuaHandle::GetHandleReadAllyTeam(L) == CEventClient::NoAccessTeam)
 		return 0;
 
-	const CTeam* team = ParseTeam(L, __func__, 1);
+	const CTeam* team = ParseTeam(L, caller, 1);
 
 	if (team == nullptr)
 		return 0;
@@ -3032,6 +3050,12 @@ int LuaSyncedRead::GetTeamUnitsByDefs(lua_State* L)
 	return 1;
 }
 
+int LuaSyncedRead::GetTeamUnitsByDefs(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetTeamUnitsByDefsLive, &LuaSnapshotServe::GetTeamUnitsByDefs);
+}
+
 
 /***
  *
@@ -3040,13 +3064,13 @@ int LuaSyncedRead::GetTeamUnitsByDefs(lua_State* L)
  * @param unitDefID integer
  * @return number? count
  */
-int LuaSyncedRead::GetTeamUnitDefCount(lua_State* L)
+static int GetTeamUnitDefCountLive(lua_State* L, const char* caller)
 {
 	if (CLuaHandle::GetHandleReadAllyTeam(L) == CEventClient::NoAccessTeam)
 		return 0;
 
 	// parse the team
-	const CTeam* team = ParseTeam(L, __func__, 1);
+	const CTeam* team = ParseTeam(L, caller, 1);
 
 	if (team == nullptr)
 		return 0;
@@ -3091,6 +3115,12 @@ int LuaSyncedRead::GetTeamUnitDefCount(lua_State* L)
 
 	lua_pushnumber(L, unitCount);
 	return 1;
+}
+
+int LuaSyncedRead::GetTeamUnitDefCount(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetTeamUnitDefCountLive, &LuaSnapshotServe::GetTeamUnitDefCount);
 }
 
 
@@ -3213,7 +3243,7 @@ static void GetFilteredUnits(lua_State *L, int allegiance, const std::vector<CUn
  * @param allegiance number?
  * @return number[] unitIDs
  */
-int LuaSyncedRead::GetUnitsInRectangle(lua_State* L)
+static int GetUnitsInRectangleLive(lua_State* L, const char* caller)
 {
 	const float xmin = luaL_checkfloat(L, 1);
 	const float zmin = luaL_checkfloat(L, 2);
@@ -3223,13 +3253,7 @@ int LuaSyncedRead::GetUnitsInRectangle(lua_State* L)
 	float3 mins(xmin, 0.0f, zmin);
 	float3 maxs(xmax, 0.0f, zmax);
 
-	// split-contract gate (PR 27a): reads the quadfield + unit positions directly
-	if (LuaSplitContract::DenyLiveRead(L, __func__)) {
-		lua_createtable(L, 0, 0);
-		return 1;
-	}
-
-	const int allegiance = LuaUtils::ParseAllegiance(L, __func__, 5);
+	const int allegiance = LuaUtils::ParseAllegiance(L, caller, 5);
 
 	const auto rectangleCheck = [&](const CUnit *unit, const float3 &pos) {
 		if((pos.x < xmin) || (pos.x > xmax))
@@ -3254,6 +3278,12 @@ int LuaSyncedRead::GetUnitsInRectangle(lua_State* L)
 	return 1;
 }
 
+int LuaSyncedRead::GetUnitsInRectangle(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitsInRectangleLive, &LuaSnapshotServe::GetUnitsInRectangle);
+}
+
 
 /***
  *
@@ -3267,7 +3297,7 @@ int LuaSyncedRead::GetUnitsInRectangle(lua_State* L)
  * @param allegiance number?
  * @return number[] unitIDs
  */
-int LuaSyncedRead::GetUnitsInBox(lua_State* L)
+static int GetUnitsInBoxLive(lua_State* L, const char* caller)
 {
 	const float xmin = luaL_checkfloat(L, 1);
 	const float ymin = luaL_checkfloat(L, 2);
@@ -3279,13 +3309,7 @@ int LuaSyncedRead::GetUnitsInBox(lua_State* L)
 	float3 mins(xmin, 0.0f, zmin);
 	float3 maxs(xmax, 0.0f, zmax);
 
-	// split-contract gate (PR 27a): reads the quadfield + unit positions directly
-	if (LuaSplitContract::DenyLiveRead(L, __func__)) {
-		lua_createtable(L, 0, 0);
-		return 1;
-	}
-
-	const int allegiance = LuaUtils::ParseAllegiance(L, __func__, 7);
+	const int allegiance = LuaUtils::ParseAllegiance(L, caller, 7);
 
 	const auto boxCheck = [&](const CUnit *unit, float3 pos) {
 		return AABB(float3(xmin, ymin, zmin), float3(xmax, ymax, zmax)).Contains(pos);
@@ -3306,6 +3330,12 @@ int LuaSyncedRead::GetUnitsInBox(lua_State* L)
 	return 1;
 }
 
+int LuaSyncedRead::GetUnitsInBox(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitsInBoxLive, &LuaSnapshotServe::GetUnitsInBox);
+}
+
 /***
  *
  * @function Spring.GetUnitsInCylinder
@@ -3314,7 +3344,7 @@ int LuaSyncedRead::GetUnitsInBox(lua_State* L)
  * @param radius number
  * @return number[] unitIDs
  */
-int LuaSyncedRead::GetUnitsInCylinder(lua_State* L)
+static int GetUnitsInCylinderLive(lua_State* L, const char* caller)
 {
 	const float x      = luaL_checkfloat(L, 1);
 	const float z      = luaL_checkfloat(L, 2);
@@ -3324,13 +3354,7 @@ int LuaSyncedRead::GetUnitsInCylinder(lua_State* L)
 	float3 mins(x - radius, 0.0f, z - radius);
 	float3 maxs(x + radius, 0.0f, z + radius);
 
-	// split-contract gate (PR 27a): reads the quadfield + unit positions directly
-	if (LuaSplitContract::DenyLiveRead(L, __func__)) {
-		lua_createtable(L, 0, 0);
-		return 1;
-	}
-
-	const int allegiance = LuaUtils::ParseAllegiance(L, __func__, 4);
+	const int allegiance = LuaUtils::ParseAllegiance(L, caller, 4);
 
 	const auto cylinderCheck = [&](const CUnit *unit, const float3 &p) {
 		return p.SqDistance2D(float3{x, 0.0, z}) <= radSqr;
@@ -3351,6 +3375,12 @@ int LuaSyncedRead::GetUnitsInCylinder(lua_State* L)
 	return 1;
 }
 
+int LuaSyncedRead::GetUnitsInCylinder(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitsInCylinderLive, &LuaSnapshotServe::GetUnitsInCylinder);
+}
+
 
 /***
  *
@@ -3361,7 +3391,7 @@ int LuaSyncedRead::GetUnitsInCylinder(lua_State* L)
  * @param radius number
  * @return number[] unitIDs
  */
-int LuaSyncedRead::GetUnitsInSphere(lua_State* L)
+static int GetUnitsInSphereLive(lua_State* L, const char* caller)
 {
 	const float x      = luaL_checkfloat(L, 1);
 	const float y      = luaL_checkfloat(L, 2);
@@ -3372,13 +3402,7 @@ int LuaSyncedRead::GetUnitsInSphere(lua_State* L)
 	float3 mins(x - radius, 0.0f, z - radius);
 	float3 maxs(x + radius, 0.0f, z + radius);
 
-	// split-contract gate (PR 27a): reads the quadfield + unit positions directly
-	if (LuaSplitContract::DenyLiveRead(L, __func__)) {
-		lua_createtable(L, 0, 0);
-		return 1;
-	}
-
-	const int allegiance = LuaUtils::ParseAllegiance(L, __func__, 5);
+	const int allegiance = LuaUtils::ParseAllegiance(L, caller, 5);
 
 	const auto sphereCheck = [&](const CUnit *unit, const float3 &p) {
 		return p.SqDistance(float3(x, y, z)) <= radSqr;
@@ -3397,6 +3421,12 @@ int LuaSyncedRead::GetUnitsInSphere(lua_State* L)
 	GetFilteredUnits(L, allegiance, units, sphereCheck);
 
 	return 1;
+}
+
+int LuaSyncedRead::GetUnitsInSphere(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitsInSphereLive, &LuaSnapshotServe::GetUnitsInSphere);
 }
 
 
@@ -3672,7 +3702,7 @@ inline void ProcessFeatures(lua_State* L, const vector<CFeature*>& features) {
  * @param zmax number
  * @return number[] featureIDs
  */
-int LuaSyncedRead::GetFeaturesInRectangle(lua_State* L)
+static int GetFeaturesInRectangleLive(lua_State* L, const char* caller)
 {
 	const float xmin = luaL_checkfloat(L, 1);
 	const float zmin = luaL_checkfloat(L, 2);
@@ -3682,16 +3712,16 @@ int LuaSyncedRead::GetFeaturesInRectangle(lua_State* L)
 	const float3 mins(xmin, 0.0f, zmin);
 	const float3 maxs(xmax, 0.0f, zmax);
 
-	// split-contract gate (PR 27a): reads the quadfield directly
-	if (LuaSplitContract::DenyLiveRead(L, __func__)) {
-		lua_createtable(L, 0, 0);
-		return 1;
-	}
-
 	QuadFieldQuery qfQuery;
 	quadField.GetFeaturesExact(qfQuery, mins, maxs);
 	ProcessFeatures(L, *qfQuery.features);
 	return 1;
+}
+
+int LuaSyncedRead::GetFeaturesInRectangle(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetFeaturesInRectangleLive, &LuaSnapshotServe::GetFeaturesInRectangle);
 }
 
 
@@ -3704,7 +3734,7 @@ int LuaSyncedRead::GetFeaturesInRectangle(lua_State* L)
  * @param radius number
  * @return number[] featureIDs
  */
-int LuaSyncedRead::GetFeaturesInSphere(lua_State* L)
+static int GetFeaturesInSphereLive(lua_State* L, const char* caller)
 {
 	const float x = luaL_checkfloat(L, 1);
 	const float y = luaL_checkfloat(L, 2);
@@ -3713,16 +3743,16 @@ int LuaSyncedRead::GetFeaturesInSphere(lua_State* L)
 
 	const float3 pos(x, y, z);
 
-	// split-contract gate (PR 27a): reads the quadfield directly
-	if (LuaSplitContract::DenyLiveRead(L, __func__)) {
-		lua_createtable(L, 0, 0);
-		return 1;
-	}
-
 	QuadFieldQuery qfQuery;
 	quadField.GetFeaturesExact(qfQuery, pos, rad, true);
 	ProcessFeatures(L, *qfQuery.features);
 	return 1;
+}
+
+int LuaSyncedRead::GetFeaturesInSphere(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetFeaturesInSphereLive, &LuaSnapshotServe::GetFeaturesInSphere);
 }
 
 
@@ -3735,7 +3765,7 @@ int LuaSyncedRead::GetFeaturesInSphere(lua_State* L)
  * @param allegiance number?
  * @return number[] featureIDs
  */
-int LuaSyncedRead::GetFeaturesInCylinder(lua_State* L)
+static int GetFeaturesInCylinderLive(lua_State* L, const char* caller)
 {
 	const float x = luaL_checkfloat(L, 1);
 	const float z = luaL_checkfloat(L, 2);
@@ -3743,16 +3773,16 @@ int LuaSyncedRead::GetFeaturesInCylinder(lua_State* L)
 
 	const float3 pos(x, 0, z);
 
-	// split-contract gate (PR 27a): reads the quadfield directly
-	if (LuaSplitContract::DenyLiveRead(L, __func__)) {
-		lua_createtable(L, 0, 0);
-		return 1;
-	}
-
 	QuadFieldQuery qfQuery;
 	quadField.GetFeaturesExact(qfQuery, pos, rad, false);
 	ProcessFeatures(L, *qfQuery.features);
 	return 1;
+}
+
+int LuaSyncedRead::GetFeaturesInCylinder(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetFeaturesInCylinderLive, &LuaSnapshotServe::GetFeaturesInCylinder);
 }
 
 static void GetProjectilesLuaTable(lua_State* L, const std::vector<CProjectile*>& projectiles,
@@ -3834,7 +3864,7 @@ int LuaSyncedRead::GetAllProjectiles(lua_State* L)
  * @param excludePieceProjectiles boolean? (Default: `false`)
  * @return number[] projectileIDs
  */
-int LuaSyncedRead::GetProjectilesInRectangle(lua_State* L)
+static int GetProjectilesInRectangleLive(lua_State* L, const char* caller)
 {
 	const float xmin = luaL_checkfloat(L, 1);
 	const float zmin = luaL_checkfloat(L, 2);
@@ -3847,16 +3877,16 @@ int LuaSyncedRead::GetProjectilesInRectangle(lua_State* L)
 	const float3 mins(xmin, 0.0f, zmin);
 	const float3 maxs(xmax, 0.0f, zmax);
 
-	// split-contract gate (PR 27a): reads the quadfield directly
-	if (LuaSplitContract::DenyLiveRead(L, __func__)) {
-		lua_createtable(L, 0, 0);
-		return 1;
-	}
-
 	QuadFieldQuery qfQuery;
 	quadField.GetProjectilesExact(qfQuery, mins, maxs);
 	GetProjectilesLuaTable(L, *qfQuery.projectiles, excludeWeaponProjectiles, excludePieceProjectiles);
 	return 1;
+}
+
+int LuaSyncedRead::GetProjectilesInRectangle(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetProjectilesInRectangleLive, &LuaSnapshotServe::GetProjectilesInRectangle);
 }
 
 /***

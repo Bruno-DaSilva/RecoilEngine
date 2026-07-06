@@ -56,6 +56,16 @@ public:
 	// whose cell lies within `radius` (XZ) of `pos`. Ascending, deduplicated.
 	void QueryUnitsInRadius(const float3& pos, float radius, std::vector<int>& unitIDs);
 
+	// coarse phase for the Lua spatial-list queries (PR 27b, the
+	// GetUnitsInRectangle/GetFeaturesIn* serving twins): gather ids whose cell
+	// overlaps the XZ rect [mins, maxs] (radius form scans [pos - r, pos + r]).
+	// Conservative superset -- the twins re-apply the exact live filters
+	// (quadfield pos bounds / distance math) on the candidates. Ascending,
+	// deduplicated.
+	void QueryUnitsInRect(const float3& mins, const float3& maxs, std::vector<int>& unitIDs);
+	void QueryFeaturesInRect(const float3& mins, const float3& maxs, std::vector<int>& featureIDs);
+	void QueryFeaturesInRadius(const float3& pos, float radius, std::vector<int>& featureIDs);
+
 private:
 	void Rebuild();
 	void GatherCells(const float3& start, const float3& end, int halo);
