@@ -28,6 +28,7 @@
 #include "lib/assimp/include/assimp/Importer.hpp"
 
 #include "System/Misc/TracyDefs.h"
+#include "System/SimDrawSplit.h"
 
 
 CModelLoader modelLoader;
@@ -227,7 +228,10 @@ std::string CModelLoader::FindModelPath(std::string name) const
 void CModelLoader::PreloadModel(const std::string& modelName)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	assert(Threading::IsMainThread() || Threading::IsGameLoadThread());
+	// PR 27b: sim code preloads build-option/wreck models (CUnit::PreInit);
+	// under the split that runs on the sim thread. The enqueue itself is
+	// thread-safe; preloadFutures is only drained at load time.
+	assert(Threading::IsMainThread() || Threading::IsGameLoadThread() || Threading::IsSimThread());
 
 	//NB: do preload in any case
 	if (ThreadPool::HasThreads()) {
@@ -301,10 +305,48 @@ S3DModel* CModelLoader::LoadModel(std::string name, bool preload)
 		return model->loadStatus == S3DModel::LoadStatus::LOADED;
 	});
 
-	if (!preload)
-		Upload(model);
+	if (!preload) {
+		// PR 27b: the upload half is GL (VBO + texture creation) and must
+		// run on the draw side; a sim-thread load queues it for the next
+		// barrier instead of blocking (the CPU-side model above is complete,
+		// which is all the sim needs -- collision/aim data, piece tree)
+		if (SimDrawSplit::Enabled() && Threading::IsSimThread()) {
+			QueueUpload(model);
+		} else {
+			Upload(model);
+		}
+	}
 
 	return model;
+}
+
+void CModelLoader::QueueUpload(S3DModel* model)
+{
+	auto lock = CModelsLock::GetScopedLock();
+
+	if (model->uploaded)
+		return;
+
+	pendingUploads.push_back(model);
+}
+
+void CModelLoader::ServiceQueuedUploads()
+{
+	// swap out under the lock, upload outside it (Upload takes CLoadLock and
+	// re-checks model->uploaded, so a concurrent main-thread Upload is fine)
+	std::vector<S3DModel*> uploads;
+	{
+		auto lock = CModelsLock::GetScopedLock();
+
+		if (pendingUploads.empty())
+			return;
+
+		std::swap(uploads, pendingUploads);
+	}
+
+	for (S3DModel* model: uploads) {
+		Upload(model);
+	}
 }
 
 S3DModel* CModelLoader::GetCachedModel(std::string fullName)

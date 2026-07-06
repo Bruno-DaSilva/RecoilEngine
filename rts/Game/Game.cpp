@@ -55,6 +55,7 @@
 #include "Rendering/TeamHighlight.h"
 #include "Map/BaseGroundDrawer.h"
 #include "Rendering/Common/ModelDrawer.h"
+#include "Rendering/Models/IModelParser.h"
 #include "Rendering/GL/LightHandler.h"
 #include "Rendering/Units/UnitDrawer.h"
 #include "Rendering/UniformConstants.h"
@@ -1577,6 +1578,11 @@ bool CGame::UpdateUnsynced(const spring_time currentTime)
  */
 void CGame::SimDrawBarrier()
 {
+	// (0) split only: run the GL upload half of any sim-thread model loads
+	// BEFORE the drain -- the creation records about to dispatch may
+	// register objects with these models (PR 27b commit c)
+	modelLoader.ServiceQueuedUploads();
+
 	// (1) apply the sim frames' queued render-event records (object creation,
 	// destruction, LOS transitions) before any draw-side code reads the
 	// drawer containers
@@ -1800,6 +1806,7 @@ void CGame::AcquireSimPause()
 		// same live-read legality as the barrier (sim parked mid-frame)
 		LuaSplitContract::ScopedLiveException valveLive;
 
+		modelLoader.ServiceQueuedUploads();
 		renderEventQueue.Flush();
 		DeliverBoundaryDeaths();
 		UnsyncedBoundaryQueue::Drain();

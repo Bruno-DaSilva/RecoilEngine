@@ -40,6 +40,13 @@ public:
 
 	const std::vector<S3DModel>& GetModelsVec() const { return models; }
 	      std::vector<S3DModel>& GetModelsVec()       { return models; }
+
+	// PR 27b: a sim-thread LoadModel queues the GL upload half (QueueUpload);
+	// the draw side services the queue at the top of every SimDrawBarrier
+	// (and the valve service), BEFORE the render-event drain -- so no drawer
+	// can meet an object whose model is not uploaded. Guarded by CModelsLock
+	// (whose thread safety stays on under the running split).
+	void ServiceQueuedUploads();
 private:
 	void ParseModel(S3DModel& model, const std::string& name, const std::string& path);
 	void FillModel(S3DModel& model, const std::string& name, const std::string& path);
@@ -54,6 +61,8 @@ private:
 	void PostProcessGeometry(S3DModel* o);
 	void Upload(S3DModel* o) const;
 
+	void QueueUpload(S3DModel* o);
+
 private:
 	std::vector<std::pair<std::string, uint32_t>> cache; // "<fullpath>/armflash.3do" --> idx at models
 	std::vector<std::pair<std::string, IModelParser*>> parsers;
@@ -62,6 +71,9 @@ private:
 
 	//can't be weak_ptr here, because in that case there are no owners left for futures. preloadFutures needs to own futures
 	std::vector<std::shared_future<void>> preloadFutures;
+
+	// see QueueUpload
+	std::vector<S3DModel*> pendingUploads;
 
 	std::vector<S3DModel> models;
 	std::vector< std::pair<std::string, std::string> > errors;
