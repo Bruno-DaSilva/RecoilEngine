@@ -10,6 +10,7 @@
 #include "LuaMenu.h"
 #include "LuaOpenGLUtils.h"
 #include "LuaParser.h"
+#include "LuaSplitContract.h"
 #include "LuaTextures.h"
 #include "LuaUtils.h"
 
@@ -535,6 +536,10 @@ int LuaUnsyncedCtrl::SendCommands(lua_State* L)
 	else {
 		luaL_error(L, "Incorrect arguments to SendCommands()");
 	}
+
+	// split contract (PR 27a): stays synchronous, classified 27b work
+	// (synchronous console-action dispatch, arbitrary executors)
+	LuaSplitContract::CountSanctionedPoke(L, __func__);
 
 	lua_settop(L, 0); // pop the input arguments
 
@@ -1507,6 +1512,10 @@ int LuaUnsyncedCtrl::SetDollyCameraLookUnit(lua_State* L)
  */
 int LuaUnsyncedCtrl::SelectUnit(lua_State* L)
 {
+	// split contract (PR 27a): stays synchronous, classified 27b work
+	// (selection handler becomes draw-owned with boundary death-pruning)
+	LuaSplitContract::CountSanctionedPoke(L, __func__);
+
 	if (!luaL_optboolean(L, 2, false))
 		selectedUnitsHandler.ClearSelected();
 
@@ -1534,6 +1543,10 @@ int LuaUnsyncedCtrl::DeselectUnit(lua_State* L)
 	if (unit == nullptr)
 		return 0;
 
+	// split contract (PR 27a): stays synchronous, classified 27b work
+	// (selection handler becomes draw-owned with boundary death-pruning)
+	LuaSplitContract::CountSanctionedPoke(L, __func__);
+
 	selectedUnitsHandler.RemoveUnit(unit);
 
 	return 0;
@@ -1543,6 +1556,11 @@ static int TableSelectionCommonFunc(lua_State* L, int unitIndexInTable, bool isS
 {
 	if (!lua_istable(L, 1))
 		luaL_error(L, "[%s] 1st argument must be a table", caller);
+
+	// split contract (PR 27a): stays synchronous, classified 27b work
+	// (selection handler becomes draw-owned with boundary death-pruning);
+	// counts under each wrapper entry's name
+	LuaSplitContract::CountSanctionedPoke(L, caller);
 
 	if (isSelect && !luaL_optboolean(L, 2, false))
 		selectedUnitsHandler.ClearSelected();
@@ -1933,6 +1951,10 @@ int LuaUnsyncedCtrl::SetMapLightTrackingState(lua_State* L)
 	const bool trackEnable = luaL_optboolean(L, 3, true);
 	const bool trackUnit = luaL_optboolean(L, 4, true);
 
+	// split contract (PR 27a): stays synchronous, classified 27b work
+	// (death-dependence registration on live sim objects)
+	LuaSplitContract::CountSanctionedPoke(L, __func__);
+
 	GL::LightHandler* lightHandler = readMap->GetGroundDrawer()->GetLightHandler();
 	GL::Light* light = (lightHandler != nullptr)? lightHandler->GetLight(lightHandle): nullptr;
 
@@ -1968,6 +1990,10 @@ int LuaUnsyncedCtrl::SetModelLightTrackingState(lua_State* L)
 	const unsigned int lightHandle = luaL_checkint(L, 1);
 	const bool trackEnable = luaL_optboolean(L, 3, true);
 	const bool trackUnit = luaL_optboolean(L, 4, true);
+
+	// split contract (PR 27a): stays synchronous, classified 27b work
+	// (death-dependence registration on live sim objects)
+	LuaSplitContract::CountSanctionedPoke(L, __func__);
 
 	GL::LightHandler* lightHandler = unitDrawer->GetLightHandler();
 	GL::Light* light = (lightHandler != nullptr)? lightHandler->GetLight(lightHandle): nullptr;
@@ -2170,7 +2196,17 @@ int LuaUnsyncedCtrl::SetUnitNoDraw(lua_State* L)
 	if (unit == nullptr)
 		return 0;
 
-	unit->noDraw = luaL_checkboolean(L, 2);
+	const bool noDraw = luaL_checkboolean(L, 2);
+
+	// split contract (PR 27a): direct sim-object write from draw context is
+	// boundary-applied; capture the id, the unit can die before the drain
+	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = unit->id, noDraw]() {
+		if (CUnit* u = unitHandler.GetUnit(id); u != nullptr)
+			u->noDraw = noDraw;
+	}))
+		return 0;
+
+	unit->noDraw = noDraw;
 	return 0;
 }
 
@@ -2189,7 +2225,17 @@ int LuaUnsyncedCtrl::SetUnitEngineDrawMask(lua_State* L)
 	if (unit == nullptr)
 		return 0;
 
-	unit->engineDrawMask = static_cast<uint8_t>(luaL_checkint(L, 2));
+	const uint8_t drawMask = static_cast<uint8_t>(luaL_checkint(L, 2));
+
+	// split contract (PR 27a): direct sim-object write from draw context is
+	// boundary-applied; capture the id, the unit can die before the drain
+	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = unit->id, drawMask]() {
+		if (CUnit* u = unitHandler.GetUnit(id); u != nullptr)
+			u->engineDrawMask = drawMask;
+	}))
+		return 0;
+
+	unit->engineDrawMask = drawMask;
 	return 0;
 }
 
@@ -2208,7 +2254,17 @@ int LuaUnsyncedCtrl::SetUnitAlwaysUpdateMatrix(lua_State* L)
 	if (unit == nullptr)
 		return 0;
 
-	unit->alwaysUpdateMat = luaL_checkboolean(L, 2);
+	const bool alwaysUpdateMat = luaL_checkboolean(L, 2);
+
+	// split contract (PR 27a): direct sim-object write from draw context is
+	// boundary-applied; capture the id, the unit can die before the drain
+	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = unit->id, alwaysUpdateMat]() {
+		if (CUnit* u = unitHandler.GetUnit(id); u != nullptr)
+			u->alwaysUpdateMat = alwaysUpdateMat;
+	}))
+		return 0;
+
+	unit->alwaysUpdateMat = alwaysUpdateMat;
 	return 0;
 }
 
@@ -2227,7 +2283,17 @@ int LuaUnsyncedCtrl::SetUnitNoMinimap(lua_State* L)
 	if (unit == nullptr)
 		return 0;
 
-	unit->noMinimap = luaL_checkboolean(L, 2);
+	const bool noMinimap = luaL_checkboolean(L, 2);
+
+	// split contract (PR 27a): direct sim-object write from draw context is
+	// boundary-applied; capture the id, the unit can die before the drain
+	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = unit->id, noMinimap]() {
+		if (CUnit* u = unitHandler.GetUnit(id); u != nullptr)
+			u->noMinimap = noMinimap;
+	}))
+		return 0;
+
+	unit->noMinimap = noMinimap;
 	return 0;
 }
 
@@ -2274,7 +2340,13 @@ int LuaUnsyncedCtrl::SetUnitNoGroup(lua_State* L)
 	if (unit == nullptr)
 		return 0;
 
-	unit->noGroup = luaL_checkboolean(L, 2);
+	const bool noGroup = luaL_checkboolean(L, 2);
+
+	// split contract (PR 27a): stays synchronous, classified 27b work
+	// (group membership is an ordered RMW shared with the sim death path)
+	LuaSplitContract::CountSanctionedPoke(L, __func__);
+
+	unit->noGroup = noGroup;
 
 	if (unit->noGroup) {
 		unit->SetGroup(nullptr);
@@ -2297,7 +2369,13 @@ int LuaUnsyncedCtrl::SetUnitNoSelect(lua_State* L)
 	if (unit == nullptr)
 		return 0;
 
-	unit->noSelect = luaL_checkboolean(L, 2);
+	const bool noSelect = luaL_checkboolean(L, 2);
+
+	// split contract (PR 27a): stays synchronous, classified 27b work
+	// (two-writer field: sim's UpdateVoidState also writes noSelect)
+	LuaSplitContract::CountSanctionedPoke(L, __func__);
+
+	unit->noSelect = noSelect;
 
 	// deselect the unit if it's selected and shouldn't be
 	if (unit->noSelect) {
@@ -2325,7 +2403,18 @@ int LuaUnsyncedCtrl::SetUnitLeaveTracks(lua_State* L)
 	if (unit == nullptr)
 		return 0;
 
-	groundDecals->SetUnitLeaveTracks(unit, lua_toboolean(L, 2));
+	const bool leaveTracks = lua_toboolean(L, 2);
+
+	// split contract (PR 27a): SetUnitLeaveTracks writes unit->leaveTracks and
+	// pokes the decal-owner bookkeeping; queue the whole effect id-based, the
+	// unit can die before the drain
+	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = unit->id, leaveTracks]() {
+		if (CUnit* u = unitHandler.GetUnit(id); u != nullptr)
+			groundDecals->SetUnitLeaveTracks(u, leaveTracks);
+	}))
+		return 0;
+
+	groundDecals->SetUnitLeaveTracks(unit, leaveTracks);
 	return 0;
 }
 
@@ -2353,7 +2442,22 @@ int LuaUnsyncedCtrl::SetUnitSelectionVolumeData(lua_State* L)
 	if (unit == nullptr)
 		return 0;
 
-	return LuaUtils::ParseColVolData(L, 2, &unit->selectionVolume);
+	// parse args before the queue decision so bad args still error at call
+	// time (ParseColVolData luaL_check's every arg, then InitShape's the
+	// whole volume -- it reads no existing state)
+	CollisionVolume selVol = unit->selectionVolume;
+	LuaUtils::ParseColVolData(L, 2, &selVol);
+
+	// split contract (PR 27a): direct sim-object write from draw context is
+	// boundary-applied; capture the id, the unit can die before the drain
+	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = unit->id, selVol]() {
+		if (CUnit* u = unitHandler.GetUnit(id); u != nullptr)
+			u->selectionVolume = selVol;
+	}))
+		return 0;
+
+	unit->selectionVolume = selVol;
+	return 0;
 }
 
 
@@ -2379,7 +2483,17 @@ int LuaUnsyncedCtrl::SetFeatureNoDraw(lua_State* L)
 	if (feature == nullptr)
 		return 0;
 
-	feature->noDraw = luaL_checkboolean(L, 2);
+	const bool noDraw = luaL_checkboolean(L, 2);
+
+	// split contract (PR 27a): direct sim-object write from draw context is
+	// boundary-applied; capture the id, the feature can die before the drain
+	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = feature->id, noDraw]() {
+		if (CFeature* f = featureHandler.GetFeature(id); f != nullptr)
+			f->noDraw = noDraw;
+	}))
+		return 0;
+
+	feature->noDraw = noDraw;
 	return 0;
 }
 
@@ -2398,7 +2512,17 @@ int LuaUnsyncedCtrl::SetFeatureEngineDrawMask(lua_State* L)
 	if (feature == nullptr)
 		return 0;
 
-	feature->engineDrawMask = static_cast<uint8_t>(luaL_checkint(L, 2));
+	const uint8_t drawMask = static_cast<uint8_t>(luaL_checkint(L, 2));
+
+	// split contract (PR 27a): direct sim-object write from draw context is
+	// boundary-applied; capture the id, the feature can die before the drain
+	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = feature->id, drawMask]() {
+		if (CFeature* f = featureHandler.GetFeature(id); f != nullptr)
+			f->engineDrawMask = drawMask;
+	}))
+		return 0;
+
+	feature->engineDrawMask = drawMask;
 	return 0;
 }
 
@@ -2417,7 +2541,17 @@ int LuaUnsyncedCtrl::SetFeatureAlwaysUpdateMatrix(lua_State* L)
 	if (feature == nullptr)
 		return 0;
 
-	feature->alwaysUpdateMat = luaL_checkboolean(L, 2);
+	const bool alwaysUpdateMat = luaL_checkboolean(L, 2);
+
+	// split contract (PR 27a): direct sim-object write from draw context is
+	// boundary-applied; capture the id, the feature can die before the drain
+	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = feature->id, alwaysUpdateMat]() {
+		if (CFeature* f = featureHandler.GetFeature(id); f != nullptr)
+			f->alwaysUpdateMat = alwaysUpdateMat;
+	}))
+		return 0;
+
+	feature->alwaysUpdateMat = alwaysUpdateMat;
 	return 0;
 }
 
@@ -2438,7 +2572,17 @@ int LuaUnsyncedCtrl::SetFeatureFade(lua_State* L)
 	if (feature == nullptr)
 		return 0;
 
-	feature->alphaFade = luaL_checkboolean(L, 2);
+	const bool alphaFade = luaL_checkboolean(L, 2);
+
+	// split contract (PR 27a): direct sim-object write from draw context is
+	// boundary-applied; capture the id, the feature can die before the drain
+	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = feature->id, alphaFade]() {
+		if (CFeature* f = featureHandler.GetFeature(id); f != nullptr)
+			f->alphaFade = alphaFade;
+	}))
+		return 0;
+
+	feature->alphaFade = alphaFade;
 	return 0;
 }
 
@@ -2466,8 +2610,22 @@ int LuaUnsyncedCtrl::SetFeatureSelectionVolumeData(lua_State* L)
 	if (feature == nullptr)
 		return 0;
 
+	// parse args before the queue decision so bad args still error at call
+	// time (ParseColVolData luaL_check's every arg, then InitShape's the
+	// whole volume -- it reads no existing state)
+	CollisionVolume selVol = feature->selectionVolume;
+	LuaUtils::ParseColVolData(L, 2, &selVol);
 
-	return LuaUtils::ParseColVolData(L, 2, &feature->selectionVolume);
+	// split contract (PR 27a): direct sim-object write from draw context is
+	// boundary-applied; capture the id, the feature can die before the drain
+	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = feature->id, selVol]() {
+		if (CFeature* f = featureHandler.GetFeature(id); f != nullptr)
+			f->selectionVolume = selVol;
+	}))
+		return 0;
+
+	feature->selectionVolume = selVol;
+	return 0;
 }
 
 
@@ -2971,10 +3129,30 @@ int LuaUnsyncedCtrl::SetTeamColor(lua_State* L)
 	if (team == nullptr)
 		return 0;
 
-	team->color[0] = (unsigned char)(std::clamp(luaL_checkfloat(L, 2      ), 0.0f, 1.0f) * 255.0f);
-	team->color[1] = (unsigned char)(std::clamp(luaL_checkfloat(L, 3      ), 0.0f, 1.0f) * 255.0f);
-	team->color[2] = (unsigned char)(std::clamp(luaL_checkfloat(L, 4      ), 0.0f, 1.0f) * 255.0f);
-	team->color[3] = (unsigned char)(std::clamp(luaL_optfloat  (L, 5, 1.0f), 0.0f, 1.0f) * 255.0f);
+	const unsigned char r = (unsigned char)(std::clamp(luaL_checkfloat(L, 2      ), 0.0f, 1.0f) * 255.0f);
+	const unsigned char g = (unsigned char)(std::clamp(luaL_checkfloat(L, 3      ), 0.0f, 1.0f) * 255.0f);
+	const unsigned char b = (unsigned char)(std::clamp(luaL_checkfloat(L, 4      ), 0.0f, 1.0f) * 255.0f);
+	const unsigned char a = (unsigned char)(std::clamp(luaL_optfloat  (L, 5, 1.0f), 0.0f, 1.0f) * 255.0f);
+
+	// split contract (PR 27a): direct sim-object write from draw context is
+	// boundary-applied; capture the teamID and re-resolve at apply time
+	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [teamID, r, g, b, a]() {
+		if (!teamHandler.IsValidTeam(teamID))
+			return;
+
+		if (CTeam* t = teamHandler.Team(teamID); t != nullptr) {
+			t->color[0] = r;
+			t->color[1] = g;
+			t->color[2] = b;
+			t->color[3] = a;
+		}
+	}))
+		return 0;
+
+	team->color[0] = r;
+	team->color[1] = g;
+	team->color[2] = b;
+	team->color[3] = a;
 	return 0;
 }
 
@@ -3174,13 +3352,35 @@ int LuaUnsyncedCtrl::SetLosViewColors(lua_State* L)
  */
 int LuaUnsyncedCtrl::SetNanoProjectileParams(lua_State* L)
 {
-	CNanoProjectile::rotVal0 = luaL_optfloat(L, 1, 0.0f) * (math::DEG_TO_RAD                            );
-	CNanoProjectile::rotVel0 = luaL_optfloat(L, 2, 0.0f) * (math::DEG_TO_RAD / GAME_SPEED               );
-	CNanoProjectile::rotAcc0 = luaL_optfloat(L, 3, 0.0f) * (math::DEG_TO_RAD / (GAME_SPEED * GAME_SPEED));
+	const float rotVal = luaL_optfloat(L, 1, 0.0f) * (math::DEG_TO_RAD                            );
+	const float rotVel = luaL_optfloat(L, 2, 0.0f) * (math::DEG_TO_RAD / GAME_SPEED               );
+	const float rotAcc = luaL_optfloat(L, 3, 0.0f) * (math::DEG_TO_RAD / (GAME_SPEED * GAME_SPEED));
 
-	CNanoProjectile::rotValRng0 = luaL_optfloat(L, 4, 0.0f) * (math::DEG_TO_RAD                            );
-	CNanoProjectile::rotVelRng0 = luaL_optfloat(L, 5, 0.0f) * (math::DEG_TO_RAD / GAME_SPEED               );
-	CNanoProjectile::rotAccRng0 = luaL_optfloat(L, 6, 0.0f) * (math::DEG_TO_RAD / (GAME_SPEED * GAME_SPEED));
+	const float rotValRng = luaL_optfloat(L, 4, 0.0f) * (math::DEG_TO_RAD                            );
+	const float rotVelRng = luaL_optfloat(L, 5, 0.0f) * (math::DEG_TO_RAD / GAME_SPEED               );
+	const float rotAccRng = luaL_optfloat(L, 6, 0.0f) * (math::DEG_TO_RAD / (GAME_SPEED * GAME_SPEED));
+
+	// split contract (PR 27a): CNanoProjectile statics are read by the sim's
+	// projectile spawns; the write is boundary-applied (values captured, no
+	// object to re-resolve)
+	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [rotVal, rotVel, rotAcc, rotValRng, rotVelRng, rotAccRng]() {
+		CNanoProjectile::rotVal0 = rotVal;
+		CNanoProjectile::rotVel0 = rotVel;
+		CNanoProjectile::rotAcc0 = rotAcc;
+
+		CNanoProjectile::rotValRng0 = rotValRng;
+		CNanoProjectile::rotVelRng0 = rotVelRng;
+		CNanoProjectile::rotAccRng0 = rotAccRng;
+	}))
+		return 0;
+
+	CNanoProjectile::rotVal0 = rotVal;
+	CNanoProjectile::rotVel0 = rotVel;
+	CNanoProjectile::rotAcc0 = rotAcc;
+
+	CNanoProjectile::rotValRng0 = rotValRng;
+	CNanoProjectile::rotVelRng0 = rotVelRng;
+	CNanoProjectile::rotAccRng0 = rotAccRng;
 
 	return 0;
 }
@@ -3364,6 +3564,10 @@ int LuaUnsyncedCtrl::SetUnitGroup(lua_State* L)
 
 	const int groupID = luaL_checkint(L, 2);
 
+	// split contract (PR 27a): stays synchronous, classified 27b work
+	// (group membership is an ordered RMW shared with the sim death path)
+	LuaSplitContract::CountSanctionedPoke(L, __func__);
+
 	if (groupID == -1) {
 		unit->SetGroup(nullptr);
 		return 0;
@@ -3457,6 +3661,10 @@ int LuaUnsyncedCtrl::GiveOrder(lua_State* L)
 		lua_pushboolean(L, false);
 		return 1;
 	}
+
+	// split contract (PR 27a): stays synchronous, classified 27b work (reads
+	// current selection + pokes player stats/wait commands; needs op capture)
+	LuaSplitContract::CountSanctionedPoke(L, __func__);
 
 	selectedUnitsHandler.GiveCommand(LuaUtils::ParseCommand(L, __func__, 1));
 
@@ -3862,6 +4070,10 @@ int LuaUnsyncedCtrl::ShareResources(lua_State* L)
 	if ((team == nullptr) || team->isDead)
 		return 0;
 
+	// split contract (PR 27a): stays synchronous, classified 27b work
+	// (the units path clears selection)
+	LuaSplitContract::CountSanctionedPoke(L, __func__);
+
 	const char* type = lua_tostring(L, 2);
 	if (type[0] == 'u') {
 		selectedUnitsHandler.SendSelect();
@@ -3936,6 +4148,11 @@ int LuaUnsyncedCtrl::MarkerAddPoint(lua_State* L)
 	const bool onlyLocal = luaL_optboolean(L, 5, true);
 
 	if (onlyLocal) {
+		// split contract (PR 27a): stays synchronous, classified 27b work
+		// (localOnly path writes the map-drawer model shared with net-message
+		// processing); the net path is thread-safe and not counted
+		LuaSplitContract::CountSanctionedPoke(L, __func__);
+
 		inMapDrawerModel->AddPoint(pos, text, luaL_optnumber(L, 6, gu->myPlayerNum));
 	} else {
 		inMapDrawer->SendPoint(pos, text, true);
@@ -3970,6 +4187,11 @@ int LuaUnsyncedCtrl::MarkerAddLine(lua_State* L)
 	const bool onlyLocal = luaL_optboolean(L, 7, false);
 
 	if (onlyLocal) {
+		// split contract (PR 27a): stays synchronous, classified 27b work
+		// (localOnly path writes the map-drawer model shared with net-message
+		// processing); the net path is thread-safe and not counted
+		LuaSplitContract::CountSanctionedPoke(L, __func__);
+
 		inMapDrawerModel->AddLine(pos1, pos2, luaL_optnumber(L, 8, gu->myPlayerNum));
 	} else {
 		inMapDrawer->SendLine(pos1, pos2, true);
@@ -4006,6 +4228,11 @@ int LuaUnsyncedCtrl::MarkerErasePosition(lua_State* L)
 
 	const bool onlyLocal = luaL_optboolean(L, 5, false);
 	if (onlyLocal) {
+		// split contract (PR 27a): stays synchronous, classified 27b work
+		// (localOnly path writes the map-drawer model shared with net-message
+		// processing); the net path is thread-safe and not counted
+		LuaSplitContract::CountSanctionedPoke(L, __func__);
+
 		// always erase if onlyLocal and current player is spectator
 		const bool alwaysErase = luaL_optboolean(L, 7, false) && gu->spectating;
 		inMapDrawerModel->EraseNear(pos, luaL_optnumber(L, 6, gu->myPlayerNum), alwaysErase);
@@ -4293,6 +4520,10 @@ int LuaUnsyncedCtrl::SendSkirmishAIMessage(lua_State* L) {
 
 	const int aiTeam = luaL_checkint(L, 1);
 	const char* inData = luaL_checkstring(L, 2);
+
+	// split contract (PR 27a): stays synchronous, classified 27b work
+	// (synchronous call into a sim-side AI)
+	LuaSplitContract::CountSanctionedPoke(L, __func__);
 
 	std::vector<const char*> outData;
 
@@ -5326,7 +5557,13 @@ int LuaUnsyncedCtrl::SetWindowMaximized(lua_State* L)
  */
 int LuaUnsyncedCtrl::Reload(lua_State* L)
 {
-	return (ReloadOrRestart("", luaL_checkstring(L, 1), false));
+	const std::string scriptText = luaL_checkstring(L, 1);
+
+	// split contract (PR 27a): stays synchronous, classified 27b work
+	// (engine lifecycle; must run at a safe point)
+	LuaSplitContract::CountSanctionedPoke(L, __func__);
+
+	return (ReloadOrRestart("", scriptText, false));
 }
 
 
@@ -5340,8 +5577,15 @@ int LuaUnsyncedCtrl::Reload(lua_State* L)
  */
 int LuaUnsyncedCtrl::Restart(lua_State* L)
 {
+	const std::string springArgs = luaL_checkstring(L, 1);
+	const std::string scriptText = luaL_checkstring(L, 2);
+
+	// split contract (PR 27a): stays synchronous, classified 27b work
+	// (engine lifecycle; must run at a safe point)
+	LuaSplitContract::CountSanctionedPoke(L, __func__);
+
 	// same as Reload now, cl-args are always ignored
-	return (ReloadOrRestart(luaL_checkstring(L, 1), luaL_checkstring(L, 2), false));
+	return (ReloadOrRestart(springArgs, scriptText, false));
 }
 
 
@@ -5357,7 +5601,14 @@ int LuaUnsyncedCtrl::Restart(lua_State* L)
  */
 int LuaUnsyncedCtrl::Start(lua_State* L)
 {
-	if (ReloadOrRestart(luaL_checkstring(L, 1), luaL_checkstring(L, 2), true) != 0) {
+	const std::string springArgs = luaL_checkstring(L, 1);
+	const std::string scriptText = luaL_checkstring(L, 2);
+
+	// split contract (PR 27a): stays synchronous, classified 27b work
+	// (engine lifecycle; must run at a safe point)
+	LuaSplitContract::CountSanctionedPoke(L, __func__);
+
+	if (ReloadOrRestart(springArgs, scriptText, true) != 0) {
 		lua_pushboolean(L, false);
 		return 1;
 	}
