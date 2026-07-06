@@ -6,6 +6,7 @@
 #include <memory>
 
 #include "Sim/Projectiles/Projectile.h"
+#include "Sim/Projectiles/ProjectileHandler.h" // GroundFlashContainer / FlyingPieceContainer (PR 27b barrier copies)
 #include "Rendering/GL/myGL.h"
 #include "Rendering/GL/RenderBuffers.h"
 #include "Rendering/GL/FBO.h"
@@ -231,6 +232,12 @@ private:
 	// BuildSplitResolveCache from the SimDrawBarrier / valve service.
 	std::array<std::vector<const CProjectile*>, 2> splitResolveCache;
 	bool splitResolveCacheBuilt = false;
+
+	// PR 27b: barrier copies of the sim-owned effect containers the passes
+	// iterate live flag-off (the sim mutates both mid-frame under the split;
+	// dead flashes are shells until the next barrier ack)
+	GroundFlashContainer splitGroundFlashes;
+	std::array<FlyingPieceContainer, MODELTYPE_CNT> splitFlyingPieces;
 
 	/// position of a handle in renderHandles, keyed [synced][id]; -1u when
 	/// not registered (replaces the old CProjectile::renderIndex backref)

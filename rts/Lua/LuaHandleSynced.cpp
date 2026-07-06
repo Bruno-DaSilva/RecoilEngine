@@ -69,11 +69,12 @@ LuaRulesParams::Params  CSplitLuaHandle::gameParams;
  */
 static lua_State* GetSendToUnsyncedMailbox()
 {
-	static luaContextData mailboxLcd(false, true);
-	static lua_State* mailbox = nullptr;
-
-	if (mailbox == nullptr)
-		mailbox = LUA_OPEN(&mailboxLcd);
+	// deliberately leaked: a function-static lcd's atexit destructor would
+	// run after LuaMemPool::KillStatic and release into a freed pool
+	// (TSan-found exit-order use-after-free); the mailbox lives for the
+	// process lifetime by design
+	static luaContextData* mailboxLcd = new luaContextData(false, true);
+	static lua_State* mailbox = LUA_OPEN(mailboxLcd);
 
 	return mailbox;
 }

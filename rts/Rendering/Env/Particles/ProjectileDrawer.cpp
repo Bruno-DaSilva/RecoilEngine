@@ -85,6 +85,15 @@ void CProjectileDrawer::BuildSplitResolveCache()
 {
 	splitResolveCacheBuilt = true;
 
+	// barrier copies of the sim-owned effect containers (see the members);
+	// dead flashes are deferred shells until the next ack, so every copied
+	// pointer stays readable for the whole draw frame
+	splitGroundFlashes = projectileHandler.groundFlashes;
+
+	for (int mt = 0; mt < MODELTYPE_CNT; ++mt) {
+		splitFlyingPieces[mt] = projectileHandler.flyingPieces[mt];
+	}
+
 	std::fill(splitResolveCache[0].begin(), splitResolveCache[0].end(), nullptr);
 	std::fill(splitResolveCache[1].begin(), splitResolveCache[1].end(), nullptr);
 
@@ -723,7 +732,9 @@ void CProjectileDrawer::DrawProjectilesMiniMap()
 void CProjectileDrawer::DrawFlyingPieces(int modelType) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	const FlyingPieceContainer& container = projectileHandler.flyingPieces[modelType];
+	// PR 27b: see DrawGroundFlashes
+	const bool splitLive = (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning());
+	const FlyingPieceContainer& container = splitLive ? splitFlyingPieces[modelType] : projectileHandler.flyingPieces[modelType];
 
 	if (container.empty())
 		return;
@@ -1066,7 +1077,10 @@ void CProjectileDrawer::DrawProjectileModel(const CProjectile* p)
 void CProjectileDrawer::DrawGroundFlashes()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	const GroundFlashContainer& gfc = projectileHandler.groundFlashes;
+	// PR 27b: with the split running, iterate the barrier copy -- the sim
+	// thread mutates the live container mid-frame
+	const bool splitLive = (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning());
+	const GroundFlashContainer& gfc = splitLive ? splitGroundFlashes : projectileHandler.groundFlashes;
 
 	if (gfc.empty())
 		return;

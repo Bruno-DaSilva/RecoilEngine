@@ -8,6 +8,7 @@
 class CUnit;
 class CFeature;
 class CProjectile;
+class CGroundFlash;
 
 /**
  * @brief Deferred-deletion epoch for pooled sim objects (units, features,
@@ -76,6 +77,7 @@ public:
 	void Defer(CUnit* unit);
 	void Defer(CFeature* feature);
 	void Defer(CProjectile* proj);
+	void Defer(CGroundFlash* flash);
 
 	// THE ack point: called once, right after renderEventQueue.Drain() in
 	// CGame::Draw. Destructs + poisons all parked shells (their destroy
@@ -96,6 +98,9 @@ private:
 		Unit,
 		Feature,
 		Projectile,
+		// PR 27b: ground flashes are projMemPool objects freed by the sim's
+		// flash update; under the split the draw side may still hold them
+		GroundFlash,
 	};
 
 	struct Entry {

@@ -15,6 +15,8 @@
 #include "System/Log/ILog.h"
 #include "System/Platform/Threading.h"
 #include "System/SimDrawSplit.h"
+#include "System/Sync/SyncChecker.h"
+#include "System/Threading/ThreadPool.h"
 
 RenderEventQueue renderEventQueue;
 
@@ -23,8 +25,14 @@ void RenderEventQueue::Push(const Record& record)
 {
 	// PR 27b: between barriers the record containers belong to the sim
 	// thread; a main-thread Push while it runs would race (game-load and
-	// boundary dispatches happen with the sim thread parked or not spawned)
-	assert(!SimDrawSplit::Enabled() || !SimDrawSplit::SimThreadRunning() || Threading::IsSimThread());
+	// boundary dispatches happen with the sim thread parked or not spawned).
+	// Workers in the sim's own fork-join (MT projectile spawns, serialized
+	// by CProjectile::mut) are sim-side and legal.
+	// the hazard is a MAIN-thread Push while the sim runs unparked; no
+	// per-thread flag identifies sim-side workers reliably
+	// (~MultithreadedSection clears unconditionally), so assert the inverse
+	assert(!SimDrawSplit::Enabled() || !SimDrawSplit::SimThreadRunning() ||
+	       !Threading::IsMainThread() || SimDrawSplit::IsSimParked());
 
 	if (!deferring) {
 		// immediate mode is only ever active with an empty queue (Drain is

@@ -32,6 +32,8 @@
 #include "System/Log/ILog.h"
 #include "System/Platform/Threading.h"
 #include "System/SimDrawSplit.h"
+#include "System/Sync/SyncChecker.h"
+#include "System/Threading/ThreadPool.h"
 #include "System/Cpp11Compat.hpp"
 #include "System/SpringMath.h"
 #include "System/TimeProfiler.h"
@@ -239,7 +241,15 @@ static void UPDATE_PTR_CONTAINER(T& cont) {
 		CGroundFlash*& gf = cont[i];
 
 		if (!gf->Update()) {
-			projMemPool.free(gf);
+			// PR 27b: under the split the draw side renders from a barrier-
+			// copied flash list -- the shell must stay readable until the
+			// next barrier ack (same epoch as every other sim object)
+			if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
+				deferredObjectDeleter.Defer(gf);
+			} else {
+				projMemPool.free(gf);
+			}
+
 			gf = cont[size -= 1];
 			continue;
 		}
@@ -417,9 +427,14 @@ void CProjectileHandler::AddProjectile(CProjectile* p)
 	// already initialized?
 	assert(p->id < 0);
 	assert(p->createMe);
-	// PR 27b: both containers are sim-thread-owned under the split; a main-
-	// thread spawn while the sim runs would race the SimFrame update loops
-	assert(!SimDrawSplit::Enabled() || !SimDrawSplit::SimThreadRunning() || Threading::IsSimThread());
+	// PR 27b: both containers are sim-thread-owned under the split -- the
+	// hazard is a MAIN-thread spawn while the sim runs unparked (racing the
+	// SimFrame update loops). Sim-side workers (ExpGenSpawner spawning from
+	// the MT unsynced-projectile pass, serialized by CProjectile::mut) are
+	// legal, and no per-thread flag identifies them reliably
+	// (~MultithreadedSection clears unconditionally), so assert the inverse.
+	assert(!SimDrawSplit::Enabled() || !SimDrawSplit::SimThreadRunning() ||
+	       !Threading::IsMainThread() || SimDrawSplit::IsSimParked());
 
 	if (p->synced)
 		p->id = static_cast<int>(projectiles[true ].Add(p, rngFuncs[true]));

@@ -1748,7 +1748,11 @@ void CGame::SimThreadProc()
 	streflop::streflop_init<streflop::Simple>();
 
 	Watchdog::RegisterThread(WDT_SIM);
-	SimDrawSplit::SetSimThreadRunning(true);
+	// simRunning was already set by SpawnSimThread BEFORE the thread
+	// existed: the pause handshake must see the thread from the very first
+	// Draw, or the barrier drains unparked against a consuming sim thread
+	// (the TSan-found spawn race)
+	assert(SimDrawSplit::SimThreadRunning());
 
 	try {
 		while (!SimDrawSplit::SimThreadExitRequested() && !gu->globalQuit) {
@@ -1799,6 +1803,8 @@ void CGame::SpawnSimThread()
 	clientNet->SetThreadSafeQueueOps(true);
 
 	SimDrawSplit::ResetSimThreadExit();
+	// set BEFORE the thread exists (see the assert in SimThreadProc)
+	SimDrawSplit::SetSimThreadRunning(true);
 	simNetThread = spring::thread(std::bind(&CGame::SimThreadProc, this));
 
 	LOG("[Game::%s] sim thread spawned (SimDrawSplit=1)", __func__);

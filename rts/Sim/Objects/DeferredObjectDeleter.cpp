@@ -10,6 +10,7 @@
 #include "Sim/Features/FeatureMemPool.h"
 #include "Sim/Projectiles/Projectile.h"
 #include "Sim/Projectiles/ProjectileMemPool.h"
+#include "Rendering/GroundFlash.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitMemPool.h"
 #include "System/Log/ILog.h"
@@ -53,9 +54,10 @@ void DeferredObjectDeleter::Park(ObjKind kind, void* obj)
 	size_t freePages = 0;
 
 	switch (kind) {
-		case ObjKind::Unit      : { freePages = FreePoolPages(unitMemPool   ); } break;
-		case ObjKind::Feature   : { freePages = FreePoolPages(featureMemPool); } break;
-		case ObjKind::Projectile: { freePages = FreePoolPages(projMemPool   ); } break;
+		case ObjKind::Unit       : { freePages = FreePoolPages(unitMemPool   ); } break;
+		case ObjKind::Feature    : { freePages = FreePoolPages(featureMemPool); } break;
+		case ObjKind::Projectile :
+		case ObjKind::GroundFlash: { freePages = FreePoolPages(projMemPool   ); } break;
 	}
 
 	if (freePages < EMERGENCY_HEADROOM_PAGES && !(pending.empty() && poisoned.empty())) {
@@ -104,6 +106,14 @@ void DeferredObjectDeleter::Defer(CProjectile* proj)
 	Park(ObjKind::Projectile, proj);
 }
 
+void DeferredObjectDeleter::Defer(CGroundFlash* flash)
+{
+	// no PreDestruct: ground flashes have no sync-observable teardown; the
+	// whole point is keeping the shell readable for the draw side's
+	// barrier-copied flash list (PR 27b)
+	Park(ObjKind::GroundFlash, flash);
+}
+
 
 void DeferredObjectDeleter::DestructAndPoison(const Entry& e) const
 {
@@ -120,6 +130,10 @@ void DeferredObjectDeleter::DestructAndPoison(const Entry& e) const
 			static_cast<CProjectile*>(e.obj)->~CProjectile();
 			std::memset(e.obj, POISON_BYTE, ProjMemPool::PAGE_SIZE());
 		} break;
+		case ObjKind::GroundFlash: {
+			static_cast<CGroundFlash*>(e.obj)->~CGroundFlash();
+			std::memset(e.obj, POISON_BYTE, ProjMemPool::PAGE_SIZE());
+		} break;
 	}
 }
 
@@ -131,9 +145,10 @@ void DeferredObjectDeleter::ReleaseSlot(const Entry& e) const
 	size_t pageSize = 0;
 
 	switch (e.kind) {
-		case ObjKind::Unit      : { pageSize = UnitMemPool::PAGE_SIZE();    } break;
-		case ObjKind::Feature   : { pageSize = FeatureMemPool::PAGE_SIZE(); } break;
-		case ObjKind::Projectile: { pageSize = ProjMemPool::PAGE_SIZE();    } break;
+		case ObjKind::Unit       : { pageSize = UnitMemPool::PAGE_SIZE();    } break;
+		case ObjKind::Feature    : { pageSize = FeatureMemPool::PAGE_SIZE(); } break;
+		case ObjKind::Projectile :
+		case ObjKind::GroundFlash: { pageSize = ProjMemPool::PAGE_SIZE();    } break;
 	}
 
 	const uint8_t* bytes = static_cast<const uint8_t*>(e.obj);
@@ -144,9 +159,10 @@ void DeferredObjectDeleter::ReleaseSlot(const Entry& e) const
 #endif
 
 	switch (e.kind) {
-		case ObjKind::Unit      : { unitMemPool.freeMem(e.obj);    } break;
-		case ObjKind::Feature   : { featureMemPool.freeMem(e.obj); } break;
-		case ObjKind::Projectile: { projMemPool.freeMem(e.obj);    } break;
+		case ObjKind::Unit       : { unitMemPool.freeMem(e.obj);    } break;
+		case ObjKind::Feature    : { featureMemPool.freeMem(e.obj); } break;
+		case ObjKind::Projectile :
+		case ObjKind::GroundFlash: { projMemPool.freeMem(e.obj);    } break;
 	}
 }
 
