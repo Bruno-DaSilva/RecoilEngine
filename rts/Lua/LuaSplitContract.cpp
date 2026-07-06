@@ -269,7 +269,32 @@ bool DenyLiveRead(lua_State* L, const char* caller)
 	// denies deterministically until its family is snapshot-served; the
 	// barrier's own dispatches run under ScopedLiveException and never get
 	// here. (Decision 5: the boundary serves everything it claims to serve.)
+	//
+	// EXCEPT the value-safe subset: pure scalar/grid reads with no sim-owned
+	// pointer or container traversal (terrain-type arrays, height grids, LOS
+	// bitmaps). Their worst case is a torn word -- the tolerated section-C
+	// class -- and denying them broke core UI (gui_info's bottom-left panel
+	// dies on the first terrain hover when GetGroundInfo nils, windowed
+	// dogfood round 5). Container-walking sanctioned entries (Test*Order,
+	// rules params, pathing) stay denied until served.
 	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() && !SimDrawSplit::IsSimParked()) {
+		static const spring::unordered_set<std::string> splitRunningValueSafe = {
+			"GetGroundInfo",       // typemap + terrain-type arrays (floats; SetTerrainTypeData is the rare writer)
+			"GetTerrainTypeData",
+			"GetSmoothMeshHeight", // float grid, sim-updated in place
+			"GetGroundOrigHeight", // float grid
+			"GetPositionLosState", // LOS bitmaps: int arrays mutated in place
+			"IsPosInLos",
+			"IsPosInRadar",
+			"IsPosInAirLos",
+			"GetRadarErrorParams", // per-allyteam scalars
+		};
+
+		if (splitRunningValueSafe.find(caller) != splitRunningValueSafe.end()) {
+			stat.liveReads++;
+			return false;
+		}
+
 		stat.denials++;
 		WarnOnce(stat, caller, "live sim read DENIED under the running split (sim thread active; family not snapshot-served yet)");
 		return true;

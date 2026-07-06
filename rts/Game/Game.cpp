@@ -356,11 +356,16 @@ void CGame::AddTimedJobs()
 			// SimFrame handles gc when not paused, this all other cases
 			// do not check the global synced state, never true in demos
 			// PR 27b: under the split this job runs on the main/draw thread,
-			// so it may not lua_gc the sim-thread-owned synced states --
-			// restrict it to the unsynced handles (SimFrame GCs the synced
-			// ones on the sim thread with the mirror filter)
-			if (luaGCControl == 1 || simFrameDeltaTime > gcForcedDeltaTime)
-				eventHandler.CollectGarbage(false, SimDrawSplit::Enabled() ? CEventHandler::GC_UNSYNCED_ONLY : CEventHandler::GC_ALL);
+			// so it may not lua_gc the sim-thread-owned synced states -- and
+			// it is the ONLY collector the unsynced states have: SimFrame's
+			// call is filtered to the synced mirror on the sim thread, so
+			// the paused-only gate master used would let LuaUI grow without
+			// bound during active play (windowed-dogfood LUA_ERRMEM at ~3min)
+			if (SimDrawSplit::Enabled()) {
+				eventHandler.CollectGarbage(false, CEventHandler::GC_UNSYNCED_ONLY);
+			} else if (luaGCControl == 1 || simFrameDeltaTime > gcForcedDeltaTime) {
+				eventHandler.CollectGarbage(false, CEventHandler::GC_ALL);
+			}
 
 			CInputReceiver::CollectGarbage();
 			return true;
