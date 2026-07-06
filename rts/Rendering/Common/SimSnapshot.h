@@ -74,8 +74,9 @@
  *    gu->myAllyTeam changes (row selection above), when the alive-unit count
  *    changes outside the frame cadence (objects spawned before the first sim
  *    frame advances -- same edge ExtractTransforms handles via its pending
- *    flag), and on any frameNum mismatch including backwards jumps
- *    (checkpoint load / replay rewind).
+ *    flag), when sim marks a between-frames mutation (net-message-driven team
+ *    transfers, see MarkMutatedOutsideFrame), and on any frameNum mismatch
+ *    including backwards jumps (checkpoint load / replay rewind).
  *  - Consumers called outside CGame::Draw (input handlers, e.g. minimap
  *    select) read the previous boundary's snapshot: at most one draw frame of
  *    staleness, the same pick-latency semantics decided for boundary picking
@@ -140,6 +141,16 @@ public:
 	/// after the render-event drain (see the timing contract above)
 	void Update();
 
+	/// sim-side notification: a v1 field of a live unit changed *between* sim
+	/// frames, invisibly to the frameNum/aliveCount due-checks. Sole caller is
+	/// CUnit::ChangedTeam -- net-message-driven transfers (resign/share/take)
+	/// run from ClientReadNet outside any sim frame and rewrite team/allyteam/
+	/// losStatus (found by the armed SnapshotDiffGate: one-boundary-stale team
+	/// rows at a mid-game resign). Makes the next Update() re-extract even
+	/// though frameNum is unchanged. Sync-safe by the render-event-queue
+	/// precedent: sim only writes a render-side bool, nothing synced reads it.
+	void MarkMutatedOutsideFrame() { mutatedOutsideFrame = true; }
+
 	/// game teardown (CGame::KillRendering); resets the stamps so the next
 	/// game's first Update() extracts, and logs the extraction-cost stats
 	void Clear();
@@ -167,6 +178,9 @@ private:
 	UnitRows hashScratch;
 
 	uint32_t generation = 0;
+
+	// see MarkMutatedOutsideFrame(); cleared by the extraction it forces
+	bool mutatedOutsideFrame = false;
 
 	// extraction-cost stats, reported by Clear()
 	float sumExtractMs = 0.0f;

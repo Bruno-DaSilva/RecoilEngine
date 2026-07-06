@@ -61,6 +61,7 @@
 #include "Sim/Weapons/WeaponDefHandler.h"
 #include "Sim/Weapons/WeaponLoader.h"
 #include "Rendering/Common/RenderEventQueue.h"
+#include "Rendering/Common/SimSnapshot.h"
 #include "System/EventHandler.h"
 #include "System/Log/ILog.h"
 #include "System/Matrix44f.h"
@@ -1604,6 +1605,10 @@ bool CUnit::ChangeTeam(int newteam, ChangeType type)
 	neutral = false;
 
 	unitHandler.ChangeUnitTeam(this, oldteam, newteam);
+
+	// transfers driven by net messages (resign/share/take) run between sim
+	// frames; tell the snapshot its frameNum-based due-check will not see this
+	simSnapshot.MarkMutatedOutsideFrame();
 
 	for (int at = 0; at < teamHandler.ActiveAllyTeams(); ++at) {
 		if (teamHandler.Ally(at, allyteam)) {

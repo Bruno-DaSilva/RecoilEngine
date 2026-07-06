@@ -17,12 +17,15 @@ SimSnapshot simSnapshot;
 void SimSnapshot::Update()
 {
 	const bool due =
+		mutatedOutsideFrame ||
 		(front->simFrame != gs->frameNum) ||
 		(front->viewAllyTeam != gu->myAllyTeam) ||
 		(front->aliveCount != static_cast<int32_t>(unitHandler.GetActiveUnits().size()));
 
 	if (!due)
 		return;
+
+	mutatedOutsideFrame = false;
 
 	SCOPED_TIMER("Update::SimSnapshot");
 
@@ -70,6 +73,7 @@ void SimSnapshot::Clear()
 	}
 
 	generation = 0;
+	mutatedOutsideFrame = false;
 	sumExtractMs = 0.0f;
 	maxExtractMs = 0.0f;
 	numExtractions = 0;
