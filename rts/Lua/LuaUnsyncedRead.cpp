@@ -1384,6 +1384,21 @@ int LuaUnsyncedRead::GetUnitAlwaysUpdateMatrix(lua_State* L)
  */
 int LuaUnsyncedRead::GetUnitDrawFlag(lua_State* L)
 {
+	// the field is DRAWER-owned; only ParseUnit's id walk touches the
+	// sim-owned handler tables. Under the running split resolve through the
+	// drawer's boundary cache instead (fully draw-side, so the callout stays
+	// live-legal where the generic deny would nil it -- BAR's cus_gl4 feeds
+	// its whole bookkeeping from this).
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
+		const CUnit* unit = DrawerGetObjectByID<CUnit>(luaL_checkint(L, 1));
+
+		if (unit == nullptr || !LuaUtils::IsUnitVisible(L, unit))
+			return 0;
+
+		lua_pushinteger(L, CUnitDrawer::GetDrawFlag(unit));
+		return 1;
+	}
+
 	CUnit* unit = ParseUnit(L, __func__, 1);
 
 	if (unit == nullptr)
@@ -1719,6 +1734,17 @@ int LuaUnsyncedRead::GetFeatureAlwaysUpdateMatrix(lua_State* L)
  */
 int LuaUnsyncedRead::GetFeatureDrawFlag(lua_State* L)
 {
+	// see GetUnitDrawFlag
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
+		const CFeature* feature = DrawerGetObjectByID<CFeature>(luaL_checkint(L, 1));
+
+		if (feature == nullptr || !LuaUtils::IsFeatureVisible(L, feature))
+			return 0;
+
+		lua_pushinteger(L, CFeatureDrawer::GetDrawFlag(feature));
+		return 1;
+	}
+
 	CFeature* feature = ParseFeature(L, __func__, 1);
 
 	if (feature == nullptr)

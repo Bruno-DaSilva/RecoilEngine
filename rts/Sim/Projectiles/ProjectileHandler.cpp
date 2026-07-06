@@ -833,6 +833,16 @@ float CProjectileHandler::GetParticleSaturation(bool randomized) const
 int CProjectileHandler::GetCurrentParticles() const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+
+	// PR 27b: the walks below iterate (and the precache counters mutate)
+	// sim-owned containers; a draw-thread caller under the running split
+	// (/debug info text, Lua) gets the last sim-frame precache instead --
+	// found by a windowed-dogfood SIGABRT mid-walk. Torn int read tolerated
+	// (a display statistic).
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() &&
+	    !Threading::IsSimThread() && !SimDrawSplit::IsSimParked())
+		return frameCurrentParticles;
+
 	// use precached part of particles count calculation that else becomes very heavy
 	// example where it matters: (in ZK) /cheat /give 20 armraven -> shoot ground
 	for (size_t i = frameProjectileCounts[true], e = projectiles[true].size(); i < e; ++i) {
