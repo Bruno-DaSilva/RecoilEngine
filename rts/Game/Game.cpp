@@ -57,6 +57,8 @@
 #include "Rendering/Common/ModelDrawer.h"
 #include "Rendering/Models/IModelParser.h"
 #include "Rendering/GL/LightHandler.h"
+#include "Rendering/Env/Particles/ProjectileDrawer.h"
+#include "Rendering/Features/FeatureDrawer.h"
 #include "Rendering/Units/UnitDrawer.h"
 #include "Rendering/UniformConstants.h"
 #include "Rendering/Map/InfoTexture/IInfoTextureHandler.h"
@@ -1460,10 +1462,14 @@ bool CGame::UpdateUnsynced(const spring_time currentTime)
 		luaUI->CheckStack();
 		luaUI->CheckAction();
 	}
-	if (luaGaia != nullptr)
-		luaGaia->CheckStack();
-	if (luaRules != nullptr)
-		luaRules->CheckStack();
+	// PR 27b: the split-handle CheckStack pokes the synced lua_State too --
+	// skip the diagnostic while the sim thread owns those states
+	if (!(SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning())) {
+		if (luaGaia != nullptr)
+			luaGaia->CheckStack();
+		if (luaRules != nullptr)
+			luaRules->CheckStack();
+	}
 
 	if (gameTextInput.SendPromptInput()) {
 		gameConsoleHistory.AddLine(gameTextInput.userInput);
@@ -1593,6 +1599,16 @@ void CGame::SimDrawBarrier()
 	// registering real death-dependences on sim objects under the split
 	// (SimDrawSplit.h), and this is their replacement notification
 	DeliverBoundaryDeaths();
+
+	// (1c) split only: rebuild the drawer id->object resolution caches (the
+	// draw passes may not touch the sim-owned handler tables post-release;
+	// see ModelDrawerData.h). After the drain so fresh registrations are
+	// covered, before anything downstream resolves.
+	if (SimDrawSplit::Enabled()) {
+		CUnitDrawer::BuildSplitResolveCache();
+		CFeatureDrawer::BuildSplitResolveCache();
+		projectileDrawer->BuildSplitResolveCache();
+	}
 
 	// (2) the drain dispatched every queued destroy record: the draw side has
 	// acked those objects, so destruct their deferred shells and poison the
@@ -1809,6 +1825,12 @@ void CGame::AcquireSimPause()
 		modelLoader.ServiceQueuedUploads();
 		renderEventQueue.Flush();
 		DeliverBoundaryDeaths();
+
+		// keep the resolution caches in step with the flushed registrations
+		CUnitDrawer::BuildSplitResolveCache();
+		CFeatureDrawer::BuildSplitResolveCache();
+		projectileDrawer->BuildSplitResolveCache();
+
 		UnsyncedBoundaryQueue::Drain();
 		deferredObjectDeleter.AckDrainedDestroys();
 		deferredObjectDeleter.ReleaseAcked();

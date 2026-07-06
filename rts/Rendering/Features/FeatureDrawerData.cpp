@@ -14,6 +14,8 @@
 #include "Rendering/Common/RenderEventQueue.h"
 
 #include "System/Misc/TracyDefs.h"
+#include "Rendering/Features/FeatureDrawer.h"
+#include "System/SimDrawSplit.h"
 
 CONFIG(float, FeatureDrawDistance)
 .defaultValue(6000.0f)
@@ -29,7 +31,7 @@ CONFIG(float, FeatureFadeDistance)
 // Pending-destroy fallback: same mid-sim-phase container-read window as the
 // CUnit resolver (see UnitDrawerData.cpp / RenderEventQueue.h)
 template<>
-const CFeature* DrawerGetObjectByID<CFeature>(int id)
+const CFeature* DrawerResolveLiveObjectByID<CFeature>(int id)
 {
 	const CFeature* feature = featureHandler.GetFeature(id);
 
@@ -38,6 +40,20 @@ const CFeature* DrawerGetObjectByID<CFeature>(int id)
 
 	assert(feature != nullptr);
 	return feature;
+}
+
+template<>
+const CFeature* DrawerGetObjectByID<CFeature>(int id)
+{
+	// PR 27b: see the CUnit resolver
+	if (SimDrawSplit::Enabled() && CFeatureDrawer::SplitResolveCacheBuilt()) {
+		const CFeature* feature = CFeatureDrawer::ResolveSplitCachedObject(id);
+
+		assert(feature != nullptr);
+		return feature;
+	}
+
+	return DrawerResolveLiveObjectByID<CFeature>(id);
 }
 
 

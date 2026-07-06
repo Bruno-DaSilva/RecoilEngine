@@ -26,6 +26,8 @@
 #include "Sim/Units/Unit.h" // LOS_* bits
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Units/UnitDefHandler.h"
+#include "System/Log/ILog.h"
+#include "System/SimDrawSplit.h"
 #include "System/EventClient.h" // CEventClient special-team constants
 #include "System/SpringMath.h" // ClampRadPi (GetUnitHeading)
 #include "System/StringHash.h" // hashString (GetUnitSensorRadius)
@@ -260,6 +262,18 @@ int LuaSnapshotServe::Route(lua_State* L, const char* caller, ServeFn liveFn, Se
 
 	if (!snapshotDiffGate.Armed())
 		return snapFn(L, caller);
+
+	// PR 27b: the dual-run's premise -- live and snapshot reads observing the
+	// same quiescent sim -- is void while the sim thread runs (the live leg
+	// would race it and false-flag besides); serve the snapshot directly
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() && !SimDrawSplit::IsSimParked()) {
+		static bool warned = false;
+		if (!warned) {
+			LOG_L(L_WARNING, "[LuaSnapshotServe::Route] armed dual-run disabled: the sim thread is running (SimDrawSplit=1); field passes at the barrier remain active");
+			warned = true;
+		}
+		return snapFn(L, caller);
+	}
 
 	// armed: run BOTH real paths, bit-compare their actual return slots
 	// (masking and gating included by construction), serve the snapshot values.

@@ -235,11 +235,11 @@ private:
 	std::vector<Quad> baseQuads;
 
 	// preallocated vectors for Get*Exact functions
-	std::array< QueryVectorCache<CUnit*>, ThreadPool::MAX_THREADS >  tempUnits;
-	std::array< QueryVectorCache<CFeature*>, ThreadPool::MAX_THREADS >  tempFeatures;
+	std::array< QueryVectorCache<CUnit*>, ThreadPool::MAX_SCRATCH_SLOTS >  tempUnits;
+	std::array< QueryVectorCache<CFeature*>, ThreadPool::MAX_SCRATCH_SLOTS >  tempFeatures;
 	QueryVectorCache<CProjectile*> tempProjectiles;
-	std::array< QueryVectorCache<CSolidObject*>, ThreadPool::MAX_THREADS > tempSolids;
-	std::array< QueryVectorCache<int>, ThreadPool::MAX_THREADS > tempQuads;
+	std::array< QueryVectorCache<CSolidObject*>, ThreadPool::MAX_SCRATCH_SLOTS > tempSolids;
+	std::array< QueryVectorCache<int>, ThreadPool::MAX_SCRATCH_SLOTS > tempQuads;
 
 	float2 invQuadSize;
 
@@ -252,6 +252,13 @@ private:
 
 extern CQuadField quadField;
 
+
+// PR 27b: the default query-scratch slot. 0 everywhere single-threaded (and
+// on the sim thread and pre-split main thread -- bit-identical flag off);
+// with the split running, main-thread queries (the still-live draw-side
+// spatial walks) take the reserved extra slot so their GetQuads/tempNum
+// scratch cannot collide with the sim thread's slot-0 queries.
+int DefaultQuadFieldQueryOwner();
 
 struct QuadFieldQuery {
 	~QuadFieldQuery() {
@@ -267,7 +274,7 @@ struct QuadFieldQuery {
 	std::vector<CProjectile*>* projectiles = nullptr;
 	std::vector<CSolidObject*>* solids = nullptr;
 	std::vector<int>* quads = nullptr;
-	int threadOwner = 0;
+	int threadOwner = DefaultQuadFieldQueryOwner();
 };
 
 

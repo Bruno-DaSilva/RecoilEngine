@@ -43,6 +43,8 @@
 #include "System/Sound/ISoundChannels.h"
 
 #include "System/Misc/TracyDefs.h"
+#include "System/SimDrawSplit.h"
+#include "System/UnsyncedBoundaryQueue.h"
 
 
 static CGameHelper gGameHelper;
@@ -270,8 +272,20 @@ void CGameHelper::Explosion(const CExplosionParams& params) {
 	// NOTE: event triggers before damage is applied to objects
 	const bool noGfx = eventHandler.Explosion(weaponDefID, weaponDef, params);
 
-	if (luaUI != nullptr && weaponDef != nullptr)
-		luaUI->ShockFront(params.pos, weaponDef->cameraShake, damageAOE);
+	if (luaUI != nullptr && weaponDef != nullptr) {
+		// PR 27b: LuaUI belongs to the draw thread; explosions fire from the
+		// sim frame (args captured by value, exactly what master passed)
+		if (SimDrawSplit::DeferUnsyncedNow()) {
+			const float3 shockPos = params.pos;
+			const float cameraShake = weaponDef->cameraShake;
+			UnsyncedBoundaryQueue::DeferFor(luaUI, [shockPos, cameraShake, damageAOE]() {
+				if (luaUI != nullptr)
+					luaUI->ShockFront(shockPos, cameraShake, damageAOE);
+			});
+		} else {
+			luaUI->ShockFront(params.pos, weaponDef->cameraShake, damageAOE);
+		}
+	}
 
 	if (params.impactOnly) {
 		if (params.hitObject.HasStored<CUnit>()) {

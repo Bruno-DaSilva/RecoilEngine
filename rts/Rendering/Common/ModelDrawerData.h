@@ -35,6 +35,12 @@
 template<typename T>
 const T* DrawerGetObjectByID(int id);
 
+// the raw handler(+pending-destroy-shell) lookup; only valid while the sim is
+// quiescent (single-threaded, parked, or in the sim phase itself) -- the
+// split-aware DrawerGetObjectByID wraps it (PR 27b)
+template<typename T>
+const T* DrawerResolveLiveObjectByID(int id);
+
 class CModelDrawerDataConcept : public CEventClient {
 public:
 	CModelDrawerDataConcept(const std::string& ecName, int ecOrder)
@@ -82,6 +88,28 @@ private:
 public:
 	// object ids; resolve via DrawerGetObjectByID<T> (see above)
 	const std::vector<int>& GetUnsortedObjects() const { return unsortedObjects; }
+
+	// PR 27b: see the splitResolveCache member comment. Build point is the
+	// SimDrawBarrier (and the valve service), right after the drain, so the
+	// cache covers every id the drawer containers hold this boundary.
+	void BuildSplitResolveCache() {
+		splitResolveCacheBuilt = true;
+
+		std::fill(splitResolveCache.begin(), splitResolveCache.end(), nullptr);
+
+		for (const int id: unsortedObjects) {
+			if (size_t(id) >= splitResolveCache.size())
+				splitResolveCache.resize(id + 1, nullptr);
+
+			splitResolveCache[id] = DrawerResolveLiveObjectByID<T>(id);
+		}
+	}
+
+	// nullptr for unregistered ids; only meaningful after the first build
+	bool SplitResolveCacheBuilt() const { return splitResolveCacheBuilt; }
+	const T* ResolveSplitCachedObject(int id) const {
+		return (size_t(id) < splitResolveCache.size()) ? splitResolveCache[id] : nullptr;
+	}
 	const ModelRenderContainer<T>& GetModelRenderer(int modelType) const { return modelRenderers[modelType]; }
 
 	// render-owned draw-visibility flags (sim/draw §A: these were drawFlag/previousDrawFlag
@@ -181,6 +209,15 @@ protected:
 	std::array<ModelRenderContainer<T>, MODELTYPE_CNT> modelRenderers;
 
 	std::vector<int> unsortedObjects; // object ids (see GetUnsortedObjects)
+
+	// PR 27b: boundary-built id->object resolution cache. Post-release, the
+	// draw passes may not resolve ids through the sim-owned handlers (the
+	// sim thread mutates them mid-frame: slots null at destroy time, the
+	// pending-destroy shell map grows); with the split running, resolution
+	// reads this cache instead -- built once per barrier with the sim
+	// parked, covering exactly the drawer-registered ids the passes walk.
+	std::vector<const T*> splitResolveCache;
+	bool splitResolveCacheBuilt = false;
 	std::vector<DrawPosition> drawPositions; // indexed by object id
 	std::vector<DrawFlagState> drawFlags;    // indexed by object id
 	spring::unordered_map<int, ScopedTransformMemAlloc> scTransMemAllocMap; // keyed by object id

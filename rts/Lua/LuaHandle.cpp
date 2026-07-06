@@ -2520,8 +2520,20 @@ void CLuaHandle::HandleLuaMsg(int playerID, int script, int mode, const std::vec
 					} break;
 				}
 
-				if (sendMsg)
-					luaUI->RecvLuaMsg(msg, playerID);
+				if (sendMsg) {
+					// PR 27b: LuaUI belongs to the draw thread; this dispatch
+					// arrives via net-message processing (the sim thread
+					// under the split). The gating decision above is captured
+					// at fire time, matching master's evaluation point.
+					if (SimDrawSplit::DeferUnsyncedNow()) {
+						UnsyncedBoundaryQueue::DeferFor(luaUI, [msg, playerID]() {
+							if (luaUI != nullptr)
+								luaUI->RecvLuaMsg(msg, playerID);
+						});
+					} else {
+						luaUI->RecvLuaMsg(msg, playerID);
+					}
+				}
 			}
 		} break;
 

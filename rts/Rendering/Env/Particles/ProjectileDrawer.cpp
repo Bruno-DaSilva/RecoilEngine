@@ -43,6 +43,7 @@
 #include "System/ScopedResource.h"
 
 #include "System/Misc/TracyDefs.h"
+#include "System/SimDrawSplit.h"
 
 CONFIG(int, SoftParticles).defaultValue(1).safemodeValue(0).description("Soften up CEG particles on clipping edges");
 
@@ -56,16 +57,50 @@ static bool CProjectileSortingPredicate(const CProjectile* p1, const CProjectile
 };
 
 // bin-walk resolution of the packed (id << 1 | synced) drawer handles; every
-// registered handle resolves to a live projectile after the boundary drain
+// registered handle resolves to a live projectile after the boundary drain.
+// PR 27b: with the split running, post-release passes may not resolve
+// through the sim-owned containers (the sim thread rehashes them mid-frame)
+// -- they read the boundary-built cache instead.
 static const CProjectile* ResolveProjectileHandle(uint32_t handle)
 {
 	const int id = int(handle >> 1);
-	const CProjectile* p = (handle & 1u) != 0 ?
+	const bool synced = ((handle & 1u) != 0);
+
+	if (SimDrawSplit::Enabled() && projectileDrawer->SplitResolveCacheBuilt()) {
+		const CProjectile* p = projectileDrawer->ResolveSplitCachedProjectile(id, synced);
+
+		assert(p != nullptr);
+		return p;
+	}
+
+	const CProjectile* p = synced ?
 		projectileHandler.GetProjectileBySyncedID(id) :
 		projectileHandler.GetProjectileByUnsyncedID(id);
 
 	assert(p != nullptr);
 	return p;
+}
+
+void CProjectileDrawer::BuildSplitResolveCache()
+{
+	splitResolveCacheBuilt = true;
+
+	std::fill(splitResolveCache[0].begin(), splitResolveCache[0].end(), nullptr);
+	std::fill(splitResolveCache[1].begin(), splitResolveCache[1].end(), nullptr);
+
+	for (const uint32_t handle: renderHandles) {
+		const int id = int(handle >> 1);
+		const bool synced = ((handle & 1u) != 0);
+
+		auto& v = splitResolveCache[synced];
+
+		if (size_t(id) >= v.size())
+			v.resize(id + 1, nullptr);
+
+		v[id] = synced ?
+			projectileHandler.GetProjectileBySyncedID(id) :
+			projectileHandler.GetProjectileByUnsyncedID(id);
+	}
 }
 
 CProjectileDrawer* projectileDrawer = nullptr;

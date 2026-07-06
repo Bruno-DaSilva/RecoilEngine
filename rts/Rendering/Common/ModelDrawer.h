@@ -109,6 +109,12 @@ public:
 	// GetOrCreateTransformMemAlloc): Lua handlers on synced events query a new
 	// object's offset mid-sim-phase, before AddObject registers it
 	static const ScopedTransformMemAlloc& GetTransformMemAlloc(const ObjType* o) { return modelDrawerData->GetOrCreateTransformMemAlloc(o); }
+
+	// PR 27b: the boundary-built id->object resolution cache (see
+	// ModelDrawerData.h); built from the SimDrawBarrier / valve service
+	static void BuildSplitResolveCache() { modelDrawerData->BuildSplitResolveCache(); }
+	static bool SplitResolveCacheBuilt() { return modelDrawerData->SplitResolveCacheBuilt(); }
+	static const ObjType* ResolveSplitCachedObject(int id) { return modelDrawerData->ResolveSplitCachedObject(id); }
 public:
 	virtual void Update() const = 0;
 	// Draw*

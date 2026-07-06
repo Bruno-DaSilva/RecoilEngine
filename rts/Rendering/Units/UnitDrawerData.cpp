@@ -29,6 +29,7 @@
 #include "Map/ReadMap.h"
 
 #include "System/Misc/TracyDefs.h"
+#include "System/SimDrawSplit.h"
 
 static FixedDynMemPoolT<MAX_UNITS / 1000, MAX_UNITS / 32, GhostSolidObject> ghostMemPool;
 
@@ -40,7 +41,7 @@ static FixedDynMemPoolT<MAX_UNITS / 1000, MAX_UNITS / 32, GhostSolidObject> ghos
 // lookup first -- the fallback map is empty in the post-drain window every
 // draw pass runs in, so hot loops never pay for it.
 template<>
-const CUnit* DrawerGetObjectByID<CUnit>(int id)
+const CUnit* DrawerResolveLiveObjectByID<CUnit>(int id)
 {
 	const CUnit* unit = unitHandler.GetUnit(id);
 
@@ -49,6 +50,21 @@ const CUnit* DrawerGetObjectByID<CUnit>(int id)
 
 	assert(unit != nullptr);
 	return unit;
+}
+
+template<>
+const CUnit* DrawerGetObjectByID<CUnit>(int id)
+{
+	// PR 27b: with the split running, post-release code may not touch the
+	// sim-owned handler/shell tables -- read the boundary-built cache
+	if (SimDrawSplit::Enabled() && CUnitDrawer::SplitResolveCacheBuilt()) {
+		const CUnit* unit = CUnitDrawer::ResolveSplitCachedObject(id);
+
+		assert(unit != nullptr);
+		return unit;
+	}
+
+	return DrawerResolveLiveObjectByID<CUnit>(id);
 }
 
 ///////////////////////////

@@ -85,6 +85,14 @@ public:
 	// (yet) registered, as the old member default was. (previousDrawFlag was dropped:
 	// it was a per-frame dead store for projectiles — no reader ever consumed it, the
 	// GetRenderObjectsDrawFlagChanged consumer only queries units/features.)
+	// PR 27b: see the splitResolveCache member
+	void BuildSplitResolveCache();
+	bool SplitResolveCacheBuilt() const { return splitResolveCacheBuilt; }
+	const CProjectile* ResolveSplitCachedProjectile(int id, bool synced) const {
+		const auto& v = splitResolveCache[synced];
+		return (size_t(id) < v.size()) ? v[id] : nullptr;
+	}
+
 	uint8_t GetDrawFlag(const CProjectile* p) const {
 		const auto& v = drawFlags[p->synced];
 		return (size_t(p->id) < v.size()) ? v[p->id] : DrawFlags::SO_NODRAW_FLAG;
@@ -215,6 +223,14 @@ private:
 	/// registration order -- the drawer's persistent iteration set, mutated
 	/// only by the render events (PR 14: no object pointers)
 	std::vector<uint32_t> renderHandles;
+
+	// PR 27b: boundary-built handle->object resolution cache, keyed
+	// [synced][id] like renderIndices (see ResolveProjectileHandle: with the
+	// split running, post-release passes may not resolve through the
+	// sim-owned FreeListMapCompact containers). Built by
+	// BuildSplitResolveCache from the SimDrawBarrier / valve service.
+	std::array<std::vector<const CProjectile*>, 2> splitResolveCache;
+	bool splitResolveCacheBuilt = false;
 
 	/// position of a handle in renderHandles, keyed [synced][id]; -1u when
 	/// not registered (replaces the old CProjectile::renderIndex backref)

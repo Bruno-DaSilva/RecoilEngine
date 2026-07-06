@@ -19,6 +19,8 @@
 #endif
 
 #include "System/Misc/TracyDefs.h"
+#include "System/Platform/Threading.h"
+#include "System/SimDrawSplit.h"
 
 CR_BIND(CQuadField, )
 CR_REG_METADATA(CQuadField, (
@@ -49,6 +51,15 @@ CR_REG_METADATA_SUB(CQuadField, Quad, (
 
 
 CQuadField quadField;
+
+int DefaultQuadFieldQueryOwner()
+{
+	// see the declaration comment (PR 27b)
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() && Threading::IsMainThread())
+		return ThreadPool::MAIN_SPLIT_SCRATCH_SLOT;
+
+	return 0;
+}
 //#define DEBUG_QUADFIELD
 
 void CQuadField::Quad::PostLoad()

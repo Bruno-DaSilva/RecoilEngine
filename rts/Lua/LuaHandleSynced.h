@@ -6,6 +6,8 @@
 #include <string>
 
 #include "LuaHandle.h"
+#include "System/SimDrawSplit.h"
+#include "System/UnsyncedBoundaryQueue.h"
 #include "LuaRulesParams.h"
 #include "System/UnorderedMap.hpp"
 
@@ -183,7 +185,24 @@ class CSplitLuaHandle
 {
 	public: // Non-eventhandler call-ins
 		bool GotChatMsg(const std::string& msg, int playerID) {
-			return syncedLuaHandle.GotChatMsg(msg, playerID) || unsyncedLuaHandle.GotChatMsg(msg, playerID);
+			const bool syncedHandled = syncedLuaHandle.GotChatMsg(msg, playerID);
+
+			// PR 27b: the unsynced half belongs to the draw thread; this
+			// arrives via synced-action net processing (the sim thread under
+			// the split). Defer that leg; the "handled" answer then reflects
+			// the synced half only -- master's return was only consumed for
+			// duplicate-dispatch suppression, and a deferred unsynced leg
+			// cannot be double-dispatched anyway.
+			if (SimDrawSplit::DeferUnsyncedNow()) {
+				if (!syncedHandled) {
+					CUnsyncedLuaHandle* ulh = &unsyncedLuaHandle;
+					UnsyncedBoundaryQueue::DeferFor(ulh, [ulh, msg, playerID]() { ulh->GotChatMsg(msg, playerID); });
+				}
+
+				return syncedHandled;
+			}
+
+			return syncedHandled || unsyncedLuaHandle.GotChatMsg(msg, playerID);
 		}
 
 		bool RecvLuaMsg(const std::string& msg, int playerID) {

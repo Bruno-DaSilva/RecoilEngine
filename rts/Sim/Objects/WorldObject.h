@@ -115,5 +115,5 @@ protected:
 	// same class as the ExpGenSpawnable anim state)
 	mutable float drawRadius = 0.0f;
 public:
-	std::array<int, ThreadPool::MAX_THREADS> mtTempNum = {};
+	std::array<int, ThreadPool::MAX_SCRATCH_SLOTS> mtTempNum = {};
 };

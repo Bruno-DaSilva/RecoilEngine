@@ -56,7 +56,7 @@ private:
 	* (increase after each use)
 	*/
 	int tempNum = 1;
-	std::array<int, ThreadPool::MAX_THREADS> mtTempNum = {};
+	std::array<int, ThreadPool::MAX_SCRATCH_SLOTS> mtTempNum = {};
 
 public:
 	/**

@@ -265,6 +265,19 @@ bool DenyLiveRead(lua_State* L, const char* caller)
 		return true;
 	}
 
+	// PR 27b: the sanctioned-live bridge ends at the flip -- with the sim
+	// thread actually running, a "sanctioned" live read walks containers the
+	// sim mutates concurrently (the quadfield/team-list/command-queue
+	// families are crash-class, not timing edges). Every unserved live read
+	// denies deterministically until its family is snapshot-served; the
+	// barrier's own dispatches run under ScopedLiveException and never get
+	// here. (Decision 5: the boundary serves everything it claims to serve.)
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() && !SimDrawSplit::IsSimParked()) {
+		stat.denials++;
+		WarnOnce(stat, caller, "live sim read DENIED under the running split (sim thread active; family not snapshot-served yet)");
+		return true;
+	}
+
 	stat.liveReads++;
 	WarnOnce(stat, caller, "live sim read from draw context (not snapshot-served; must be served, boundary-copied or nil-contracted before the 27b flip)");
 	return false;
