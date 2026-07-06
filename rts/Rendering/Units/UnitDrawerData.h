@@ -197,6 +197,9 @@ public:
 
 	size_t GetUnitIconIndex(const CUnit* u) const { return GetIconState(u).currentIconIndex; }
 	float GetUnitIconRadius(const CUnit* u) const { return GetIconState(u).iconRadius; }
+	// id-keyed variant for draw-side picking (TraceRay holds a snapshot id, not
+	// a CUnit*); same unregistered/stale-id defaults as the pointer form
+	float GetUnitIconRadius(int id) const { return GetIconState(id).iconRadius; }
 	bool GetUnitDrawIcon(const CUnit* u) const { return GetIconState(u).drawIcon; }
 
 	// writes resize on demand: unsynced Lua can address a unit in the window
@@ -243,6 +246,7 @@ public:
 	void ConfigNotify(const std::string& key, const std::string& value);
 private:
 	const UnitIconState& GetIconState(const CUnit* u) const;
+	const UnitIconState& GetIconState(int id) const;
 	UnitIconState& IconStateRef(const CUnit* u);
 
 	SavedData savedData;

@@ -224,6 +224,38 @@ bool CCollisionHandler::MouseHit(
 	return (CCollisionHandler::Intersect(o, v, m, p0, p1, cq));
 }
 
+bool CCollisionHandler::MouseHit(
+	const float3& relMidPos,
+	bool isInVoid,
+	const CMatrix44f& m,
+	const float3& p0,
+	const float3& p1,
+	const CollisionVolume* v,
+	CollisionQuery* cq
+) {
+	RECOIL_DETAILED_TRACY_ZONE;
+	if (cq != nullptr)
+		cq->Reset();
+
+	if (isInVoid)
+		return false;
+
+	// piece-tree selection volumes are deferred draw-side (PR 25); the caller
+	// detects this and falls back to a live read
+	if (v->DefaultToPieceTree())
+		return false;
+	if (v->IgnoreHits())
+		return false;
+
+	// replicate Intersect(o, v, m) with s = 1: translate into the midpos-relative
+	// space the CV is positioned in, then by the CV's own offsets
+	CMatrix44f mr = m;
+	mr.Translate(relMidPos);
+	mr.Translate(v->GetOffsets());
+
+	return (CCollisionHandler::Intersect(v, mr, p0, p1, cq));
+}
+
 
 /*
 bool CCollisionHandler::IntersectPieceTreeHelper(

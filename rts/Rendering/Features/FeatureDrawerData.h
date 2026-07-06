@@ -31,6 +31,9 @@ public:
 	// replaced the unsynced half of CFeature::transMatrix). Identity until the
 	// feature first passes the draw-flag gate below, as the old member was.
 	const CMatrix44f& GetUnsyncedTransformMatrix(const CFeature* f) const;
+	// id-keyed variant for draw-side picking (TraceRay holds a snapshot id, not
+	// a CFeature*); same identity default for unregistered/stale ids
+	const CMatrix44f& GetUnsyncedTransformMatrix(int id) const;
 
 	// distance-fade alpha, written by UpdateObjectDrawFlags each draw frame
 	// (drawer-owned since the §A drawAlpha eviction; was a CFeature field).

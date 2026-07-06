@@ -10,6 +10,7 @@
 #include "Game/GlobalUnsynced.h"
 #include "Game/UI/MouseHandler.h"
 #include "Map/ReadMap.h"
+#include "Rendering/Common/SimSnapshot.h"
 #include "Rendering/Units/UnitDrawer.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitHandler.h"
@@ -111,7 +112,10 @@ void CDollyController::Update()
 		dir = (lookT - pos).Normalize();
 	} else if (lookMode == DOLLY_LOOKMODE_UNIT) {
 		CUnit* unit = unitHandler.GetUnit(lookUnit);
-		if (unit != nullptr && unit->IsInLosForAllyTeam(gu->myAllyTeam)) {
+		// snapshot-served LOS gate (SimSnapshot / §C torn-read policy, PR 24):
+		// mirrors CUnit::IsInLosForAllyTeam (losStatus & LOS_INLOS) off the boundary
+		// row; unit is used only for its id (position via drawer-owned GetDrawPos).
+		if (unit != nullptr && (simSnapshot.Read().LosStatus(unit->id, gu->myAllyTeam) & LOS_INLOS)) {
 			pos += CUnitDrawer::GetDrawPos(unit) * relative;
 			dir = (CUnitDrawer::GetDrawPos(unit) - pos).Normalize();
 		}

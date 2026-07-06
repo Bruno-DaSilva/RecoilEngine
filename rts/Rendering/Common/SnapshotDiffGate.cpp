@@ -7,8 +7,11 @@
 
 #include "SimSnapshot.h"
 #include "Sim/Features/Feature.h"
+#include "Sim/Features/FeatureDef.h"
+#include "Sim/Features/FeatureHandler.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/LosHandler.h"
+#include "Sim/Misc/ModInfo.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Projectiles/ProjectileHandler.h"
 #include "Sim/Projectiles/WeaponProjectiles/WeaponProjectile.h"
@@ -55,6 +58,10 @@ static constexpr const char* FIELD_NAMES[] = {
 	"posErrorBits",
 	"globals",
 	"maskedErrorVec",
+	"noSelect",
+	"inVoid",
+	"selVol",
+	"inRadarAll",
 	"proj:validity",
 	"proj:pos",
 	"proj:speed",
@@ -64,7 +71,34 @@ static constexpr const char* FIELD_NAMES[] = {
 	"proj:weaponDefID",
 	"proj:target",
 	"proj:inLosAll",
+	"feat:validity",
+	"feat:pos",
+	"feat:midPos",
+	"feat:relMidPos",
+	"feat:radius",
+	"feat:allyTeam",
+	"feat:defID",
+	"feat:flags",
+	"feat:selVol",
+	"feat:inLosAll",
+	"feat:globals",
 };
+
+// field-wise CollisionVolume compare over exactly the params the hit-test reads
+// (avoids memcmp padding-byte false positives between two field-wise copies)
+static bool ColVolEqual(const CollisionVolume& a, const CollisionVolume& b)
+{
+	return BitEqual(a.GetScales(), b.GetScales())
+		&& BitEqual(a.GetOffsets(), b.GetOffsets())
+		&& a.GetVolumeType() == b.GetVolumeType()
+		&& a.GetPrimaryAxis() == b.GetPrimaryAxis()
+		&& a.GetSecondaryAxis(0) == b.GetSecondaryAxis(0)
+		&& a.GetSecondaryAxis(1) == b.GetSecondaryAxis(1)
+		&& a.IgnoreHits() == b.IgnoreHits()
+		&& a.UseContHitTest() == b.UseContHitTest()
+		&& a.DefaultToPieceTree() == b.DefaultToPieceTree()
+		&& a.DefaultToFootPrint() == b.DefaultToFootPrint();
+}
 
 
 void SnapshotDiffGate::Arm()
@@ -257,6 +291,12 @@ void SnapshotDiffGate::CheckBoundary()
 		checkF3(F_RIGHTDIR, rows.rightdir[i], u->rightdir);
 		checkF3(F_POSERRORVEC, rows.posErrorVector[i], u->posErrorVector);
 		checkI(F_LEAVESGHOST, rows.leavesGhost[i], int(u->leavesGhost));
+		checkI(F_NOSELECT, int(rows.noSelect[i]), int(u->noSelect));
+		checkI(F_INVOID, int(rows.inVoid[i]), int(u->IsInVoid()));
+
+		if (Bump(fields[F_SELVOL], ColVolEqual(rows.selVol[i], u->selectionVolume)))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=selVol mismatch (type snap=%d live=%d)",
+				gs->frameNum, id, rows.selVol[i].GetVolumeType(), u->selectionVolume.GetVolumeType());
 
 		// per-allyteam stride rows + the masked-value sweep: for every POV,
 		// UnitRows::ErrorVector is the exact masking function the Lua serving
@@ -272,6 +312,10 @@ void SnapshotDiffGate::CheckBoundary()
 				if (Bump(fields[F_POSERRORBIT], rows.posErrorBits[at * maxUnits + i] == uint8_t(u->GetPosErrorBit(at))))
 					LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=posErrorBits[ally %d] snap=%d live=%d",
 						gs->frameNum, id, at, int(rows.posErrorBits[at * maxUnits + i]), int(u->GetPosErrorBit(at)));
+
+				if (Bump(fields[F_INRADAR], (rows.inRadarAll[at * maxUnits + i] != 0) == losHandler->InRadar(u, at)))
+					LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=inRadarAll[ally %d] snap=%d live=%d",
+						gs->frameNum, id, at, int(rows.inRadarAll[at * maxUnits + i]), int(losHandler->InRadar(u, at)));
 			}
 
 			const float3 snapErr = rows.ErrorVector(id, at);
@@ -284,6 +328,7 @@ void SnapshotDiffGate::CheckBoundary()
 	}
 
 	CheckProjectileRows();
+	CheckFeatureRows();
 }
 
 void SnapshotDiffGate::CheckProjectileRows()
@@ -388,3 +433,90 @@ void SnapshotDiffGate::CheckProjectileRows()
 				gs->frameNum, int(id));
 	}
 }
+
+void SnapshotDiffGate::CheckFeatureRows()
+{
+	const SimSnapshot::FeatureRows& rows = simSnapshot.ReadFeatures();
+	const size_t slots = rows.MaxSlots();
+	const int numAllyTeams = rows.numAllyTeams;
+
+	// globals the feature visibility mirror depends on
+	{
+		const bool globalsEqual =
+			(rows.featureVisibility == modInfo.featureVisibility) &&
+			(rows.gaiaAllyTeam == std::max(0, teamHandler.GaiaAllyTeamID())) &&
+			(numAllyTeams == teamHandler.ActiveAllyTeams());
+		if (Bump(fields[FT_GLOBALS], globalsEqual))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=feat:globals mismatch (featVis snap=%d live=%d)",
+				gs->frameNum, rows.featureVisibility, modInfo.featureVisibility);
+	}
+
+	std::vector<uint8_t> liveSeen(slots, 0);
+	const auto& activeIDs = featureHandler.GetActiveFeatureIDs();
+
+	for (const int id : activeIDs) {
+		const CFeature* f = featureHandler.GetFeature(id);
+		if (f == nullptr)
+			continue;
+
+		if (static_cast<size_t>(id) < slots)
+			liveSeen[id] = 1;
+
+		const bool snapValid = rows.Valid(id);
+		if (Bump(fields[FT_VALIDITY], snapValid)) {
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d feat=%d field=feat:validity snap=0 live=1",
+				gs->frameNum, id);
+			continue;
+		}
+
+		if (Bump(fields[FT_POS], BitEqual(rows.pos[id], f->pos)))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d feat=%d field=feat:pos snap=(%.9g,%.9g,%.9g) live=(%.9g,%.9g,%.9g)",
+				gs->frameNum, id, rows.pos[id].x, rows.pos[id].y, rows.pos[id].z, f->pos.x, f->pos.y, f->pos.z);
+
+		if (Bump(fields[FT_MIDPOS], BitEqual(rows.midPos[id], f->midPos)))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d feat=%d field=feat:midPos", gs->frameNum, id);
+
+		if (Bump(fields[FT_RELMIDPOS], BitEqual(rows.relMidPos[id], static_cast<float3>(f->relMidPos))))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d feat=%d field=feat:relMidPos", gs->frameNum, id);
+
+		if (Bump(fields[FT_RADIUS], BitEqual(rows.radius[id], f->radius)))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d feat=%d field=feat:radius snap=%.9g live=%.9g",
+				gs->frameNum, id, rows.radius[id], f->radius);
+
+		if (Bump(fields[FT_ALLYTEAM], rows.allyTeam[id] == f->allyteam))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d feat=%d field=feat:allyTeam snap=%d live=%d",
+				gs->frameNum, id, rows.allyTeam[id], f->allyteam);
+
+		if (Bump(fields[FT_DEFID], rows.defID[id] == f->def->id))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d feat=%d field=feat:defID snap=%d live=%d",
+				gs->frameNum, id, rows.defID[id], f->def->id);
+
+		const bool flagsEqual =
+			(int(rows.alwaysVisible[id]) == int(f->alwaysVisible)) &&
+			(int(rows.noSelect[id]) == int(f->noSelect)) &&
+			(int(rows.inVoid[id]) == int(f->IsInVoid()));
+		if (Bump(fields[FT_FLAGS], flagsEqual))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d feat=%d field=feat:flags mismatch", gs->frameNum, id);
+
+		if (Bump(fields[FT_SELVOL], ColVolEqual(rows.selVol[id], f->selectionVolume)))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d feat=%d field=feat:selVol mismatch", gs->frameNum, id);
+
+		for (int at = 0; at < numAllyTeams; ++at) {
+			const bool snapLos = (rows.inLosAll[at * slots + id] != 0);
+			const bool liveLos = losHandler->InLos(f->pos, at);
+			if (Bump(fields[FT_INLOS], snapLos == liveLos))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d feat=%d field=feat:inLosAll[ally %d] snap=%d live=%d",
+					gs->frameNum, id, at, int(snapLos), int(liveLos));
+		}
+	}
+
+	// reverse validity: valid rows with no live feature
+	for (size_t id = 0; id < slots; ++id) {
+		if (rows.valid[id] == 0 || liveSeen[id] != 0)
+			continue;
+		if (Bump(fields[FT_VALIDITY], false))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d feat=%d field=feat:validity snap=1 live=0",
+				gs->frameNum, int(id));
+	}
+}
+

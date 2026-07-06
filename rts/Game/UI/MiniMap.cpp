@@ -922,7 +922,7 @@ void CMiniMap::ProxyMousePress(int x, int y, int button)
 
 	if (unit != nullptr) {
 		if (gu->spectatingFullView) {
-			mapPos = unit->midPos;
+			mapPos = simSnapshot.Read().MidPos(unit->id); // PR 25: boundary snapshot (fullView -> exact)
 		} else {
 			mapPos = CUnitDrawer::GetObjDrawErrorPos(unit, gu->myAllyTeam);
 			mapPos.y = readMap->GetCurrMaxHeight();
@@ -945,7 +945,7 @@ void CMiniMap::ProxyMouseRelease(int x, int y, int button)
 
 	if (unit != nullptr) {
 		if (gu->spectatingFullView) {
-			mapPos = unit->midPos;
+			mapPos = simSnapshot.Read().MidPos(unit->id); // PR 25: boundary snapshot (fullView -> exact)
 		} else {
 			mapPos = CUnitDrawer::GetObjDrawErrorPos(unit, gu->myAllyTeam);
 			mapPos.y = readMap->GetCurrMaxHeight();

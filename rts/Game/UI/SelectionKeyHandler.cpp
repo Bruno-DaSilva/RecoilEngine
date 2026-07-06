@@ -11,6 +11,7 @@
 #include "Map/Ground.h"
 #include "Sim/Misc/CategoryHandler.h"
 #include "Sim/Units/CommandAI/Command.h"
+#include "Rendering/Common/SimSnapshot.h"
 #include "Sim/Units/CommandAI/CommandAI.h"
 #include "Sim/Units/CommandAI/CommandQueue.h"
 #include "Sim/Units/UnitDef.h"
@@ -310,7 +311,9 @@ void CSelectionKeyHandler::DoSelection(std::string selectString)
 				selection.reserve(unitHandler.NumUnitsByTeam(gu->myTeam));
 
 				for (CUnit* unit: unitHandler.GetUnitsByTeam(gu->myTeam)) {
-					if (!camera->InView(unit->midPos, unit->radius))
+					// PR 25: boundary snapshot midPos/radius (section D); own or
+					// (fullSelect) spectator-visible units, so the raw value is exact
+					if (!camera->InView(simSnapshot.Read().MidPos(unit->id), simSnapshot.Read().Radius(unit->id)))
 						continue;
 
 					selection.push_back(unit);
@@ -320,7 +323,9 @@ void CSelectionKeyHandler::DoSelection(std::string selectString)
 				selection.reserve((unitHandler.GetActiveUnits()).size());
 
 				for (CUnit* unit: unitHandler.GetActiveUnits()) {
-					if (!camera->InView(unit->midPos, unit->radius))
+					// PR 25: boundary snapshot midPos/radius (section D); own or
+					// (fullSelect) spectator-visible units, so the raw value is exact
+					if (!camera->InView(simSnapshot.Read().MidPos(unit->id), simSnapshot.Read().Radius(unit->id)))
 						continue;
 
 					selection.push_back(unit);
@@ -351,7 +356,7 @@ void CSelectionKeyHandler::DoSelection(std::string selectString)
 				selection.reserve(unitHandler.NumUnitsByTeam(gu->myTeam));
 
 				for (CUnit* unit: unitHandler.GetUnitsByTeam(gu->myTeam)) {
-					float3 up = unit->pos;
+					float3 up = simSnapshot.Read().Pos(unit->id); // PR 25: boundary snapshot pos
 
 					if (cylindrical)
 						up.y = 0.0f;
@@ -366,7 +371,7 @@ void CSelectionKeyHandler::DoSelection(std::string selectString)
 				selection.reserve((unitHandler.GetActiveUnits()).size());
 
 				for (CUnit* unit: unitHandler.GetActiveUnits()) {
-					float3 up = unit->pos;
+					float3 up = simSnapshot.Read().Pos(unit->id); // PR 25: boundary snapshot pos
 
 					if (cylindrical)
 						up.y = 0.0f;

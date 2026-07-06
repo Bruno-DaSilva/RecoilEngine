@@ -45,7 +45,7 @@ static inline uint64_t HashUnitRow(const SimSnapshot::UnitRows& r, int id)
 		w[2] = std::bit_cast<uint32_t>(v.z);
 	};
 
-	uint32_t w[40];
+	uint32_t w[41];
 	w[0]  = static_cast<uint32_t>(id);
 	f3(&w[1], r.pos[id]);
 	w[4]  = std::bit_cast<uint32_t>(r.speed[id].x);
@@ -77,10 +77,49 @@ static inline uint64_t HashUnitRow(const SimSnapshot::UnitRows& r, int id)
 	for (int at = 0; at < r.numAllyTeams; ++at) {
 		losAcc = (losAcc ^ r.losStatusAll[at * r.MaxUnits() + id]) * 16777619u;
 		errAcc = (errAcc ^ r.posErrorBits[at * r.MaxUnits() + id]) * 16777619u;
+		// fold the per-allyteam InRadar answer (PR 25) into the los word
+		losAcc = (losAcc ^ (r.inRadarAll[at * r.MaxUnits() + id] << 1)) * 16777619u;
 	}
 	w[37] = losAcc;
 	w[38] = errAcc;
 	w[39] = static_cast<uint32_t>(r.numAllyTeams);
+	// picking gates (PR 25); noSelect/inVoid are synced state. selVol is
+	// UNSYNCED per-object state (a widget can mutate it via the unsynced
+	// SetUnitSelectionVolumeData), so it is intentionally NOT folded into the
+	// synced-desync hash -- it is covered by the diff gate instead.
+	w[40] = static_cast<uint32_t>(r.noSelect[id])
+	      | (static_cast<uint32_t>(r.inVoid[id]) << 8);
+
+	return Mix(w, sizeof(w), UNIT_SEED);
+}
+
+// Per-feature row hash (PR 25 family); folded into the root like the projectile
+// section. selVol excluded for the same reason as the unit rows.
+static inline uint64_t HashFeatureRow(const SimSnapshot::FeatureRows& r, int id)
+{
+	uint32_t w[16];
+	w[0]  = static_cast<uint32_t>(id);
+	w[1]  = std::bit_cast<uint32_t>(r.pos[id].x);
+	w[2]  = std::bit_cast<uint32_t>(r.pos[id].y);
+	w[3]  = std::bit_cast<uint32_t>(r.pos[id].z);
+	w[4]  = std::bit_cast<uint32_t>(r.midPos[id].x);
+	w[5]  = std::bit_cast<uint32_t>(r.midPos[id].y);
+	w[6]  = std::bit_cast<uint32_t>(r.midPos[id].z);
+	w[7]  = std::bit_cast<uint32_t>(r.radius[id]);
+	w[8]  = static_cast<uint32_t>(r.allyTeam[id]);
+	w[9]  = static_cast<uint32_t>(r.defID[id]);
+	w[10] = static_cast<uint32_t>(r.alwaysVisible[id])
+	      | (static_cast<uint32_t>(r.noSelect[id]) << 8)
+	      | (static_cast<uint32_t>(r.inVoid[id])   << 16);
+	w[11] = std::bit_cast<uint32_t>(r.relMidPos[id].x);
+	w[12] = std::bit_cast<uint32_t>(r.relMidPos[id].y);
+	w[13] = std::bit_cast<uint32_t>(r.relMidPos[id].z);
+
+	uint32_t losAcc = 2166136261u;
+	for (int at = 0; at < r.numAllyTeams; ++at)
+		losAcc = (losAcc ^ r.inLosAll[at * r.MaxSlots() + id]) * 16777619u;
+	w[14] = losAcc;
+	w[15] = static_cast<uint32_t>(r.numAllyTeams);
 
 	return Mix(w, sizeof(w), UNIT_SEED);
 }
@@ -210,7 +249,7 @@ void FlushPartial()
 	WriteOut();
 }
 
-void HashFrame(int frameNum, const SimSnapshot::UnitRows& rows, const SimSnapshot::ProjectileRows& projRows)
+void HashFrame(int frameNum, const SimSnapshot::UnitRows& rows, const SimSnapshot::ProjectileRows& projRows, const SimSnapshot::FeatureRows& featRows)
 {
 	if (!dumpActive)
 		return;
@@ -262,6 +301,18 @@ void HashFrame(int frameNum, const SimSnapshot::UnitRows& rows, const SimSnapsho
 			projHash = Mix(&ph, sizeof(ph), projHash);
 		}
 		rootHash = Mix(&projHash, sizeof(projHash), rootHash);
+	}
+
+	// feature section: one word folded into the root (ascending id order)
+	{
+		uint64_t featHash = Mix(&BUCKET_SEED, sizeof(BUCKET_SEED), ROOT_SEED);
+		for (size_t id = 0; id < featRows.MaxSlots(); ++id) {
+			if (featRows.valid[id] == 0)
+				continue;
+			const uint64_t fh = HashFeatureRow(featRows, static_cast<int>(id));
+			featHash = Mix(&fh, sizeof(fh), featHash);
+		}
+		rootHash = Mix(&featHash, sizeof(featHash), rootHash);
 	}
 
 	char rb[64];

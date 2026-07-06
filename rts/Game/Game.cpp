@@ -36,6 +36,7 @@
 #include "Rendering/WorldDrawer.h"
 #include "Rendering/Common/RenderEventQueue.h"
 #include "Rendering/Common/SimSnapshot.h"
+#include "Rendering/Common/SnapshotPickGrid.h"
 #include "Rendering/Common/SnapshotHash.h"
 #include "Rendering/Common/SnapshotDiffGate.h"
 #include "Rendering/Env/IWater.h"
@@ -1018,6 +1019,7 @@ void CGame::KillRendering()
 	// (CUnitHandler::Kill frees units without Render*Destroyed notifications)
 	renderEventQueue.Clear();
 	simSnapshot.Clear();
+	snapshotPickGrid.Clear();
 	icon::iconHandler.Kill();
 	spring::SafeDelete(geometricObjects);
 	worldDrawer.Kill();

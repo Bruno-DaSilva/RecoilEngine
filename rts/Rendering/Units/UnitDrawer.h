@@ -84,6 +84,7 @@ public:
 	// GetUnitIconRadius also serves draw-side picking (TraceRay)
 	static size_t GetUnitIconIndex(const CUnit* unit) { return modelDrawerData->GetUnitIconIndex(unit); }
 	static float GetUnitIconRadius(const CUnit* unit) { return modelDrawerData->GetUnitIconRadius(unit); }
+	static float GetUnitIconRadius(int unitID) { return modelDrawerData->GetUnitIconRadius(unitID); }
 	static bool GetUnitDrawIcon(const CUnit* unit) { return modelDrawerData->GetUnitDrawIcon(unit); }
 	static void SetUnitDrawIcon(const CUnit* unit, bool b) { modelDrawerData->SetUnitDrawIcon(unit, b); }
 	static void SetUnitCustomIcon(const CUnit* unit, size_t iconIdx) { modelDrawerData->SetUnitCustomIcon(unit, iconIdx); }

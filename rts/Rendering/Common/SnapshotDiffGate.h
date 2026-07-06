@@ -118,6 +118,11 @@ private:
 		F_POSERRORBIT,
 		F_GLOBALS,
 		F_MASKEDERRVEC,
+		// picking gates (PR 25)
+		F_NOSELECT,
+		F_INVOID,
+		F_SELVOL,
+		F_INRADAR,
 		// projectile rows (second family)
 		P_VALIDITY,
 		P_POS,
@@ -128,6 +133,18 @@ private:
 		P_WDEFID,
 		P_TARGET,
 		P_INLOS,
+		// feature rows (PR 25 family)
+		FT_VALIDITY,
+		FT_POS,
+		FT_MIDPOS,
+		FT_RELMIDPOS,
+		FT_RADIUS,
+		FT_ALLYTEAM,
+		FT_DEFID,
+		FT_FLAGS,       // alwaysVisible / noSelect / inVoid
+		FT_SELVOL,
+		FT_INLOS,
+		FT_GLOBALS,     // featureVisibility / gaiaAllyTeam
 		F_COUNT
 	};
 
@@ -135,8 +152,9 @@ private:
 	// LOG_L(L_ERROR) line for this mismatch (mismatch and under the per-field cap)
 	bool Bump(FieldCounter& fc, bool equal);
 
-	// projectile-row half of the field pass (called from CheckBoundary)
+	// projectile-row / feature-row halves of the field pass (from CheckBoundary)
 	void CheckProjectileRows();
+	void CheckFeatureRows();
 
 	void Report(const char* reason) const;
 	void ResetCounters();

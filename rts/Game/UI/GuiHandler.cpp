@@ -26,6 +26,7 @@
 #include "Rendering/Fonts/glFont.h"
 #include "Rendering/IconHandler.h"
 #include "Rendering/Units/UnitDrawer.h"
+#include "Rendering/Common/SimSnapshot.h"
 #include "Rendering/GL/glExtra.h"
 #include "Rendering/Map/InfoTexture/IInfoTextureHandler.h"
 #include "Rendering/Textures/Bitmap.h"
@@ -4031,8 +4032,11 @@ void CGuiHandler::DrawCentroidCursor()
 
 	float3 pos;
 
+	// snapshot-served midPos (SimSnapshot / §C torn-read policy, PR 24): selected
+	// units are own units (always in LOS) so the raw boundary midPos is exact.
+	const auto& snapshot = simSnapshot.Read();
 	for (const int unitID: selUnits) {
-		pos += (unitHandler.GetUnit(unitID))->midPos;
+		pos += snapshot.MidPos(unitID);
 	}
 	pos /= (float)selUnits.size();
 

@@ -602,8 +602,13 @@ void CUnitDrawerData::UpdateTempDrawUnits(std::vector<TempDrawUnit>& tempDrawUni
 
 const CUnitDrawerData::UnitIconState& CUnitDrawerData::GetIconState(const CUnit* u) const
 {
+	return GetIconState(u->id);
+}
+
+const CUnitDrawerData::UnitIconState& CUnitDrawerData::GetIconState(int id) const
+{
 	static const UnitIconState def = {};
-	return (u->id < iconStates.size()) ? iconStates[u->id] : def;
+	return (static_cast<size_t>(id) < iconStates.size()) ? iconStates[id] : def;
 }
 
 CUnitDrawerData::UnitIconState& CUnitDrawerData::IconStateRef(const CUnit* u)

@@ -4,8 +4,11 @@
 
 #include "SnapshotHash.h"
 #include "Sim/Features/Feature.h"
+#include "Sim/Features/FeatureDef.h"
+#include "Sim/Features/FeatureHandler.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/LosHandler.h"
+#include "Sim/Misc/ModInfo.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Projectiles/ProjectileHandler.h"
 #include "Sim/Projectiles/WeaponProjectiles/WeaponProjectile.h"
@@ -64,6 +67,27 @@ float3 SimSnapshot::UnitRows::ErrorVector(int unitID, int argAllyTeam) const
 	return (posErrorVector[unitID] * errorMult * (atErrorMask != 0));
 }
 
+bool SimSnapshot::FeatureRows::IsInLosForAllyTeam(int id, int argAllyTeam) const
+{
+	// bit-for-bit mirror of CFeature::IsInLosForAllyTeam from extracted inputs
+	if (alwaysVisible[id] != 0 || argAllyTeam == -1)
+		return true;
+
+	const bool isGaia = (allyTeam[id] == gaiaAllyTeam);
+
+	switch (featureVisibility) {
+		case CModInfo::FEATURELOS_NONE:
+		default:
+			return InLos(id, argAllyTeam);
+		case CModInfo::FEATURELOS_GAIAONLY:
+			return (isGaia || InLos(id, argAllyTeam));
+		case CModInfo::FEATURELOS_GAIAALLIED:
+			return (isGaia || allyTeam[id] == argAllyTeam || InLos(id, argAllyTeam));
+		case CModInfo::FEATURELOS_ALL:
+			return true;
+	}
+}
+
 void SimSnapshot::Update()
 {
 	const bool due =
@@ -82,8 +106,10 @@ void SimSnapshot::Update()
 
 	Extract(*back);
 	ExtractProjectiles(*projBack);
+	ExtractFeatures(*featBack);
 	std::swap(front, back);
 	std::swap(projFront, projBack);
+	std::swap(featFront, featBack);
 	generation += 1;
 
 	const float dt = (spring_gettime() - t0).toMilliSecsf();
@@ -104,7 +130,8 @@ void SimSnapshot::HashCompletedFrame(int frameNum)
 	// untouched, so nothing draw-side observes this.
 	Extract(hashScratch);
 	ExtractProjectiles(hashProjScratch);
-	SnapshotHash::HashFrame(frameNum, hashScratch, hashProjScratch);
+	ExtractFeatures(hashFeatScratch);
+	SnapshotHash::HashFrame(frameNum, hashScratch, hashProjScratch, hashFeatScratch);
 }
 
 void SimSnapshot::Clear()
@@ -115,17 +142,18 @@ void SimSnapshot::Clear()
 			r.radarErrorSizes.size() * sizeof(float) + r.allied.size() +
 			r.valid.size() + r.team.size() + r.allyTeam.size() +
 			r.beingBuilt.size() + r.stunned.size() + r.leavesGhost.size() +
-			r.losStatusAll.size() + r.posErrorBits.size() +
+			r.losStatusAll.size() + r.posErrorBits.size() + r.inRadarAll.size() +
 			(r.pos.size() + r.midPos.size() + r.aimPos.size() + r.relMidPos.size() +
 			 r.frontdir.size() + r.updir.size() + r.rightdir.size() +
 			 r.posErrorVector.size()) * sizeof(float3) +
 			r.speed.size() * sizeof(float4) +
 			(r.health.size() + r.maxHealth.size() + r.paralyzeDamage.size() +
 			 r.captureProgress.size() + r.buildProgress.size() + r.radius.size()) * sizeof(float) +
-			r.defID.size() * sizeof(int32_t);
-		LOG("[SimSnapshot] extractions=%u avgMs=%.4f maxMs=%.4f peakUnits=%d memKB=%.1f projSlots=%d",
+			r.defID.size() * sizeof(int32_t) +
+			r.noSelect.size() + r.inVoid.size() + r.selVol.size() * sizeof(CollisionVolume);
+		LOG("[SimSnapshot] extractions=%u avgMs=%.4f maxMs=%.4f peakUnits=%d memKB=%.1f projSlots=%d featSlots=%d",
 			numExtractions, sumExtractMs / numExtractions, maxExtractMs, peakAliveCount,
-			(2.0f * bufBytes) / 1024.0f, int(projFront->MaxSlots()));
+			(2.0f * bufBytes) / 1024.0f, int(projFront->MaxSlots()), int(featFront->MaxSlots()));
 	}
 
 	for (UnitRows& rows : buffers) {
@@ -133,6 +161,8 @@ void SimSnapshot::Clear()
 		rows.aliveCount = 0;
 	}
 	for (ProjectileRows& rows : projBuffers)
+		std::fill(rows.valid.begin(), rows.valid.end(), 0);
+	for (FeatureRows& rows : featBuffers)
 		std::fill(rows.valid.begin(), rows.valid.end(), 0);
 
 	generation = 0;
@@ -165,6 +195,9 @@ void SimSnapshot::Resize(UnitRows& rows, size_t maxUnits, int numAllyTeams)
 	rows.beingBuilt.resize(maxUnits);
 	rows.stunned.resize(maxUnits);
 	rows.radius.resize(maxUnits);
+	rows.selVol.resize(maxUnits);
+	rows.noSelect.resize(maxUnits);
+	rows.inVoid.resize(maxUnits);
 	rows.relMidPos.resize(maxUnits);
 	rows.frontdir.resize(maxUnits);
 	rows.updir.resize(maxUnits);
@@ -173,6 +206,7 @@ void SimSnapshot::Resize(UnitRows& rows, size_t maxUnits, int numAllyTeams)
 	rows.leavesGhost.resize(maxUnits);
 	rows.losStatusAll.resize(size_t(numAllyTeams) * maxUnits);
 	rows.posErrorBits.resize(size_t(numAllyTeams) * maxUnits);
+	rows.inRadarAll.resize(size_t(numAllyTeams) * maxUnits);
 }
 
 void SimSnapshot::Extract(UnitRows& rows)
@@ -214,6 +248,9 @@ void SimSnapshot::Extract(UnitRows& rows)
 		rows.beingBuilt[id] = u->beingBuilt;
 		rows.stunned[id] = u->IsStunned();
 		rows.radius[id] = u->radius;
+		rows.selVol[id] = u->selectionVolume;
+		rows.noSelect[id] = u->noSelect;
+		rows.inVoid[id] = u->IsInVoid();
 		rows.relMidPos[id] = u->relMidPos;
 		rows.frontdir[id] = u->frontdir;
 		rows.updir[id] = u->updir;
@@ -224,6 +261,7 @@ void SimSnapshot::Extract(UnitRows& rows)
 		for (int at = 0; at < numAllyTeams; ++at) {
 			rows.losStatusAll[at * maxUnits + id] = u->losStatus[at];
 			rows.posErrorBits[at * maxUnits + id] = u->GetPosErrorBit(at);
+			rows.inRadarAll[at * maxUnits + id] = losHandler->InRadar(u, at);
 		}
 	}
 
@@ -304,5 +342,64 @@ void SimSnapshot::ExtractProjectiles(ProjectileRows& rows)
 
 		for (int at = 0; at < numAllyTeams; ++at)
 			rows.inLosAll[at * slots + id] = losHandler->InLos(p->pos, at);
+	}
+}
+
+void SimSnapshot::ExtractFeatures(FeatureRows& rows)
+{
+	const int numAllyTeams = teamHandler.ActiveAllyTeams();
+	const auto& activeIDs = featureHandler.GetActiveFeatureIDs();
+
+	// feature ids are dense but sparse-occupancy; rows grow-only to the max id
+	// seen so slot indices stay stable across extractions (projectile pattern)
+	int maxID = -1;
+	for (const int id : activeIDs)
+		maxID = std::max(maxID, id);
+
+	const size_t wantSlots = static_cast<size_t>(maxID + 1);
+
+	if (rows.valid.size() < wantSlots || rows.numAllyTeams != numAllyTeams) {
+		const size_t n = std::max(wantSlots, rows.valid.size());
+		rows.numAllyTeams = numAllyTeams;
+		rows.valid.resize(n, 0);
+		rows.pos.resize(n);
+		rows.midPos.resize(n);
+		rows.relMidPos.resize(n);
+		rows.radius.resize(n);
+		rows.allyTeam.resize(n);
+		rows.defID.resize(n);
+		rows.alwaysVisible.resize(n);
+		rows.noSelect.resize(n);
+		rows.inVoid.resize(n);
+		rows.selVol.resize(n);
+		rows.inLosAll.resize(size_t(numAllyTeams) * n);
+	}
+
+	std::fill(rows.valid.begin(), rows.valid.end(), 0);
+
+	rows.featureVisibility = modInfo.featureVisibility;
+	rows.gaiaAllyTeam = std::max(0, teamHandler.GaiaAllyTeamID());
+
+	const size_t slots = rows.MaxSlots();
+
+	for (const int id : activeIDs) {
+		const CFeature* f = featureHandler.GetFeature(id);
+		if (f == nullptr)
+			continue;
+
+		rows.valid[id] = 1;
+		rows.pos[id] = f->pos;
+		rows.midPos[id] = f->midPos;
+		rows.relMidPos[id] = f->relMidPos;
+		rows.radius[id] = f->radius;
+		rows.allyTeam[id] = f->allyteam;
+		rows.defID[id] = f->def->id;
+		rows.alwaysVisible[id] = f->alwaysVisible;
+		rows.noSelect[id] = f->noSelect;
+		rows.inVoid[id] = f->IsInVoid();
+		rows.selVol[id] = f->selectionVolume;
+
+		for (int at = 0; at < numAllyTeams; ++at)
+			rows.inLosAll[at * slots + id] = losHandler->InLos(f->pos, at);
 	}
 }

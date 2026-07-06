@@ -82,9 +82,9 @@ namespace SnapshotHash {
 	// ~CGame so the dump survives rewind reloads and is complete at final exit.
 	void FlushPartial();
 
-	// hash one completed sim frame's snapshot rows (units + synced projectiles;
-	// the projectile section folds into the root hash) and append its lines to
-	// the buffer; no-op unless armed and frameNum is inside the window. Driven
-	// from SimSnapshot::HashCompletedFrame (CGame::SimFrame).
-	void HashFrame(int frameNum, const SimSnapshot::UnitRows& rows, const SimSnapshot::ProjectileRows& projRows);
+	// hash one completed sim frame's snapshot rows (units + synced projectiles +
+	// features; the projectile and feature sections fold into the root hash) and
+	// append its lines to the buffer; no-op unless armed and frameNum is inside
+	// the window. Driven from SimSnapshot::HashCompletedFrame (CGame::SimFrame).
+	void HashFrame(int frameNum, const SimSnapshot::UnitRows& rows, const SimSnapshot::ProjectileRows& projRows, const SimSnapshot::FeatureRows& featRows);
 }

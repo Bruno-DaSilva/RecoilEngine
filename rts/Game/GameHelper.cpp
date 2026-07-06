@@ -9,6 +9,8 @@
 #include "Map/Ground.h"
 #include "Map/MapDamage.h"
 #include "Map/ReadMap.h"
+#include "Rendering/Common/SimSnapshot.h"
+#include "Rendering/Common/SnapshotPickGrid.h"
 #include "Sim/Features/Feature.h"
 #include "Sim/Features/FeatureDef.h"
 #include "Sim/Misc/BuildingMaskMap.h"
@@ -797,10 +799,38 @@ size_t CGameHelper::GenerateWeaponTargets(const CWeapon* weapon, const CUnit* av
 CUnit* CGameHelper::GetClosestUnit(const float3& pos, float searchRadius)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	Query::ClosestUnit_ErrorPos_NOT_SYNCED q(pos, searchRadius);
-	// draw/UI picking (MiniMap): use the unsynced dedup scratch
-	QueryUnits<false>(Filter::Friendly_All_Plus_Enemy_InLos_NOT_SYNCED(), q);
-	return q.GetClosestUnit();
+	// PR 25 (sim/draw decoupling section D): this is the draw/UI picker (MiniMap
+	// GetSelectUnit / SelectUnits) -- served from the SimSnapshot + the draw-side
+	// grid instead of the sim quadfield walk. Reproduces the exact predicate of
+	// Filter::Friendly_All_Plus_Enemy_InLos_NOT_SYNCED + the distance test of
+	// Query::ClosestUnit_ErrorPos_NOT_SYNCED against snapshot rows. Reads the
+	// last published boundary (<=1 draw frame stale for input handlers). The
+	// terminal id -> pointer lookup is the seam left for the split.
+	const SimSnapshot::UnitRows& urows = simSnapshot.Read();
+	const int myAllyTeam = gu->myAllyTeam;
+	const bool fullView = gu->spectatingFullView;
+
+	static std::vector<int> cand;
+	snapshotPickGrid.QueryUnitsInRadius(pos, searchRadius, cand);
+
+	float closeSqDist = searchRadius * searchRadius;
+	int closeID = -1;
+
+	for (const int id: cand) {
+		const bool visible = (urows.AllyTeam(id) == myAllyTeam) ||
+			(urows.LosStatus(id, myAllyTeam) & (LOS_INLOS | LOS_INRADAR)) || fullView;
+		if (!visible)
+			continue;
+
+		const float3 unitPos = fullView ? urows.MidPos(id) : (urows.MidPos(id) + urows.ErrorVector(id, myAllyTeam));
+		const float sqDist = (pos - unitPos).SqLength2D();
+		if (sqDist <= closeSqDist) {
+			closeSqDist = sqDist;
+			closeID = id;
+		}
+	}
+
+	return (closeID >= 0) ? unitHandler.GetUnit(closeID) : nullptr;
 }
 
 CUnit* CGameHelper::GetClosestEnemyUnit(const CUnit* excludeUnit, const float3& pos, float searchRadius, int searchAllyteam)
@@ -852,12 +882,38 @@ CUnit* CGameHelper::GetClosestEnemyUnitNoLosTest(
 CUnit* CGameHelper::GetClosestFriendlyUnit(const CUnit* excludeUnit, const float3& pos, float searchRadius, int searchAllyteam, bool synced)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	Query::ClosestUnit q(pos, searchRadius);
-	if (synced)
+	if (synced) {
+		Query::ClosestUnit q(pos, searchRadius);
 		QueryUnits<true>(Filter::Friendly(excludeUnit, searchAllyteam), q);
-	else
-		QueryUnits<false>(Filter::Friendly(excludeUnit, searchAllyteam), q);
-	return q.GetClosestUnit();
+		return q.GetClosestUnit();
+	}
+
+	// PR 25: unsynced (MiniMap SelectUnits) path -> SimSnapshot + draw-side grid,
+	// reproducing Filter::Friendly (allied-to-searchAllyteam, excludeUnit) +
+	// Query::ClosestUnit (raw midPos distance). Section D previous-boundary read.
+	const SimSnapshot::UnitRows& urows = simSnapshot.Read();
+	const int excludeID = (excludeUnit != nullptr) ? excludeUnit->id : -1;
+
+	static std::vector<int> cand;
+	snapshotPickGrid.QueryUnitsInRadius(pos, searchRadius, cand);
+
+	float closeSqDist = searchRadius * searchRadius;
+	int closeID = -1;
+
+	for (const int id: cand) {
+		if (id == excludeID)
+			continue;
+		if (!urows.Allied(searchAllyteam, urows.AllyTeam(id)))
+			continue;
+
+		const float sqDist = (pos - urows.MidPos(id)).SqLength2D();
+		if (sqDist <= closeSqDist) {
+			closeSqDist = sqDist;
+			closeID = id;
+		}
+	}
+
+	return (closeID >= 0) ? unitHandler.GetUnit(closeID) : nullptr;
 }
 
 CUnit* CGameHelper::GetClosestEnemyAircraft(const CUnit* excludeUnit, const float3& pos, float searchRadius, int searchAllyteam)

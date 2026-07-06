@@ -250,8 +250,13 @@ void CFeatureDrawerData::UpdateObjectDrawFlags(const CSolidObject* o)
 
 const CMatrix44f& CFeatureDrawerData::GetUnsyncedTransformMatrix(const CFeature* f) const
 {
+	return GetUnsyncedTransformMatrix(f->id);
+}
+
+const CMatrix44f& CFeatureDrawerData::GetUnsyncedTransformMatrix(int id) const
+{
 	static const CMatrix44f identity;
-	return (f->id < unsyncedTransforms.size()) ? unsyncedTransforms[f->id] : identity;
+	return (static_cast<size_t>(id) < unsyncedTransforms.size()) ? unsyncedTransforms[id] : identity;
 }
 
 float CFeatureDrawerData::GetDrawAlpha(const CFeature* f) const

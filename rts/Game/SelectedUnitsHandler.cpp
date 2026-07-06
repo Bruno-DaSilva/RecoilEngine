@@ -21,6 +21,7 @@
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/MoveTypes/MoveDefHandler.h"
 #include "Sim/Features/Feature.h"
+#include "Rendering/Common/SimSnapshot.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Units/UnitHandler.h"
@@ -308,7 +309,15 @@ void CSelectedUnitsHandler::HandleUnitBoxSelection(const float4& planeRight, con
 			continue;
 
 		for (CUnit* u: unitHandler.GetUnitsByTeam(team)) {
-			const float4 vec(u->midPos, 1.0f);
+			// PR 25 (sim/draw decoupling section D): the box predicate reads the
+			// boundary snapshot midPos, not the live sim object. Box-select only
+			// iterates own/selectable teams (always in LOS) so the raw snapshot
+			// value equals master's raw u->midPos; a unit created since the last
+			// boundary reads (0,0,0) and is simply not box-selectable for <=1
+			// frame (the decided pick-latency contract). The iteration and the
+			// AddUnit/RemoveUnit below still hold live pointers -- the id -> owner
+			// seam left for the split.
+			const float4 vec(simSnapshot.Read().MidPos(u->id), 1.0f);
 
 			if (vec.dot4(planeRight) >= 0.0f)
 				continue;
@@ -378,7 +387,8 @@ void CSelectedUnitsHandler::HandleSingleUnitClickSelection(CUnit* unit, bool doI
 				if (u->unitDef->id != unit->unitDef->id)
 					continue;
 
-				if (!doInViewTest || KeyInput::GetKeyModState(KMOD_CTRL) || camera->InView((u)->midPos))
+				// PR 25: snapshot midPos (own/selectable units, always in LOS)
+				if (!doInViewTest || KeyInput::GetKeyModState(KMOD_CTRL) || camera->InView(simSnapshot.Read().MidPos(u->id)))
 					AddUnit(u);
 			}
 		}

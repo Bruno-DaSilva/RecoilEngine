@@ -120,6 +120,22 @@ class CCollisionHandler {
 			const CollisionVolume* v,
 			CollisionQuery* cq = nullptr
 		);
+		// draw-side picking variant (PR 25 sim/draw decoupling): the object's
+		// midpos-relative offset and in-void state are passed explicitly so the
+		// hit-test needs no live CSolidObject (the caller reads them from the
+		// render-side SimSnapshot). The piece-tree branch (DefaultToPieceTree)
+		// is NOT served here -- it returns false and the caller falls back to a
+		// live sim read (see TraceRay.cpp). Simple-volume math is byte-identical
+		// to the object overload (same Intersect(v, mr, ...)).
+		static bool MouseHit(
+			const float3& relMidPos,
+			bool isInVoid,
+			const CMatrix44f& m,
+			const float3& p0,
+			const float3& p1,
+			const CollisionVolume* v,
+			CollisionQuery* cq = nullptr
+		);
 
 	private:
 		// HITTEST_DISC helpers for DetectHit

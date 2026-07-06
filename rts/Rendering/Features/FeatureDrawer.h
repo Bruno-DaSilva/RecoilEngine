@@ -38,6 +38,7 @@ public:
 	static const float3& GetDrawMidPos(const CFeature* feature) { return modelDrawerData->GetDrawMidPos(feature); }
 	static float3 GetObjDrawMidPos(const CFeature* feature) { return modelDrawerData->GetObjDrawMidPos(feature); }
 	static const CMatrix44f& GetUnsyncedTransformMatrix(const CFeature* feature) { return modelDrawerData->GetUnsyncedTransformMatrix(feature); }
+	static const CMatrix44f& GetUnsyncedTransformMatrix(int featureID) { return modelDrawerData->GetUnsyncedTransformMatrix(featureID); }
 
 	// drawer-owned distance-fade alpha (sim/draw §A drawAlpha eviction, PR 6)
 	static float GetDrawAlpha(const CFeature* feature) { return modelDrawerData->GetDrawAlpha(feature); }

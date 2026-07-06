@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "Sim/Misc/CollisionVolume.h"
 #include "System/float3.h"
 #include "System/float4.h"
 
@@ -41,6 +42,20 @@
  *    count -- rows grow-only to the max id seen), same buffer/publish
  *    lifecycle as the unit rows. Unsynced projectiles are draw-side state and
  *    are not Lua-visible through the synced callouts, so they have no rows.
+ *  - PR 25 (draw-side picking, section D) additions: the object read set of
+ *    GuiTraceRay + box-select. Units gained selVol (the live per-object
+ *    selectionVolume, copied by value -- an unsynced widget can mutate it at
+ *    runtime, so this is the current value, never the def), noSelect and
+ *    inVoid (the two hit-test gates). The FeatureRows namespace below is the
+ *    first non-unit/non-projectile family (features are pickable): dense but
+ *    sparse-occupancy feature ids, rows grow-only to the max id seen like the
+ *    projectile rows, carrying validity/pos/midPos/relMidPos/radius/allyTeam/
+ *    defID + the same selVol/noSelect/inVoid picking gates + per-allyteam
+ *    positional-LOS bytes (inLosAll) and the two IsInLosForAllyTeam globals
+ *    (featureVisibility mode, gaiaAllyTeam) for the visibility mirror.
+ *    Piece-tree selection volumes (usePieceSelectionVolumes) are deliberately
+ *    NOT served here -- unused in BAR; picking falls back to a live sim read
+ *    for those objects, to be removed at split-enable (see TraceRay.cpp).
  *
  * Validity rules:
  *  - Valid(id) mirrors membership in unitHandler's active-unit list at the
@@ -155,6 +170,12 @@ public:
 		std::vector<uint8_t> stunned;        // CUnit::IsStunned()
 		std::vector<float> radius;           // IsUnitVisible's default sphere
 
+		// picking (PR 25): the live per-object selection volume (copied by
+		// value; an unsynced widget can mutate it) plus the two MouseHit gates
+		std::vector<CollisionVolume> selVol;
+		std::vector<uint8_t> noSelect;       // CSolidObject::noSelect
+		std::vector<uint8_t> inVoid;         // CSolidObject::IsInVoid()
+
 		// object-space basis + relative midpoint (drawer midpos math, GetUnitVectors-class reads)
 		std::vector<float3> relMidPos;
 		std::vector<float3> frontdir;
@@ -166,6 +187,11 @@ public:
 		std::vector<uint8_t> leavesGhost;
 		std::vector<uint8_t> losStatusAll;   // [numAllyTeams * maxUnits], row-major by allyteam
 		std::vector<uint8_t> posErrorBits;   // same layout; CUnit::GetPosErrorBit(at)
+		// picking (PR 25): the per-allyteam InRadar answer (GuiTraceRay's radar
+		// gate). InRadar folds sonar/jammer/water logic, so -- like the
+		// projectile/feature inLosAll rows -- we store the computed answer, not
+		// the inputs. Same [numAllyTeams * maxUnits] stride layout.
+		std::vector<uint8_t> inRadarAll;
 
 		// out-of-range ids (including any id before the first extraction ever
 		// ran, when the arrays are still unsized) are part of the stale/nil
@@ -181,7 +207,12 @@ public:
 			return (Valid(unitID) && argAllyTeam >= 0 && argAllyTeam < numAllyTeams) ?
 				losStatusAll[argAllyTeam * MaxUnits() + unitID] : 0;
 		}
+		bool InRadar(int unitID, int argAllyTeam) const {
+			return (Valid(unitID) && argAllyTeam >= 0 && argAllyTeam < numAllyTeams) &&
+				inRadarAll[argAllyTeam * MaxUnits() + unitID] != 0;
+		}
 		float3 Pos(int unitID) const { return Valid(unitID) ? pos[unitID] : float3{}; }
+		float3 MidPos(int unitID) const { return Valid(unitID) ? midPos[unitID] : float3{}; }
 		float4 Speed(int unitID) const { return Valid(unitID) ? speed[unitID] : float4{}; }
 		float Health(int unitID) const { return Valid(unitID) ? health[unitID] : 0.0f; }
 		float MaxHealth(int unitID) const { return Valid(unitID) ? maxHealth[unitID] : 0.0f; }
@@ -189,6 +220,20 @@ public:
 		int AllyTeam(int unitID) const { return Valid(unitID) ? allyTeam[unitID] : -1; }
 		int DefID(int unitID) const { return Valid(unitID) ? defID[unitID] : 0; }
 		float BuildProgress(int unitID) const { return Valid(unitID) ? buildProgress[unitID] : 0.0f; }
+		float Radius(int unitID) const { return Valid(unitID) ? radius[unitID] : 0.0f; }
+		// object-space basis vectors (drawer-midpos / camera-orientation consumers, PR 24)
+		float3 Frontdir(int unitID) const { return Valid(unitID) ? frontdir[unitID] : float3{}; }
+		float3 Updir(int unitID) const { return Valid(unitID) ? updir[unitID] : float3{}; }
+		float3 Rightdir(int unitID) const { return Valid(unitID) ? rightdir[unitID] : float3{}; }
+
+		// picking accessors (PR 25); stale/nil contract: invalid ids read the
+		// default-constructed sphere volume / no-select / not-in-void
+		bool NoSelect(int unitID) const { return Valid(unitID) && noSelect[unitID] != 0; }
+		bool InVoid(int unitID) const { return Valid(unitID) && inVoid[unitID] != 0; }
+		const CollisionVolume& SelVol(int unitID) const {
+			static const CollisionVolume def;
+			return Valid(unitID) ? selVol[unitID] : def;
+		}
 
 		// ---- serving-layer masking helpers (PR 18) ----
 		// Bit-for-bit mirrors of the live formulas, computed from extracted
@@ -266,6 +311,59 @@ public:
 			return !((readAllyTeam != allyTeam[projID]) && !InLos(projID, readAllyTeam));
 		}
 	};
+
+	/**
+	 * Feature rows (PR 25, first non-unit/non-projectile family). Keyed by
+	 * feature id; ids are dense but sparse-occupancy (SimObjectIDPool, bounded
+	 * by MAX_FEATURES), so rows grow-only to the max id seen exactly like the
+	 * projectile rows. Carries the GuiTraceRay feature read set. Feature
+	 * visibility is positional like projectiles (losHandler->InLos(pos, at))
+	 * but with CFeature::IsInLosForAllyTeam's mod-config branches, so inLosAll
+	 * holds the per-allyteam positional-LOS answer and the two globals
+	 * (featureVisibility, gaiaAllyTeam) drive the InLosForAllyTeam mirror.
+	 */
+	struct FeatureRows {
+		int32_t numAllyTeams = 0;
+		int32_t featureVisibility = 0;  // CModInfo::featureVisibility (FEATURELOS_*)
+		int32_t gaiaAllyTeam = 0;       // std::max(0, teamHandler.GaiaAllyTeamID())
+
+		std::vector<uint8_t> valid;
+		std::vector<float3> pos;
+		std::vector<float3> midPos;
+		std::vector<float3> relMidPos;
+		std::vector<float> radius;
+		std::vector<int32_t> allyTeam;   // CFeature::allyteam (may be -1)
+		std::vector<int32_t> defID;
+		std::vector<uint8_t> alwaysVisible;
+		std::vector<uint8_t> noSelect;
+		std::vector<uint8_t> inVoid;
+		std::vector<CollisionVolume> selVol;
+		std::vector<uint8_t> inLosAll;   // [numAllyTeams * MaxSlots()], row-major by allyteam
+
+		bool Valid(int id) const {
+			return (static_cast<size_t>(id) < valid.size() && valid[id] != 0);
+		}
+		size_t MaxSlots() const { return valid.size(); }
+
+		float3 Pos(int id) const { return Valid(id) ? pos[id] : float3{}; }
+		float3 MidPos(int id) const { return Valid(id) ? midPos[id] : float3{}; }
+		float Radius(int id) const { return Valid(id) ? radius[id] : 0.0f; }
+		int AllyTeam(int id) const { return Valid(id) ? allyTeam[id] : -1; }
+		int DefID(int id) const { return Valid(id) ? defID[id] : 0; }
+		bool NoSelect(int id) const { return Valid(id) && noSelect[id] != 0; }
+		bool InVoid(int id) const { return Valid(id) && inVoid[id] != 0; }
+		const CollisionVolume& SelVol(int id) const {
+			static const CollisionVolume def;
+			return Valid(id) ? selVol[id] : def;
+		}
+
+		bool InLos(int id, int argAllyTeam) const {
+			return (argAllyTeam >= 0 && argAllyTeam < numAllyTeams &&
+				inLosAll[argAllyTeam * MaxSlots() + id] != 0);
+		}
+		// CFeature::IsInLosForAllyTeam mirror; caller must have checked Valid()
+		bool IsInLosForAllyTeam(int id, int argAllyTeam) const;
+	};
 public:
 	/// extract-if-due + publish; called once per draw frame from CGame::Draw,
 	/// after the render-event drain (see the timing contract above)
@@ -295,10 +393,12 @@ public:
 
 	const UnitRows& Read() const { return *front; }
 	const ProjectileRows& ReadProjectiles() const { return *projFront; }
+	const FeatureRows& ReadFeatures() const { return *featFront; }
 	uint32_t Generation() const { return generation; }
 private:
 	void Extract(UnitRows& rows);
 	void ExtractProjectiles(ProjectileRows& rows);
+	void ExtractFeatures(FeatureRows& rows);
 	static void Resize(UnitRows& rows, size_t maxUnits, int numAllyTeams);
 private:
 	UnitRows buffers[2];
@@ -309,10 +409,15 @@ private:
 	ProjectileRows* projFront = &projBuffers[0];
 	ProjectileRows* projBack = &projBuffers[1];
 
+	FeatureRows featBuffers[2];
+	FeatureRows* featFront = &featBuffers[0];
+	FeatureRows* featBack = &featBuffers[1];
+
 	// PR 16: scratch rows for per-sim-frame hashing; never published, kept only
 	// to avoid reallocating its arrays every armed frame
 	UnitRows hashScratch;
 	ProjectileRows hashProjScratch;
+	FeatureRows hashFeatScratch;
 
 	uint32_t generation = 0;
 
