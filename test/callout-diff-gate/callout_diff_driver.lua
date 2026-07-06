@@ -34,11 +34,19 @@ end
 --                          view (default 6000).
 --   DiffGatePovTeam      : team to spectate (-1 = auto: team of the first unit
 --                          that is not Gaia's at flip time).
+--   DiffGateCtrlPokes    : 1 => exercise the PR-27a boundary-queued
+--                          LuaUnsyncedCtrl sim pokes (SetUnitNoDraw family)
+--                          from a Draw* callin every ~90 draw frames and
+--                          verify the one-frame-deferred read-back next
+--                          frame. Pokes are toggled back immediately so the
+--                          scene stays watchable. Logs
+--                          "[DiffGateDriver] ctrl-poke ..." ok/FAIL lines.
+--                          Default 0 (headless replays never hit this path).
 --
 -- Pass criterion: the engine's [SnapshotDiffGate] report prints
 --   "PASS (0 mismatches)" and total mismatches=0 over the whole replay.
 
-local label, armGate, fastForward, quitFrame, exercise
+local label, armGate, fastForward, quitFrame, exercise, ctrlPokes
 local povFrame, povSpan, povTeam
 local povActive = false
 local povDone = false
@@ -81,6 +89,7 @@ function widget:Initialize()
 	povFrame    = Spring.GetConfigInt("DiffGatePovFrame", 6000)
 	povSpan     = Spring.GetConfigInt("DiffGatePovSpan", 6000)
 	povTeam     = Spring.GetConfigInt("DiffGatePovTeam", -1)
+	ctrlPokes   = Spring.GetConfigInt("DiffGateCtrlPokes", 0)
 
 	announce(("label=%s ff=%d quit=%d exercise=%d povFrame=%d povSpan=%d povTeam=%d")
 		:format(label, fastForward, quitFrame, exercise, povFrame, povSpan, povTeam))
@@ -342,11 +351,98 @@ local function ExerciseFamily()
 	end
 end
 
+-- PR 27a ctrl-poke exercise: under SplitDrawContract the last-wins ctrl
+-- setters queue to the next SimDrawBarrier instead of applying in place. The
+-- probe is SetTeamColor: it has NO control-permission gate (the SetUnit*
+-- family silently no-ops for spectators at ParseCtrlUnit, master behavior)
+-- and GetTeamColor is snapshot-served, so one round-trip verifies the whole
+-- chain: queue -> barrier drain (before the snapshot publish) -> boundary
+-- copy -> serving twin. A poke made during draw frame N must NOT read back
+-- at frame N (the deferral itself) and MUST read back at frame N+1. The
+-- color is restored one frame later so the scene stays watchable. The
+-- permission-gated SetUnit*/SetFeature* setters are still called each round
+-- (they queue when the handle has ctrl rights, e.g. /godmode; inventory
+-- counters show which path ran).
+local pokeState = nil
+local pokeCount, pokeFails = 0, 0
+
+local function TeamColorRed(teamID)
+	local r = Spring.GetTeamColor(teamID)
+	return r
+end
+
+local function CtrlPokeCheck(drawFrameTag)
+	if pokeState ~= nil then
+		-- verify last frame's poke applied at the barrier we just crossed
+		local r = TeamColorRed(pokeState.teamID)
+		pokeCount = pokeCount + 1
+		if r == nil or math.abs(r - pokeState.wantRed) > (1.5 / 255.0) then
+			pokeFails = pokeFails + 1
+			announce(("ctrl-poke FAIL at drawtag %d: teamColor red=%s want=%.4f")
+				:format(drawFrameTag, tostring(r), pokeState.wantRed))
+		end
+		-- restore (also boundary-queued)
+		Spring.SetTeamColor(pokeState.teamID, pokeState.origR, pokeState.origG, pokeState.origB)
+		pokeState = nil
+		return
+	end
+
+	local teams = Spring.GetTeamList()
+	if teams == nil or #teams == 0 then
+		return
+	end
+	local teamID = teams[1]
+	local origR, origG, origB = Spring.GetTeamColor(teamID)
+	if origR == nil then
+		return
+	end
+
+	-- a distinctive red, alternating so consecutive rounds cannot pass on a
+	-- stale value; quantized to the engine's uint8 storage for the compare
+	local wantRed = (pokeCount % 2 == 0) and 0.1230 or 0.8770
+	Spring.SetTeamColor(teamID, wantRed, origG, origB)
+	pokeState = { teamID = teamID, origR = origR, origG = origG, origB = origB,
+	              wantRed = math.floor(wantRed * 255) / 255 }
+
+	-- the deferral itself: the write must NOT be visible this frame (it queued)
+	local sameFrame = TeamColorRed(teamID)
+	if sameFrame ~= nil and math.abs(sameFrame - pokeState.wantRed) <= (0.5 / 255.0)
+	   and math.abs(origR - pokeState.wantRed) > (2.0 / 255.0) then
+		pokeCount = pokeCount + 1
+		pokeFails = pokeFails + 1
+		pokeState = nil
+		announce("ctrl-poke FAIL: SetTeamColor visible same-frame (queue did not defer)")
+		Spring.SetTeamColor(teamID, origR, origG, origB)
+		return
+	end
+
+	-- the permission-gated family: exercised for coverage; queues only when
+	-- the handle can control the unit (godmode), silently no-ops otherwise
+	local units = Spring.GetAllUnits()
+	if #units > 0 then
+		local uid = units[1 + (pokeCount % #units)]
+		Spring.SetUnitNoDraw(uid, false)
+		Spring.SetUnitNoMinimap(uid, false)
+		Spring.SetUnitAlwaysUpdateMatrix(uid, false)
+	end
+	Spring.SetNanoProjectileParams(1, 1, 0, 0, 0, 0)
+end
+
+local drawFrameCount = 0
+
 -- DrawGenesis is the one Draw* callin that fires every draw frame even when
 -- rendering is inactive (headless: CGame::Draw returns right after it when
 -- !globalRendering->active), so it is the guaranteed-cadence exercise point
 function widget:DrawGenesis()
-	if not armed or finished or exercise == 0 then
+	if not armed or finished then
+		return
+	end
+	drawFrameCount = drawFrameCount + 1
+	if ctrlPokes ~= 0 and (pokeState ~= nil or drawFrameCount % 90 == 0) then
+		AnnounceOnce("ctrl-pokes")
+		CtrlPokeCheck(drawFrameCount)
+	end
+	if exercise == 0 then
 		return
 	end
 	AnnounceOnce("DrawGenesis")
@@ -375,5 +471,11 @@ function widget:GameOver()
 	if gameOverFrame == nil then
 		gameOverFrame = Spring.GetGameFrame()
 		announce("game over at frame " .. gameOverFrame)
+	end
+end
+
+function widget:Shutdown()
+	if ctrlPokes ~= nil and ctrlPokes ~= 0 then
+		announce(("ctrl-poke checks: %d rounds, %d FAILED"):format(pokeCount, pokeFails))
 	end
 end
