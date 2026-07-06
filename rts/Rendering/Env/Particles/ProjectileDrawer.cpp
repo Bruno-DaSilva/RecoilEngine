@@ -55,6 +55,19 @@ static bool CProjectileSortingPredicate(const CProjectile* p1, const CProjectile
 	return std::forward_as_tuple(projectileDrawer->GetSortDist(p1, sortCamType), p1) > std::forward_as_tuple(projectileDrawer->GetSortDist(p2, sortCamType), p2);
 };
 
+// bin-walk resolution of the packed (id << 1 | synced) drawer handles; every
+// registered handle resolves to a live projectile after the boundary drain
+static const CProjectile* ResolveProjectileHandle(uint32_t handle)
+{
+	const int id = int(handle >> 1);
+	const CProjectile* p = (handle & 1u) != 0 ?
+		projectileHandler.GetProjectileBySyncedID(id) :
+		projectileHandler.GetProjectileByUnsyncedID(id);
+
+	assert(p != nullptr);
+	return p;
+}
+
 CProjectileDrawer* projectileDrawer = nullptr;
 
 // can not be a CProjectileDrawer; destruction in global
@@ -283,6 +296,7 @@ void CProjectileDrawer::Init() {
 	}
 
 
+	renderHandles.reserve(projectileHandler.maxParticles + projectileHandler.maxNanoParticles);
 	renderProjectiles.reserve(projectileHandler.maxParticles + projectileHandler.maxNanoParticles);
 	for (auto& mr : modelRenderers) { mr.Clear(); }
 
@@ -348,10 +362,15 @@ void CProjectileDrawer::Kill() {
 
 	smokeTextures.clear();
 
+	renderHandles.clear();
 	renderProjectiles.clear();
-	drawPositions.clear();
-	drawFlags.clear();
-	sortDists.clear();
+
+	for (int ns = 0; ns < 2; ns++) {
+		renderIndices[ns].clear();
+		drawPositions[ns].clear();
+		drawFlags[ns].clear();
+		sortDists[ns].clear();
+	}
 
 	for (auto& dp : drawParticles)
 		dp.clear();
@@ -375,13 +394,29 @@ void CProjectileDrawer::UpdateDrawFlags()
 {
 	ZoneScopedN("ProjectileDrawer::UpdateDrawFlags");
 
-	for_mt(0, renderProjectiles.size(), [this](int i) {
-		const CProjectile* p = renderProjectiles[i];
+	// resolve the registered handles into this draw frame's pointer set: one
+	// handler lookup per projectile per frame, every later pass (alpha
+	// passes, minimap, transparent shadows) iterates the resolved pointers
+	renderProjectiles.resize(renderHandles.size());
+
+	for_mt(0, renderHandles.size(), [this](int i) {
+		const uint32_t handle = renderHandles[i];
+		const bool synced = (handle & 1u) != 0;
+		const int id = int(handle >> 1);
+
+		const CProjectile* p = synced ?
+			projectileHandler.GetProjectileBySyncedID(id) :
+			projectileHandler.GetProjectileByUnsyncedID(id);
+
+		// post-drain invariant: every registered id resolves to a live object
+		assert(p != nullptr);
+		renderProjectiles[i] = p;
+
 		const bool hasModel = (p->model != nullptr);
 
-		const float3& drawPos = (drawPositions[i] = p->GetDrawPos(globalRendering->timeOffset));
+		const float3& drawPos = (drawPositions[synced][id] = p->GetDrawPos(globalRendering->timeOffset));
 
-		uint8_t& drawFlag = drawFlags[i];
+		uint8_t& drawFlag = drawFlags[synced][id];
 		drawFlag = DrawFlags::SO_NODRAW_FLAG;
 
 		if (!CanDrawProjectile(p, p->GetAllyteamID()))
@@ -403,7 +438,7 @@ void CProjectileDrawer::UpdateDrawFlags()
 			if (!cam->InView(drawPos, p->GetDrawRadius()))
 				continue;
 
-			sortDists[i][camType] = cam->ProjectedDistance(drawPos) + p->sortDistOffset;
+			sortDists[synced][id][camType] = cam->ProjectedDistance(drawPos) + p->sortDistOffset;
 
 			switch (camType)
 			{
@@ -709,7 +744,9 @@ void CProjectileDrawer::DrawOpaque(bool drawReflection, bool drawRefraction)
 
 			CModelDrawerHelper::BindModelTypeTexture(modelType, mdlRenderer.GetObjectBinKey(i));
 
-			for (const CProjectile* p : mdlRenderer.GetObjectBin(i)) {
+			for (const uint32_t handle : mdlRenderer.GetObjectBin(i)) {
+				const CProjectile* p = ResolveProjectileHandle(handle);
+
 				if (!ShouldDrawProjectile(p, thisPassMask))
 					continue;
 
@@ -852,7 +889,9 @@ void CProjectileDrawer::DrawShadowOpaque()
 
 			CModelDrawerHelper::BindModelTypeTexture(modelType, mdlRenderer.GetObjectBinKey(i));
 
-			for (const CProjectile* p : mdlRenderer.GetObjectBin(i)) {
+			for (const uint32_t handle : mdlRenderer.GetObjectBin(i)) {
+				const CProjectile* p = ResolveProjectileHandle(handle);
+
 				if (!ShouldDrawProjectile(p, DrawFlags::SO_SHOPAQ_FLAG))
 					continue;
 
@@ -1214,12 +1253,32 @@ void CProjectileDrawer::GenerateNoiseTex(uint32_t tex)
 void CProjectileDrawer::RenderProjectileCreated(const CProjectile* p)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	const bool synced = p->synced;
+	const size_t id = p->id;
+
 	{
-		p->SetRenderIndex(renderProjectiles.size());
-		renderProjectiles.push_back(p);
-		drawPositions.emplace_back(); // zero until the first UpdateDrawFlags, as the old member was
-		drawFlags.emplace_back(DrawFlags::SO_NODRAW_FLAG); // as the old member default was
-		sortDists.emplace_back(); // zero until first in view, as the old member default was
+		// fresh slots for a fresh projectile (the id may be recycled)
+		auto& positions = drawPositions[synced];
+		auto& flags = drawFlags[synced];
+		auto& dists = sortDists[synced];
+		auto& indices = renderIndices[synced];
+
+		if (id >= indices.size()) {
+			positions.resize(id + 1);
+			flags.resize(id + 1, DrawFlags::SO_NODRAW_FLAG);
+			dists.resize(id + 1);
+			indices.resize(id + 1, uint32_t(-1));
+		}
+
+		// NB: not "= {}" -- float3 has operator=(const float f[3]) and an empty
+		// braced list binds to it as a null pointer, not to a zeroed float3
+		positions[id] = ZeroVector; // zero until the first UpdateDrawFlags, as the old member was
+		flags[id] = DrawFlags::SO_NODRAW_FLAG; // as the old member default was
+		dists[id] = {}; // zero until first in view, as the old member default was
+
+		assert(indices[id] == uint32_t(-1));
+		indices[id] = renderHandles.size();
+		renderHandles.push_back(ModelRenderContainerTraits<CProjectile>::ToHandle(p));
 	}
 
 	if (p->model != nullptr)
@@ -1229,24 +1288,29 @@ void CProjectileDrawer::RenderProjectileCreated(const CProjectile* p)
 void CProjectileDrawer::RenderProjectileDestroyed(const CProjectile* p)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	const auto ri = p->GetRenderIndex();
-	if (ri >= renderProjectiles.size()) {
+	const bool synced = p->synced;
+	const size_t id = p->id;
+
+	auto& indices = renderIndices[synced];
+
+	if (id >= indices.size() || indices[id] == uint32_t(-1)) {
 		assert(false);
 		return;
 	}
 
-	renderProjectiles[ri] = renderProjectiles.back();
-	renderProjectiles[ri]->SetRenderIndex(ri);
-	renderProjectiles.pop_back();
+	const uint32_t ri = indices[id];
 
-	drawPositions[ri] = drawPositions.back();
-	drawPositions.pop_back();
+	renderHandles[ri] = renderHandles.back();
+	renderHandles.pop_back();
 
-	drawFlags[ri] = drawFlags.back();
-	drawFlags.pop_back();
+	// rewire the swapped-in handle's backref (skipped when <p> was the back
+	// element, so the reset below is what sticks)
+	if (ri < renderHandles.size()) {
+		const uint32_t movedHandle = renderHandles[ri];
+		renderIndices[movedHandle & 1u][movedHandle >> 1] = ri;
+	}
 
-	sortDists[ri] = sortDists.back();
-	sortDists.pop_back();
+	indices[id] = uint32_t(-1);
 
 	if (p->model != nullptr)
 		modelRenderers[MDL_TYPE(p)].DelObject(p);

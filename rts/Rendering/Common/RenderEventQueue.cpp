@@ -12,6 +12,7 @@
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitHandler.h"
 #include "System/EventHandler.h"
+#include "System/Log/ILog.h"
 
 RenderEventQueue renderEventQueue;
 
@@ -120,6 +121,9 @@ const CProjectile* RenderEventQueue::ResolveProjectile(int32_t id, bool synced) 
 	const CProjectile* proj = synced ?
 		projectileHandler.GetProjectileBySyncedID(id) :
 		projectileHandler.GetProjectileByUnsyncedID(id);
+
+	if (proj == nullptr)
+		LOG_L(L_ERROR, "[RenderEventQueue::%s] no live object or shell for id=%d synced=%d (pending=%d)", __func__, id, int(synced), int(records.size()));
 
 	assert(proj != nullptr);
 	return proj;

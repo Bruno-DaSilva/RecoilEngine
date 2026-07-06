@@ -23,6 +23,13 @@ class CGroundFlash;
 struct FlyingPiece;
 class LuaTable;
 
+// packed projectile handle for the drawer containers (PR 14): the id plus
+// the namespace bit, matching ModelRenderContainerTraits<CProjectile>
+inline uint32_t ModelRenderContainerTraits<CProjectile>::ToHandle(const CProjectile* o)
+{
+	return (uint32_t(o->id) << 1) | uint32_t(o->synced);
+}
+
 
 class CProjectileDrawer: public CEventClient {
 public:
@@ -61,36 +68,37 @@ public:
 	void RenderProjectileCreated(const CProjectile* projectile);
 	void RenderProjectileDestroyed(const CProjectile* projectile);
 
-	// drawer-owned interpolated draw position, parallel to renderProjectiles
-	// (sim/draw §A drawPos eviction; was a CProjectile field). Zero for
-	// projectiles not (yet) registered, as the old member default was.
+	// drawer-owned interpolated draw position, keyed by id per namespace
+	// (sim/draw §A drawPos eviction; was a CProjectile field; PR 14 rekeyed
+	// renderIndex -> [synced][id]). Zero for projectiles not (yet)
+	// registered, as the old member default was.
 	const float3& GetDrawPos(const CProjectile* p) const {
 		static const float3 zero;
-		const uint32_t ri = p->GetRenderIndex();
-		return (ri < drawPositions.size()) ? drawPositions[ri] : zero;
+		const auto& v = drawPositions[p->synced];
+		return (size_t(p->id) < v.size()) ? v[p->id] : zero;
 	}
 	// draw-time transform (was CProjectile::GetTransformMatrix, "UNSYNCED ONLY")
 	CMatrix44f GetTransformMatrix(const CProjectile* p, bool offsetPos) const;
 
-	// drawer-owned draw-visibility flags, parallel to renderProjectiles (sim/draw §A
+	// drawer-owned draw-visibility flags, keyed by id per namespace (sim/draw §A
 	// drawFlag eviction; was a CProjectile field). SO_NODRAW_FLAG for projectiles not
 	// (yet) registered, as the old member default was. (previousDrawFlag was dropped:
 	// it was a per-frame dead store for projectiles — no reader ever consumed it, the
 	// GetRenderObjectsDrawFlagChanged consumer only queries units/features.)
 	uint8_t GetDrawFlag(const CProjectile* p) const {
-		const uint32_t ri = p->GetRenderIndex();
-		return (ri < drawFlags.size()) ? drawFlags[ri] : DrawFlags::SO_NODRAW_FLAG;
+		const auto& v = drawFlags[p->synced];
+		return (size_t(p->id) < v.size()) ? v[p->id] : DrawFlags::SO_NODRAW_FLAG;
 	}
 	bool HasDrawFlag(const CProjectile* p, DrawFlags f) const { return (GetDrawFlag(p) & f) == f; }
 
-	// drawer-owned per-camera z-sort keys, parallel to renderProjectiles (sim/draw §A
+	// drawer-owned per-camera z-sort keys, keyed by id per namespace (sim/draw §A
 	// sortDist eviction; was a CProjectile field). Written by UpdateDrawFlags for the
 	// cameras a projectile is in view of (stale slots keep their last value, as the
 	// old member did); zero for projectiles not (yet) registered, as the old member
 	// default was. Includes the sim-authored p->sortDistOffset, like the old setter.
 	float GetSortDist(const CProjectile* p, uint32_t camType) const {
-		const uint32_t ri = p->GetRenderIndex();
-		return (ri < sortDists.size()) ? sortDists[ri][camType] : 0.0f;
+		const auto& v = sortDists[p->synced];
+		return (size_t(p->id) < v.size()) ? v[p->id][camType] : 0.0f;
 	}
 
 	unsigned int NumSmokeTextures() const { return (smokeTextures.size()); }
@@ -194,16 +202,28 @@ private:
 
 	std::vector<const AtlasedTexture*> smokeTextures;
 
-	/// interpolated draw positions, parallel to renderProjectiles (see GetDrawPos)
-	std::vector<float3> drawPositions;
+	/// interpolated draw positions, keyed [synced][id] (see GetDrawPos)
+	std::array<std::vector<float3>, 2> drawPositions;
 
-	/// draw-visibility flags, parallel to renderProjectiles (see GetDrawFlag)
-	std::vector<uint8_t> drawFlags;
+	/// draw-visibility flags, keyed [synced][id] (see GetDrawFlag)
+	std::array<std::vector<uint8_t>, 2> drawFlags;
 
-	/// per-camera z-sort keys, parallel to renderProjectiles (see GetSortDist)
-	std::vector<std::array<float, 3>> sortDists;
+	/// per-camera z-sort keys, keyed [synced][id] (see GetSortDist)
+	std::array<std::vector<std::array<float, 3>>, 2> sortDists;
 
-	/// projectiles container
+	/// registered projectiles: packed (id << 1 | synced) handles in
+	/// registration order -- the drawer's persistent iteration set, mutated
+	/// only by the render events (PR 14: no object pointers)
+	std::vector<uint32_t> renderHandles;
+
+	/// position of a handle in renderHandles, keyed [synced][id]; -1u when
+	/// not registered (replaces the old CProjectile::renderIndex backref)
+	std::array<std::vector<uint32_t>, 2> renderIndices;
+
+	/// per-draw-frame pointer resolution of renderHandles, parallel to it;
+	/// rebuilt by UpdateDrawFlags right after the boundary drain and only
+	/// valid for the draw passes of the same frame (never crosses a sim
+	/// boundary: every id resolves to a live object, asserted at rebuild)
 	std::vector<const CProjectile*> renderProjectiles;
 
 	/// projectiles with a model, binned by model type and textures

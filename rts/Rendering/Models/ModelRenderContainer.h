@@ -3,6 +3,7 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
 #include <vector>
 
 #include "Rendering/Models/3DModelDefs.hpp"
@@ -19,19 +20,21 @@ public:
 };
 
 // what the bins store per object (PR 14: drawer containers hold IDs, not
-// pointers; draw passes resolve the id through the object's handler). The
-// projectile drawer keeps identity handles until its own conversion lands.
+// pointers; draw passes resolve the id through the object's handler)
 template<typename TObject>
 struct ModelRenderContainerTraits {
 	using Handle = int;
 	static Handle ToHandle(const TObject* o) { return o->id; }
 };
 
+// projectile ids live in two namespaces (synced/unsynced), so their handle
+// carries the namespace bit; ToHandle is defined in ProjectileDrawer.h,
+// which sees the complete CProjectile type
 class CProjectile;
 template<>
 struct ModelRenderContainerTraits<CProjectile> {
-	using Handle = const CProjectile*;
-	static Handle ToHandle(const CProjectile* o) { return o; }
+	using Handle = uint32_t; // (id << 1) | synced
+	static Handle ToHandle(const CProjectile* o);
 };
 
 template<typename TObject, typename TObjectSelector = ModelRenderContainerSelector<TObject>>

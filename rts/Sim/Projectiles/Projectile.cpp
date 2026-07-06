@@ -55,7 +55,6 @@ CR_REG_METADATA(CProjectile,
 
 	CR_MEMBER(projectileType),
 	CR_MEMBER(collisionFlags),
-	CR_IGNORED(renderIndex),
 
 	CR_MEMBER(quads)
 ))
