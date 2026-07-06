@@ -29,6 +29,12 @@
  *    piece transforms (extracted separately since PR 8, see
  *    CModelDrawerDataBase::ExtractTransforms) and command queues / paths
  *    (unbounded; dirty-versioned copies in a later PR).
+ *  - PR 18 (positions/status callout family) additions: midPos, aimPos,
+ *    paralyzeDamage, captureProgress, beingBuilt, stunned, plus the masking
+ *    inputs (see below): relMidPos + frontdir/updir/rightdir (object-space
+ *    math for the drawer-based midpos variants), posErrorVector, leavesGhost,
+ *    per-allyteam stride rows losStatusAll / posErrorBits, and a per-buffer
+ *    global block (numAllyTeams, radar-error scalars, alliance matrix).
  *
  * Validity rules:
  *  - Valid(id) mirrors membership in unitHandler's active-unit list at the
@@ -45,23 +51,33 @@
  *    to detect reuse across that window, add a per-slot generation tag --
  *    do not widen the staleness contract instead.
  *
- * losStatus semantics:
- *  - One byte per unit: the losStatus row for viewAllyTeam, which is
- *    gu->myAllyTeam at extraction time (for full-view spectators that is the
- *    row of whatever allyteam they are nominally on; full-view consumers keep
- *    their live `gu->spectatingFullView` bypass exactly as on master, so the
- *    row content is moot for them). The snapshot re-extracts when
- *    gu->myAllyTeam changes, so a spectator switching viewed teams gets the
- *    new row at the next Update() even while paused.
- *  - Information surface: the losStatus row is by definition what the local
- *    client knows, so serving it does not widen anything. The other v1 fields
- *    are extracted raw and unmasked for *all* alive units -- safe while the
- *    snapshot is CPU-side and every consumer applies the same visibility
- *    gates master applies (v1's only consumer reads losStatus itself). The
- *    first consumer that could leak a hidden-enemy value (Lua callout
- *    serving, PR 18) must settle the masking policy: either mask fields at
- *    extraction by this losStatus row, or gate at the serving layer -- cf.
- *    the LOS gate precedent in UpdateObjectUniforms / ExtractTransforms.
+ * losStatus / masking semantics (masking policy settled in PR 18):
+ *  - losStatusAll holds one byte per (allyTeam, unit), laid out as numAllyTeams
+ *    consecutive rows of maxUnits bytes (index at * maxUnits + unitID);
+ *    posErrorBits has the identical layout (CUnit::GetPosErrorBit per
+ *    allyteam). LosStatus(unitID, allyTeam) is the row accessor -- consumers
+ *    that used the old single-row form pass gu->myAllyTeam and read exactly
+ *    the byte they read before. Rows are POV-complete: no re-extraction is
+ *    needed when the viewed allyteam changes (/specteam), the accessor just
+ *    reads a different row.
+ *  - DECIDED (PR 18): masking happens at the SERVING layer, not at
+ *    extraction. The snapshot stores raw synced values plus the masking
+ *    *inputs* for every allyteam (losStatusAll, posErrorBits, posErrorVector,
+ *    leavesGhost, the alliance matrix and the radar-error scalars), and the
+ *    POV helpers below (PovAlliedUnit / PovUnitVisible / PovUnitInLos /
+ *    ErrorVector / LuaErrorVector) replicate the live gate + errorVector
+ *    formulas (LuaUtils::IsUnitVisible / IsUnitInLos, CUnit::GetErrorVector)
+ *    bit-for-bit from those inputs. Rationale: one snapshot serves every
+ *    handle POV at once (LuaUI player POV, LuaRules-unsynced, spectators
+ *    flipping /specteam between boundaries), and the result is directly
+ *    bit-comparable against the live path (SnapshotDiffGate). Since the
+ *    snapshot is CPU-side process memory -- which already holds the full
+ *    lockstep sim -- storing raw rows widens no information surface; the
+ *    leak boundary is what values cross into Lua, and the serving-layer
+ *    gates are the same gates master applies. Extraction-time masking
+ *    remains MANDATORY for GPU-visible surfaces (Lua-shader-readable SSBOs;
+ *    see the LOS gate in UpdateObjectUniforms / ExtractTransforms) -- do not
+ *    copy this policy there.
  *
  * Extraction timing:
  *  - Update() runs at the start of the draw side of the frame -- in
@@ -71,12 +87,13 @@
  *  - Zero new sim frames since the last extraction = no-op. A catch-up burst
  *    of N sim frames produces one extraction (intermediate frames are
  *    unobservable, same as master's rendering). Extraction also re-runs when
- *    gu->myAllyTeam changes (row selection above), when the alive-unit count
- *    changes outside the frame cadence (objects spawned before the first sim
- *    frame advances -- same edge ExtractTransforms handles via its pending
- *    flag), when sim marks a between-frames mutation (net-message-driven team
- *    transfers, see MarkMutatedOutsideFrame), and on any frameNum mismatch
- *    including backwards jumps (checkpoint load / replay rewind).
+ *    the alive-unit count changes outside the frame cadence (objects spawned
+ *    before the first sim frame advances -- same edge ExtractTransforms
+ *    handles via its pending flag), when sim marks a between-frames mutation
+ *    (net-message-driven team transfers, see MarkMutatedOutsideFrame), and on
+ *    any frameNum mismatch including backwards jumps (checkpoint load /
+ *    replay rewind). Viewed-allyteam changes need no re-extraction since the
+ *    per-allyteam rows became POV-complete (PR 18).
  *  - Consumers called outside CGame::Draw (input handlers, e.g. minimap
  *    select) read the previous boundary's snapshot: at most one draw frame of
  *    staleness, the same pick-latency semantics decided for boundary picking
@@ -95,8 +112,10 @@
  *  1. add the parallel array to UnitRows and size it in Resize();
  *  2. copy the value in Extract()'s per-unit loop (values only -- never a
  *     pointer, never lazy recompute of sim-side caches);
- *  3. add an accessor with the invalid-id default;
- *  4. convert consumers from the live dereference to the accessor, one small
+ *  3. add an accessor with the invalid-id default, and a word for the field
+ *     in SnapshotHash::HashUnitRow (fixed order);
+ *  4. add the field compare to SnapshotDiffGate::CheckBoundary;
+ *  5. convert consumers from the live dereference to the accessor, one small
  *     PR per consumer, keeping any gu->spectatingFullView bypass live.
  */
 class SimSnapshot
@@ -104,19 +123,42 @@ class SimSnapshot
 public:
 	struct UnitRows {
 		int32_t simFrame = -1;      // sim frame this buffer was extracted at
-		int32_t viewAllyTeam = -1;  // allyteam whose losStatus row was extracted
 		int32_t aliveCount = 0;
+
+		// global block: fixed-at-gamestart sim tables the masking formulas
+		// need; re-extracted (cheap) every boundary like everything else
+		int32_t numAllyTeams = 0;
+		float baseRadarErrorSize = 0.0f;
+		std::vector<float> radarErrorSizes;  // [numAllyTeams]
+		std::vector<uint8_t> allied;         // [numAllyTeams^2], teamHandler.Ally(a,b)
 
 		std::vector<uint8_t> valid;
 		std::vector<float3> pos;
+		std::vector<float3> midPos;
+		std::vector<float3> aimPos;
 		std::vector<float4> speed;
 		std::vector<float> health;
 		std::vector<float> maxHealth;
+		std::vector<float> paralyzeDamage;
+		std::vector<float> captureProgress;
 		std::vector<uint8_t> team;
 		std::vector<uint8_t> allyTeam;
 		std::vector<int32_t> defID;
 		std::vector<float> buildProgress;
-		std::vector<uint8_t> losStatus;
+		std::vector<uint8_t> beingBuilt;
+		std::vector<uint8_t> stunned;        // CUnit::IsStunned()
+
+		// object-space basis + relative midpoint (drawer midpos math, GetUnitVectors-class reads)
+		std::vector<float3> relMidPos;
+		std::vector<float3> frontdir;
+		std::vector<float3> updir;
+		std::vector<float3> rightdir;
+
+		// masking inputs (see the masking-policy block above)
+		std::vector<float3> posErrorVector;
+		std::vector<uint8_t> leavesGhost;
+		std::vector<uint8_t> losStatusAll;   // [numAllyTeams * maxUnits], row-major by allyteam
+		std::vector<uint8_t> posErrorBits;   // same layout; CUnit::GetPosErrorBit(at)
 
 		// out-of-range ids (including any id before the first extraction ever
 		// ran, when the arrays are still unsized) are part of the stale/nil
@@ -125,8 +167,13 @@ public:
 			return (static_cast<size_t>(unitID) < valid.size() && valid[unitID] != 0);
 		}
 
+		size_t MaxUnits() const { return valid.size(); }
+
 		// accessors return a deterministic default for invalid ids (stale/nil contract)
-		uint8_t LosStatus(int unitID) const { return Valid(unitID) ? losStatus[unitID] : 0; }
+		uint8_t LosStatus(int unitID, int argAllyTeam) const {
+			return (Valid(unitID) && argAllyTeam >= 0 && argAllyTeam < numAllyTeams) ?
+				losStatusAll[argAllyTeam * MaxUnits() + unitID] : 0;
+		}
 		float3 Pos(int unitID) const { return Valid(unitID) ? pos[unitID] : float3{}; }
 		float4 Speed(int unitID) const { return Valid(unitID) ? speed[unitID] : float4{}; }
 		float Health(int unitID) const { return Valid(unitID) ? health[unitID] : 0.0f; }
@@ -135,6 +182,41 @@ public:
 		int AllyTeam(int unitID) const { return Valid(unitID) ? allyTeam[unitID] : -1; }
 		int DefID(int unitID) const { return Valid(unitID) ? defID[unitID] : 0; }
 		float BuildProgress(int unitID) const { return Valid(unitID) ? buildProgress[unitID] : 0.0f; }
+
+		// ---- serving-layer masking helpers (PR 18) ----
+		// Bit-for-bit mirrors of the live formulas, computed from extracted
+		// inputs only; the Lua serving twins (LuaSnapshotServe) and the diff
+		// gate both call these. readAllyTeam/fullRead are the handle POV
+		// (CLuaHandle::GetHandleReadAllyTeam/GetHandleFullRead).
+
+		// teamHandler.Ally(a, b) mirror; out-of-range reads false
+		bool Allied(int a, int b) const {
+			return (a >= 0 && a < numAllyTeams && b >= 0 && b < numAllyTeams &&
+				allied[a * numAllyTeams + b] != 0);
+		}
+		// LuaUtils::IsAlliedAllyTeam / IsAllyUnit mirror; caller must have
+		// checked Valid(unitID)
+		bool PovAlliedUnit(int unitID, int readAllyTeam, bool fullRead) const {
+			if (readAllyTeam < 0)
+				return fullRead;
+			return (allyTeam[unitID] == readAllyTeam);
+		}
+		// LuaUtils::IsUnitVisible / IsUnitInLos mirrors. A readAllyTeam that
+		// is negative without fullRead indexes losStatus out of bounds on the
+		// live path (cannot arise for real handles); here it reads as a
+		// deterministic not-visible.
+		bool PovUnitVisible(int unitID, int readAllyTeam, bool fullRead) const;
+		bool PovUnitInLos(int unitID, int readAllyTeam, bool fullRead) const;
+
+		// CUnit::GetErrorVector / GetLuaErrorVector mirrors
+		float3 ErrorVector(int unitID, int argAllyTeam) const;
+		float3 LuaErrorVector(int unitID, int readAllyTeam, bool fullRead) const {
+			return (fullRead ? float3{0.0f, 0.0f, 0.0f} : ErrorVector(unitID, readAllyTeam));
+		}
+		// CSolidObject::GetObjectSpaceVec mirror
+		float3 ObjectSpaceVec(int unitID, const float3& v) const {
+			return ((frontdir[unitID] * v.z) + (rightdir[unitID] * v.x) + (updir[unitID] * v.y));
+		}
 	};
 public:
 	/// extract-if-due + publish; called once per draw frame from CGame::Draw,
@@ -167,7 +249,7 @@ public:
 	uint32_t Generation() const { return generation; }
 private:
 	void Extract(UnitRows& rows);
-	static void Resize(UnitRows& rows, size_t maxUnits);
+	static void Resize(UnitRows& rows, size_t maxUnits, int numAllyTeams);
 private:
 	UnitRows buffers[2];
 	UnitRows* front = &buffers[0];

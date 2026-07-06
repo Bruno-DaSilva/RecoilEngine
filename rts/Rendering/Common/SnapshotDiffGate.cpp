@@ -6,6 +6,8 @@
 
 #include "SimSnapshot.h"
 #include "Sim/Misc/GlobalSynced.h"
+#include "Sim/Misc/LosHandler.h"
+#include "Sim/Misc/TeamHandler.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Units/UnitHandler.h"
@@ -20,6 +22,34 @@ SnapshotDiffGate snapshotDiffGate;
 static bool BitEqual(float a, float b) { return std::memcmp(&a, &b, sizeof(float)) == 0; }
 static bool BitEqual(const float3& a, const float3& b) { return std::memcmp(&a, &b, sizeof(float3)) == 0; }
 static bool BitEqual(const float4& a, const float4& b) { return std::memcmp(&a, &b, sizeof(float4)) == 0; }
+
+static constexpr const char* FIELD_NAMES[] = {
+	"validity",
+	"pos",
+	"midPos",
+	"aimPos",
+	"speed",
+	"health",
+	"maxHealth",
+	"paralyzeDamage",
+	"captureProgress",
+	"team",
+	"allyTeam",
+	"defID",
+	"buildProgress",
+	"beingBuilt",
+	"stunned",
+	"relMidPos",
+	"frontdir",
+	"updir",
+	"rightdir",
+	"posErrorVector",
+	"leavesGhost",
+	"losStatusAll",
+	"posErrorBits",
+	"globals",
+	"maskedErrorVec",
+};
 
 
 void SnapshotDiffGate::Arm()
@@ -59,13 +89,11 @@ void SnapshotDiffGate::FlushPartial()
 void SnapshotDiffGate::ResetCounters()
 {
 	boundaryChecks = 0;
-	for (FieldCounter* fc : {
-		&cValidity, &cPos, &cSpeed, &cHealth, &cMaxHealth, &cTeam,
-		&cAllyTeam, &cDefID, &cBuildProgress, &cLosStatus, &cCalloutPos }) {
-		fc->checked = 0;
-		fc->mismatched = 0;
-		fc->logged = 0;
-	}
+
+	for (int f = 0; f < F_COUNT; ++f)
+		fields[f] = FieldCounter{FIELD_NAMES[f]};
+
+	callouts.clear();
 }
 
 bool SnapshotDiffGate::Bump(FieldCounter& fc, bool equal)
@@ -85,40 +113,37 @@ bool SnapshotDiffGate::Bump(FieldCounter& fc, bool equal)
 void SnapshotDiffGate::Report(const char* reason) const
 {
 	uint64_t totalMismatch = 0;
-	for (const FieldCounter* fc : {
-		&cValidity, &cPos, &cSpeed, &cHealth, &cMaxHealth, &cTeam,
-		&cAllyTeam, &cDefID, &cBuildProgress, &cLosStatus, &cCalloutPos })
-		totalMismatch += fc->mismatched;
+	for (const FieldCounter& fc : fields)
+		totalMismatch += fc.mismatched;
+	for (const auto& [name, fc] : callouts)
+		totalMismatch += fc.mismatched;
 
 	LOG("[SnapshotDiffGate] ===== report (%s) : %s =====",
 		reason, (totalMismatch == 0) ? "PASS (0 mismatches)" : "FAIL");
 	LOG("[SnapshotDiffGate] boundary checks=%llu, total mismatches=%llu",
 		(unsigned long long)boundaryChecks, (unsigned long long)totalMismatch);
 
-	for (const FieldCounter* fc : {
-		&cValidity, &cPos, &cSpeed, &cHealth, &cMaxHealth, &cTeam,
-		&cAllyTeam, &cDefID, &cBuildProgress, &cLosStatus, &cCalloutPos }) {
-		LOG("[SnapshotDiffGate]   %-24s checked=%-14llu mismatched=%llu",
-			fc->name, (unsigned long long)fc->checked, (unsigned long long)fc->mismatched);
+	for (const FieldCounter& fc : fields) {
+		LOG("[SnapshotDiffGate]   %-28s checked=%-14llu mismatched=%llu",
+			fc.name, (unsigned long long)fc.checked, (unsigned long long)fc.mismatched);
+	}
+	for (const auto& [name, fc] : callouts) {
+		LOG("[SnapshotDiffGate]   callout:%-20s checked=%-14llu mismatched=%llu",
+			name.c_str(), (unsigned long long)fc.checked, (unsigned long long)fc.mismatched);
 	}
 }
 
 
-void SnapshotDiffGate::CheckCalloutUnitPosition(int unitID, const float3& liveBasePos)
+void SnapshotDiffGate::CountCallout(const char* callout, bool equal, const char* detail)
 {
 	if (!armed)
 		return;
 
-	// the exact accessor PR 18 will call to serve the value; the invalid-id
-	// default is part of the SimSnapshot stale/nil contract
-	const float3 served = simSnapshot.Read().Pos(unitID);
+	FieldCounter& fc = callouts[callout];
 
-	if (Bump(cCalloutPos, BitEqual(served, liveBasePos)))
-		LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=callout:GetUnitPosition "
-			"snap=(%.9g,%.9g,%.9g) live=(%.9g,%.9g,%.9g)",
-			gs->frameNum, unitID,
-			served.x, served.y, served.z,
-			liveBasePos.x, liveBasePos.y, liveBasePos.z);
+	if (Bump(fc, equal))
+		LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d callout=%s %s",
+			gs->frameNum, callout, detail);
 }
 
 
@@ -141,18 +166,32 @@ void SnapshotDiffGate::CheckBoundary()
 
 	boundaryChecks++;
 
-	const int viewAllyTeam = rows.viewAllyTeam;
-	const bool losRowValid = (viewAllyTeam >= 0);
+	const int numAllyTeams = rows.numAllyTeams;
+	const size_t maxUnits = rows.MaxUnits();
 
-	const size_t n = rows.valid.size();
-	for (size_t i = 0; i < n; ++i) {
+	// global block: alliance matrix + radar-error scalars (one bundled counter)
+	{
+		bool globalsEqual = (numAllyTeams == teamHandler.ActiveAllyTeams());
+		globalsEqual = globalsEqual && BitEqual(rows.baseRadarErrorSize, losHandler->GetBaseRadarErrorSize());
+		for (int at = 0; globalsEqual && at < numAllyTeams; ++at)
+			globalsEqual = BitEqual(rows.radarErrorSizes[at], losHandler->GetAllyTeamRadarErrorSize(at));
+		for (int a = 0; globalsEqual && a < numAllyTeams; ++a)
+			for (int b = 0; globalsEqual && b < numAllyTeams; ++b)
+				globalsEqual = (rows.Allied(a, b) == teamHandler.Ally(a, b));
+
+		if (Bump(fields[F_GLOBALS], globalsEqual))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=globals mismatch (numAllyTeams snap=%d live=%d)",
+				gs->frameNum, numAllyTeams, teamHandler.ActiveAllyTeams());
+	}
+
+	for (size_t i = 0; i < maxUnits; ++i) {
 		const int id = static_cast<int>(i);
-		const CUnit* u = unitHandler.GetUnitUnsafe(id); // id < maxUnits == n
+		const CUnit* u = unitHandler.GetUnitUnsafe(id); // id < maxUnits
 
 		const bool snapValid = (rows.valid[i] != 0);
 		const bool liveValid = (u != nullptr);
 
-		if (Bump(cValidity, snapValid == liveValid))
+		if (Bump(fields[F_VALIDITY], snapValid == liveValid))
 			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=validity snap=%d live=%d",
 				gs->frameNum, id, int(snapValid), int(liveValid));
 
@@ -161,48 +200,70 @@ void SnapshotDiffGate::CheckBoundary()
 		if (!snapValid || !liveValid)
 			continue;
 
-		if (Bump(cPos, BitEqual(rows.pos[i], u->pos)))
-			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=pos snap=(%.9g,%.9g,%.9g) live=(%.9g,%.9g,%.9g)",
-				gs->frameNum, id, rows.pos[i].x, rows.pos[i].y, rows.pos[i].z, u->pos.x, u->pos.y, u->pos.z);
+		const auto checkF3 = [&](int f, const float3& snap, const float3& live) {
+			if (Bump(fields[f], BitEqual(snap, live)))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=%s snap=(%.9g,%.9g,%.9g) live=(%.9g,%.9g,%.9g)",
+					gs->frameNum, id, FIELD_NAMES[f], snap.x, snap.y, snap.z, live.x, live.y, live.z);
+		};
+		const auto checkF = [&](int f, float snap, float live) {
+			if (Bump(fields[f], BitEqual(snap, live)))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=%s snap=%.9g live=%.9g",
+					gs->frameNum, id, FIELD_NAMES[f], snap, live);
+		};
+		const auto checkI = [&](int f, int snap, int live) {
+			if (Bump(fields[f], snap == live))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=%s snap=%d live=%d",
+					gs->frameNum, id, FIELD_NAMES[f], snap, live);
+		};
 
-		if (Bump(cSpeed, BitEqual(rows.speed[i], u->speed)))
+		checkF3(F_POS, rows.pos[i], u->pos);
+		checkF3(F_MIDPOS, rows.midPos[i], u->midPos);
+		checkF3(F_AIMPOS, rows.aimPos[i], u->aimPos);
+
+		if (Bump(fields[F_SPEED], BitEqual(rows.speed[i], u->speed)))
 			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=speed snap=(%.9g,%.9g,%.9g,%.9g) live=(%.9g,%.9g,%.9g,%.9g)",
 				gs->frameNum, id, rows.speed[i].x, rows.speed[i].y, rows.speed[i].z, rows.speed[i].w,
 				u->speed.x, u->speed.y, u->speed.z, u->speed.w);
 
-		if (Bump(cHealth, BitEqual(rows.health[i], u->health)))
-			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=health snap=%.9g live=%.9g",
-				gs->frameNum, id, rows.health[i], u->health);
+		checkF(F_HEALTH, rows.health[i], u->health);
+		checkF(F_MAXHEALTH, rows.maxHealth[i], u->maxHealth);
+		checkF(F_PARALYZE, rows.paralyzeDamage[i], u->paralyzeDamage);
+		checkF(F_CAPTURE, rows.captureProgress[i], u->captureProgress);
+		checkI(F_TEAM, rows.team[i], static_cast<uint8_t>(u->team));
+		checkI(F_ALLYTEAM, rows.allyTeam[i], static_cast<uint8_t>(u->allyteam));
+		checkI(F_DEFID, rows.defID[i], u->unitDef->id);
+		checkF(F_BUILDPROGRESS, rows.buildProgress[i], u->buildProgress);
+		checkI(F_BEINGBUILT, rows.beingBuilt[i], int(u->beingBuilt));
+		checkI(F_STUNNED, rows.stunned[i], int(u->IsStunned()));
+		checkF3(F_RELMIDPOS, rows.relMidPos[i], u->relMidPos);
+		checkF3(F_FRONTDIR, rows.frontdir[i], u->frontdir);
+		checkF3(F_UPDIR, rows.updir[i], u->updir);
+		checkF3(F_RIGHTDIR, rows.rightdir[i], u->rightdir);
+		checkF3(F_POSERRORVEC, rows.posErrorVector[i], u->posErrorVector);
+		checkI(F_LEAVESGHOST, rows.leavesGhost[i], int(u->leavesGhost));
 
-		if (Bump(cMaxHealth, BitEqual(rows.maxHealth[i], u->maxHealth)))
-			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=maxHealth snap=%.9g live=%.9g",
-				gs->frameNum, id, rows.maxHealth[i], u->maxHealth);
+		// per-allyteam stride rows + the masked-value sweep: for every POV,
+		// UnitRows::ErrorVector is the exact masking function the Lua serving
+		// twins apply (SimSnapshot.h masking policy) -- diff it against the
+		// live formula. The at == -1 iteration exercises the invalid-allyteam
+		// branch (a fullRead-less handle without a read allyteam).
+		for (int at = -1; at < numAllyTeams; ++at) {
+			if (at >= 0) {
+				if (Bump(fields[F_LOSSTATUS], rows.losStatusAll[at * maxUnits + i] == u->losStatus[at]))
+					LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=losStatusAll[ally %d] snap=0x%02x live=0x%02x",
+						gs->frameNum, id, at, rows.losStatusAll[at * maxUnits + i], u->losStatus[at]);
 
-		if (Bump(cTeam, rows.team[i] == static_cast<uint8_t>(u->team)))
-			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=team snap=%d live=%d",
-				gs->frameNum, id, int(rows.team[i]), u->team);
+				if (Bump(fields[F_POSERRORBIT], rows.posErrorBits[at * maxUnits + i] == uint8_t(u->GetPosErrorBit(at))))
+					LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=posErrorBits[ally %d] snap=%d live=%d",
+						gs->frameNum, id, at, int(rows.posErrorBits[at * maxUnits + i]), int(u->GetPosErrorBit(at)));
+			}
 
-		if (Bump(cAllyTeam, rows.allyTeam[i] == static_cast<uint8_t>(u->allyteam)))
-			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=allyTeam snap=%d live=%d",
-				gs->frameNum, id, int(rows.allyTeam[i]), u->allyteam);
+			const float3 snapErr = rows.ErrorVector(id, at);
+			const float3 liveErr = u->GetErrorVector(at);
 
-		if (Bump(cDefID, rows.defID[i] == u->unitDef->id))
-			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=defID snap=%d live=%d",
-				gs->frameNum, id, rows.defID[i], u->unitDef->id);
-
-		if (Bump(cBuildProgress, BitEqual(rows.buildProgress[i], u->buildProgress)))
-			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=buildProgress snap=%.9g live=%.9g",
-				gs->frameNum, id, rows.buildProgress[i], u->buildProgress);
-
-		if (losRowValid) {
-			const uint8_t live = u->losStatus[viewAllyTeam];
-			if (Bump(cLosStatus, rows.losStatus[i] == live))
-				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=losStatus[ally %d] snap=0x%02x live=0x%02x",
-					gs->frameNum, id, viewAllyTeam, rows.losStatus[i], live);
+			if (Bump(fields[F_MASKEDERRVEC], BitEqual(snapErr, liveErr)))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=maskedErrorVec[ally %d] snap=(%.9g,%.9g,%.9g) live=(%.9g,%.9g,%.9g)",
+					gs->frameNum, id, at, snapErr.x, snapErr.y, snapErr.z, liveErr.x, liveErr.y, liveErr.z);
 		}
-
-		// proof-of-use of the callout comparator plumbing PR 18 plugs into:
-		// exercise the GetUnitPosition-shaped read with the live base position
-		CheckCalloutUnitPosition(id, u->pos);
 	}
 }

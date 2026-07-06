@@ -138,6 +138,10 @@ public:
 	const float3& GetDrawPos(const T* o) const { return GetDrawPosition(o).pos; }
 	const float3& GetDrawMidPos(const T* o) const { return GetDrawPosition(o).midPos; }
 
+	// id-keyed variant for snapshot-serving consumers (PR 18 Lua callout twins)
+	// that hold no object pointer; same unregistered/stale-id semantics as above
+	const float3& GetDrawPos(int id) const { return GetDrawPosition(id).pos; }
+
 	// these transform a point or vector to object-space, based at the draw position
 	float3 GetObjectSpaceDrawPos(const T* o, const float3& p) const { return (GetDrawPos(o) + o->GetObjectSpaceVec(p)); }
 
@@ -152,9 +156,10 @@ protected:
 		float3 midPos;
 	};
 
-	const DrawPosition& GetDrawPosition(const T* o) const {
+	const DrawPosition& GetDrawPosition(const T* o) const { return GetDrawPosition(o->id); }
+	const DrawPosition& GetDrawPosition(int id) const {
 		static const DrawPosition zero = {};
-		return (o->id < drawPositions.size()) ? drawPositions[o->id] : zero;
+		return (static_cast<size_t>(id) < drawPositions.size()) ? drawPositions[id] : zero;
 	}
 
 	struct DrawFlagState {

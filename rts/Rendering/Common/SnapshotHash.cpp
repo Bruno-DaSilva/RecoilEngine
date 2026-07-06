@@ -30,17 +30,24 @@ static inline uint64_t Mix(const void* p, size_t n, uint64_t seed)
 	return XXH3_64bits_withSeed(p, n, static_cast<XXH64_hash_t>(seed));
 }
 
-// Per-unit row hash over exactly the SimSnapshot v1 field set, in a fixed order,
+// Per-unit row hash over exactly the SimSnapshot field set, in a fixed order,
 // each value as a fixed-width word (floats via their IEEE-754 bit pattern). No
 // padding and no pointers are hashed, so identical content hashes identically on
 // every run and platform. If a field is added to SimSnapshot, add a word here.
+// The per-allyteam stride rows (losStatusAll/posErrorBits) are folded into one
+// word each with an FNV-1a-style mix since their width is game-dependent; every
+// field is synced state, so all of it belongs in the desync-localization hash.
 static inline uint64_t HashUnitRow(const SimSnapshot::UnitRows& r, int id)
 {
-	uint32_t w[13];
+	const auto f3 = [](uint32_t* w, const float3& v) {
+		w[0] = std::bit_cast<uint32_t>(v.x);
+		w[1] = std::bit_cast<uint32_t>(v.y);
+		w[2] = std::bit_cast<uint32_t>(v.z);
+	};
+
+	uint32_t w[40];
 	w[0]  = static_cast<uint32_t>(id);
-	w[1]  = std::bit_cast<uint32_t>(r.pos[id].x);
-	w[2]  = std::bit_cast<uint32_t>(r.pos[id].y);
-	w[3]  = std::bit_cast<uint32_t>(r.pos[id].z);
+	f3(&w[1], r.pos[id]);
 	w[4]  = std::bit_cast<uint32_t>(r.speed[id].x);
 	w[5]  = std::bit_cast<uint32_t>(r.speed[id].y);
 	w[6]  = std::bit_cast<uint32_t>(r.speed[id].z);
@@ -48,10 +55,32 @@ static inline uint64_t HashUnitRow(const SimSnapshot::UnitRows& r, int id)
 	w[8]  = std::bit_cast<uint32_t>(r.health[id]);
 	w[9]  = std::bit_cast<uint32_t>(r.maxHealth[id]);
 	w[10] = static_cast<uint32_t>(r.team[id])
-	      | (static_cast<uint32_t>(r.allyTeam[id])  << 8)
-	      | (static_cast<uint32_t>(r.losStatus[id]) << 16);
+	      | (static_cast<uint32_t>(r.allyTeam[id])    << 8)
+	      | (static_cast<uint32_t>(r.beingBuilt[id])  << 16)
+	      | (static_cast<uint32_t>(r.stunned[id])     << 24);
 	w[11] = static_cast<uint32_t>(r.defID[id]);
 	w[12] = std::bit_cast<uint32_t>(r.buildProgress[id]);
+	f3(&w[13], r.midPos[id]);
+	f3(&w[16], r.aimPos[id]);
+	w[19] = std::bit_cast<uint32_t>(r.paralyzeDamage[id]);
+	w[20] = std::bit_cast<uint32_t>(r.captureProgress[id]);
+	f3(&w[21], r.relMidPos[id]);
+	f3(&w[24], r.frontdir[id]);
+	f3(&w[27], r.updir[id]);
+	f3(&w[30], r.rightdir[id]);
+	f3(&w[33], r.posErrorVector[id]);
+	w[36] = static_cast<uint32_t>(r.leavesGhost[id]);
+
+	uint32_t losAcc = 2166136261u;
+	uint32_t errAcc = 2166136261u;
+	for (int at = 0; at < r.numAllyTeams; ++at) {
+		losAcc = (losAcc ^ r.losStatusAll[at * r.MaxUnits() + id]) * 16777619u;
+		errAcc = (errAcc ^ r.posErrorBits[at * r.MaxUnits() + id]) * 16777619u;
+	}
+	w[37] = losAcc;
+	w[38] = errAcc;
+	w[39] = static_cast<uint32_t>(r.numAllyTeams);
+
 	return Mix(w, sizeof(w), UNIT_SEED);
 }
 

@@ -3,19 +3,17 @@
 #pragma once
 
 #include <cstdint>
-
-#include "System/float3.h"
+#include <map>
+#include <string>
 
 /**
  * @brief SnapshotDiffGate -- TEST-ONLY snapshot-vs-live differential verifier
  *
  * PR 17 of the sim|draw decoupling plan (doc/sim-draw-thread-decoupling-research.md,
- * §E / §E.1 and the "Lua API compatibility tiers" note). PR 18 will redirect the
- * hot Lua callout families (Spring.GetUnitPosition / GetUnitViewPosition /
- * IsUnitVisible ...) to read the extracted SimSnapshot (PR 15) instead of live
- * sim objects when they are called from draw context. This gate is the verifier
- * that lets each converted family land pre-verified: while armed, for every value
- * the snapshot would serve it ALSO computes the live-sim answer and diffs them.
+ * §E / §E.1 and the "Lua API compatibility tiers" note), extended by PR 18 when
+ * the positions/status callout family became snapshot-served. While armed, for
+ * every value the snapshot serves it ALSO computes the live-sim answer and diffs
+ * them.
  *
  * The invariant is exact equality, no tolerance: by construction the snapshot and
  * the live sim describe the SAME completed sim frame (extraction happens in
@@ -28,7 +26,7 @@
  * run) -- mismatches are reported via LOG_L(L_ERROR, ...) and counted; the run
  * keeps going. Zero cost when unarmed (a single branch at each hook site).
  *
- * Two surfaces, one shared reporting/counter path:
+ * Three surfaces, one shared reporting/counter path:
  *
  *  1. Field-level pass -- CheckBoundary(), driven from CGame::Draw right after
  *     simSnapshot.Update(). Walks every unit id and verifies:
@@ -38,21 +36,22 @@
  *         / DeleteUnit), which is exactly what SimSnapshot::Extract iterates, so
  *         at the same frame the two sets are identical -- dying-but-not-deleted
  *         and recycled ids included (SimSnapshot.h validity contract).
- *       - every v1 field for valid rows: pos, speed, health, maxHealth, team,
- *         allyTeam, defID, buildProgress, and the losStatus row against
- *         unit->losStatus[snapshot viewAllyTeam].
+ *       - every extracted field for valid rows, including the per-allyteam
+ *         losStatusAll/posErrorBits stride rows and the per-buffer global block
+ *         (alliance matrix, radar-error scalars).
  *
- *  2. Callout-level comparator -- CheckCalloutUnitPosition() and peers. This is
- *     the plug PR 18 fills: a converted callout family calls the comparator with
- *     the live value it would otherwise have returned, and the gate diffs it
- *     against the value the snapshot accessor serves, routing through the same
- *     counters/logging. Implemented now for the positions family as proof-of-use,
- *     driven from CheckBoundary itself (this PR redirects no Lua callout -- it
- *     only builds and exercises the comparison plumbing). The comparator takes the
- *     un-errored base position (o->pos, what SimSnapshot stores and what
- *     LuaSyncedRead::GetUnitPosition pushes before GetLuaErrorVector); the LOS/
- *     errorVec masking layer is settled separately at conversion time (see the
- *     losStatus masking note in SimSnapshot.h).
+ *  2. Masked-value sweep (PR 18, the masking-aware layer) -- part of
+ *     CheckBoundary: for every valid unit and every allyteam POV (plus the
+ *     invalid-allyteam branch), diff UnitRows::ErrorVector -- the exact function
+ *     the Lua serving twins add to positions -- against live
+ *     CUnit::GetErrorVector. This verifies the masking math for ALL POVs every
+ *     boundary, independent of which POV the local handles happen to run.
+ *
+ *  3. Serving-path comparator -- CountCallout(), fed by LuaSnapshotServe::Route:
+ *     while armed every redirected callout runs BOTH real paths (live body and
+ *     snapshot twin) and bit-compares the actual Lua return slots, so the
+ *     composed gate+mask+value behavior is verified per invocation at the
+ *     handle's real POV. Counter key = callout name.
  *
  * Reporting: per-field checked/mismatched counters, dumped on /snapshotdiffgate
  * dump, on disarm, and at game end while armed (FlushPartial). Pass criterion:
@@ -72,14 +71,13 @@ public:
 
 	bool Armed() const { return armed; }
 
-	/// field-level pass over the whole snapshot surface; call right after
-	/// simSnapshot.Update() in CGame::Draw. No-op unless armed.
+	/// field-level pass + masked-value sweep over the whole snapshot surface;
+	/// call right after simSnapshot.Update() in CGame::Draw. No-op unless armed.
 	void CheckBoundary();
 
-	/// callout-level comparator (the PR 18 plug): diff the snapshot-served base
-	/// position against the live value a converted GetUnitPosition-family callout
-	/// would return (o->pos, pre-errorVec). No-op unless armed.
-	void CheckCalloutUnitPosition(int unitID, const float3& liveBasePos);
+	/// serving-path comparator sink (see LuaSnapshotServe::Route): `detail` is
+	/// logged on the first kMaxLogged mismatches per callout
+	void CountCallout(const char* callout, bool equal, const char* detail);
 
 private:
 	// one field's running tally; kMaxLogged caps the LOG_L spam per field per
@@ -91,6 +89,36 @@ private:
 		uint64_t logged = 0;
 	};
 	static constexpr uint64_t kMaxLogged = 32;
+
+	// fixed field-pass counters (order = report order)
+	enum {
+		F_VALIDITY = 0,
+		F_POS,
+		F_MIDPOS,
+		F_AIMPOS,
+		F_SPEED,
+		F_HEALTH,
+		F_MAXHEALTH,
+		F_PARALYZE,
+		F_CAPTURE,
+		F_TEAM,
+		F_ALLYTEAM,
+		F_DEFID,
+		F_BUILDPROGRESS,
+		F_BEINGBUILT,
+		F_STUNNED,
+		F_RELMIDPOS,
+		F_FRONTDIR,
+		F_UPDIR,
+		F_RIGHTDIR,
+		F_POSERRORVEC,
+		F_LEAVESGHOST,
+		F_LOSSTATUS,
+		F_POSERRORBIT,
+		F_GLOBALS,
+		F_MASKEDERRVEC,
+		F_COUNT
+	};
 
 	// counter bump + log-gate: returns true iff the caller should emit a
 	// LOG_L(L_ERROR) line for this mismatch (mismatch and under the per-field cap)
@@ -104,18 +132,10 @@ private:
 
 	uint64_t boundaryChecks = 0; // CheckBoundary() invocations while armed
 
-	FieldCounter cValidity{"validity"};
-	FieldCounter cPos{"pos"};
-	FieldCounter cSpeed{"speed"};
-	FieldCounter cHealth{"health"};
-	FieldCounter cMaxHealth{"maxHealth"};
-	FieldCounter cTeam{"team"};
-	FieldCounter cAllyTeam{"allyTeam"};
-	FieldCounter cDefID{"defID"};
-	FieldCounter cBuildProgress{"buildProgress"};
-	FieldCounter cLosStatus{"losStatus"};
+	FieldCounter fields[F_COUNT];
 
-	FieldCounter cCalloutPos{"callout:GetUnitPosition"};
+	// serving-path counters, keyed by callout name (LuaSnapshotServe::Route)
+	std::map<std::string, FieldCounter> callouts;
 };
 
 extern SnapshotDiffGate snapshotDiffGate;

@@ -2726,6 +2726,13 @@ void CLuaHandle::RunDrawCallIn(const LuaHashString& hs)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	LUA_CALL_IN_CHECK(L);
+	// the shared dispatcher's __func__ ("RunDrawCallIn") defeats the timer
+	// macro's name-based Draw* detection, so open the draw-callin context
+	// bracket explicitly -- every callin routed through here is a Draw* one.
+	// Without this, callouts fired from the argless draw callins (DrawWorld,
+	// DrawGenesis, ...) count as non-draw context (PR-2 census skew) and the
+	// PR-18 snapshot redirect never engages for them.
+	ScopedDrawCallinContext drawCallinCtx(true);
 	luaL_checkstack(L, 2, __func__);
 	if (!hs.GetGlobalFunc(L))
 		return;

@@ -438,7 +438,7 @@ void CUnitDrawerGLSL::DrawUnitMiniMapIcons() const
 				currentColor = teamHandler.Team(unit->team)->color;
 			}
 
-			if (!isFullView && !(snapshot.LosStatus(unit->id) & LOS_INRADAR)) {
+			if (!isFullView && !(snapshot.LosStatus(unit->id, myAllyTeam) & LOS_INRADAR)) {
 				if (ghostIconDimming == 0.0f)
 					continue;
 

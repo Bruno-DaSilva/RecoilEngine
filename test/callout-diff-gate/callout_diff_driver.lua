@@ -16,14 +16,29 @@ end
 --   DiffGateLabel        : echo prefix / log tag (string)
 --   DiffGateFastForward  : 1 => /setspeed 20 + /speedcontrol 0
 --   DiffGateQuitFrame    : hard quit at this frame (0 = quit on game over / demo end)
---   DiffGateExercise     : 1 => call the positions-family callouts over all units
---                          each draw frame (keeps the draw-side surface PR 18 will
---                          redirect hot; the gate itself verifies via CheckBoundary)
+--   DiffGateExercise     : 1 => call the redirected positions/status-family
+--                          callouts over all units each DRAW-CALLIN frame. PR 18:
+--                          the loop runs from Draw* callins (DrawGenesis +
+--                          DrawWorld), not widget:Update -- only Draw* callins
+--                          set the draw-context flag the redirect branches on,
+--                          so Update-loop calls would exercise the live path
+--                          only (and headless never reaches DrawWorld).
+--   DiffGatePovFrame     : frame to drop full-view and spectate a single team's
+--                          POV (0 = never). Exercises the non-fullRead masking
+--                          path (errorVectors, LOS gates) end-to-end through the
+--                          armed dual-run comparator. Default 6000.
+--   DiffGatePovSpan      : frames to stay in team POV before restoring full
+--                          view (default 6000).
+--   DiffGatePovTeam      : team to spectate (-1 = auto: team of the first unit
+--                          that is not Gaia's at flip time).
 --
 -- Pass criterion: the engine's [SnapshotDiffGate] report prints
 --   "PASS (0 mismatches)" and total mismatches=0 over the whole replay.
 
 local label, fastForward, quitFrame, exercise
+local povFrame, povSpan, povTeam
+local povActive = false
+local povDone = false
 local armed = false
 local finished = false
 local gameOverFrame = nil
@@ -57,13 +72,32 @@ function widget:Initialize()
 	fastForward = Spring.GetConfigInt("DiffGateFastForward", 1)
 	quitFrame   = Spring.GetConfigInt("DiffGateQuitFrame", 0)
 	exercise    = Spring.GetConfigInt("DiffGateExercise", 1)
+	povFrame    = Spring.GetConfigInt("DiffGatePovFrame", 6000)
+	povSpan     = Spring.GetConfigInt("DiffGatePovSpan", 6000)
+	povTeam     = Spring.GetConfigInt("DiffGatePovTeam", -1)
 
-	announce(("label=%s ff=%d quit=%d exercise=%d"):format(label, fastForward, quitFrame, exercise))
+	announce(("label=%s ff=%d quit=%d exercise=%d povFrame=%d povSpan=%d povTeam=%d")
+		:format(label, fastForward, quitFrame, exercise, povFrame, povSpan, povTeam))
 
 	if fastForward ~= 0 then
 		Spring.SendCommands("setspeed 20")
 		Spring.SendCommands("speedcontrol 0")
 	end
+end
+
+local function PickPovTeam()
+	if povTeam >= 0 then
+		return povTeam
+	end
+	local gaiaTeam = Spring.GetGaiaTeamID()
+	local units = Spring.GetAllUnits()
+	for i = 1, #units do
+		local t = Spring.GetUnitTeam(units[i])
+		if t ~= nil and t ~= gaiaTeam then
+			return t
+		end
+	end
+	return nil
 end
 
 function widget:GameFrame(f)
@@ -73,6 +107,27 @@ function widget:GameFrame(f)
 		armed = true
 		Spring.SendCommands("snapshotdiffgate arm")
 		announce("armed /snapshotdiffgate at frame " .. f)
+	end
+
+	-- POV segment: drop full view and spectate one team so the redirected
+	-- callouts run at a non-fullRead POV (real errorVector/LOS masking) for a
+	-- stretch of the replay; restore full view afterwards
+	if not povDone and not povActive and povFrame > 0 and f >= povFrame then
+		local t = PickPovTeam()
+		if t ~= nil then
+			povActive = true
+			Spring.SendCommands("specfullview 0")
+			Spring.SendCommands("specteam " .. t)
+			announce(("POV segment: spectating team %d (no fullview) at frame %d"):format(t, f))
+		else
+			povDone = true
+		end
+	end
+	if povActive and f >= povFrame + povSpan then
+		povActive = false
+		povDone = true
+		Spring.SendCommands("specfullview 3")
+		announce("POV segment done: restored fullview at frame " .. f)
 	end
 
 	-- let the sim run a short tail past game over so trailing events settle
@@ -85,27 +140,60 @@ function widget:GameFrame(f)
 	end
 end
 
--- draw-context load generator: hit the positions/visibility callout families the
--- gate exists to verify, over every unit the local (spectator full-view) client
--- can see, once per draw frame. In PR 17 these still read live sim; in PR 18 they
--- will be snapshot-served and the gate's CheckBoundary is what actually verifies
--- them. Kept here so the draw surface matches the future load.
-function widget:Update()
-	if not armed or finished or exercise == 0 then
-		return
+-- draw-context load generator: hit the redirected positions/status callout
+-- family over every unit the local client can see, from a real Draw* callin
+-- (widget:Update does NOT set the draw-callin context flag, so the redirect
+-- would not fire there). With the gate armed, every one of these calls
+-- dual-runs the live body and the snapshot twin and bit-compares the returns
+-- (LuaSnapshotServe::Route); CheckBoundary independently sweeps the fields and
+-- the per-POV masking math each boundary.
+local announced = {}
+local function AnnounceOnce(tag)
+	if not announced[tag] then
+		announced[tag] = true
+		announce("exercise loop active (" .. tag .. ")")
 	end
+end
 
+local function ExerciseFamily()
 	local units = Spring.GetAllUnits()
 	for i = 1, #units do
 		local uid = units[i]
 		Spring.GetUnitPosition(uid, true, true)
+		Spring.GetUnitBasePosition(uid)
+		Spring.GetUnitHealth(uid)
+		Spring.GetUnitIsStunned(uid)
 		Spring.GetUnitViewPosition(uid)
+		Spring.GetUnitViewPosition(uid, true)
 		Spring.IsUnitVisible(uid)
 	end
+end
 
+-- DrawGenesis is the one Draw* callin that fires every draw frame even when
+-- rendering is inactive (headless: CGame::Draw returns right after it when
+-- !globalRendering->active), so it is the guaranteed-cadence exercise point
+function widget:DrawGenesis()
+	if not armed or finished or exercise == 0 then
+		return
+	end
+	AnnounceOnce("DrawGenesis")
+	ExerciseFamily()
+end
+
+-- also exercise from the world pass when it runs (live-GL runs; harmless
+-- double coverage, and it is the context real widgets call the family from)
+function widget:DrawWorld()
+	if not armed or finished or exercise == 0 then
+		return
+	end
+	AnnounceOnce("DrawWorld")
+	ExerciseFamily()
+end
+
+function widget:Update()
 	-- demo-end watchdog: if the sim stops advancing for 15 wall-clock seconds
 	-- (demo stream exhausted without a GameOver), finish
-	if armed and lastAdvanceTime ~= nil and (os.clock() - lastAdvanceTime) > 15 then
+	if armed and not finished and lastAdvanceTime ~= nil and (os.clock() - lastAdvanceTime) > 15 then
 		dumpAndQuit("no sim advance for 15s (demo end?)")
 	end
 end

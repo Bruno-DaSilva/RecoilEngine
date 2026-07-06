@@ -11,6 +11,7 @@
 #include "LuaPathFinder.h"
 #include "LuaRules.h"
 #include "LuaRulesParams.h"
+#include "LuaSnapshotServe.h"
 #include "LuaUnsyncedRead.h" // shared profiler-zone callouts (sync-safe: return nothing)
 #include "LuaUtils.h"
 #include "ExternalAI/SkirmishAIHandler.h"
@@ -4105,9 +4106,9 @@ int LuaSyncedRead::GetUnitNeutral(lua_State* L)
  * @return number captureProgress
  * @return number buildProgress between 0.0-1.0
  */
-int LuaSyncedRead::GetUnitHealth(lua_State* L)
+static int GetUnitHealthLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseInLosUnit(L, __func__, 1);
+	const CUnit* unit = ParseInLosUnit(L, caller, 1);
 	if (unit == nullptr)
 		return 0;
 
@@ -4131,6 +4132,12 @@ int LuaSyncedRead::GetUnitHealth(lua_State* L)
 	lua_pushnumber(L, unit->captureProgress);
 	lua_pushnumber(L, unit->buildProgress);
 	return 5;
+}
+
+int LuaSyncedRead::GetUnitHealth(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 18, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitHealthLive, &LuaSnapshotServe::GetUnitHealth);
 }
 
 
@@ -4165,9 +4172,9 @@ int LuaSyncedRead::GetUnitIsDead(lua_State* L)
  * @return boolean stunned unit is either stunned via EMP or being transported by a non-fireplatform
  * @return boolean beingBuilt unit is under construction
  */
-int LuaSyncedRead::GetUnitIsStunned(lua_State* L)
+static int GetUnitIsStunnedLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseInLosUnit(L, __func__, 1);
+	const CUnit* unit = ParseInLosUnit(L, caller, 1);
 	if (unit == nullptr)
 		return 0;
 
@@ -4175,6 +4182,12 @@ int LuaSyncedRead::GetUnitIsStunned(lua_State* L)
 	lua_pushboolean(L, unit->IsStunned());
 	lua_pushboolean(L, unit->beingBuilt);
 	return 3;
+}
+
+int LuaSyncedRead::GetUnitIsStunned(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 18, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitIsStunnedLive, &LuaSnapshotServe::GetUnitIsStunned);
 }
 
 
@@ -4401,9 +4414,16 @@ int LuaSyncedRead::GetUnitMass(lua_State* L)
  * @return number aimPointY
  * @return number aimPointZ
  */
+static int GetUnitPositionLive(lua_State* L, const char* caller)
+{
+	return (GetSolidObjectPosition(L, ParseUnit(L, caller, 1), false));
+}
+
 int LuaSyncedRead::GetUnitPosition(lua_State* L)
 {
-	return (GetSolidObjectPosition(L, ParseUnit(L, __func__, 1), false));
+	// snapshot-served from draw context (sim|draw PR 18, see LuaSnapshotServe.h);
+	// GetUnitBasePosition routes through here too
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitPositionLive, &LuaSnapshotServe::GetUnitPosition);
 }
 
 /***

@@ -19,6 +19,10 @@
 #   DG_QUIT_FRAME    hard quit frame, 0 = at game end   (default 0)
 #   DG_FF            fast-forward (setspeed 20)          (default 1)
 #   DG_EXERCISE      widget calls positions callouts/frame (default 1)
+#   DG_POV_FRAME     frame to drop fullview for a single-team POV segment
+#                    (masking coverage; 0 = never)       (default 6000)
+#   DG_POV_SPAN      POV segment length in frames        (default 6000)
+#   DG_POV_TEAM      team to spectate (-1 = auto)        (default -1)
 
 set -euo pipefail
 
@@ -71,6 +75,9 @@ DiffGateLabel = $LABEL
 DiffGateFastForward = ${DG_FF:-1}
 DiffGateQuitFrame = ${DG_QUIT_FRAME:-0}
 DiffGateExercise = ${DG_EXERCISE:-1}
+DiffGatePovFrame = ${DG_POV_FRAME:-6000}
+DiffGatePovSpan = ${DG_POV_SPAN:-6000}
+DiffGatePovTeam = ${DG_POV_TEAM:--1}
 WorkerThreadCount = ${WORKERS:--1}
 EOF
 
@@ -92,10 +99,11 @@ echo "--- [SnapshotDiffGate] report ---"
 grep -F "[SnapshotDiffGate]" "$INFOLOG" || echo "(no gate output - was it armed? is the driver widget enabled?)"
 
 echo
-# per-mismatch lines are the only [SnapshotDiffGate] lines carrying "field="
-if grep -q "\[SnapshotDiffGate\].*field=" "$INFOLOG"; then
+# per-mismatch lines carry "field=" (boundary pass) or "callout=" + "differ"
+# (serving-path dual-run comparator)
+if grep -qE "\[SnapshotDiffGate\].*(field=|callout=.*differ)" "$INFOLOG"; then
 	echo "GATE   : MISMATCHES DETECTED - snapshot does not match live sim"
-	grep -m 5 "\[SnapshotDiffGate\].*field=" "$INFOLOG"
+	grep -m 5 -E "\[SnapshotDiffGate\].*(field=|callout=.*differ)" "$INFOLOG"
 elif grep -q "PASS (0 mismatches)" "$INFOLOG"; then
 	echo "GATE   : PASS (0 mismatches)"
 else

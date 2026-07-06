@@ -5,6 +5,7 @@
 #include "LuaConfig.h"
 #include "LuaInclude.h"
 #include "LuaHandle.h"
+#include "LuaSnapshotServe.h"
 #include "LuaHashString.h"
 #include "LuaUtils.h"
 #include "LuaRules.h"
@@ -1950,9 +1951,9 @@ int LuaUnsyncedRead::IsSphereInView(lua_State* L)
  * @return number y
  * @return number z
  */
-int LuaUnsyncedRead::GetUnitViewPosition(lua_State* L)
+static int GetUnitViewPositionLive(lua_State* L, const char* caller)
 {
-	CUnit* unit = ParseUnit(L, __func__, 1);
+	CUnit* unit = ParseUnit(L, caller, 1);
 
 	if (unit == nullptr)
 		return 0;
@@ -1964,6 +1965,14 @@ int LuaUnsyncedRead::GetUnitViewPosition(lua_State* L)
 	lua_pushnumber(L, unitPos.y + errorVec.y);
 	lua_pushnumber(L, unitPos.z + errorVec.z);
 	return 3;
+}
+
+int LuaUnsyncedRead::GetUnitViewPosition(lua_State* L)
+{
+	// the draw position is drawer-owned, but the visibility gate and the
+	// errorVector masking were live sim reads -- snapshot-served from draw
+	// context (sim|draw PR 18, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitViewPositionLive, &LuaSnapshotServe::GetUnitViewPosition);
 }
 
 
