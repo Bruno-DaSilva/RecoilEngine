@@ -64,6 +64,8 @@
 #include "Lua/LuaRules.h"
 #include "Lua/LuaOpenGL.h"
 #include "Lua/LuaSplitContract.h"
+#include "System/SimDrawSplit.h"
+#include "System/UnsyncedBoundaryQueue.h"
 #include "Lua/LuaParser.h"
 #include "Lua/LuaSyncedRead.h"
 #include "Lua/LuaUI.h"
@@ -251,6 +253,9 @@ CGame::CGame(const std::string& mapFileName, const std::string& modFileName, ILo
 	// set "Headless" in config overlay (not persisted)
 	configHandler->Set("Headless", (SpringVersion::IsHeadless()) ? 1 : 0, true);
 
+	// cache the sim|draw split flag for this game session (PR 27b)
+	SimDrawSplit::UpdateConfig();
+
 	showFPS   = configHandler->GetBool("ShowFPS");
 	showClock = configHandler->GetBool("ShowClock");
 	showSpeed = configHandler->GetBool("ShowSpeed");
@@ -337,13 +342,12 @@ void CGame::AddTimedJobs()
 
 			// SimFrame handles gc when not paused, this all other cases
 			// do not check the global synced state, never true in demos
-			// TODO(27b, split contract): this job runs on the main thread and
-			// CollectGarbage iterates ALL handles incl. the synced ones -- a
-			// draw-thread lua_gc on the sim-thread-owned synced state. At the
-			// split, restrict the job to unsynced handles (sim keeps GCing its
-			// own via SimFrame) or move the synced half behind the barrier.
+			// PR 27b: under the split this job runs on the main/draw thread,
+			// so it may not lua_gc the sim-thread-owned synced states --
+			// restrict it to the unsynced handles (SimFrame GCs the synced
+			// ones on the sim thread with the mirror filter)
 			if (luaGCControl == 1 || simFrameDeltaTime > gcForcedDeltaTime)
-				eventHandler.CollectGarbage(false);
+				eventHandler.CollectGarbage(false, SimDrawSplit::Enabled() ? CEventHandler::GC_UNSYNCED_ONLY : CEventHandler::GC_ALL);
 
 			CInputReceiver::CollectGarbage();
 			return true;
@@ -1024,6 +1028,9 @@ void CGame::KillRendering()
 	// pending records reference sim objects that die without further drains
 	// (CUnitHandler::Kill frees units without Render*Destroyed notifications)
 	renderEventQueue.Clear();
+	// same for boundary-deferred unsynced dispatches (their targets die here)
+	UnsyncedBoundaryQueue::Clear();
+	SimDrawSplit::Clear();
 	simSnapshot.Clear();
 	snapshotPickGrid.Clear();
 	// dumps the draw-contract trip inventory into the infolog before reset
@@ -1209,7 +1216,13 @@ bool CGame::Update()
 
 	ENTER_SYNCED_CODE();
 	SendClientProcUsage();
-	ClientReadNet(); // issues new SimFrame()s
+	{
+		// the sim phase (PR 27b): sim-fired unsynced work inside this bracket
+		// boundary-defers when the split flag is on; under the split the same
+		// bracket wraps the sim thread's ClientReadNet call instead
+		SimDrawSplit::ScopedSimPhase simPhase;
+		ClientReadNet(); // issues new SimFrame()s
+	}
 
 	if (!gameOver) {
 		if (clientNet->NeedsReconnect())
@@ -1511,10 +1524,14 @@ bool CGame::UpdateUnsynced(const spring_time currentTime)
  *         events), moved here from CWorldDrawer::Update: it is boundary work
  *         (sim writes the rect queue). Runs after the movers, preserving
  *         their old relative order.
- *  - MAY NOT run inside: rendering, GL work, or Lua callins -- with the one
- *    sanctioned exception of the drain's Render* event dispatches (and the
- *    UnsyncedHeightMapUpdate events of step 6), which exist precisely to fire
- *    at the boundary.
+ *      7. UnsyncedBoundaryQueue::Drain()      -- replay the sim phase's
+ *         boundary-deferred unsynced dispatches (PR 27b: LuaUI events,
+ *         Cob2Lua, SendToUnsynced, net-message draw pokes) in fire order.
+ *         Empty unless the split flag is on.
+ *  - MAY NOT run inside: rendering, GL work, or Lua callins -- with the
+ *    sanctioned exceptions of the drain's Render* event dispatches, the
+ *    UnsyncedHeightMapUpdate events of step 6, and the deferred unsynced
+ *    dispatches of step 7, which exist precisely to fire at the boundary.
  *  - Deferred second half (documented decision, PR 26): the drawer extraction
  *    layer (CModelDrawerDataBase::Update/ExtractTransforms/
  *    UpdateObjectUniforms, projectileDrawer->UpdateDrawFlags -- the section-C
@@ -1591,6 +1608,15 @@ void CGame::SimDrawBarrier()
 		readMap->UpdateDraw(firstUnsyncedHeightMapDrain);
 		firstUnsyncedHeightMapDrain = false;
 	}
+
+	// (7) replay the sim phase's boundary-deferred unsynced dispatches (PR
+	// 27b, UnsyncedBoundaryQueue.h): LuaUI/unsynced-handle events, Cob2Lua,
+	// SendToUnsynced, ... -- in exact fire order, after the snapshot publish
+	// so their callin bodies read this boundary's frame. Empty (and free)
+	// unless the split flag deferred something since the last barrier. These
+	// are sanctioned boundary callins, the same class as the Render* event
+	// dispatches of step 1.
+	UnsyncedBoundaryQueue::Drain();
 }
 
 bool CGame::Draw() {
@@ -1843,8 +1869,17 @@ void CGame::StartPlaying()
 		gu->myAllyTeam = teamHandler.AllyTeam(gu->myTeam);
 	}
 
-	GameSetupDrawer::Disable();
-	CLuaUI::UpdateTeams();
+	// PR 27b: both are draw/UI-owned (the setup-drawer singleton and the
+	// unsynced LuaUI state); StartPlaying fires from net-message handling
+	if (SimDrawSplit::DeferUnsyncedNow()) {
+		UnsyncedBoundaryQueue::Defer([]() {
+			GameSetupDrawer::Disable();
+			CLuaUI::UpdateTeams();
+		});
+	} else {
+		GameSetupDrawer::Disable();
+		CLuaUI::UpdateTeams();
+	}
 
 	teamHandler.SetDefaultStartPositions(gameSetup);
 
@@ -1926,8 +1961,10 @@ void CGame::SimFrame() {
 
 			// keep garbage-collection rate tied to sim-speed
 			// (fixed 30Hz gc is not enough while catching up)
+			// PR 27b: under the split the sim phase GCs only the synced
+			// lua_States it owns; the main-thread timed job covers the rest
 			if (luaGCControl == 0)
-				eventHandler.CollectGarbage(false);
+				eventHandler.CollectGarbage(false, SimDrawSplit::Enabled() ? CEventHandler::GC_SYNCED_ONLY : CEventHandler::GC_ALL);
 
 			eventHandler.GameFrame(gs->frameNum);
 		}
@@ -2034,7 +2071,13 @@ void CGame::GameEnd(const std::vector<unsigned char>& winningAllyTeams, bool tim
 	gameOver = true;
 	eventHandler.GameOver(winningAllyTeams);
 
-	CEndGameBox::Create(winningAllyTeams);
+	// PR 27b: the end-game box is an agui/UI object; GameEnd can fire from
+	// net-message handling (sim thread under the split) -- boundary-defer
+	if (SimDrawSplit::DeferUnsyncedNow()) {
+		UnsyncedBoundaryQueue::Defer([winningAllyTeams]() { CEndGameBox::Create(winningAllyTeams); });
+	} else {
+		CEndGameBox::Create(winningAllyTeams);
+	}
 #ifdef    HEADLESS
 	CTimeProfiler::GetInstance().PrintProfilingInfo();
 #endif // HEADLESS
@@ -2100,6 +2143,18 @@ void CGame::SendNetChat(std::string message, int destination)
 }
 
 
+// PR 27b: the chat-notification sample plays through the UI sound channel
+// (main-thread/audio-owned); chat arrives via net-message handling, which
+// runs on the sim thread under the split
+static void PlayDeferrableChatSound(int soundID)
+{
+	if (SimDrawSplit::DeferUnsyncedNow()) {
+		UnsyncedBoundaryQueue::Defer([soundID]() { Channels::UserInterface->PlaySample(soundID, 5); });
+	} else {
+		Channels::UserInterface->PlaySample(soundID, 5);
+	}
+}
+
 void CGame::HandleChatMsg(const ChatMessage& msg)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
@@ -2145,13 +2200,13 @@ void CGame::HandleChatMsg(const ChatMessage& msg)
 			const bool allied = teamHandler.Ally(msgAllyTeam, gu->myAllyTeam);
 			if (gu->spectating || (allied && !player->spectator)) {
 				LOG("%sAllies: %s", label.c_str(), s.c_str());
-				Channels::UserInterface->PlaySample(chatSound, 5);
+				PlayDeferrableChatSound(chatSound);
 			}
 		}
 		else if (msg.destination == ChatMessage::TO_SPECTATORS) {
 			if (gu->spectating || myMsg) {
 				LOG("%sSpectators: %s", label.c_str(), s.c_str());
-				Channels::UserInterface->PlaySample(chatSound, 5);
+				PlayDeferrableChatSound(chatSound);
 			}
 		}
 		else if (msg.destination == ChatMessage::TO_EVERYONE) {
@@ -2162,7 +2217,7 @@ void CGame::HandleChatMsg(const ChatMessage& msg)
 				} else {
 					LOG("%s%s", label.c_str(), s.c_str());
 				}
-				Channels::UserInterface->PlaySample(chatSound, 5);
+				PlayDeferrableChatSound(chatSound);
 			}
 		}
 		else if ((msg.destination < playerHandler.ActivePlayers()) && player)
@@ -2173,7 +2228,7 @@ void CGame::HandleChatMsg(const ChatMessage& msg)
 				LOG("%s whispered %s: %s", label.c_str(), playerHandler.Player(msg.destination)->name.c_str(), s.c_str());
 			} else if (msg.destination == gu->myPlayerNum && player->spectator == gu->spectating) {
 				LOG("%sPrivate: %s", label.c_str(), s.c_str());
-				Channels::UserInterface->PlaySample(chatSound, 5);
+				PlayDeferrableChatSound(chatSound);
 			}
 			else if (player->playerNum == gu->myPlayerNum)
 			{

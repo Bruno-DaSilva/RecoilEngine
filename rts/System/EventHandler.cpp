@@ -5,6 +5,8 @@
 #include "Lua/LuaCallInCheck.h"
 #include "Lua/LuaOpenGL.h"  // FIXME -- should be moved
 
+#include "Sim/Units/UnitHandler.h"
+
 #include "System/Config/ConfigHandler.h"
 #include "System/Platform/Threading.h"
 #include "System/GlobalConfig.h"
@@ -499,7 +501,14 @@ template<typename T, typename F, typename... A> void IterateEventClientList(T& l
 	for (size_t i = 0; i < list.size(); ) {
 		CEventClient* ec = list[i];
 
-		(ec->*func)(std::forward<A>(args)...);
+		// PR 27b: sim-fired dispatch to an unsynced client defers to the
+		// SimDrawBarrier (args copied by value into the closure); a single
+		// cached-bool load when the split flag is off
+		if (UnsyncedBoundaryQueue::ShouldDefer(ec)) {
+			UnsyncedBoundaryQueue::DeferFor(ec, std::bind(func, ec, args...));
+		} else {
+			(ec->*func)(std::forward<A>(args)...);
+		}
 
 		// the call-in may remove itself from the list
 		i += (i < list.size() && ec == list[i]);
@@ -570,6 +579,26 @@ void CEventHandler::GameProgress(int gameFrame)
 void CEventHandler::GameID(const unsigned char* gameID, unsigned int numBytes)
 {
 	ZoneScoped;
+	// deferral would capture a dangling buffer pointer; copy it (fires once
+	// per game, so the shared_ptr detour is free in practice)
+	if (SimDrawSplit::DeferUnsyncedNow()) {
+		const auto idCopy = std::make_shared<std::vector<unsigned char>>(gameID, gameID + numBytes);
+
+		for (size_t i = 0; i < listGameID.size(); ) {
+			CEventClient* ec = listGameID[i];
+
+			if (UnsyncedBoundaryQueue::ShouldDefer(ec)) {
+				UnsyncedBoundaryQueue::DeferFor(ec, [ec, idCopy, numBytes]() { ec->GameID(idCopy->data(), numBytes); });
+			} else {
+				ec->GameID(gameID, numBytes);
+			}
+
+			i += (i < listGameID.size() && ec == listGameID[i]);
+		}
+
+		return;
+	}
+
 	ITERATE_EVENTCLIENTLIST(GameID, gameID, numBytes);
 }
 
@@ -625,10 +654,54 @@ void CEventHandler::UnitHarvestStorageFull(const CUnit* unit)
 /******************************************************************************/
 /******************************************************************************/
 
-void CEventHandler::CollectGarbage(bool forced)
+void CEventHandler::CollectGarbage(bool forced, CEventHandler::GCFilter filter)
 {
 	ZoneScoped;
-	ITERATE_EVENTCLIENTLIST(CollectGarbage, forced);
+	// PR 27b: under the split, sim-side GC covers the synced lua_States only
+	// (they belong to the sim thread) and the main-thread timed job covers
+	// the unsynced ones -- callers pass a filter when the flag is on.
+	// GC_ALL keeps the exact legacy iteration (flag-off path).
+	if (filter == GC_ALL) {
+		ITERATE_EVENTCLIENTLIST(CollectGarbage, forced);
+		return;
+	}
+
+	for (size_t i = 0; i < listCollectGarbage.size(); ) {
+		CEventClient* ec = listCollectGarbage[i];
+
+		if (ec->GetSynced() == (filter == GC_SYNCED_ONLY))
+			ec->CollectGarbage(forced);
+
+		i += (i < listCollectGarbage.size() && ec == listCollectGarbage[i]);
+	}
+}
+
+
+void CEventHandler::StockpileChanged(const CUnit* unit, const CWeapon* weapon, int oldCount)
+{
+	const auto unitAllyTeam = unit->allyteam;
+
+	for (size_t i = 0; i < listStockpileChanged.size(); ) {
+		CEventClient* ec = listStockpileChanged[i];
+
+		if (ec->CanReadAllyTeam(unitAllyTeam)) {
+			if (UnsyncedBoundaryQueue::ShouldDefer(ec)) {
+				// the CWeapon* is not lifetime-protected by the deferred-
+				// deletion epoch (PreDestruct frees the weapons), so drop the
+				// dispatch if the unit died before the boundary: master fired
+				// it pre-death, the widget just misses one final tick
+				const int unitID = unit->id;
+				UnsyncedBoundaryQueue::DeferFor(ec, [ec, unit, weapon, oldCount, unitID]() {
+					if (unitHandler.GetUnit(unitID) == unit)
+						ec->StockpileChanged(unit, weapon, oldCount);
+				});
+			} else {
+				ec->StockpileChanged(unit, weapon, oldCount);
+			}
+		}
+
+		i += (i < listStockpileChanged.size() && ec == listStockpileChanged[i]);
+	}
 }
 
 void CEventHandler::DbgTimingInfo(DbgTimingInfoType type, const spring_time start, const spring_time end)

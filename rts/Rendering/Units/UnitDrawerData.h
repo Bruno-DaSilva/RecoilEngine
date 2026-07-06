@@ -53,6 +53,11 @@ public:
 			eventName == "PlayerChanged";
 	}
 
+	// PR 27b: the LOS-transition handlers below are the RenderEventQueue
+	// enqueue layer (event-time capture) and must run at fire time even when
+	// the sim phase executes on the sim thread (see EventClient.h)
+	bool IsSimPhaseCaptureClient() const override { return true; }
+
 	void RenderUnitPreCreated(const CUnit* unit) override;
 	void RenderUnitCreated(const CUnit* unit, int cloaked) override;
 	void RenderUnitDestroyed(const CUnit* unit) override;

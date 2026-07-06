@@ -45,6 +45,8 @@
 #include "System/creg/SerializeLuaState.h"
 #include "System/Config/ConfigHandler.h"
 #include "System/EventHandler.h"
+#include "System/SimDrawSplit.h"
+#include "System/UnsyncedBoundaryQueue.h"
 #include "System/Exceptions.h"
 #include "System/GlobalConfig.h"
 #include "System/Rectangle.h"
@@ -169,7 +171,9 @@ CLuaHandle::CLuaHandle(const string& _name, int _order, bool _userMode, bool _sy
 	// do not use it for LuaMenu either; too many blocks allocated
 	// by *other* states end up not being recycled which presently
 	// forces clearing the shared pool on reload
-	, D(_name != "LuaIntro" && name != "LuaMenu", true)
+	// (unsynced handles use the draw-side shared pool under the
+	// sim|draw split, PR 27b -- see LuaMemPool.cpp)
+	, D(_name != "LuaIntro" && name != "LuaMenu", true, !_synced)
 {
 	D.owner = this;
 	D.synced = _synced;
@@ -2419,6 +2423,15 @@ void CLuaHandle::SetDevMode(bool value)
 		for (const auto* lc : *lcd) {
 			if (!lc || !lc->owner)
 				continue;
+
+			// PR 27b: /cheat arrives as a net message (sim phase); the
+			// unsynced handles' lua_States belong to the draw thread under
+			// the split, so their half of the fan-out defers to the boundary
+			if (!lc->synced && SimDrawSplit::DeferUnsyncedNow()) {
+				CLuaHandle* owner = lc->owner;
+				UnsyncedBoundaryQueue::DeferFor(owner, [owner]() { owner->EnactDevMode(); });
+				continue;
+			}
 
 			lc->owner->EnactDevMode();
 		}

@@ -37,7 +37,9 @@ public:
 	static size_t GetPoolCount();
 
 	static LuaMemPool* GetSharedPtr();
-	static LuaMemPool* AcquirePtr(bool shared, bool owned);
+	// unsyncedShared selects the draw-side shared pool under the sim|draw
+	// split (PR 27b; see the .cpp comment) -- ignored when the split is off
+	static LuaMemPool* AcquirePtr(bool shared, bool owned, bool unsyncedShared = false);
 	static void ReleasePtr(LuaMemPool* p, const CLuaHandle* o);
 
 	static void FreeShared();

@@ -18,19 +18,37 @@
 bool LuaMemPool::enabled = false;
 
 static LuaMemPool* gSharedPool = nullptr;
+static LuaMemPool* gSharedPoolUnsynced = nullptr;
 
 static std::array<uint8_t, sizeof(LuaMemPool)> gSharedPoolMem;
+static std::array<uint8_t, sizeof(LuaMemPool)> gSharedPoolUnsyncedMem;
 static std::vector<LuaMemPool*> gPools;
 static std::vector<size_t> gIndcs;
 static std::atomic<size_t> gCount = {0};
 static spring::mutex gMutex;
 
+// PR 27b: under the sim|draw split the synced handles allocate on the sim
+// thread and the unsynced ones (LuaRules/LuaGaia-unsynced, LuaUI) on the
+// draw thread; a single unlocked shared pool would race, so each side gets
+// its own. Flag off: one shared pool, bit-identical legacy behavior.
+// unitsync/dedicated do not link the split flag (and have no split) -- the
+// unsynced pool is simply never selected there.
+#if (!defined(UNITSYNC) && !defined(DEDICATED))
+#include "System/SimDrawSplit.h"
+static bool UnsyncedSharedPoolActive() { return SimDrawSplit::Enabled(); }
+#else
+static bool UnsyncedSharedPoolActive() { return false; }
+#endif
+
 size_t LuaMemPool::GetPoolCount() { return (gCount.load()); }
 
 LuaMemPool* LuaMemPool::GetSharedPtr() { return gSharedPool; }
-LuaMemPool* LuaMemPool::AcquirePtr(bool shared, bool owned)
+LuaMemPool* LuaMemPool::AcquirePtr(bool shared, bool owned, bool unsyncedShared)
 {
 	LuaMemPool* p = GetSharedPtr();
+
+	if (shared && unsyncedShared && UnsyncedSharedPoolActive())
+		p = gSharedPoolUnsynced;
 
 	if (!shared) {
 		// caller can be any thread; cf LuaParser context-data ctors
@@ -62,7 +80,7 @@ void LuaMemPool::ReleasePtr(LuaMemPool* p, const CLuaHandle* o)
 	RECOIL_DETAILED_TRACY_ZONE;
 	gCount -= (o != nullptr);
 
-	if (p == GetSharedPtr()) {
+	if (p == GetSharedPtr() || p == gSharedPoolUnsynced) {
 		p->GetSharedCount() -= 1;
 		return;
 	}
@@ -72,8 +90,12 @@ void LuaMemPool::ReleasePtr(LuaMemPool* p, const CLuaHandle* o)
 	gMutex.unlock();
 }
 
-void LuaMemPool::FreeShared() { gSharedPool->Clear(); }
-void LuaMemPool::InitStatic(bool enable) { gSharedPool = new (gSharedPoolMem.data()) LuaMemPool(LuaMemPool::enabled = enable); }
+void LuaMemPool::FreeShared() { gSharedPool->Clear(); gSharedPoolUnsynced->Clear(); }
+void LuaMemPool::InitStatic(bool enable)
+{
+	gSharedPool = new (gSharedPoolMem.data()) LuaMemPool(LuaMemPool::enabled = enable);
+	gSharedPoolUnsynced = new (gSharedPoolUnsyncedMem.data()) LuaMemPool(LuaMemPool::enabled);
+}
 void LuaMemPool::KillStatic()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
@@ -85,6 +107,7 @@ void LuaMemPool::KillStatic()
 	gIndcs.clear();
 
 	spring::SafeDestruct(gSharedPool);
+	spring::SafeDestruct(gSharedPoolUnsynced);
 }
 
 

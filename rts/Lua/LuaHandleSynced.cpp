@@ -48,13 +48,35 @@
 #include "System/creg/SerializeLuaState.h"
 #include "System/FileSystem/FileHandler.h"
 #include "System/Log/ILog.h"
+#include "System/SimDrawSplit.h"
 #include "System/SpringMath.h"
 #include "System/LoadLock.h"
+#include "System/UnsyncedBoundaryQueue.h"
 
 #include "System/Misc/TracyDefs.h"
 
 
 LuaRulesParams::Params  CSplitLuaHandle::gameParams;
+
+
+/**
+ * PR 27b: the SendToUnsynced boundary mailbox -- a bare lua_State used only
+ * as a value buffer between the sim phase (which parks each message's args
+ * in a registry-ref'd table) and the barrier drain (which unpacks and
+ * dispatches them). Touched exclusively from those two contexts, which never
+ * overlap under the split's handshake; owns a private non-shared LuaMemPool
+ * so its allocations cannot race either thread's handle pools.
+ */
+static lua_State* GetSendToUnsyncedMailbox()
+{
+	static luaContextData mailboxLcd(false, true);
+	static lua_State* mailbox = nullptr;
+
+	if (mailbox == nullptr)
+		mailbox = LUA_OPEN(&mailboxLcd);
+
+	return mailbox;
+}
 
 
 
@@ -2031,6 +2053,51 @@ int CSyncedLuaHandle::SendToUnsynced(lua_State* L)
 	}
 
 	CUnsyncedLuaHandle* ulh = CSplitLuaHandle::GetUnsyncedHandle(L);
+
+	// PR 27b: RecvFromSynced runs unsynced Lua synchronously in this call
+	// stack; under the split the args park in a neutral mailbox lua_State
+	// (owned below; touched only from the sim phase and the barrier drain,
+	// never concurrently) and the dispatch replays at the boundary. The
+	// entry is tagged with the receiving handle so a handle disabled before
+	// the boundary drops its pending messages instead of dangling.
+	if (SimDrawSplit::DeferUnsyncedNow()) {
+		lua_State* mb = GetSendToUnsyncedMailbox();
+
+		luaL_checkstack(mb, args + 3, __func__);
+		lua_createtable(mb, args, 0);
+
+		const int tblIdx = lua_gettop(mb);
+
+		LuaUtils::CopyData(mb, L, args);
+
+		for (int i = args; i >= 1; --i) {
+			lua_rawseti(mb, tblIdx, i);
+		}
+
+		const int msgRef = luaL_ref(mb, LUA_REGISTRYINDEX);
+
+		UnsyncedBoundaryQueue::DeferFor(ulh, [ulh, msgRef, args]() {
+			lua_State* mb = GetSendToUnsyncedMailbox();
+
+			lua_rawgeti(mb, LUA_REGISTRYINDEX, msgRef);
+
+			const int tblIdx = lua_gettop(mb);
+
+			luaL_checkstack(mb, args + 2, "SendToUnsynced::drain");
+
+			for (int i = 1; i <= args; ++i) {
+				lua_rawgeti(mb, tblIdx, i);
+			}
+
+			ulh->RecvFromSynced(mb, args);
+
+			lua_settop(mb, tblIdx - 1);
+			luaL_unref(mb, LUA_REGISTRYINDEX, msgRef);
+		});
+
+		return 0;
+	}
+
 	ulh->RecvFromSynced(L, args);
 	return 0;
 }
@@ -2054,7 +2121,15 @@ int CSyncedLuaHandle::AddSyncedActionFallback(lua_State* L)
 
 	auto lhs = GetSyncedHandle(L);
 	lhs->textCommands[cmd] = luaL_checkstring(L, 2);
-	wordCompletion.AddWord(cmdRaw, true, false, false);
+
+	// PR 27b: wordCompletion is the draw/UI-owned text-input dictionary --
+	// a synced callout may not poke it from the sim phase under the split
+	if (SimDrawSplit::DeferUnsyncedNow()) {
+		UnsyncedBoundaryQueue::Defer([cmdRaw = std::move(cmdRaw)]() { wordCompletion.AddWord(cmdRaw, true, false, false); });
+	} else {
+		wordCompletion.AddWord(cmdRaw, true, false, false);
+	}
+
 	lua_pushboolean(L, true);
 	return 1;
 }
@@ -2084,7 +2159,14 @@ int CSyncedLuaHandle::RemoveSyncedActionFallback(lua_State* L)
 
 	if (it != cmds.end()) {
 		cmds.erase(it);
-		wordCompletion.RemoveWord(cmdRaw);
+
+		// see AddSyncedActionFallback
+		if (SimDrawSplit::DeferUnsyncedNow()) {
+			UnsyncedBoundaryQueue::Defer([cmdRaw]() { wordCompletion.RemoveWord(cmdRaw); });
+		} else {
+			wordCompletion.RemoveWord(cmdRaw);
+		}
+
 		lua_pushboolean(L, true);
 	} else {
 		lua_pushboolean(L, false);

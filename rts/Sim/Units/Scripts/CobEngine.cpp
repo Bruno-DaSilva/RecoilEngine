@@ -9,6 +9,8 @@
 
 #include <cstdint>
 #include "System/Misc/TracyDefs.h"
+#include "System/SimDrawSplit.h"
+#include "System/UnsyncedBoundaryQueue.h"
 #include "Lua/LuaUI.h"
 
 CR_BIND(CCobEngine, )
@@ -233,6 +235,22 @@ void CCobEngine::RunDeferredCallins()
 		deferredCallins.erase(it);
 
 		const LuaHashString cmdStr = LuaHashString(callins[0].funcName.c_str());
+
+		// PR 27b: these run unsynced Lua from the sim phase -- boundary-defer
+		// under the split (args are already plain-data copies; the CUnit*
+		// each callin carries stays readable until the drain per PR 13)
+		if (SimDrawSplit::DeferUnsyncedNow()) {
+			UnsyncedBoundaryQueue::Defer([cmdStr, callins = std::move(callins)]() mutable {
+				// re-check the handles at drain time (a handle can be
+				// disabled between the defer and the boundary)
+				if (luaRules != nullptr)
+					luaRules->unsyncedLuaHandle.Cob2LuaBatch(cmdStr, callins);
+				if (luaUI != nullptr)
+					luaUI->Cob2LuaBatch(cmdStr, callins);
+			});
+			continue;
+		}
+
 		luaRules->unsyncedLuaHandle.Cob2LuaBatch(cmdStr, callins);
 		if (luaUI)
 			luaUI->Cob2LuaBatch(cmdStr, callins);

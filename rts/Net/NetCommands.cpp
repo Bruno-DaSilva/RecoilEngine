@@ -31,8 +31,10 @@
 #include "System/EventHandler.h"
 #include "System/GlobalConfig.h"
 #include "System/Log/ILog.h"
+#include "System/SimDrawSplit.h"
 #include "System/SpringMath.h"
 #include "System/TimeProfiler.h"
+#include "System/UnsyncedBoundaryQueue.h"
 #include "System/LoadSave/DemoRecorder.h"
 #include "System/Net/UnpackPacket.h"
 #include "System/Sound/ISound.h"
@@ -47,6 +49,27 @@ CONFIG(bool, LogClientData).defaultValue(false);
 LOG_REGISTER_SECTION_GLOBAL(LOG_SECTION_NET)
 
 static spring::unordered_map<int32_t, uint32_t> localSyncChecksums;
+
+// PR 27b: wordCompletion is the draw/UI-owned text-input dictionary; pokes
+// from net-message handling (which runs on the sim thread under the split)
+// boundary-defer. All net-side AddWord callers pass (false, false, false).
+static void NetDeferrableWordAdd(std::string word)
+{
+	if (SimDrawSplit::DeferUnsyncedNow()) {
+		UnsyncedBoundaryQueue::Defer([word = std::move(word)]() { wordCompletion.AddWord(word, false, false, false); });
+	} else {
+		wordCompletion.AddWord(word, false, false, false);
+	}
+}
+
+static void NetDeferrableWordRemove(std::string word)
+{
+	if (SimDrawSplit::DeferUnsyncedNow()) {
+		UnsyncedBoundaryQueue::Defer([word = std::move(word)]() { wordCompletion.RemoveWord(word); });
+	} else {
+		wordCompletion.RemoveWord(word);
+	}
+}
 
 
 void CGame::AddTraffic(int playerID, int packetCode, int length)
@@ -353,7 +376,13 @@ void CGame::ClientReadNet()
 				const uint32_t timeToStart = *reinterpret_cast<const uint32_t*>(inbuf + 1);
 
 				if (timeToStart > 0) {
-					GameSetupDrawer::StartCountdown(timeToStart);
+					// PR 27b: the countdown lives in the UI-owned
+					// GameSetupDrawer singleton -- boundary-defer the poke
+					if (SimDrawSplit::DeferUnsyncedNow()) {
+						UnsyncedBoundaryQueue::Defer([timeToStart]() { GameSetupDrawer::StartCountdown(timeToStart); });
+					} else {
+						GameSetupDrawer::StartCountdown(timeToStart);
+					}
 				} else {
 					StartPlaying();
 				}
@@ -402,7 +431,17 @@ void CGame::ClientReadNet()
 
 			case NETMSG_INTERNAL_SPEED: {
 				ZoneScopedN("Net::InternalSpeed");
-				sound->PitchAdjust(gs->speedFactor = *reinterpret_cast<const float*>(&inbuf[1]));
+				gs->speedFactor = *reinterpret_cast<const float*>(&inbuf[1]);
+
+				// PR 27b: the audio pitch poke is main-thread/audio-owned;
+				// the speedFactor assignment above is the sim side and stays
+				if (SimDrawSplit::DeferUnsyncedNow()) {
+					const float newSpeedFactor = gs->speedFactor;
+					UnsyncedBoundaryQueue::Defer([newSpeedFactor]() { sound->PitchAdjust(newSpeedFactor); });
+				} else {
+					sound->PitchAdjust(gs->speedFactor);
+				}
+
 				TracyPlot(tracingSpeedFactor, gs->speedFactor);
 				AddTraffic(-1, packetCode, dataLength);
 			} break;
@@ -465,7 +504,7 @@ void CGame::ClientReadNet()
 					player->SetReadyToStart(gameSetup->startPosType != CGameSetup::StartPos_ChooseInGame);
 					player->active = true;
 
-					wordCompletion.AddWord(player->name, false, false, false); // required?
+					NetDeferrableWordAdd(player->name); // required?
 					AddTraffic(playerID, packetCode, dataLength);
 				} catch (const netcode::UnpackPacketException& ex) {
 					LOG_L(L_ERROR, "[Game::%s][NETMSG_PLAYERNAME] exception \"%s\"", __func__, ex.what());
@@ -1131,6 +1170,20 @@ void CGame::ClientReadNet()
 
 			case NETMSG_MAPDRAW: {
 				ZoneScopedN("Net::MapDraw");
+
+				// PR 27b: GotNetMsg mutates the draw-owned map-marker model
+				// (inMapDrawerModel AddPoint/AddLine/EraseNear) -- boundary-
+				// defer the whole dispatch; the traffic tally reads the
+				// sender byte from the packet directly
+				if (SimDrawSplit::DeferUnsyncedNow()) {
+					// packet layout: [0]=code, [1]=size, [2]=playerNum
+					if (dataLength > 2 && playerHandler.IsValidPlayer(inbuf[2]))
+						AddTraffic(inbuf[2], packetCode, dataLength);
+
+					UnsyncedBoundaryQueue::Defer([packet]() mutable { inMapDrawer->GotNetMsg(packet); });
+					break;
+				}
+
 				const int32_t playerNum = inMapDrawer->GotNetMsg(packet);
 
 				if (playerNum >= 0)
@@ -1287,7 +1340,7 @@ void CGame::ClientReadNet()
 							#endif
 						} else {
 							// we will end up here for local AIs defined mid-game, eg. with /aicontrol
-							wordCompletion.AddWord(aiData.name + " ", false, false, false);
+							NetDeferrableWordAdd(aiData.name + " ");
 							skirmishAIHandler.AddSkirmishAI(aiData, aiNum);
 						}
 					} else {
@@ -1297,7 +1350,7 @@ void CGame::ClientReadNet()
 						aiData.name       = aiName;
 						aiData.shortName  = "n/a"; // determines validity for GetSkirmishAI
 
-						wordCompletion.AddWord(aiData.name + " ", false, false, false);
+						NetDeferrableWordAdd(aiData.name + " ");
 						skirmishAIHandler.AddSkirmishAI(aiData, aiNum);
 					}
 
@@ -1363,7 +1416,7 @@ void CGame::ClientReadNet()
 
 						LOG("[Game::%s] %s skirmish AI \"%s\" (ID: %i) being removed from team %i", __func__, types[isLocal], aiData->name.c_str(), aiNum, aiTeamId);
 
-						wordCompletion.RemoveWord(aiData->name + " ");
+						NetDeferrableWordRemove(aiData->name + " ");
 						skirmishAIHandler.RemoveSkirmishAI(aiNum);
 
 						CPlayer::UpdateControlledTeams();

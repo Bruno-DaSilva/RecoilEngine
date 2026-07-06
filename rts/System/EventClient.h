@@ -74,6 +74,16 @@ class CEventClient
 		// used by the eventHandler to route certain event types
 		virtual int  GetReadAllyTeam() const { return NoAccessTeam; }
 		virtual bool GetFullRead()     const { return GetReadAllyTeam() == AllAccessTeam; }
+
+		/**
+		 * PR 27b: fire-time capture clients (the RenderEventQueue enqueue
+		 * layer, i.e. CUnitDrawerData's LOS-transition handlers) must receive
+		 * sim-fired events at fire time even under the sim|draw split -- they
+		 * record event-time facts into boundary-drained records and their
+		 * sim-fired handlers are sim-thread-safe by design. Everyone else
+		 * unsynced gets boundary-deferred (UnsyncedBoundaryQueue.h).
+		 */
+		virtual bool IsSimPhaseCaptureClient() const { return false; }
 		inline bool CanReadAllyTeam(int allyTeam) {
 			return (GetFullRead() || (GetReadAllyTeam() == allyTeam));
 		}
