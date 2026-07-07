@@ -2964,20 +2964,18 @@ int LuaUnsyncedRead::GetSelectedUnits(lua_State* L)
  * @return table<number,number[]> where keys are unitDefIDs and values are unitIDs
  * @return integer the number of unitDefIDs
  */
-int LuaUnsyncedRead::GetSelectedUnitsSorted(lua_State* L)
+static int GetSelectedUnitsSortedLive(lua_State* L, const char* caller)
 {
-	// split-contract gate (PR 27a): derefs live units (unitHandler.GetUnit -> unitDef) to
-	// sort the draw-owned selection ids; deny mirrors the empty-selection result
-	if (LuaSplitContract::DenyLiveRead(L, __func__)) {
-		lua_createtable(L, 0, 0);
-		lua_pushnumber(L, 0);
-		return 2;
-	}
-
 	const auto numDefKeys = PushUnitListSortedByDef(L, selectedUnitsHandler.selectedUnits);
 	lua_pushnumber(L, numDefKeys);
 
 	return 2;
+}
+
+int LuaUnsyncedRead::GetSelectedUnitsSorted(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 34, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetSelectedUnitsSortedLive, &LuaSnapshotServe::GetSelectedUnitsSorted);
 }
 
 
@@ -2988,20 +2986,18 @@ int LuaUnsyncedRead::GetSelectedUnitsSorted(lua_State* L)
  * @return table<number,number> unitsCounts where keys are unitDefIDs and values are counts
  * @return integer the number of unitDefIDs
  */
-int LuaUnsyncedRead::GetSelectedUnitsCounts(lua_State* L)
+static int GetSelectedUnitsCountsLive(lua_State* L, const char* caller)
 {
-	// split-contract gate (PR 27a): derefs live units (unitHandler.GetUnit -> unitDef) to
-	// tally the draw-owned selection ids; deny mirrors the empty-selection result
-	if (LuaSplitContract::DenyLiveRead(L, __func__)) {
-		lua_createtable(L, 0, 0);
-		lua_pushnumber(L, 0);
-		return 2;
-	}
-
 	const auto numDefKeys = PushSparseUnitTallyByDef(L, selectedUnitsHandler.selectedUnits);
 	lua_pushnumber(L, numDefKeys);
 
 	return 2;
+}
+
+int LuaUnsyncedRead::GetSelectedUnitsCounts(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 34, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetSelectedUnitsCountsLive, &LuaSnapshotServe::GetSelectedUnitsCounts);
 }
 
 
@@ -4735,21 +4731,20 @@ int LuaUnsyncedRead::GetGroupUnits(lua_State* L)
  * @param groupID integer
  * @return table<number,number[]>? where keys are unitDefIDs and values are unitIDs
  */
-int LuaUnsyncedRead::GetGroupUnitsSorted(lua_State* L)
+static int GetGroupUnitsSortedLive(lua_State* L, const char* caller)
 {
 	const auto group = GetGroupFromArg(L, 1);
 	if (!group)
 		return 0;
 
-	// split-contract gate (PR 27a): derefs live units (unitHandler.GetUnit -> unitDef) to sort
-	// the draw-owned group ids; deny mirrors the empty-group result (bare table, no count)
-	if (LuaSplitContract::DenyLiveRead(L, __func__)) {
-		lua_createtable(L, 0, 0);
-		return 1;
-	}
-
 	PushUnitListSortedByDef(L, group->units);
 	return 1;
+}
+
+int LuaUnsyncedRead::GetGroupUnitsSorted(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 34, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetGroupUnitsSortedLive, &LuaSnapshotServe::GetGroupUnitsSorted);
 }
 
 
@@ -4759,21 +4754,20 @@ int LuaUnsyncedRead::GetGroupUnitsSorted(lua_State* L)
  * @param groupID integer
  * @return table<number,number>? where keys are unitDefIDs and values are counts
  */
-int LuaUnsyncedRead::GetGroupUnitsCounts(lua_State* L)
+static int GetGroupUnitsCountsLive(lua_State* L, const char* caller)
 {
 	const auto group = GetGroupFromArg(L, 1);
 	if (!group)
 		return 0;
 
-	// split-contract gate (PR 27a): derefs live units (unitHandler.GetUnit -> unitDef) to tally
-	// the draw-owned group ids; deny mirrors the empty-group result (bare table, no count)
-	if (LuaSplitContract::DenyLiveRead(L, __func__)) {
-		lua_createtable(L, 0, 0);
-		return 1;
-	}
-
 	PushSparseUnitTallyByDef(L, group->units);
 	return 1;
+}
+
+int LuaUnsyncedRead::GetGroupUnitsCounts(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 34, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetGroupUnitsCountsLive, &LuaSnapshotServe::GetGroupUnitsCounts);
 }
 
 

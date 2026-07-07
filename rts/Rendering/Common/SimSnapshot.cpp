@@ -476,6 +476,7 @@ void SimSnapshot::ExtractProjectiles(ProjectileRows& rows)
 		rows.pieceSpinSpeed.resize(n);
 		rows.pieceSpinVec.resize(n);
 		rows.pieceName.resize(n);
+		rows.radius.resize(n); // PR 34 (spatial/list remainder)
 		rows.inLosAll.resize(size_t(numAllyTeams) * n);
 	}
 
@@ -496,6 +497,7 @@ void SimSnapshot::ExtractProjectiles(ProjectileRows& rows)
 		rows.isPiece[id] = p->piece;
 		rows.dir[id] = p->dir;
 		rows.mygravity[id] = p->mygravity;
+		rows.radius[id] = p->radius; // PR 34 (spatial/list remainder)
 		rows.teamID[id] = static_cast<int32_t>(p->GetTeamID());
 		rows.weaponDefID[id] = -1;
 		rows.targetType[id] = 0;

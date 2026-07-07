@@ -251,7 +251,7 @@ static inline uint64_t HashTeamRow(const SimSnapshot::TeamRows& r, int t)
 // job, projectile rows just extend divergence *detection* coverage.
 static inline uint64_t HashProjectileRow(const SimSnapshot::ProjectileRows& r, int id)
 {
-	uint32_t w[30];
+	uint32_t w[31];
 	w[0]  = static_cast<uint32_t>(id);
 	w[1]  = std::bit_cast<uint32_t>(r.pos[id].x);
 	w[2]  = std::bit_cast<uint32_t>(r.pos[id].y);
@@ -295,6 +295,9 @@ static inline uint64_t HashProjectileRow(const SimSnapshot::ProjectileRows& r, i
 	w[27] = std::bit_cast<uint32_t>(r.pieceSpinVec[id].x);
 	w[28] = std::bit_cast<uint32_t>(r.pieceSpinVec[id].y);
 	w[29] = std::bit_cast<uint32_t>(r.pieceSpinVec[id].z);
+	// PR 34 (spatial/list remainder), appended in fixed order after PR 33's
+	// piece params to keep every prior hash-word index stable
+	w[30] = std::bit_cast<uint32_t>(r.radius[id]);
 
 	return Mix(w, sizeof(w), UNIT_SEED);
 }

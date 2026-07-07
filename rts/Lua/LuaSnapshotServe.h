@@ -227,6 +227,24 @@ namespace LuaSnapshotServe {
 	};
 	CmdQueueCompareResult CompareCmdQueueSlot(int unitID, const CUnit* liveUnit);
 
+	// ---- PR 34 (spatial/list remainder) ----
+	// The remainder of the spatial/list family: per-team plane test + table
+	// centroids over UnitRows, the whole-list projectile/feature twins over
+	// ProjectileRows/FeatureRows, and the draw-owned selection/group aggregate
+	// twins (defID sort keys from UnitRows; the id containers are draw-owned).
+	// List-returning ones share the ascending-id order deviation and compare as
+	// ID sets; centroids and the selection/group aggregates are order-exact
+	// (they iterate the same Lua table / draw-owned container as the live path).
+	int GetUnitArrayCentroid(lua_State* L, const char* caller);   // LuaSyncedRead
+	int GetUnitMapCentroid(lua_State* L, const char* caller);     // LuaSyncedRead
+	int GetAllProjectiles(lua_State* L, const char* caller);      // LuaSyncedRead
+	int GetProjectilesInSphere(lua_State* L, const char* caller); // LuaSyncedRead (projectile radius row)
+	int GetAllFeatures(lua_State* L, const char* caller);         // LuaSyncedRead
+	int GetSelectedUnitsSorted(lua_State* L, const char* caller); // LuaUnsyncedRead (draw-owned selection set)
+	int GetSelectedUnitsCounts(lua_State* L, const char* caller); // LuaUnsyncedRead
+	int GetGroupUnitsSorted(lua_State* L, const char* caller);    // LuaUnsyncedRead (draw-owned group set)
+	int GetGroupUnitsCounts(lua_State* L, const char* caller);    // LuaUnsyncedRead
+
 	/// game teardown: drop the per-generation serving caches (the team-unit
 	/// index, the command-queue copies); SimSnapshot's generation counter
 	/// resets across games, so a stale cache could otherwise alias a fresh

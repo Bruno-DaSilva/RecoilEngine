@@ -83,8 +83,11 @@ namespace {
 	 *    callout surface needs id-keyed piece-tree serving on top
 	 *  - spatial/list queries: core family SERVED in PR 27b (SnapshotPickGrid
 	 *    + team-unit index, ascending-id order deviation, set-mode dual-run
-	 *    comparison); the remainder below is screen-space/selection/nearest
-	 *    composites and reads without rows (projectile radius)
+	 *    comparison); PR 34 served the table centroids, whole-list projectile/
+	 *    feature twins (projectile radius row added), and the draw-owned
+	 *    selection/group aggregates; the remainder below is the camera-frustum
+	 *    composites (visible/screen-rect), the CGameHelper nearest search, and
+	 *    GetUnitsInPlanes' per-team-overwrite quirk -- each a design edge deferred
 	 *  - pathing: sim-owned pathManager; reads need boundary copies,
 	 *    RequestPath is a mutation (boundary-apply or contract-error)
 	 */
@@ -146,15 +149,21 @@ namespace {
 		// + GetUnitScript* + GetFeatureCollisionVolumeData/LastAttackedPiece
 		// + GetPieceProjectile* callouts route through their serving twins.
 		// (The two UNIT collision-volume reads above are PR 32's, not PR 33's.)
-		// spatial/list-query remainder (the core family is served, PR 27b)
-		"GetUnitsInPlanes", "GetUnitArrayCentroid", "GetUnitMapCentroid",
-		"GetAllProjectiles",
-		"GetProjectilesInSphere", // exact filter needs p->radius; no snapshot row
-		"GetUnitNearestAlly", "GetUnitNearestEnemy", "GetAllFeatures",
-		"GetVisibleUnits", "GetVisibleFeatures", "GetVisibleProjectiles",
-		"GetUnitsInScreenRectangle", "GetFeaturesInScreenRectangle",
-		"GetSelectedUnitsSorted", "GetSelectedUnitsCounts",
-		"GetGroupUnitsSorted", "GetGroupUnitsCounts",
+		// spatial/list-query remainder (core family served PR 27b; the table
+		// centroids, whole-list projectile/feature twins, projectile radius row,
+		// and the draw-owned selection/group aggregates served PR 34)
+		"GetUnitsInPlanes", // PR 34 deferred: GetFilteredUnits resets its array
+		                    // counter per team, so multi-team allegiances
+		                    // overwrite earlier slots -- an order-dependent quirk
+		                    // the ascending-id snapshot can't reproduce/verify
+		"GetUnitNearestAlly", "GetUnitNearestEnemy", // PR 34 deferred: CGameHelper
+		                    // closest-search fidelity/tie-break; scalar return is
+		                    // not id-set-verifiable (needs a design sign-off)
+		"GetVisibleUnits", "GetVisibleFeatures", "GetVisibleProjectiles", // PR 34
+		                    // deferred: camera-frustum + drawer drawflag-by-id
+		                    // storage (a draw-side artifact not yet present)
+		"GetUnitsInScreenRectangle", "GetFeaturesInScreenRectangle", // PR 34
+		                    // deferred: camera screen-projection re-host
 		// pathing (sim-owned pathManager)
 		"GetUnitEstimatedPath", "RequestPath", "PathFinder::Next",
 		"PathFinder::GetPathWayPoints", "PathFinder::DeletePath",

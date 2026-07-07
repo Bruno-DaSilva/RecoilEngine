@@ -202,6 +202,10 @@ private:
 		// PR 33 piece/script family: CPieceProjectile params (appended last to
 		// keep every prior field index stable)
 		P_PIECEPARAMS,  // explFlags / spinAngle / spinSpeed / spinVec / pieceName
+		// PR 34 (spatial/list remainder): appended at the enum tail (not in the
+		// projectile group) to keep the FIELD_NAMES append-only discipline; the
+		// report grouping is cosmetic, the static_assert enforces alignment
+		P_RADIUS,       // projectile radius (GetProjectilesInSphere input)
 		F_COUNT
 	};
 

@@ -148,6 +148,8 @@ static constexpr const char* FIELD_NAMES[] = {
 	"cq:factory",
 	// PR 33 piece/script family (appended last, matches P_PIECEPARAMS)
 	"proj:pieceParams",
+	// PR 34 (spatial/list remainder): appended to match the enum tail P_RADIUS
+	"proj:radius",
 };
 
 // structural compare for the copied customOpts maps (emilib::HashMap has no
@@ -558,6 +560,11 @@ void SnapshotDiffGate::CheckProjectileRows()
 		if (Bump(fields[P_TEAMID], rows.teamID[id] == static_cast<int32_t>(p->GetTeamID())))
 			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d proj=%d field=proj:teamID snap=%d live=%d",
 				gs->frameNum, id, rows.teamID[id], int(p->GetTeamID()));
+
+		// PR 34 (spatial/list remainder): projectile radius (GetProjectilesInSphere)
+		if (Bump(fields[P_RADIUS], BitEqual(rows.radius[id], p->radius)))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d proj=%d field=proj:radius snap=%.9g live=%.9g",
+				gs->frameNum, id, rows.radius[id], p->radius);
 
 		{
 			int32_t liveTtl = 0;

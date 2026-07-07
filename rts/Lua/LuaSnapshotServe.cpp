@@ -6,6 +6,7 @@
 #include <cassert> // the rotation twins' IsOrthoNormal assert
 #include <cstdio>
 #include <cstring>
+#include <map>    // PR 34: PushUnitListSortedByDefSnap's ordered def buckets
 #include <vector>
 
 #include "LuaHandle.h"
@@ -17,9 +18,9 @@
 #include "Game/Camera.h"
 #include "Game/Game.h" // the stats callouts' live `game` null-check
 #include "Game/GlobalUnsynced.h" // gu->myAllyTeam (IsUnitAllied's fullRead answer)
-#include "Game/SelectedUnitsHandler.h" // IsUnitSelected's id-set payload
-#include "Game/UI/Groups/Group.h" // CGroup::id (GetUnitGroup)
-#include "Game/UI/Groups/GroupHandler.h" // uiGroupHandlers (GetUnitGroup)
+#include "Game/SelectedUnitsHandler.h" // IsUnitSelected's id-set payload; PR 34 GetSelectedUnits* draw-owned id set
+#include "Game/UI/Groups/Group.h" // CGroup::id (GetUnitGroup); PR 34 CGroup::units (GetGroupUnits*)
+#include "Game/UI/Groups/GroupHandler.h" // uiGroupHandlers (GetUnitGroup / PR 34 GetGroupUnits*)
 #include "Rendering/Common/DrawMapMirrors.h" // PR 28: map-layer mirror serving
 #include "Rendering/Common/SimSnapshot.h"
 #include "Rendering/Common/SnapshotDiffGate.h"
@@ -387,6 +388,12 @@ namespace {
 			"GetUnitsInCylinder", "GetUnitsInSphere",
 			"GetFeaturesInRectangle", "GetFeaturesInSphere",
 			"GetFeaturesInCylinder", "GetProjectilesInRectangle",
+			// PR 34 (spatial/list remainder): whole-list twins with the same
+			// ascending-id order deviation. The selection/group aggregates and
+			// the centroids are deliberately NOT here: they iterate the same Lua
+			// table / draw-owned container as the live path (order-exact) and the
+			// counts tables are keyed (multiset compare would be wrong for them).
+			"GetAllProjectiles", "GetProjectilesInSphere", "GetAllFeatures",
 		};
 		return (idSetCallouts.find(caller) != idSetCallouts.end());
 	}
@@ -2935,6 +2942,125 @@ namespace {
 
 		snapGtuObjectIDs.push_back(ud->id);
 	}
+
+	// ---- PR 34 (spatial/list remainder) helpers ----
+
+	// mirror of LuaSyncedRead's file-local GetUnitTableCentroid: iterate the arg
+	// table, ParseUnit each entry (ParseRawUnit number-check + error, then the
+	// visibility gate), accumulate the raw midPos row. indexWithinTable is -1
+	// (array value) or -2 (map key), exactly as the live callers pass it.
+	int GetUnitTableCentroidSnap(lua_State* L, int indexWithinTable, const char* caller)
+	{
+		if (!lua_istable(L, 1))
+			luaL_error(L, "[%s] argument must be a table", caller);
+
+		const auto& rows = simSnapshot.Read();
+		const Pov pov = HandlePov(L);
+
+		float3 center {0.0f, 0.0f, 0.0f};
+		size_t count = 0;
+		for (lua_pushnil(L); lua_next(L, 1); lua_pop(L, 1)) {
+			// ParseUnit mirror at indexWithinTable: ParseRawUnit's number check
+			// (same error text) then the ParseUnit visibility gate
+			const int unitID = ParseUnitIDSynced(L, caller, indexWithinTable);
+
+			if (!rows.Valid(unitID) || !rows.PovUnitVisible(unitID, pov.readAllyTeam, pov.fullRead))
+				continue;
+
+			center += rows.midPos[unitID];
+			++count;
+		}
+
+		if (!count)
+			return 0;
+
+		center /= static_cast<float>(count);
+
+		lua_pushnumber(L, center.x);
+		lua_pushnumber(L, center.y);
+		lua_pushnumber(L, center.z);
+
+		return 3;
+	}
+
+	// mirror of LuaUnsyncedRead.cpp's file-local PushUnitListSortedByDef: the
+	// only live read is unitHandler.GetUnit(id)->unitDef->id, replaced by the
+	// UnitRows defID row. The id container is draw-owned (selection / group),
+	// iterated in the same order as the live path, so the result table is
+	// order-exact (not an id-set deviation).
+	//
+	// DEVIATION sub-case (defID-0 staleness, review-appended at integration):
+	// the draw-owned selection/group id set and the published snapshot skew by
+	// up to one boundary under the running split. If the set names a unitID
+	// whose snapshot row is stale/absent (a unit selected-then-died, or one
+	// spawned+selected after the last boundary), rows.DefID(unitID) returns the
+	// stale/nil default 0 instead of the true unitDef->id, so that id lands in
+	// def bucket 0 rather than its real def bucket (and the sparse tally counts
+	// it under key 0). Pre-split this cannot occur (the draw window sees no
+	// intervening sim frame, so the set and the snapshot agree); the armed
+	// dual-run compares against the live path at the same boundary, so it is
+	// not flagged. The live path derefs GetUnit(id)->unitDef directly, which for
+	// a live-but-uncaptured id would read the true def -- hence the documented
+	// skew. No sync/masking impact: def-0 grouping is a draw-side ordering
+	// artifact of the boundary skew, not a synced-state divergence.
+	template <typename T>
+	size_t PushUnitListSortedByDefSnap(lua_State* L, const SimSnapshot::UnitRows& rows, const T& units)
+	{
+		std::map<int, std::vector<int>> unitsByDef;
+
+		for (const auto unitID: units)
+			unitsByDef[rows.DefID(unitID)].push_back(unitID);
+
+		lua_createtable(L, 0, unitsByDef.size());
+
+		for (const auto& [unitDefID, unitIDs]: unitsByDef) {
+			lua_createtable(L, unitIDs.size(), 0);
+			for (size_t i = 0; i < unitIDs.size(); ++i) {
+				lua_pushnumber(L, unitIDs[i]);
+				lua_rawseti(L, -2, i + 1);
+			}
+			lua_rawseti(L, -2, unitDefID);
+		}
+
+		return unitsByDef.size();
+	}
+
+	// mirror of LuaUnsyncedRead.cpp's file-local PushSparseUnitTallyByDef
+	// (unitDef->id -> the UnitRows defID row)
+	template <typename T>
+	size_t PushSparseUnitTallyByDefSnap(lua_State* L, const SimSnapshot::UnitRows& rows, const T& v)
+	{
+		std::vector<size_t> counts(unitDefHandler->NumUnitDefs() + 1, 0);
+		size_t numDefKeys = 0;
+		for (const int unitID: v)
+			if (!counts[rows.DefID(unitID)]++)
+				numDefKeys++;
+
+		lua_createtable(L, 0, numDefKeys);
+		for (size_t i = 0; i < counts.size(); ++i) {
+			if (counts[i] == 0)
+				continue;
+
+			lua_pushnumber(L, counts[i]);
+			lua_rawseti(L, -2, i);
+		}
+
+		return numDefKeys;
+	}
+
+	// mirror of LuaUnsyncedRead.cpp's file-local GetGroupFromArg: uiGroupHandlers
+	// and CGroup are draw-owned UI state, so this is a pointer-free read of
+	// draw-side data (no sim-owned table touched)
+	inline const CGroup* GetGroupFromArgSnap(lua_State* L, int arg)
+	{
+		const int groupID = luaL_checkint(L, arg);
+		const auto& groupHandler = uiGroupHandlers[gu->myTeam];
+
+		if (!groupHandler.HasGroup(groupID))
+			return nullptr;
+
+		return groupHandler.GetGroup(groupID);
+	}
 }
 
 
@@ -3781,6 +3907,111 @@ int LuaSnapshotServe::GetUnitIcon(lua_State* L, const char* caller)
 	else {
 		const auto& iconData = icon::iconHandler.GetIconData(iconIdx);
 		lua_pushstring(L, iconData.GetName().c_str());
+	}
+
+	return 1;
+}
+
+
+/******************************************************************************
+ * PR 34 (spatial/list remainder) twins. Whole-list projectile/feature twins
+ * (ascending-id deviation, id-set compare), table centroids (order-exact, they
+ * iterate the same arg table as the live path), and the draw-owned selection/
+ * group aggregate twins (defID sort keys from UnitRows; the id containers are
+ * draw-owned so the result order matches the live iteration exactly).
+ ******************************************************************************/
+
+// mirror of LuaSyncedRead::GetUnitArrayCentroid (GetUnitTableCentroid, value idx)
+int LuaSnapshotServe::GetUnitArrayCentroid(lua_State* L, const char* caller)
+{
+	return GetUnitTableCentroidSnap(L, -1, caller);
+}
+
+// mirror of LuaSyncedRead::GetUnitMapCentroid (GetUnitTableCentroid, key idx)
+int LuaSnapshotServe::GetUnitMapCentroid(lua_State* L, const char* caller)
+{
+	return GetUnitTableCentroidSnap(L, -2, caller);
+}
+
+// mirror of LuaSyncedRead::GetAllProjectiles: whole synced-projectile list (only
+// synced projectiles have rows, so the live !pro->synced skip is by construction)
+int LuaSnapshotServe::GetAllProjectiles(lua_State* L, const char* caller)
+{
+	const bool excludeWeaponProjectiles = luaL_optboolean(L, 1, false);
+	const bool excludePieceProjectiles  = luaL_optboolean(L, 2, false);
+
+	const auto& rows = simSnapshot.ReadProjectiles();
+
+	// DEVIATION: ascending ids (master lists the active-projectile container order)
+	sqObjectIDs.clear();
+	for (size_t projID = 0; projID < rows.MaxSlots(); ++projID) {
+		if (rows.valid[projID] == 0)
+			continue;
+		sqObjectIDs.push_back(static_cast<int>(projID));
+	}
+
+	GetProjectilesLuaTableSnap(L, rows, sqObjectIDs, excludeWeaponProjectiles, excludePieceProjectiles);
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetProjectilesInSphere: linear scan (no projectile
+// grid rows) with the exact CQuadField::GetProjectilesExact(pos, radius) filter
+// pos.SqDistance(p->pos) >= Square(radius + p->radius) -- the p->radius input is
+// the PR-34 ProjectileRows::radius row
+int LuaSnapshotServe::GetProjectilesInSphere(lua_State* L, const char* caller)
+{
+	const float3 sphereCenter(luaL_checkfloat(L, 1), luaL_checkfloat(L, 2), luaL_checkfloat(L, 3));
+	const float radius = luaL_checkfloat(L, 4);
+
+	const bool excludeWeaponProjectiles = luaL_optboolean(L, 5, false);
+	const bool excludePieceProjectiles = luaL_optboolean(L, 6, false);
+
+	const auto& rows = simSnapshot.ReadProjectiles();
+
+	sqObjectIDs.clear();
+
+	for (size_t projID = 0; projID < rows.MaxSlots(); ++projID) {
+		if (rows.valid[projID] == 0)
+			continue;
+
+		const float totRad = radius + rows.radius[projID];
+		if (sphereCenter.SqDistance(rows.pos[projID]) >= (totRad * totRad))
+			continue;
+
+		sqObjectIDs.push_back(static_cast<int>(projID));
+	}
+
+	GetProjectilesLuaTableSnap(L, rows, sqObjectIDs, excludeWeaponProjectiles, excludePieceProjectiles);
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetAllFeatures (NB its own fullRead/IsFeatureVisible
+// branch structure, distinct from ProcessFeatures' readAllyTeam<0 shape)
+int LuaSnapshotServe::GetAllFeatures(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.ReadFeatures();
+	const Pov pov = HandlePov(L);
+
+	// DEVIATION: ascending ids (master lists featureHandler's active-id order)
+	lua_createtable(L, rows.MaxSlots(), 0);
+
+	int count = 0;
+	if (pov.fullRead) {
+		for (size_t id = 0; id < rows.MaxSlots(); ++id) {
+			if (rows.valid[id] == 0)
+				continue;
+			lua_pushnumber(L, static_cast<int>(id));
+			lua_rawseti(L, -2, ++count);
+		}
+	} else {
+		for (size_t id = 0; id < rows.MaxSlots(); ++id) {
+			if (rows.valid[id] == 0)
+				continue;
+			if (!PovFeatureVisible(rows, static_cast<int>(id), pov))
+				continue;
+			lua_pushnumber(L, static_cast<int>(id));
+			lua_rawseti(L, -2, ++count);
+		}
 	}
 
 	return 1;
@@ -5675,6 +5906,58 @@ int LuaSnapshotServe::GetUnitScriptNames(lua_State* L, const char* caller)
 			lua_rawset(L, -3);
 		}
 	}
+
+	return 1;
+}
+
+
+// mirror of LuaUnsyncedRead::GetSelectedUnitsSorted (the selection id set is
+// draw-owned; only the unitDef sort-key deref was a live sim read)
+int LuaSnapshotServe::GetSelectedUnitsSorted(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+
+	const auto numDefKeys = PushUnitListSortedByDefSnap(L, rows, selectedUnitsHandler.selectedUnits);
+	lua_pushnumber(L, numDefKeys);
+
+	return 2;
+}
+
+// mirror of LuaUnsyncedRead::GetSelectedUnitsCounts
+int LuaSnapshotServe::GetSelectedUnitsCounts(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+
+	const auto numDefKeys = PushSparseUnitTallyByDefSnap(L, rows, selectedUnitsHandler.selectedUnits);
+	lua_pushnumber(L, numDefKeys);
+
+	return 2;
+}
+
+// mirror of LuaUnsyncedRead::GetGroupUnitsSorted (the group id set is draw-owned
+// UI state; only the unitDef sort-key deref was a live sim read)
+int LuaSnapshotServe::GetGroupUnitsSorted(lua_State* L, const char* caller)
+{
+	const CGroup* group = GetGroupFromArgSnap(L, 1);
+	if (group == nullptr)
+		return 0;
+
+	const auto& rows = simSnapshot.Read();
+
+	PushUnitListSortedByDefSnap(L, rows, group->units);
+	return 1;
+}
+
+// mirror of LuaUnsyncedRead::GetGroupUnitsCounts
+int LuaSnapshotServe::GetGroupUnitsCounts(lua_State* L, const char* caller)
+{
+	const CGroup* group = GetGroupFromArgSnap(L, 1);
+	if (group == nullptr)
+		return 0;
+
+	const auto& rows = simSnapshot.Read();
+
+	PushSparseUnitTallyByDefSnap(L, rows, group->units);
 	return 1;
 }
 

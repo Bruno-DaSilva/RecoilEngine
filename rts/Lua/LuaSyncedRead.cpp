@@ -3593,9 +3593,15 @@ static int GetUnitTableCentroid(lua_State *const L, const int indexWithinTable, 
  * @return number centerY
  * @return number centerZ
  */
+static int GetUnitArrayCentroidLive(lua_State* L, const char* caller)
+{
+	return GetUnitTableCentroid(L, -1, caller);
+}
+
 int LuaSyncedRead::GetUnitArrayCentroid(lua_State* L)
 {
-	return GetUnitTableCentroid(L, -1, __func__);
+	// snapshot-served from draw context (sim|draw PR 34, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitArrayCentroidLive, &LuaSnapshotServe::GetUnitArrayCentroid);
 }
 
 /*** Returns the centroid of a map of units
@@ -3608,9 +3614,15 @@ int LuaSyncedRead::GetUnitArrayCentroid(lua_State* L)
  * @return number centerY
  * @return number centerZ
  */
+static int GetUnitMapCentroidLive(lua_State* L, const char* caller)
+{
+	return GetUnitTableCentroid(L, -2, caller);
+}
+
 int LuaSyncedRead::GetUnitMapCentroid(lua_State* L)
 {
-	return GetUnitTableCentroid(L, -2, __func__);
+	// snapshot-served from draw context (sim|draw PR 34, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitMapCentroidLive, &LuaSnapshotServe::GetUnitMapCentroid);
 }
 
 
@@ -3854,20 +3866,20 @@ static void GetProjectilesLuaTable(lua_State* L, const std::vector<CProjectile*>
  * @param excludePieceProjectiles boolean? (Default: `false`)
  * @return number[] projectileIDs
  */
-int LuaSyncedRead::GetAllProjectiles(lua_State* L)
+static int GetAllProjectilesLive(lua_State* L, const char* caller)
 {
 	const bool excludeWeaponProjectiles = luaL_optboolean(L, 1, false);
 	const bool excludePieceProjectiles  = luaL_optboolean(L, 2, false);
 
-	// split-contract gate (PR 27a): iterates projectileHandler's live projectile list directly
-	if (LuaSplitContract::DenyLiveRead(L, __func__)) {
-		lua_createtable(L, 0, 0);
-		return 1;
-	}
-
 	const auto& projVec = projectileHandler.GetActiveProjectiles(true).GetData();
 	GetProjectilesLuaTable(L, projVec, excludeWeaponProjectiles, excludePieceProjectiles);
 	return 1;
+}
+
+int LuaSyncedRead::GetAllProjectiles(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 34, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetAllProjectilesLive, &LuaSnapshotServe::GetAllProjectiles);
 }
 
 /***
@@ -3917,7 +3929,7 @@ int LuaSyncedRead::GetProjectilesInRectangle(lua_State* L)
  * @param excludePieceProjectiles boolean? (Default: false)
  * @return number[] projectileIDs
  */
-int LuaSyncedRead::GetProjectilesInSphere(lua_State* L)
+static int GetProjectilesInSphereLive(lua_State* L, const char* caller)
 {
 	const float3 sphereCenter(luaL_checkfloat(L, 1), luaL_checkfloat(L, 2), luaL_checkfloat(L, 3));
 	const float radius = luaL_checkfloat(L, 4);
@@ -3925,16 +3937,16 @@ int LuaSyncedRead::GetProjectilesInSphere(lua_State* L)
 	const bool excludeWeaponProjectiles = luaL_optboolean(L, 5, false);
 	const bool excludePieceProjectiles = luaL_optboolean(L, 6, false);
 
-	// split-contract gate (PR 27a): reads the quadfield directly
-	if (LuaSplitContract::DenyLiveRead(L, __func__)) {
-		lua_createtable(L, 0, 0);
-		return 1;
-	}
-
 	QuadFieldQuery qfQuery;
 	quadField.GetProjectilesExact(qfQuery, sphereCenter, radius);
 	GetProjectilesLuaTable(L, *qfQuery.projectiles, excludeWeaponProjectiles, excludePieceProjectiles);
 	return 1;
+}
+
+int LuaSyncedRead::GetProjectilesInSphere(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 34, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetProjectilesInSphereLive, &LuaSnapshotServe::GetProjectilesInSphere);
 }
 
 /******************************************************************************
@@ -7343,14 +7355,8 @@ int LuaSyncedRead::ValidFeatureID(lua_State* L)
  * @function Spring.GetAllFeatures
  * @return integer[] featureIDs
  */
-int LuaSyncedRead::GetAllFeatures(lua_State* L)
+static int GetAllFeaturesLive(lua_State* L, const char* caller)
 {
-	// split-contract gate (PR 27a): iterates featureHandler's live active-feature set directly
-	if (LuaSplitContract::DenyLiveRead(L, __func__)) {
-		lua_createtable(L, 0, 0);
-		return 1;
-	}
-
 	int count = 0;
 	const auto& activeFeatureIDs = featureHandler.GetActiveFeatureIDs();
 
@@ -7370,6 +7376,12 @@ int LuaSyncedRead::GetAllFeatures(lua_State* L)
 		}
 	}
 	return 1;
+}
+
+int LuaSyncedRead::GetAllFeatures(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 34, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetAllFeaturesLive, &LuaSnapshotServe::GetAllFeatures);
 }
 
 

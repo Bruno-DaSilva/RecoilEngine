@@ -396,12 +396,18 @@ public:
 		std::vector<float> pieceSpinSpeed;
 		std::vector<float3> pieceSpinVec;
 		std::vector<std::string> pieceName;  // empty when !isPiece
+		// PR 34 (spatial/list remainder): CProjectile::radius, the sphere-test
+		// input GetProjectilesInSphere's quadfield filter reads
+		// (pos.SqDistance(p->pos) >= Square(radius + p->radius))
+		std::vector<float> radius;
 		std::vector<uint8_t> inLosAll;    // [numAllyTeams * MaxSlots()], row-major by allyteam
 
 		bool Valid(int projID) const {
 			return (static_cast<size_t>(projID) < valid.size() && valid[projID] != 0);
 		}
 		size_t MaxSlots() const { return valid.size(); }
+		// PR 34 stale/nil contract default (invalid ids read 0)
+		float Radius(int projID) const { return Valid(projID) ? radius[projID] : 0.0f; }
 
 		bool InLos(int projID, int argAllyTeam) const {
 			return (argAllyTeam >= 0 && argAllyTeam < numAllyTeams &&
