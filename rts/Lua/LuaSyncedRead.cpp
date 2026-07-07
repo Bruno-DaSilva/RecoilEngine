@@ -9078,7 +9078,7 @@ int LuaSyncedRead::GetSmoothMeshHeight(lua_State* L)
  * @param centerOnly boolean? (Default: `false`)
  * @return boolean
  */
-int LuaSyncedRead::TestMoveOrder(lua_State* L)
+static int TestMoveOrderLive(lua_State* L, const char* caller)
 {
 	const int unitDefID = luaL_checkint(L, 1);
 	const UnitDef* unitDef = unitDefHandler->GetUnitDefByID(unitDefID);
@@ -9103,7 +9103,7 @@ int LuaSyncedRead::TestMoveOrder(lua_State* L)
 	const bool centerOnly = luaL_optboolean(L, 10, false);
 
 	// split-contract gate (PR 27a): reads losHandler + the synced blocking/terrain maps directly
-	if (LuaSplitContract::DenyLiveRead(L, __func__))
+	if (LuaSplitContract::DenyLiveRead(L, caller))
 		return 0;
 
 	bool los = false;
@@ -9124,6 +9124,13 @@ int LuaSyncedRead::TestMoveOrder(lua_State* L)
 	return 1;
 }
 
+int LuaSyncedRead::TestMoveOrder(lua_State* L)
+{
+	// sim|draw PR 38e: served by the sim-side placement query/reply channel (the
+	// PR 35 trace-test mechanism). Flag-off runs the live body inline (bit-identical).
+	return LuaSnapshotServe::RoutePlacementQuery(L, __func__, &TestMoveOrderLive, LuaSnapshotServe::PlacementKind::TestMoveOrder);
+}
+
 /***
  * @alias BuildOrderBlockedStatus
  * | 0 # blocked
@@ -9142,7 +9149,7 @@ int LuaSyncedRead::TestMoveOrder(lua_State* L)
  * @return BuildOrderBlockedStatus blocking
  * @return integer? featureID A reclaimable feature in the way.
  */
-int LuaSyncedRead::TestBuildOrder(lua_State* L)
+static int TestBuildOrderLive(lua_State* L, const char* caller)
 {
 	const int unitDefID = luaL_checkint(L, 1);
 	const UnitDef* unitDef = unitDefHandler->GetUnitDefByID(unitDefID);
@@ -9153,12 +9160,12 @@ int LuaSyncedRead::TestBuildOrder(lua_State* L)
 	}
 
 	BuildInfo bi;
-	bi.buildFacing = LuaUtils::ParseFacing(L, __func__, 5);
+	bi.buildFacing = LuaUtils::ParseFacing(L, caller, 5);
 	bi.def = unitDef;
 	bi.pos = {luaL_checkfloat(L, 2), luaL_checkfloat(L, 3), luaL_checkfloat(L, 4)};
 
 	// split-contract gate (PR 27a): TestUnitBuildSquare reads the blocking map + live objects directly
-	if (LuaSplitContract::DenyLiveRead(L, __func__))
+	if (LuaSplitContract::DenyLiveRead(L, caller))
 		return 0;
 
 	bi.pos = CGameHelper::Pos2BuildPos(bi, CLuaHandle::GetHandleSynced(L));
@@ -9184,6 +9191,12 @@ int LuaSyncedRead::TestBuildOrder(lua_State* L)
 	lua_pushnumber(L, retval);
 	lua_pushnumber(L, feature->id);
 	return 2;
+}
+
+int LuaSyncedRead::TestBuildOrder(lua_State* L)
+{
+	// sim|draw PR 38e: served by the sim-side placement query/reply channel
+	return LuaSnapshotServe::RoutePlacementQuery(L, __func__, &TestBuildOrderLive, LuaSnapshotServe::PlacementKind::TestBuildOrder);
 }
 
 
@@ -9244,7 +9257,7 @@ int LuaSyncedRead::Pos2BuildPos(lua_State* L)
  * @return number buildPosY
  * @return number buildPosZ
  */
-int LuaSyncedRead::ClosestBuildPos(lua_State* L)
+static int ClosestBuildPosLive(lua_State* L, const char* caller)
 {
 	const int teamID = luaL_checkint(L, 1);
 	const int udefID = luaL_checkint(L, 2);
@@ -9257,7 +9270,7 @@ int LuaSyncedRead::ClosestBuildPos(lua_State* L)
 	const float3 worldPos = {luaL_checkfloat(L, 3), luaL_checkfloat(L, 4), luaL_checkfloat(L, 5)};
 
 	// split-contract gate (PR 27a): ClosestBuildPos runs live build-square tests (blocking map + objects)
-	if (LuaSplitContract::DenyLiveRead(L, __func__))
+	if (LuaSplitContract::DenyLiveRead(L, caller))
 		return 0;
 
 	const float3 buildPos = CGameHelper::ClosestBuildPos(teamID, unitDefHandler->GetUnitDefByID(udefID), worldPos, searchRadius, minDistance, buildFacing, CLuaHandle::GetHandleSynced(L));
@@ -9266,6 +9279,12 @@ int LuaSyncedRead::ClosestBuildPos(lua_State* L)
 	lua_pushnumber(L, buildPos.y);
 	lua_pushnumber(L, buildPos.z);
 	return 3;
+}
+
+int LuaSyncedRead::ClosestBuildPos(lua_State* L)
+{
+	// sim|draw PR 38e: served by the sim-side placement query/reply channel
+	return LuaSnapshotServe::RoutePlacementQuery(L, __func__, &ClosestBuildPosLive, LuaSnapshotServe::PlacementKind::ClosestBuildPos);
 }
 
 

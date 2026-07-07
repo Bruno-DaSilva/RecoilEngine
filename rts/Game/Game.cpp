@@ -1690,6 +1690,14 @@ void CGame::SimDrawBarrier()
 	// when the draw side enqueued nothing since the last barrier.
 	LuaSnapshotServe::EvaluateTraceQueries();
 
+	// (3d) evaluate the draw side's pending placement-test queries (sim|draw
+	// PR 38e, same sim-side query/reply channel as (3c)). Sim parked, so the exact
+	// live CGameHelper::TestUnitBuildSquare / MoveDef::TestMoveSquare /
+	// ClosestBuildPos predicates run against valid boundary-N terrain/blocking
+	// state; replies publish for the next draw frame. No-op (empty check) flag-off
+	// or when the draw side enqueued nothing since the last barrier.
+	LuaSnapshotServe::EvaluatePlacementQueries();
+
 	// (4) TEST-ONLY (PR 17): when armed via /snapshotdiffgate, verify every
 	// value the snapshot would serve bit-matches the live sim read at this
 	// boundary. A single branch when unarmed.

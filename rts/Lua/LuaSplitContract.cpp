@@ -92,20 +92,20 @@ namespace {
 	 *    RequestPath is a mutation (boundary-apply or contract-error)
 	 */
 	const spring::unordered_set<std::string> sanctionedLive = {
-		// placement/build tests (GuiHandler-driven widgets call these per
-		// mouse position from draw context). sim|draw PR 29 landed the
-		// DrawMapMirrors blocking-map mirror (per-square cell[0] id + kind) and
-		// SERVED Pos2BuildPos (draw-safe unsynced-heightmap build-grid snap) and
-		// GetGroundBlocked (blocking mirror + snapshot unit/feature visibility).
-		// The three below stay live: their test logic bottoms out in the SYNCED
-		// terrain-speedmod arrays (maxHeightMap/typeMap/slopeMap/centerNormals2D
-		// via CheckCollisionQuery elevation + CMoveMath::GetPosSpeedMod), which
-		// need their own draw-side terrain mirror + a faithful CMoveMath/
-		// TestUnitBuildSquare re-host -- a distinct, gate-verified follow-up (the
-		// blocking mirror is in place; see the PR 29 escalation note).
-		"TestBuildOrder",
-		"TestMoveOrder",
-		"ClosestBuildPos",
+		// placement/build tests: FULLY SERVED. sim|draw PR 29 served Pos2BuildPos
+		// (draw-safe unsynced-heightmap build-grid snap) and GetGroundBlocked
+		// (DrawMapMirrors blocking mirror + snapshot unit/feature visibility). The
+		// remaining three -- TestBuildOrder / TestMoveOrder / ClosestBuildPos --
+		// landed in sim|draw PR 38e via the SIM-SIDE QUERY/REPLY channel (the PR 35
+		// trace-test mechanism; LuaSnapshotServe::RoutePlacementQuery +
+		// EvaluatePlacementQueries): flag-off runs the live CGameHelper /
+		// MoveDef::TestMoveSquare / CMoveMath predicate inline (bit-identical),
+		// flag-on defers a query the sim evaluates sim-exact at the barrier. A
+		// bit-exact draw-side recompute was infeasible (the SYNCED terrain-speedmod
+		// arrays + full per-cell object capture would need approximation, which
+		// Route() forbids flag-off -- the PR 29 escalation note), so the channel
+		// serves them without approximation. They take no draw-context live read
+		// and are no longer sanctioned. Nothing from this family remains here.
 		// map info reads: GetGroundOrigHeight (orig-heightmap), GetTerrainTypeData
 		// (terrain-type table) and GetSmoothMeshHeight (smooth mesh) are SERVED
 		// from DrawMapMirrors (PR 28). GetGroundInfo (typemap + terrain-type table

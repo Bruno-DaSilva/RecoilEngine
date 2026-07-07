@@ -505,4 +505,69 @@ namespace LuaSnapshotServe {
 	/// ClearCaches()). Self-pruning already prevents growth/aliasing; this is the
 	/// explicit belt-and-suspenders reset.
 	void ClearTraceQueryChannel();
+
+	// ================= PR 38e: placement build/move tests =================
+	// TestBuildOrder/TestMoveOrder/ClosestBuildPos served by the SAME sim-side
+	// QUERY/REPLY channel as PR 35's weapon trace tests (the last three
+	// sanctionedLive entries; landing them unblocks PR 38b's zero-sanction flip).
+	// They re-host CGameHelper::TestUnitBuildSquare / MoveDef::TestMoveSquare /
+	// ClosestBuildPos + CMoveMath, whose bit-exact draw-side recompute would need
+	// the whole terrain-speedmod mirror + full per-cell object capture (the PR 29
+	// escalation note) -- an approximation-prone sub-project that would break
+	// flag-off bit-identity (Route() serves the value even flag-off). So, like
+	// PR 35:
+	//
+	//  - Flag-OFF (no running split): RoutePlacementQuery runs the LIVE body
+	//    inline (bit-identical to master; sim==draw single-threaded, sim parked
+	//    relative to draw). No queue, no defer.
+	//  - Flag-ON (running split): the callout enqueues a placement query and
+	//    returns the LAST boundary's sim-exact reply (documented default on
+	//    first-call/miss). EvaluatePlacementQueries() drains the pending queue at
+	//    the SimDrawBarrier (sim parked) and evaluates the EXACT live predicate
+	//    against live sim state -- boundary-deferred (<=1 stale) but sim-exact, no
+	//    approximation. Reply state is UNSYNCED (draw-only): no synced write, no
+	//    gsRNG, no streflop (the predicates are const reads over the blocking map /
+	//    terrain / heightmap / los, already called from unsynced widgets on master
+	//    without desync).
+	//
+	// This request/reply channel is DISTINCT from the published snapshot ring --
+	// PR 43's epoch mechanism must carry the query queue + reply map alongside the
+	// ring (same flag as the PR 35 trace channel).
+	//
+	// FLAG-ON DEVIATION (enumerated; the PR 35 pos-form finding applies in FULL
+	// here and is the DOMINANT case for placement): the reply map is keyed by the
+	// FULL query, including the float pos bits. Build-placement / move-order
+	// widgets follow the MOUSE CURSOR, so the queried position CHANGES essentially
+	// every frame => a NEW key each frame => every serve is a map miss => the
+	// callout returns the documented DEFAULT (blocked / not-found) PERSISTENTLY
+	// while the cursor moves. This is worse than the "<=1 stale" envelope and is
+	// ADVISORY-UI-ONLY (no sync/leak consequence -- the channel is unsynced
+	// draw-state; flag-off is byte-identical). It is deliberately left
+	// forward-fixable at PR 43's epoch refresh rather than fixed here: evaluating
+	// the predicate synchronously at request time is UNSAFE under the running
+	// split (it reads the blocking map / terrain arrays / quadfield the sim thread
+	// is concurrently mutating -- the exact race this channel avoids), and a
+	// build-grid-snapped secondary key is only value-safe for TestBuildOrder (its
+	// result depends solely on the snapped pos), NOT for ClosestBuildPos (the
+	// nearest-pos search value depends continuously on worldPos) or reliably for
+	// TestMoveOrder -- so a uniform key change would silently corrupt two of the
+	// three. The windowed build-placement gate (batch end) MUST exercise a
+	// moving-cursor build preview so this class is verified, not silently broken.
+	enum class PlacementKind { TestMoveOrder = 0, TestBuildOrder = 1, ClosestBuildPos = 2 };
+
+	/// entry-point glue for the three placement tests (called from LuaSyncedRead):
+	/// dispatches to `liveFn` when the split is off (bit-identical), to the
+	/// query/reply channel under the running split, and dual-runs live-vs-query
+	/// for coverage when the diff gate is armed flag-off.
+	int RoutePlacementQuery(lua_State* L, const char* caller, ServeFn liveFn, PlacementKind kind);
+
+	/// SimDrawBarrier hook (sim parked): drain the pending placement queries and
+	/// evaluate each against live sim state, publishing the replies for the next
+	/// draw frame. No-op (empty check) flag-off / when nothing was enqueued.
+	void EvaluatePlacementQueries();
+
+	/// game teardown: reset the placement-query pending queue + reply map (called
+	/// from ClearCaches()). Self-pruning already prevents growth/aliasing; this is
+	/// the explicit belt-and-suspenders reset.
+	void ClearPlacementQueryChannel();
 }

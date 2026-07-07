@@ -45,7 +45,9 @@
 #include "Sim/Misc/CollisionVolume.h" // WORLD_TO_OBJECT_SPACE
 #include "Sim/Misc/GlobalConstants.h" // GAME_SPEED
 #include "Sim/Misc/GlobalSynced.h" // GODMODE_*_BIT
+#include "Sim/Misc/LosHandler.h" // sim|draw PR 38e: TestMoveOrder barrier los gate (losHandler->InLos)
 #include "Sim/MoveTypes/MoveDefHandler.h" // immutable MoveDef name (GetUnitMoveDefID)
+#include "Sim/MoveTypes/MoveMath/MoveMath.h" // sim|draw PR 38e: TestMoveOrder barrier CheckCollisionQuery ctor
 #include "Sim/MoveTypes/AAirMoveType.h" // PR 32 GetUnitMoveTypeData aircraftState enum
 #include "Sim/MoveTypes/HoverAirMoveType.h" // PR 32 GetUnitMoveTypeData flyState enum
 #include "Sim/Projectiles/PieceProjectile.h" // PR 33 GetPieceProjectileParams/Name twins
@@ -6754,6 +6756,10 @@ void LuaSnapshotServe::ClearCaches()
 	// caches above can); ClearTraceQueryChannel() resets it explicitly all the
 	// same, called next to this from CGame teardown.
 	LuaSnapshotServe::ClearTraceQueryChannel();
+
+	// PR 38e placement query/reply channel: same self-pruning main-thread-only
+	// design as the PR 35 trace channel above; reset it explicitly at teardown.
+	LuaSnapshotServe::ClearPlacementQueryChannel();
 }
 
 
@@ -8593,4 +8599,450 @@ void LuaSnapshotServe::ClearTraceQueryChannel()
 	traceQueryPending.shrink_to_fit();
 	traceQueryReplies.clear();
 	traceQueryRepliesScratch.clear();
+}
+
+
+/******************************************************************************
+ * PR 38e -- placement build/move tests via the SIM-SIDE QUERY/REPLY channel
+ *
+ * Serves the last three sanctioned placement callouts -- TestBuildOrder /
+ * TestMoveOrder / ClosestBuildPos -- so the draw thread no longer runs the live
+ * CGameHelper::TestUnitBuildSquare / MoveDef::TestMoveSquare / ClosestBuildPos
+ * physics predicates against sim-owned terrain/blocking state while the sim
+ * advances. This is the SAME physics-predicate-rehost class as PR 35's weapon
+ * trace tests (aed2f64bbb): flag-off Route()-style serving forbids ANY
+ * approximation (the served value must equal master's live value byte-for-byte),
+ * and a faithful draw-side recompute would need the whole terrain-speedmod
+ * mirror + a bit-exact CMoveMath / TestUnitBuildSquare re-host bottoming out in
+ * the SYNCED, non-double-buffered terrain arrays (maxHeightMap / typeMap /
+ * slopeMap / centerNormals2D) + buildingMaskMap + yardmapStatusEffectsMap +
+ * full per-cell object physical-state capture (RangeIsBlocked iterates whole
+ * cells, not just the cell[0] the PR 29 blocking mirror captures) -- a large,
+ * fragile, approximation-prone sub-project (the PR 29 escalation note). So these
+ * three are served the same way PR 35 served the trace tests:
+ *
+ *   flag-OFF: RoutePlacementQuery runs the LIVE body inline -> bit-identical.
+ *   flag-ON : the callout enqueues a query and returns the last boundary's reply;
+ *             EvaluatePlacementQueries() (a SimDrawBarrier step, sim parked -- the
+ *             RefreshCommandQueues / EvaluateTraceQueries precedent) evaluates the
+ *             EXACT live predicate against live sim state. Boundary-deferred
+ *             (<=1 stale) but sim-exact, no approximation.
+ *
+ * The query queue + reply map are MAIN-THREAD-ONLY (written by draw-context Lua
+ * during CGame::Draw, drained at the barrier that opens the same CGame::Draw --
+ * both on the main thread; the sim thread never touches them). No locks, no
+ * atomics; flag-off the twin never enqueues, so the channel is inert.
+ * DISTINCT from the snapshot ring -> flagged for PR 43's epoch refresh (same as
+ * the PR 35 channel).
+ *
+ * Sync audit: CGameHelper::{TestUnitBuildSquare,Pos2BuildPos,ClosestBuildPos},
+ * MoveDef::TestMoveSquare (-> CMoveMath GetPosSpeedMod / RangeIsBlocked /
+ * ObjectBlockType) and losHandler->InLos are const reads over the blocking map /
+ * terrain arrays / heightmap / features / los -- they consume NO gsRNG (verified:
+ * no RNG in GameHelper's build-square region or MoveMath) and mutate no synced
+ * state (master already calls all three from unsynced widget draw context every
+ * frame without desync -- that is exactly why they were sanctionedLive). The
+ * `synced` flag is false for a served handle, so the height snap uses the
+ * UNSYNCED heightmap; the blocking/terrain reads are the same sanctioned barrier
+ * class as RefreshCommandQueues' live queue walk (sim parked, scratch
+ * uncontended -- no concurrent sim query runs). No synced write, no streflop, no
+ * snapshot ring mutation.
+ *
+ * Dirty-marking choke-point audit: N/A -- like the PR 35 channel this adds no
+ * mirror or dirty-copy; the reply map is recomputed wholesale each barrier from
+ * live objects, so there is no dirty-mark to funnel and no missed-dirty class to
+ * gate. (The PR 29 blocking mirror this family could otherwise build on is not
+ * used here: the value must be bit-exact, and that mirror captures only cell[0]
+ * -- RangeIsBlocked reads whole cells -- so a mirror recompute cannot match.)
+ *
+ * POV/masking audit: TestMoveOrder's los gate captures readAllyTeam+fullRead and
+ * evaluates losHandler->InLos(pos, allyTeam) at the barrier exactly as the live
+ * body (negative-allyTeam -> fullRead). TestBuildOrder passes readAllyTeam to
+ * TestUnitBuildSquare (negative allyTeam = full visibility, as documented in the
+ * live body). ClosestBuildPos takes an explicit teamID arg (not the handle POV)
+ * and resolves team->allyTeam inside the helper, unchanged. Return shapes mirror
+ * the live bodies exactly (TMO: 1 boolean; TBO: 1 number, or 2 with the blocking
+ * feature id; CBP: 3 numbers). Bad-arg Lua errors (luaL_checkint/checkfloat /
+ * LuaUtils::ParseFacing) raise identically because the query build re-does the
+ * same arg reads in the same order as master.
+ ******************************************************************************/
+
+namespace {
+	// Packed POD placement query -- the reply-map key. All members are 4 bytes
+	// (int32_t/float) so the whole struct hashes/compares byte-wise with no
+	// padding; unused-per-kind fields are zeroed at build time so two identical
+	// widget calls produce an identical key (the PR 35 WeaponTraceQuery pattern).
+	struct PlacementQuery {
+		int32_t kind;         // LuaSnapshotServe::PlacementKind
+		int32_t defID;        // TMO/TBO unitDefID; CBP udefID (arg 2)
+		int32_t teamID;       // CBP team (arg 1); 0 otherwise
+		int32_t readAllyTeam; // POV: TMO los gate + TBO TestUnitBuildSquare allyTeam
+		int32_t fullRead;     // POV bool (TMO los gate); 0/1
+		int32_t synced;       // handle synced flag (always 0 for a served handle); 0/1
+		int32_t facing;       // TBO/CBP buildFacing
+		int32_t minDistance;  // CBP
+		int32_t flags;        // TMO: bit0 testTerrain, bit1 testObjects, bit2 centerOnly
+		float px, py, pz;     // pos (all kinds)
+		float dx, dy, dz;     // TMO dir
+		float searchRadius;   // CBP
+	};
+	static_assert(sizeof(PlacementQuery) == 16 * sizeof(int32_t), "PlacementQuery must be padding-free for byte-wise hash/eq");
+
+	// The sim-exact reply for one query. retCount is the Lua return count master
+	// would push; i0/i1 carry integer/id results, f0/f1/f2 the float triple.
+	struct PlacementReply {
+		int32_t retCount;   // 1 (TMO / TBO-no-feature), 2 (TBO+feature), 3 (CBP)
+		int32_t i0;         // TMO: bool(0/1); TBO: BUILDSQUARE_* status
+		int32_t i1;         // TBO: blocking feature id (only when retCount==2)
+		float f0, f1, f2;   // CBP buildPos x/y/z
+	};
+
+	struct PlacementQueryEq {
+		bool operator()(const PlacementQuery& a, const PlacementQuery& b) const {
+			return std::memcmp(&a, &b, sizeof(PlacementQuery)) == 0;
+		}
+	};
+	struct PlacementQueryHash {
+		size_t operator()(const PlacementQuery& q) const {
+			// FNV-1a over the raw bytes (the PR 35 channel's hash)
+			const unsigned char* p = reinterpret_cast<const unsigned char*>(&q);
+			size_t h = 1469598103934665603ULL;
+			for (size_t i = 0; i < sizeof(PlacementQuery); ++i) {
+				h ^= p[i];
+				h *= 1099511628211ULL;
+			}
+			return h;
+		}
+	};
+
+	// requested since the last barrier (draw-context callouts push here; the
+	// barrier drains + clears). Main-thread-only.
+	std::vector<PlacementQuery> placementQueryPending;
+	// last boundary's sim-exact replies, keyed by query. Rebuilt each barrier from
+	// the pending set (a query the widgets stop requesting drops out -- no growth).
+	std::unordered_map<PlacementQuery, PlacementReply, PlacementQueryHash, PlacementQueryEq> placementQueryReplies;
+	std::unordered_map<PlacementQuery, PlacementReply, PlacementQueryHash, PlacementQueryEq> placementQueryRepliesScratch;
+
+	// master's "no info yet" first-call/miss default per kind (documented):
+	//  - TMO: false (los-blocked answer)
+	//  - TBO: BUILDSQUARE_BLOCKED (conservative "cannot build")
+	//  - CBP: -RgtVector (CGameHelper::ClosestBuildPos' "not found" sentinel)
+	PlacementReply DefaultPlacementReply(LuaSnapshotServe::PlacementKind kind)
+	{
+		using PK = LuaSnapshotServe::PlacementKind;
+		PlacementReply r = {};
+		switch (kind) {
+			case PK::TestMoveOrder:  r.retCount = 1; r.i0 = 0; break;
+			case PK::TestBuildOrder: r.retCount = 1; r.i0 = CGameHelper::BUILDSQUARE_BLOCKED; break;
+			case PK::ClosestBuildPos: r.retCount = 3; r.f0 = -1.0f; r.f1 = 0.0f; r.f2 = 0.0f; break;
+		}
+		return r;
+	}
+
+	// push a reply onto the Lua stack in the live callout's exact shape.
+	int PushPlacementReply(lua_State* L, LuaSnapshotServe::PlacementKind kind, const PlacementReply& r)
+	{
+		using PK = LuaSnapshotServe::PlacementKind;
+		switch (kind) {
+			case PK::TestMoveOrder:
+				lua_pushboolean(L, r.i0 != 0);
+				return 1;
+			case PK::TestBuildOrder:
+				lua_pushnumber(L, r.i0);
+				if (r.retCount == 2) {
+					lua_pushnumber(L, r.i1);
+					return 2;
+				}
+				return 1;
+			case PK::ClosestBuildPos:
+				lua_pushnumber(L, r.f0);
+				lua_pushnumber(L, r.f1);
+				lua_pushnumber(L, r.f2);
+				return 3;
+		}
+		return 0;
+	}
+
+	// Build a placement query from the Lua args, reproducing the live body's arg
+	// parse order (and its Lua errors) and the pure-def early-outs that read only
+	// immutable UnitDef/MoveDef data (answered inline draw-side, never enqueued --
+	// no staleness for the "invalid/immobile def" cases). Returns 1 with `q` filled
+	// (enqueue + serve the last reply), or 0 having filled `inlineReply` (a def
+	// early-out already resolved the answer). POV (readAllyTeam/fullRead/synced) is
+	// captured into the query so the barrier evaluates the same gate as the live body.
+	int BuildPlacementQuery(lua_State* L, const char* caller, LuaSnapshotServe::PlacementKind kind,
+	                        PlacementQuery& q, PlacementReply& inlineReply)
+	{
+		using PK = LuaSnapshotServe::PlacementKind;
+		const Pov pov = HandlePov(L);
+
+		q = PlacementQuery{};
+		q.kind = static_cast<int32_t>(kind);
+		q.readAllyTeam = pov.readAllyTeam;
+		q.fullRead = pov.fullRead ? 1 : 0;
+		q.synced = CLuaHandle::GetHandleSynced(L) ? 1 : 0;
+
+		switch (kind) {
+			case PK::TestMoveOrder: {
+				const int unitDefID = luaL_checkint(L, 1);
+				const UnitDef* unitDef = unitDefHandler->GetUnitDefByID(unitDefID);
+				if (unitDef == nullptr || unitDef->pathType == -1u) {
+					inlineReply = PlacementReply{}; inlineReply.retCount = 1; inlineReply.i0 = 0; // false
+					return 0;
+				}
+				const MoveDef* moveDef = moveDefHandler.GetMoveDefByPathType(unitDef->pathType);
+				if (moveDef == nullptr) {
+					inlineReply = PlacementReply{}; inlineReply.retCount = 1;
+					inlineReply.i0 = unitDef->IsImmobileUnit() ? 0 : 1; // !IsImmobileUnit()
+					return 0;
+				}
+				q.defID = unitDefID;
+				q.px = luaL_checkfloat(L, 2); q.py = luaL_checkfloat(L, 3); q.pz = luaL_checkfloat(L, 4);
+				q.dx = luaL_optfloat(L, 5, 0.0f); q.dy = luaL_optfloat(L, 6, 0.0f); q.dz = luaL_optfloat(L, 7, 0.0f);
+				if (luaL_optboolean(L, 8, true))   q.flags |= 1; // testTerrain
+				if (luaL_optboolean(L, 9, true))   q.flags |= 2; // testObjects
+				if (luaL_optboolean(L, 10, false)) q.flags |= 4; // centerOnly
+				return 1;
+			}
+			case PK::TestBuildOrder: {
+				const int unitDefID = luaL_checkint(L, 1);
+				const UnitDef* unitDef = unitDefHandler->GetUnitDefByID(unitDefID);
+				if (unitDef == nullptr) {
+					inlineReply = PlacementReply{}; inlineReply.retCount = 1; inlineReply.i0 = 0; // 0
+					return 0;
+				}
+				// live parse order: ParseFacing(arg 5) BEFORE the pos floats (2,3,4)
+				q.facing = LuaUtils::ParseFacing(L, caller, 5);
+				q.defID = unitDefID;
+				q.px = luaL_checkfloat(L, 2); q.py = luaL_checkfloat(L, 3); q.pz = luaL_checkfloat(L, 4);
+				return 1;
+			}
+			case PK::ClosestBuildPos: {
+				// live parse order: 1,2,6,7,8,3,4,5
+				q.teamID = luaL_checkint(L, 1);
+				q.defID = luaL_checkint(L, 2);
+				q.searchRadius = luaL_checkfloat(L, 6);
+				q.minDistance = static_cast<int>(luaL_checkfloat(L, 7));
+				q.facing = luaL_checkint(L, 8);
+				q.px = luaL_checkfloat(L, 3); q.py = luaL_checkfloat(L, 4); q.pz = luaL_checkfloat(L, 5);
+				return 1;
+			}
+		}
+		return 1;
+	}
+
+	// Evaluate a placement query against LIVE sim state -- the EXACT live body tail,
+	// with the derived positions (Pos2BuildPos build-grid snap) recomputed sim-side
+	// exactly as the live body does. Called at the barrier (sim parked) and by the
+	// armed flag-off dual-run (single-threaded). Re-derives the immutable def data;
+	// the def early-outs were answered inline (never enqueued), but re-checking is
+	// cheap and defensive against a stray direct call.
+	PlacementReply EvaluatePlacementQueryLive(const PlacementQuery& q)
+	{
+		using PK = LuaSnapshotServe::PlacementKind;
+		PlacementReply r = {};
+
+		switch (static_cast<PK>(q.kind)) {
+			case PK::TestMoveOrder: {
+				r.retCount = 1;
+				const UnitDef* unitDef = unitDefHandler->GetUnitDefByID(q.defID);
+				if (unitDef == nullptr || unitDef->pathType == -1u) { r.i0 = 0; return r; }
+				const MoveDef* moveDef = moveDefHandler.GetMoveDefByPathType(unitDef->pathType);
+				if (moveDef == nullptr) { r.i0 = unitDef->IsImmobileUnit() ? 0 : 1; return r; }
+
+				const float3 pos(q.px, q.py, q.pz);
+				const float3 dir(q.dx, q.dy, q.dz);
+
+				bool los = (q.readAllyTeam < 0) ? (q.fullRead != 0)
+				                                : losHandler->InLos(pos, q.readAllyTeam);
+				bool ret = false;
+				if (los) {
+					MoveTypes::CheckCollisionQuery collisionQuery(moveDef, pos);
+					ret = moveDef->TestMoveSquare(collisionQuery, pos, dir,
+						(q.flags & 1) != 0, (q.flags & 2) != 0, (q.flags & 4) != 0);
+				}
+				r.i0 = ret ? 1 : 0;
+				return r;
+			}
+			case PK::TestBuildOrder: {
+				const UnitDef* unitDef = unitDefHandler->GetUnitDefByID(q.defID);
+				if (unitDef == nullptr) { r.retCount = 1; r.i0 = 0; return r; }
+
+				BuildInfo bi;
+				bi.buildFacing = q.facing;
+				bi.def = unitDef;
+				bi.pos = { q.px, q.py, q.pz };
+				bi.pos = CGameHelper::Pos2BuildPos(bi, q.synced != 0);
+
+				CFeature* feature = nullptr;
+				int retval = CGameHelper::TestUnitBuildSquare(bi, feature, q.readAllyTeam, q.synced != 0);
+
+				// live back-compat map: BUILDSQUARE_OPEN -> BUILDSQUARE_RECLAIMABLE
+				if (retval == CGameHelper::BUILDSQUARE_OPEN)
+					retval = CGameHelper::BUILDSQUARE_RECLAIMABLE;
+
+				r.i0 = retval;
+				if (feature == nullptr) { r.retCount = 1; return r; }
+				r.retCount = 2; r.i1 = feature->id;
+				return r;
+			}
+			case PK::ClosestBuildPos: {
+				r.retCount = 3;
+				const float3 buildPos = CGameHelper::ClosestBuildPos(
+					q.teamID, unitDefHandler->GetUnitDefByID(q.defID),
+					float3(q.px, q.py, q.pz), q.searchRadius, q.minDistance, q.facing, q.synced != 0);
+				r.f0 = buildPos.x; r.f1 = buildPos.y; r.f2 = buildPos.z;
+				return r;
+			}
+		}
+		return r;
+	}
+
+	// flag-ON serving twin: build the query (or resolve a def early-out inline),
+	// enqueue it for the next boundary, and return this frame's reply (the previous
+	// boundary's evaluation, or the documented default on first-call/miss).
+	int ServePlacementQuery(lua_State* L, const char* caller, LuaSnapshotServe::PlacementKind kind)
+	{
+		PlacementQuery q;
+		PlacementReply inlineReply;
+		if (BuildPlacementQuery(L, caller, kind, q, inlineReply) == 0)
+			return PushPlacementReply(L, kind, inlineReply); // def early-out, no channel
+
+		placementQueryPending.push_back(q);
+
+		const auto it = placementQueryReplies.find(q);
+		const PlacementReply r = (it != placementQueryReplies.end()) ? it->second : DefaultPlacementReply(kind);
+		return PushPlacementReply(L, kind, r);
+	}
+}
+
+
+int LuaSnapshotServe::RoutePlacementQuery(lua_State* L, const char* caller, ServeFn liveFn, PlacementKind kind)
+{
+	// non-draw context (synced gadget on the sim thread, sim-phase call): the
+	// live state is owned here, run the body directly -- identical to master
+	if (!ShouldServe(L))
+		return liveFn(L, caller);
+
+	// pregame: no sim thread yet, live tables exist, snapshot does not -- serve
+	// live under the sanctioned live-exception bracket (the Route() precedent)
+	if (simSnapshot.Generation() == 0) {
+		LuaSplitContract::ScopedLiveException prePublishFallback;
+		return liveFn(L, caller);
+	}
+
+	const bool splitRunning =
+		SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() && !SimDrawSplit::IsSimParked();
+
+	if (splitRunning) {
+		// flag-ON: the sim thread owns live terrain/blocking state -- NEVER touch
+		// it from draw context. Enqueue + return the last boundary's sim-exact reply.
+		return ServePlacementQuery(L, caller, kind);
+	}
+
+	// flag-OFF from draw context: single-threaded, the sim is parked relative to
+	// draw, so the live predicate IS the sim-side evaluation (sim==draw thread).
+	// It must be the served value (flag-off bit-identity). Under a live-exception
+	// bracket so the dress-rehearsal contract gates don't nil the live read.
+	if (!snapshotDiffGate.Armed()) {
+		LuaSplitContract::ScopedLiveException simParkedInline;
+		return liveFn(L, caller);
+	}
+
+	// armed flag-OFF gate: dual-run for coverage of the query build + barrier
+	// evaluation. Live leg = the master body; snap leg = the SAME query built and
+	// evaluated synchronously inline (live-exact by construction, so it passes
+	// trivially -- and any reconstruction bug is caught here). Serve the LIVE
+	// result: flag-off must be bit-identical, the query path is verified, not served.
+	const int base = lua_gettop(L);
+
+	int liveN = 0;
+	{
+		LuaSplitContract::ScopedLiveException liveLeg;
+		liveN = liveFn(L, caller);
+	}
+
+	// stash the live returns, reset the stack to the original args
+	lua_createtable(L, liveN, 0);
+	for (int i = 1; i <= liveN; ++i) {
+		lua_pushvalue(L, base + i);
+		lua_rawseti(L, -2, i);
+	}
+	const int liveRef = luaL_ref(L, LUA_REGISTRYINDEX);
+	lua_settop(L, base);
+
+	// snap leg: build + evaluate the query inline (single-threaded, live objects).
+	// Its returns sit at base+1 .. base+snapN.
+	int snapN = 0;
+	{
+		PlacementQuery q;
+		PlacementReply reply;
+		if (BuildPlacementQuery(L, caller, kind, q, reply) != 0)
+			reply = EvaluatePlacementQueryLive(q);
+		snapN = PushPlacementReply(L, kind, reply);
+	}
+
+	lua_rawgeti(L, LUA_REGISTRYINDEX, liveRef); // live-returns table at base+snapN+1
+	const int tbl = base + snapN + 1;
+
+	bool equal = (liveN == snapN);
+	char detail[160] = "";
+
+	if (!equal) {
+		snprintf(detail, sizeof(detail), "return counts differ: live=%d snap=%d", liveN, snapN);
+	} else {
+		for (int i = 1; i <= liveN; ++i) {
+			lua_rawgeti(L, tbl, i); // live value i at tbl+1
+			const bool slotEqual = SlotsEqual(L, tbl + 1, base + i);
+			if (!slotEqual && equal) {
+				equal = false;
+				char liveDesc[48];
+				char snapDesc[48];
+				DescribeSlot(L, tbl + 1, liveDesc, sizeof(liveDesc));
+				DescribeSlot(L, base + i, snapDesc, sizeof(snapDesc));
+				snprintf(detail, sizeof(detail), "return %d differs: live=%s snap=%s", i, liveDesc, snapDesc);
+			}
+			lua_pop(L, 1);
+		}
+	}
+
+	snapshotDiffGate.CountCallout(caller, equal, detail);
+
+	// serve the LIVE returns (flag-off bit-identity): drop everything above the
+	// args, push the stashed live values, then release the stash.
+	lua_settop(L, base);
+	lua_rawgeti(L, LUA_REGISTRYINDEX, liveRef); // live-returns table on top
+	for (int i = 1; i <= liveN; ++i)
+		lua_rawgeti(L, base + 1, i);            // push live value i above the table
+	lua_remove(L, base + 1);                    // drop the table, leaving the liveN values
+	luaL_unref(L, LUA_REGISTRYINDEX, liveRef);
+	return liveN;
+}
+
+
+void LuaSnapshotServe::EvaluatePlacementQueries()
+{
+	// flag-off / nothing enqueued -> inert (the twin only enqueues under the
+	// running split). Called at the SimDrawBarrier with the sim parked, so the
+	// live predicate evaluation is the sanctioned RefreshCommandQueues class.
+	if (placementQueryPending.empty())
+		return;
+
+	// rebuild the reply map from this boundary's pending set: a query the widgets
+	// stopped requesting drops out, so the map cannot grow unbounded across a game.
+	placementQueryRepliesScratch.clear();
+	for (const PlacementQuery& q: placementQueryPending)
+		placementQueryRepliesScratch[q] = EvaluatePlacementQueryLive(q);
+
+	std::swap(placementQueryReplies, placementQueryRepliesScratch);
+	placementQueryPending.clear();
+}
+
+
+void LuaSnapshotServe::ClearPlacementQueryChannel()
+{
+	placementQueryPending.clear();
+	placementQueryPending.shrink_to_fit();
+	placementQueryReplies.clear();
+	placementQueryRepliesScratch.clear();
 }
