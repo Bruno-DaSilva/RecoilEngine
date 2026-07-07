@@ -434,6 +434,28 @@ namespace LuaSnapshotServe {
 	// This request/reply channel is DISTINCT from the published snapshot ring --
 	// PR 43's epoch mechanism must carry the query queue + reply map alongside the
 	// ring (flagged for the epoch-infra refresh).
+	//
+	// FLAG-ON DEVIATION (enumerated at integration -- PR 35 review finding): the
+	// reply map is keyed by the FULL query, including the float pos/tgt bits. For
+	// enemy-form queries {owner,weapon,enemyID} the key is stable, so after the
+	// first boundary the reply populates and tracks at <=1 stale (deviation #2).
+	// But a POS-FORM / cursor-tracking query whose ground position CHANGES every
+	// frame (attack-range / ground-attack placement widgets that follow the mouse
+	// cursor) produces a NEW key each frame => every serve is a map miss => the
+	// callout returns the default `false` PERSISTENTLY, never a correct answer,
+	// for as long as the position keeps moving. This is worse than the sanctioned
+	// "<=1 stale" envelope and is ADVISORY-UI-ONLY (no sync/leak consequence --
+	// the channel is unsynced draw-state). It is deliberately left forward-fixable
+	// rather than fixed here: evaluating pos-form synchronously at request time is
+	// UNSAFE under the running split (the predicates read the collision world /
+	// CGround / quadfield TraceRay scratch the sim thread is concurrently touching
+	// -- the exact race this channel avoids), and a pos-agnostic secondary key
+	// (return the most-recent-position reply) carries its own same-frame collision
+	// ambiguity between two widgets querying one owner/weapon at different cursor
+	// positions. If BAR ships a cursor-following pos-form predicate widget that
+	// this breaks, PR 43's epoch refresh is the place to revisit the keying. The
+	// windowed targeting-widget gate (batch end) MUST exercise a moving-cursor
+	// ground-placement predicate so this class is verified, not silently broken.
 	enum class TraceKind { TryTarget = 0, TestTarget = 1, TestRange = 2, HaveFreeLineOfFire = 3 };
 
 	/// entry-point glue for the four trace tests (called from LuaSyncedRead):

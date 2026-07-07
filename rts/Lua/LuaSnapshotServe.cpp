@@ -8085,6 +8085,14 @@ namespace {
 
 		traceQueryPending.push_back(q);
 
+		// NOTE (enumerated flag-ON deviation -- see the header): the key includes
+		// the float pos bits, so an ENEMY-form query tracks at <=1 stale, but a
+		// POS-FORM query whose ground position moves every frame (cursor-following
+		// placement widgets) mints a new key each frame => this find() is always a
+		// miss => the callout returns `false` persistently until the position
+		// settles. Advisory-UI-only, deliberately forward-fixable (a synchronous
+		// draw-context eval would race the sim). The batch-end targeting-widget
+		// gate exercises a moving-cursor predicate to keep this class verified.
 		const auto it = traceQueryReplies.find(q);
 		lua_pushboolean(L, (it != traceQueryReplies.end()) ? (it->second != 0) : 0);
 		return 1;
