@@ -4225,7 +4225,14 @@ void CLuaHandle::CollectGarbage(bool forced)
 	// and OOM exceptions become a concern when catching up
 	// OTOH if gc is tied to sim-speed the increased number of calls can
 	// mean too much time is spent on it, must weigh the per-call period
-	const float gcSpeedFactor = std::clamp(gs->speedFactor * (1 - gs->PreSimFrame()) * (1 - gs->paused), 1.0f, 50.0f);
+	//
+	// PR 27b: that weighing assumes a per-sim-frame caller (more calls at
+	// higher speed, smaller slices). Under the split the unsynced states
+	// are collected by a FIXED 30Hz main-thread job -- dividing its budget
+	// by sim speed starves the collector exactly when catch-up generates
+	// the most garbage (BAR's 1.2GB emergency-collect valve was firing)
+	const bool fixedRateCaller = (SimDrawSplit::Enabled() && !GetLuaContextData(L)->synced);
+	const float gcSpeedFactor = fixedRateCaller ? 1.0f : std::clamp(gs->speedFactor * (1 - gs->PreSimFrame()) * (1 - gs->paused), 1.0f, 50.0f);
 	const float gcBaseRunTime = smoothstep(10.0f, 100.0f, gcMemFootPrint / 1024);
 	const float gcLoopRunTime = std::clamp((gcBaseRunTime * gcRunTimeMult) / gcSpeedFactor, D.gcCtrl.minLoopRunTime, D.gcCtrl.maxLoopRunTime);
 
