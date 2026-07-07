@@ -8462,18 +8462,21 @@ int LuaSyncedRead::GetWaterLevel(lua_State* L)
  * @param z number
  * @return number
  */
-int LuaSyncedRead::GetGroundOrigHeight(lua_State* L)
+static int GetGroundOrigHeightLive(lua_State* L, const char* caller)
 {
 	const float x = luaL_checkfloat(L, 1);
 	const float z = luaL_checkfloat(L, 2);
 
-	// split-contract gate (PR 27a): unlike the rest of the ground family this reads the
-	// SYNCED original heightmap unconditionally (sim-mutable via Spring.SetOriginalHeightMap)
-	if (LuaSplitContract::DenyLiveRead(L, __func__))
-		return 0;
-
 	lua_pushnumber(L, CGround::GetOrigHeight(x, z));
 	return 1;
+}
+
+int LuaSyncedRead::GetGroundOrigHeight(lua_State* L)
+{
+	// map-mirror-served from draw context (sim|draw PR 28, see LuaSnapshotServe.h):
+	// the orig-heightmap copy in DrawMapMirrors replaces the SYNCED original
+	// heightmap read (sim-mutable via Spring.SetOriginalHeightMap)
+	return LuaSnapshotServe::Route(L, __func__, &GetGroundOrigHeightLive, &LuaSnapshotServe::GetGroundOrigHeight);
 }
 
 
@@ -8668,18 +8671,22 @@ int LuaSyncedRead::GetGroundExtremes(lua_State* L)
  * @return number shipSpeed
  * @return boolean receiveTracks
  */
-int LuaSyncedRead::GetTerrainTypeData(lua_State* L)
+static int GetTerrainTypeDataLive(lua_State* L, const char* caller)
 {
 	const int tti = luaL_checkint(L, 1);
-
-	// split-contract gate (PR 27a): terrain types are sim-mutable (Spring.SetTerrainTypeData), read directly
-	if (LuaSplitContract::DenyLiveRead(L, __func__))
-		return 0;
 
 	if (tti < 0 || tti >= CMapInfo::NUM_TERRAIN_TYPES)
 		return 0;
 
 	return (PushTerrainTypeData(L, &mapInfo->terrainTypes[tti], false));
+}
+
+int LuaSyncedRead::GetTerrainTypeData(lua_State* L)
+{
+	// map-mirror-served from draw context (sim|draw PR 28, see LuaSnapshotServe.h):
+	// the terrain-type table copy in DrawMapMirrors replaces the sim-mutable
+	// mapInfo->terrainTypes read (Spring.SetTerrainTypeData)
+	return LuaSnapshotServe::Route(L, __func__, &GetTerrainTypeDataLive, &LuaSnapshotServe::GetTerrainTypeData);
 }
 
 
@@ -8706,17 +8713,20 @@ int LuaSyncedRead::GetGrass(lua_State* L)
  * @param z number
  * @return number height
  */
-int LuaSyncedRead::GetSmoothMeshHeight(lua_State* L)
+static int GetSmoothMeshHeightLive(lua_State* L, const char* caller)
 {
 	const float x = luaL_checkfloat(L, 1);
 	const float z = luaL_checkfloat(L, 2);
 
-	// split-contract gate (PR 27a): reads the sim-updated smooth-height mesh directly
-	if (LuaSplitContract::DenyLiveRead(L, __func__))
-		return 0;
-
 	lua_pushnumber(L, smoothGround.GetHeight(x, z));
 	return 1;
+}
+
+int LuaSyncedRead::GetSmoothMeshHeight(lua_State* L)
+{
+	// map-mirror-served from draw context (sim|draw PR 28, see LuaSnapshotServe.h):
+	// the smooth-mesh copy in DrawMapMirrors replaces the sim-updated mesh read
+	return LuaSnapshotServe::Route(L, __func__, &GetSmoothMeshHeightLive, &LuaSnapshotServe::GetSmoothMeshHeight);
 }
 
 
@@ -8970,15 +8980,11 @@ static int GetEffectiveLosAllyTeam(lua_State* L, int arg)
  * @return boolean inRadar
  * @return boolean inJammer
  */
-int LuaSyncedRead::GetPositionLosState(lua_State* L)
+static int GetPositionLosStateLive(lua_State* L, const char* caller)
 {
 	const float3 pos(luaL_checkfloat(L, 1),
 	                 luaL_checkfloat(L, 2),
 	                 luaL_checkfloat(L, 3));
-
-	// split-contract gate (PR 27a): reads losHandler positional LOS/radar/jammer maps directly
-	if (LuaSplitContract::DenyLiveRead(L, __func__))
-		return 0;
 
 	const int allyTeamID = GetEffectiveLosAllyTeam(L, 4);
 	if (allyTeamID < 0) {
@@ -9001,6 +9007,12 @@ int LuaSyncedRead::GetPositionLosState(lua_State* L)
 	return 4;
 }
 
+int LuaSyncedRead::GetPositionLosState(lua_State* L)
+{
+	// map-mirror-served from draw context (sim|draw PR 28, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetPositionLosStateLive, &LuaSnapshotServe::GetPositionLosState);
+}
+
 
 /***
  *
@@ -9011,15 +9023,11 @@ int LuaSyncedRead::GetPositionLosState(lua_State* L)
  * @param allyTeamID integer?
  * @return boolean
  */
-int LuaSyncedRead::IsPosInLos(lua_State* L)
+static int IsPosInLosLive(lua_State* L, const char* caller)
 {
 	const float3 pos(luaL_checkfloat(L, 1),
 	                 luaL_checkfloat(L, 2),
 	                 luaL_checkfloat(L, 3));
-
-	// split-contract gate (PR 27a): reads losHandler positional LOS maps directly
-	if (LuaSplitContract::DenyLiveRead(L, __func__))
-		return 0;
 
 	const int allyTeamID = GetEffectiveLosAllyTeam(L, 4);
 	if (allyTeamID < 0) {
@@ -9029,6 +9037,12 @@ int LuaSyncedRead::IsPosInLos(lua_State* L)
 
 	lua_pushboolean(L, losHandler->InLos(pos, allyTeamID));
 	return 1;
+}
+
+int LuaSyncedRead::IsPosInLos(lua_State* L)
+{
+	// map-mirror-served from draw context (sim|draw PR 28, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &IsPosInLosLive, &LuaSnapshotServe::IsPosInLos);
 }
 
 
@@ -9041,15 +9055,11 @@ int LuaSyncedRead::IsPosInLos(lua_State* L)
  * @param allyTeamID integer?
  * @return boolean
  */
-int LuaSyncedRead::IsPosInRadar(lua_State* L)
+static int IsPosInRadarLive(lua_State* L, const char* caller)
 {
 	const float3 pos(luaL_checkfloat(L, 1),
 	                 luaL_checkfloat(L, 2),
 	                 luaL_checkfloat(L, 3));
-
-	// split-contract gate (PR 27a): reads losHandler positional radar maps directly
-	if (LuaSplitContract::DenyLiveRead(L, __func__))
-		return 0;
 
 	const int allyTeamID = GetEffectiveLosAllyTeam(L, 4);
 	if (allyTeamID < 0) {
@@ -9059,6 +9069,12 @@ int LuaSyncedRead::IsPosInRadar(lua_State* L)
 
 	lua_pushboolean(L, losHandler->InRadar(pos, allyTeamID));
 	return 1;
+}
+
+int LuaSyncedRead::IsPosInRadar(lua_State* L)
+{
+	// map-mirror-served from draw context (sim|draw PR 28, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &IsPosInRadarLive, &LuaSnapshotServe::IsPosInRadar);
 }
 
 
@@ -9071,15 +9087,11 @@ int LuaSyncedRead::IsPosInRadar(lua_State* L)
  * @param allyTeamID integer?
  * @return boolean
  */
-int LuaSyncedRead::IsPosInAirLos(lua_State* L)
+static int IsPosInAirLosLive(lua_State* L, const char* caller)
 {
 	const float3 pos(luaL_checkfloat(L, 1),
 	                 luaL_checkfloat(L, 2),
 	                 luaL_checkfloat(L, 3));
-
-	// split-contract gate (PR 27a): reads losHandler positional air-LOS maps directly
-	if (LuaSplitContract::DenyLiveRead(L, __func__))
-		return 0;
 
 	const int allyTeamID = GetEffectiveLosAllyTeam(L, 4);
 	if (allyTeamID < 0) {
@@ -9089,6 +9101,12 @@ int LuaSyncedRead::IsPosInAirLos(lua_State* L)
 
 	lua_pushboolean(L, losHandler->InAirLos(pos, allyTeamID));
 	return 1;
+}
+
+int LuaSyncedRead::IsPosInAirLos(lua_State* L)
+{
+	// map-mirror-served from draw context (sim|draw PR 28, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &IsPosInAirLosLive, &LuaSnapshotServe::IsPosInAirLos);
 }
 
 /*** Get unit los state (bitmask)
@@ -9963,13 +9981,9 @@ int LuaSyncedRead::TraceRayGroundBetweenPositions(lua_State* L)
  * @return number baseRadarErrorSize
  * @return number baseRadarErrorMult
  */
-int LuaSyncedRead::GetRadarErrorParams(lua_State* L)
+static int GetRadarErrorParamsLive(lua_State* L, const char* caller)
 {
 	const int allyTeamID = lua_tonumber(L, 1);
-
-	// split-contract gate (PR 27a): reads teamHandler + losHandler radar-error state directly
-	if (LuaSplitContract::DenyLiveRead(L, __func__))
-		return 0;
 
 	if (!teamHandler.IsValidAllyTeam(allyTeamID))
 		return 0;
@@ -9982,6 +9996,13 @@ int LuaSyncedRead::GetRadarErrorParams(lua_State* L)
 	lua_pushnumber(L, losHandler->GetBaseRadarErrorSize());
 	lua_pushnumber(L, losHandler->GetBaseRadarErrorMult());
 	return 3;
+}
+
+int LuaSyncedRead::GetRadarErrorParams(lua_State* L)
+{
+	// map-mirror-served from draw context (sim|draw PR 28, see LuaSnapshotServe.h):
+	// the radar-error scalars are drained into DrawMapMirrors alongside the LOS maps
+	return LuaSnapshotServe::Route(L, __func__, &GetRadarErrorParamsLive, &LuaSnapshotServe::GetRadarErrorParams);
 }
 
 

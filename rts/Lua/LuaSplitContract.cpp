@@ -96,20 +96,20 @@ namespace {
 		"Pos2BuildPos",
 		"ClosestBuildPos",
 		"GetGroundBlocked",
-		"GetGroundOrigHeight", // reads the SYNCED original heightmap (unlike the rest of the CGround family)
-		// map info reads without an unsynced mirror yet
+		// map info reads without an unsynced mirror yet: GetGroundOrigHeight
+		// (orig-heightmap), GetTerrainTypeData (terrain-type table) and
+		// GetSmoothMeshHeight (smooth mesh) are SERVED from DrawMapMirrors
+		// (PR 28); GetGroundInfo also reads the metal + type maps (metal-map
+		// mirror deferred, headless-stubbed) so it stays live for now
 		"GetGroundInfo",
-		"GetTerrainTypeData",
-		"GetSmoothMeshHeight",
-		// positional LOS-map queries (fog/attack-preview widgets)
-		"GetPositionLosState",
-		"IsPosInLos",
-		"IsPosInRadar",
-		"IsPosInAirLos",
+		// positional LOS-map queries (fog/attack-preview widgets): the
+		// POSITION family (GetPositionLosState/IsPosIn{Los,Radar,AirLos}) and
+		// GetRadarErrorParams are SERVED from the DrawMapMirrors LOS maps +
+		// radar-error scalars (PR 28). The UNIT variants below read cloak/
+		// stealth/water unit fields not yet mirrored, so they stay live.
 		"IsUnitInLos",    // CLosHandler::InLos(unit, at): cloak/airLos positional math, not losStatus
 		"IsUnitInAirLos",
 		"IsUnitInJammer",
-		"GetRadarErrorParams",
 		// rules params (dirty-delta copy pending)
 		"GetGameRulesParam", "GetGameRulesParams",
 		"GetTeamRulesParam", "GetTeamRulesParams",

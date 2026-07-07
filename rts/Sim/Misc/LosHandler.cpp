@@ -97,8 +97,12 @@ void ILosType::Init(const int mipLevel_, LosType type_)
 	const float* ctrHeightMap = readMap->GetCenterHeightMapSynced();
 	const float* mipHeightMap = readMap->GetMIPHeightMapSynced(mipLevel_);
 
-	for (CLosMap& losMap: losMaps) {
+	for (size_t at = 0; at < losMaps.size(); ++at) {
+		CLosMap& losMap = losMaps[at];
 		losMap.Init(size, int2(mapDims.mapx, mapDims.mapy), ctrHeightMap, mipHeightMap, type == LOS_TYPE_LOS);
+		// PR 28: identify this map to the DrawMapMirrors LOS store; mirrorType
+		// == the LosType enum (matches DrawMapMirrors::LOS_MIRROR_TYPE_*)
+		losMap.SetMirrorId(static_cast<int>(type), static_cast<int>(at));
 	}
 }
 

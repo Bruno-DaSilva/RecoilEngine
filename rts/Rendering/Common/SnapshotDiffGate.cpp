@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "SimSnapshot.h"
+#include "DrawMapMirrors.h"
 #include "ExternalAI/SkirmishAIHandler.h"
 #include "Game/Game.h"
 #include "Game/GameSetup.h"
@@ -14,10 +15,12 @@
 #include "Sim/Features/Feature.h"
 #include "Sim/Features/FeatureDef.h"
 #include "Sim/Features/FeatureHandler.h"
+#include "Map/MapInfo.h"
 #include "Map/ReadMap.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/LosHandler.h"
 #include "Sim/Misc/ModInfo.h"
+#include "Sim/Misc/SmoothHeightMesh.h"
 #include "Sim/Misc/Team.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Misc/Wind.h"
@@ -128,6 +131,12 @@ static constexpr const char* FIELD_NAMES[] = {
 	"glob:wind",
 	"glob:heights",
 	"glob:globalLos",
+	// map-layer mirrors (PR 28)
+	"map:los",
+	"map:terrainTypes",
+	"map:smoothMesh",
+	"map:origHeight",
+	"map:radarError",
 };
 
 // structural compare for the copied customOpts maps (emilib::HashMap has no
@@ -476,6 +485,7 @@ void SnapshotDiffGate::CheckBoundary()
 	CheckFeatureRows();
 	CheckTeamPlayerRows();
 	CheckGlobalRows();
+	CheckMapMirrors();
 }
 
 void SnapshotDiffGate::CheckProjectileRows()
@@ -906,4 +916,87 @@ void SnapshotDiffGate::CheckGlobalRows()
 		losEqual = (bool(grows.globalLos[at]) == losHandler->GetGlobalLOS(at));
 	if (Bump(fields[G_GLOBALLOS], losEqual))
 		LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=glob:globalLos mismatch", gs->frameNum);
+}
+
+// PR 28: the DrawMapMirrors compare pass. Drained at the barrier (before the
+// snapshot publish) and nothing runs sim between there and here, so every
+// mirror must bit-match the live source; a mismatch means a missed choke-point
+// dirty mark (the deterministic detector the mirror-verification rule asks for).
+void SnapshotDiffGate::CheckMapMirrors()
+{
+	if (!drawMapMirrors.Ready() || losHandler == nullptr || readMap == nullptr || mapInfo == nullptr)
+		return;
+
+	// --- LOS layers (per losType, per allyTeam whole-map memcmp) ---
+	const ILosType* lts[DrawMapMirrors::LOS_MIRROR_TYPE_COUNT];
+	lts[DrawMapMirrors::LOS_MIRROR_TYPE_LOS]          = &losHandler->los;
+	lts[DrawMapMirrors::LOS_MIRROR_TYPE_AIRLOS]       = &losHandler->airLos;
+	lts[DrawMapMirrors::LOS_MIRROR_TYPE_RADAR]        = &losHandler->radar;
+	lts[DrawMapMirrors::LOS_MIRROR_TYPE_SONAR]        = &losHandler->sonar;
+	lts[DrawMapMirrors::LOS_MIRROR_TYPE_JAMMER]       = &losHandler->jammer;
+	lts[DrawMapMirrors::LOS_MIRROR_TYPE_SEISMIC]      = &losHandler->seismic;
+	lts[DrawMapMirrors::LOS_MIRROR_TYPE_SONAR_JAMMER] = &losHandler->sonarJammer;
+
+	for (int t = 0; t < DrawMapMirrors::LOS_MIRROR_TYPE_COUNT; ++t) {
+		const int nAlly = static_cast<int>(lts[t]->losMaps.size());
+		for (int at = 0; at < nAlly; ++at) {
+			const std::vector<uint16_t>* mm = drawMapMirrors.LosMap(t, at);
+			const auto& live = lts[t]->losMaps[at].GetLosMap();
+
+			bool eq = (mm != nullptr) && (mm->size() == live.size()) &&
+				(mm->empty() || std::memcmp(mm->data(), live.data(), mm->size() * sizeof(uint16_t)) == 0);
+			if (Bump(fields[MM_LOS], eq))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=map:los mismatch (type=%d ally=%d)",
+					gs->frameNum, t, at);
+		}
+	}
+
+	// --- terrain-type table ---
+	bool ttEqual = (drawMapMirrors.TerrainTypeCount() == CMapInfo::NUM_TERRAIN_TYPES);
+	for (int i = 0; ttEqual && i < CMapInfo::NUM_TERRAIN_TYPES; ++i) {
+		const DrawMapMirrors::TerrainType& m = drawMapMirrors.TerrainTypeAt(i);
+		const CMapInfo::TerrainType& l = mapInfo->terrainTypes[i];
+		ttEqual =
+			(m.name == l.name) &&
+			BitEqual(m.hardness, l.hardness) &&
+			BitEqual(m.tankSpeed, l.tankSpeed) &&
+			BitEqual(m.kbotSpeed, l.kbotSpeed) &&
+			BitEqual(m.hoverSpeed, l.hoverSpeed) &&
+			BitEqual(m.shipSpeed, l.shipSpeed) &&
+			(m.receiveTracks == l.receiveTracks);
+	}
+	if (Bump(fields[MM_TERRAINTYPES], ttEqual))
+		LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=map:terrainTypes mismatch", gs->frameNum);
+
+	// --- smooth-height mesh ---
+	{
+		const std::vector<float>& mm = drawMapMirrors.SmoothMeshData();
+		const size_t n = static_cast<size_t>(smoothGround.GetMaxX()) * static_cast<size_t>(smoothGround.GetMaxY());
+		const bool eq = (mm.size() == n) &&
+			(mm.empty() || std::memcmp(mm.data(), smoothGround.GetMeshData(), n * sizeof(float)) == 0);
+		if (Bump(fields[MM_SMOOTHMESH], eq))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=map:smoothMesh mismatch", gs->frameNum);
+	}
+
+	// --- original heightmap ---
+	{
+		const std::vector<float>& mm = drawMapMirrors.OrigHeightMap();
+		const size_t n = static_cast<size_t>(mapDims.mapxp1) * static_cast<size_t>(mapDims.mapyp1);
+		const bool eq = (mm.size() == n) &&
+			(mm.empty() || std::memcmp(mm.data(), readMap->GetOriginalHeightMapSynced(), n * sizeof(float)) == 0);
+		if (Bump(fields[MM_ORIGHEIGHT], eq))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=map:origHeight mismatch", gs->frameNum);
+	}
+
+	// --- radar-error scalars ---
+	{
+		bool eq =
+			(drawMapMirrors.NumAllyTeams() == teamHandler.ActiveAllyTeams()) &&
+			BitEqual(drawMapMirrors.BaseRadarErrorSize(), losHandler->GetBaseRadarErrorSize()) &&
+			BitEqual(drawMapMirrors.BaseRadarErrorMult(), losHandler->GetBaseRadarErrorMult());
+		for (int at = 0; eq && at < drawMapMirrors.NumAllyTeams(); ++at)
+			eq = BitEqual(drawMapMirrors.AllyTeamRadarErrorSize(at), losHandler->GetAllyTeamRadarErrorSize(at));
+		if (Bump(fields[MM_RADARERR], eq))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=map:radarError mismatch", gs->frameNum);
+	}
 }

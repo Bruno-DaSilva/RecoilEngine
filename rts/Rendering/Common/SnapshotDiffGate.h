@@ -186,6 +186,13 @@ private:
 		G_WIND,         // windVec / windDir / windStrength
 		G_HEIGHTS,      // init/curr ground extremes
 		G_GLOBALLOS,    // per-allyteam globalLOS
+		// map-layer mirrors (PR 28, DrawMapMirrors) -- memcmp-grade passes
+		// against the live sim; the mirror is the draw-side authority
+		MM_LOS,         // per (losType, allyTeam) losMap copy
+		MM_TERRAINTYPES,// mapInfo->terrainTypes table copy
+		MM_SMOOTHMESH,  // smoothGround mesh copy
+		MM_ORIGHEIGHT,  // readMap original heightmap copy
+		MM_RADARERR,    // base/per-allyteam radar-error scalars
 		F_COUNT
 	};
 
@@ -199,6 +206,7 @@ private:
 	void CheckFeatureRows();
 	void CheckTeamPlayerRows();
 	void CheckGlobalRows();
+	void CheckMapMirrors(); // PR 28: DrawMapMirrors vs live sim (memcmp-grade)
 
 	void Report(const char* reason) const;
 	void ResetCounters();

@@ -240,6 +240,23 @@ namespace LuaSnapshotServe {
 	int GetFeatureTransformMatrix(lua_State* L, const char* caller);  // LuaUnsyncedRead
 	int GetFeatureRotation(lua_State* L, const char* caller);
 
+	// ---- PR 28: map-layer mirror family (positional LOS + map info) ----
+	// Served from DrawMapMirrors (the boundary-drained draw-owned copies of the
+	// per-allyteam LOS/radar/jammer maps, the terrain-type table, the
+	// smooth-height mesh, the original heightmap, and the radar-error scalars),
+	// NOT from SimSnapshot rows. Same §E.2 Route()/twin recipe; the positional
+	// twins mirror the CLosHandler formulas, the map-info twins mirror the
+	// ground interpolation math. POV: the LOS maps are per-allyteam like the
+	// source, so the twins index the requested allyteam's mirror.
+	int IsPosInLos(lua_State* L, const char* caller);
+	int IsPosInRadar(lua_State* L, const char* caller);
+	int IsPosInAirLos(lua_State* L, const char* caller);
+	int GetPositionLosState(lua_State* L, const char* caller);
+	int GetRadarErrorParams(lua_State* L, const char* caller);
+	int GetTerrainTypeData(lua_State* L, const char* caller);
+	int GetSmoothMeshHeight(lua_State* L, const char* caller);
+	int GetGroundOrigHeight(lua_State* L, const char* caller);
+
 	int GetGaiaTeamID(lua_State* L, const char* caller);
 	int GetAllyTeamList(lua_State* L, const char* caller);
 	int GetTeamList(lua_State* L, const char* caller);

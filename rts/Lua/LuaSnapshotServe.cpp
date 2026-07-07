@@ -20,6 +20,7 @@
 #include "Game/SelectedUnitsHandler.h" // IsUnitSelected's id-set payload
 #include "Game/UI/Groups/Group.h" // CGroup::id (GetUnitGroup)
 #include "Game/UI/Groups/GroupHandler.h" // uiGroupHandlers (GetUnitGroup)
+#include "Rendering/Common/DrawMapMirrors.h" // PR 28: map-layer mirror serving
 #include "Rendering/Common/SimSnapshot.h"
 #include "Rendering/Common/SnapshotDiffGate.h"
 #include "Rendering/Common/SnapshotPickGrid.h"
@@ -4786,4 +4787,179 @@ void LuaSnapshotServe::ClearCaches()
 	cmdQueueCache.clear();
 	cmdQueueCache.shrink_to_fit();
 	cmdQueueCacheGeneration = 0;
+}
+
+
+// ===========================================================================
+// PR 28: map-layer mirror family (positional LOS + map info)
+// Served from DrawMapMirrors, not SimSnapshot rows. Each twin is a line-by-line
+// mirror of the live LuaSyncedRead body with the losHandler/mapInfo/smoothGround
+// /orig-heightmap dereference replaced by the corresponding drawMapMirrors query
+// (which itself reproduces the live formula over the mirror). Argument parsing,
+// error text and return shapes are identical by construction.
+// ===========================================================================
+
+namespace {
+	// LuaSyncedRead::GetEffectiveLosAllyTeam mirror. Reads only the handle POV
+	// (CLuaHandle) and the mirror's ally-team count (== teamHandler.
+	// ActiveAllyTeams(), captured at the drain) -- no live teamHandler read.
+	inline int ServeEffectiveLosAllyTeam(lua_State* L, int arg)
+	{
+		if (lua_isnoneornil(L, arg))
+			return (CLuaHandle::GetHandleReadAllyTeam(L));
+
+		const int aat = luaL_optint(L, arg, CEventClient::MinSpecialTeam - 1);
+
+		if (aat == CEventClient::NoAccessTeam)
+			return aat;
+
+		if (CLuaHandle::GetHandleFullRead(L)) {
+			if (aat >= 0 && aat < drawMapMirrors.NumAllyTeams())
+				return aat;
+
+			if (aat == CEventClient::AllAccessTeam)
+				return aat;
+		} else {
+			if (aat == CLuaHandle::GetHandleReadAllyTeam(L))
+				return aat;
+		}
+
+		// never returns
+		return (luaL_argerror(L, arg, "Invalid allyTeam"));
+	}
+}
+
+int LuaSnapshotServe::IsPosInLos(lua_State* L, const char* caller)
+{
+	const float3 pos(luaL_checkfloat(L, 1),
+	                 luaL_checkfloat(L, 2),
+	                 luaL_checkfloat(L, 3));
+
+	const int allyTeamID = ServeEffectiveLosAllyTeam(L, 4);
+	if (allyTeamID < 0) {
+		lua_pushboolean(L, (allyTeamID == CEventClient::AllAccessTeam));
+		return 1;
+	}
+
+	lua_pushboolean(L, drawMapMirrors.PosInLos(pos, allyTeamID));
+	return 1;
+}
+
+int LuaSnapshotServe::IsPosInRadar(lua_State* L, const char* caller)
+{
+	const float3 pos(luaL_checkfloat(L, 1),
+	                 luaL_checkfloat(L, 2),
+	                 luaL_checkfloat(L, 3));
+
+	const int allyTeamID = ServeEffectiveLosAllyTeam(L, 4);
+	if (allyTeamID < 0) {
+		lua_pushboolean(L, (allyTeamID == CEventClient::AllAccessTeam));
+		return 1;
+	}
+
+	lua_pushboolean(L, drawMapMirrors.PosInRadar(pos, allyTeamID));
+	return 1;
+}
+
+int LuaSnapshotServe::IsPosInAirLos(lua_State* L, const char* caller)
+{
+	const float3 pos(luaL_checkfloat(L, 1),
+	                 luaL_checkfloat(L, 2),
+	                 luaL_checkfloat(L, 3));
+
+	const int allyTeamID = ServeEffectiveLosAllyTeam(L, 4);
+	if (allyTeamID < 0) {
+		lua_pushboolean(L, (allyTeamID == CEventClient::AllAccessTeam));
+		return 1;
+	}
+
+	lua_pushboolean(L, drawMapMirrors.PosInAirLos(pos, allyTeamID));
+	return 1;
+}
+
+int LuaSnapshotServe::GetPositionLosState(lua_State* L, const char* caller)
+{
+	const float3 pos(luaL_checkfloat(L, 1),
+	                 luaL_checkfloat(L, 2),
+	                 luaL_checkfloat(L, 3));
+
+	const int allyTeamID = ServeEffectiveLosAllyTeam(L, 4);
+	if (allyTeamID < 0) {
+		const bool fullView = (allyTeamID == CEventClient::AllAccessTeam);
+		lua_pushboolean(L, fullView);
+		lua_pushboolean(L, fullView);
+		lua_pushboolean(L, fullView);
+		lua_pushboolean(L, fullView);
+		return 4;
+	}
+
+	const bool inLos    = drawMapMirrors.PosInLos(pos, allyTeamID);
+	const bool inRadar  = drawMapMirrors.PosInRadar(pos, allyTeamID);
+	const bool inJammer = drawMapMirrors.PosInJammer(pos, allyTeamID);
+
+	lua_pushboolean(L, inLos || inRadar);
+	lua_pushboolean(L, inLos);
+	lua_pushboolean(L, inRadar);
+	lua_pushboolean(L, inJammer);
+	return 4;
+}
+
+int LuaSnapshotServe::GetRadarErrorParams(lua_State* L, const char* caller)
+{
+	const int allyTeamID = lua_tonumber(L, 1);
+
+	if (!(allyTeamID >= 0 && allyTeamID < drawMapMirrors.NumAllyTeams()))
+		return 0;
+
+	// LuaUtils::IsAlliedAllyTeam(L, allyTeamID) mirror
+	const int readAllyTeam = CLuaHandle::GetHandleReadAllyTeam(L);
+	const bool allied = (readAllyTeam < 0) ? CLuaHandle::GetHandleFullRead(L) : (allyTeamID == readAllyTeam);
+
+	if (allied) {
+		lua_pushnumber(L, drawMapMirrors.AllyTeamRadarErrorSize(allyTeamID));
+	} else {
+		lua_pushnumber(L, drawMapMirrors.BaseRadarErrorSize());
+	}
+	lua_pushnumber(L, drawMapMirrors.BaseRadarErrorSize());
+	lua_pushnumber(L, drawMapMirrors.BaseRadarErrorMult());
+	return 3;
+}
+
+int LuaSnapshotServe::GetTerrainTypeData(lua_State* L, const char* caller)
+{
+	const int tti = luaL_checkint(L, 1);
+
+	if (tti < 0 || tti >= drawMapMirrors.TerrainTypeCount())
+		return 0;
+
+	// PushTerrainTypeData(L, tt, false) mirror (8 returns: index + name + the
+	// 5 speed/hardness floats + receiveTracks)
+	const DrawMapMirrors::TerrainType& tt = drawMapMirrors.TerrainTypeAt(tti);
+	lua_pushinteger(L, tti);
+	lua_pushsstring(L, tt.name);
+	lua_pushnumber(L, tt.hardness);
+	lua_pushnumber(L, tt.tankSpeed);
+	lua_pushnumber(L, tt.kbotSpeed);
+	lua_pushnumber(L, tt.hoverSpeed);
+	lua_pushnumber(L, tt.shipSpeed);
+	lua_pushboolean(L, tt.receiveTracks);
+	return 8;
+}
+
+int LuaSnapshotServe::GetSmoothMeshHeight(lua_State* L, const char* caller)
+{
+	const float x = luaL_checkfloat(L, 1);
+	const float z = luaL_checkfloat(L, 2);
+
+	lua_pushnumber(L, drawMapMirrors.SmoothMeshHeight(x, z));
+	return 1;
+}
+
+int LuaSnapshotServe::GetGroundOrigHeight(lua_State* L, const char* caller)
+{
+	const float x = luaL_checkfloat(L, 1);
+	const float z = luaL_checkfloat(L, 2);
+
+	lua_pushnumber(L, drawMapMirrors.OrigHeight(x, z));
+	return 1;
 }

@@ -6,6 +6,7 @@
 #include "LosMap.h"
 #include "LosHandler.h"
 #include "Map/ReadMap.h"
+#include "Rendering/Common/DrawMapMirrors.h" // PR 28: LOS-mirror dirty marking
 #include "System/SpringMath.h"
 #include "System/float3.h"
 #include "System/Log/ILog.h"
@@ -412,6 +413,10 @@ void CLosTableHelper::Debug(const LosTable& losRays, const std::vector<int2>& po
 void CLosMap::AddCircle(SLosInstance* instance, int amount)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// PR 28 choke point: this map's cells are about to change -> mark the
+	// DrawMapMirrors LOS copy of (mirrorType, mirrorAlly) dirty for the drain
+	drawMapMirrors.MarkLosDirty(mirrorType, mirrorAlly);
+
 	MidpointCircleAlgoPerLine(instance->radius, [&](int width, int y) {
 		const unsigned y_ = instance->basePos.y + y;
 
@@ -434,6 +439,10 @@ void CLosMap::AddRaycast(SLosInstance* instance, int amount)
 
 	if (losSquares.empty() || losSquares[0].length == SLosInstance::EMPTY_RLE.length)
 		return;
+
+	// PR 28 choke point: cells of this map are about to change -> mark the
+	// DrawMapMirrors LOS copy of (mirrorType, mirrorAlly) dirty for the drain
+	drawMapMirrors.MarkLosDirty(mirrorType, mirrorAlly);
 
 	// inform ReadMap when squares enter LoS
 	const bool visibleInstanceSquares = (instance->allyteam >= 0 && (instance->allyteam == gu->myAllyTeam || gu->spectatingFullView));

@@ -35,6 +35,7 @@
 #include "ExternalAI/SkirmishAIHandler.h"
 #include "Rendering/WorldDrawer.h"
 #include "Rendering/Common/RenderEventQueue.h"
+#include "Rendering/Common/DrawMapMirrors.h"
 #include "Rendering/Common/SimSnapshot.h"
 #include "Rendering/Common/SnapshotPickGrid.h"
 #include "Rendering/Common/SnapshotHash.h"
@@ -1050,6 +1051,7 @@ void CGame::KillRendering()
 	UnsyncedBoundaryQueue::Clear();
 	SimDrawSplit::Clear();
 	simSnapshot.Clear();
+	drawMapMirrors.Clear(); // PR 28: forget the map-layer mirrors for the next game
 	snapshotPickGrid.Clear();
 	// per-generation serving caches (the generation counter resets with the snapshot)
 	LuaSnapshotServe::ClearCaches();
@@ -1648,6 +1650,16 @@ void CGame::SimDrawBarrier()
 		// class as net-driven team transfers, see CUnit::ChangedTeam)
 		simSnapshot.MarkMutatedOutsideFrame();
 	}
+
+	// (2c) drain the map-layer mirrors (PR 28, DrawMapMirrors): copy the dirty
+	// LOS/airLos/radar/sonar/jammer maps + the near-static terrain-type/
+	// smooth-mesh/orig-heightmap layers into the draw-owned mirror, so the
+	// positional-LOS + map-info serving twins never touch losHandler/mapInfo/
+	// smoothGround/the synced orig-heightmap. BEFORE the snapshot publish so
+	// the mirror, the object rows and the drawer containers all describe the
+	// same completed sim frame (the same "no sim runs after here" boundary the
+	// diff-gate memcmp pass relies on).
+	drawMapMirrors.DrainAtBarrier();
 
 	// (3) publish the observable-state snapshot for draw-side consumers
 	// (contract in SimSnapshot.h; the team/player copy refreshes every call)

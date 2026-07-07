@@ -26,6 +26,7 @@
 #include "Map/MapDamage.h"
 #include "Map/MapInfo.h"
 #include "Map/ReadMap.h"
+#include "Rendering/Common/DrawMapMirrors.h" // PR 28: terrain-type + orig-heightmap mirror dirty marking
 #include "Rendering/Env/GrassDrawer.h"
 #include "Rendering/Env/IGroundDecalDrawer.h"
 #include "Rendering/Models/IModelParser.h"
@@ -6570,6 +6571,8 @@ int LuaSyncedCtrl::LevelOriginalHeightMap(lua_State* L)
 		}
 	}
 
+	// PR 28 choke point: orig-heightmap writer -> mark the DrawMapMirrors copy
+	drawMapMirrors.MarkOrigHeightDirty();
 	return 0;
 }
 
@@ -6664,6 +6667,8 @@ int LuaSyncedCtrl::RevertOriginalHeightMap(lua_State* L)
 		}
 	}
 
+	// PR 28 choke point: orig-heightmap writer -> mark the DrawMapMirrors copy
+	drawMapMirrors.MarkOrigHeightDirty();
 	return 0;
 }
 
@@ -6797,6 +6802,11 @@ int LuaSyncedCtrl::SetOriginalHeightMapFunc(lua_State* L)
 				error, lua_tostring(L, -1));
 		lua_error(L);
 	}
+
+	// PR 28 choke point: the callback ran Spring.{Set,Add}OriginalHeightMap
+	// (the only paths that reach those, guarded by inOriginalHeightMap) ->
+	// mark the DrawMapMirrors orig-heightmap copy for the barrier drain
+	drawMapMirrors.MarkOrigHeightDirty();
 
 	lua_pushnumber(L, originalHeightMapAmountChanged);
 	return 1;
@@ -7136,6 +7146,10 @@ int LuaSyncedCtrl::SetTerrainTypeData(lua_State* L)
 		mapDamage->TerrainTypeHardnessChanged(tti);
 	if (ttSpeedModChanged)
 		mapDamage->TerrainTypeSpeedModChanged(tti);
+
+	// PR 28 choke point: the sole runtime writer of mapInfo->terrainTypes ->
+	// mark the DrawMapMirrors terrain-type copy for the barrier drain
+	drawMapMirrors.MarkTerrainTypesDirty();
 
 	lua_pushboolean(L, true);
 	return 1;
