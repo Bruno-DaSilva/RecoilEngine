@@ -118,4 +118,19 @@ namespace LuaSplitContract {
 		ScopedLiveException();
 		~ScopedLiveException();
 	};
+
+	// PR 38h: re-assert enforcement inside an active ScopedLiveException, so a
+	// snapshot-served read routes to its twin again. The barrier drain
+	// (CGame::SimDrawBarrier) runs under a ScopedLiveException so its Render*/
+	// Cob2Lua dispatches may read the parked sim live; but the sim-fired
+	// unsynced EVENT callins deferred there (UnitCommand/UnitCmdDone/
+	// UnitLeftLos) must be snapshot-served like every other draw-thread widget
+	// callin, so their event-time overrides (LuaSnapshotServe::GetCmdQueueSlot /
+	// SimSnapshotLosEvent) actually apply -- the live path never consults them.
+	// Saves and zeroes the live-exception depth for its scope, then restores.
+	struct ScopedContractReassert {
+		ScopedContractReassert();
+		~ScopedContractReassert();
+		int savedDepth;
+	};
 }

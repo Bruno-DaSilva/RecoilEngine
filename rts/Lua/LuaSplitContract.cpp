@@ -426,4 +426,11 @@ ScopedDrawWindow::~ScopedDrawWindow() { tlDrawWindowDepth--; }
 ScopedLiveException::ScopedLiveException() { tlLiveExceptionDepth++; }
 ScopedLiveException::~ScopedLiveException() { tlLiveExceptionDepth--; }
 
+// PR 38h: temporarily undo any active live-exception on this thread so a
+// deferred unsynced EVENT callin at the barrier is snapshot-served (Enforced
+// returns true again) and its event-time override applies. Restores the exact
+// saved depth on scope exit (nested-dispatch-safe).
+ScopedContractReassert::ScopedContractReassert() : savedDepth(tlLiveExceptionDepth) { tlLiveExceptionDepth = 0; }
+ScopedContractReassert::~ScopedContractReassert() { tlLiveExceptionDepth = savedDepth; }
+
 }

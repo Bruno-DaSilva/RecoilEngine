@@ -5,6 +5,7 @@
 #include "Lua/LuaCallInCheck.h"
 #include "Lua/LuaOpenGL.h"  // FIXME -- should be moved
 #include "Lua/LuaSnapshotServe.h" // PR 38f: event-time command-queue presentation
+#include "Lua/LuaSplitContract.h" // PR 38h: re-assert enforcement for deferred event callins
 
 #include "Sim/Units/CommandAI/Command.h" // PR 38f: std::bind copies Command by value
 #include "Sim/Units/UnitHandler.h"
@@ -637,6 +638,11 @@ void CEventHandler::UnitCommand(const CUnit* unit, const Command& command, int p
 				// event-time queue override for the single handler call
 				auto boundFn = std::bind(&CEventClient::UnitCommand, ec, unit, command, playerNum, fromSynced, fromLua);
 				UnsyncedBoundaryQueue::DeferFor(ec, [evtUnitID, evtQueue, boundFn = std::move(boundFn)]() {
+					// PR 38h: re-assert enforcement (the drain runs under the
+					// barrier's ScopedLiveException) so the read routes to the
+					// snapshot twin, where the event-time override lives -- the
+					// live path never consults it
+					LuaSplitContract::ScopedContractReassert reassert;
 					LuaSnapshotServe::ScopedCmdQueueEventOverride ov(evtUnitID, evtQueue);
 					boundFn();
 				});
@@ -664,6 +670,9 @@ void CEventHandler::UnitCmdDone(const CUnit* unit, const Command& command)
 			if (UnsyncedBoundaryQueue::ShouldDefer(ec)) {
 				auto boundFn = std::bind(&CEventClient::UnitCmdDone, ec, unit, command);
 				UnsyncedBoundaryQueue::DeferFor(ec, [evtUnitID, evtQueue, boundFn = std::move(boundFn)]() {
+					// PR 38h: re-assert enforcement so the read routes to the
+					// snapshot twin where the event-time override lives
+					LuaSplitContract::ScopedContractReassert reassert;
 					LuaSnapshotServe::ScopedCmdQueueEventOverride ov(evtUnitID, evtQueue);
 					boundFn();
 				});
@@ -698,6 +707,9 @@ void CEventHandler::UnitLeftLos(const CUnit* unit, int at)
 				ec->UnitLeftLos(unit, at);
 			} else if (UnsyncedBoundaryQueue::ShouldDefer(ec)) {
 				UnsyncedBoundaryQueue::DeferFor(ec, [ec, unit, evtUnitID, at, evtLosStatus]() {
+					// PR 38h: re-assert enforcement so GetUnitPosition routes to
+					// the snapshot twin, where the residual-LOS override lives
+					LuaSplitContract::ScopedContractReassert reassert;
 					SimSnapshotLosEvent::ScopedVisibility ov(evtUnitID, at, evtLosStatus);
 					ec->UnitLeftLos(unit, at);
 				});
