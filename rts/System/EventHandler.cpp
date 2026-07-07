@@ -4,8 +4,12 @@
 
 #include "Lua/LuaCallInCheck.h"
 #include "Lua/LuaOpenGL.h"  // FIXME -- should be moved
+#include "Lua/LuaSnapshotServe.h" // PR 38f: event-time command-queue presentation
 
+#include "Sim/Units/CommandAI/Command.h" // PR 38f: std::bind copies Command by value
 #include "Sim/Units/UnitHandler.h"
+
+#include "Rendering/Common/SimSnapshot.h" // PR 38f: event-time LOS-exit visibility override
 
 #include "System/Config/ConfigHandler.h"
 #include "System/Platform/Threading.h"
@@ -600,6 +604,106 @@ void CEventHandler::GameID(const unsigned char* gameID, unsigned int numBytes)
 	}
 
 	ITERATE_EVENTCLIENTLIST(GameID, gameID, numBytes);
+}
+
+
+/* PR 38f -- event-time presentation. UnitCommand / UnitCmdDone / UnitLeftLos are
+ * synced events dispatched to unsynced handlers; under the split those handlers
+ * defer to the SimDrawBarrier, where the published boundary state no longer
+ * matches what master's synchronous, mid-sim dispatch saw. These three
+ * dispatchers capture the event-time state at FIRE time and present it as a
+ * per-target override around each deferred handler call (cleared right after),
+ * then drop the override. Flag-off / immediate-dispatch paths take no capture
+ * and install no override -> byte-identical (the GameID dispatcher above is the
+ * out-of-line precedent). The overrides are UNSYNCED (draw-only): no synced
+ * write, no sync-hash impact, no gsRNG. */
+
+void CEventHandler::UnitCommand(const CUnit* unit, const Command& command, int playerNum, bool fromSynced, bool fromLua)
+{
+	ZoneScoped;
+	// event-time command queue for <unit> (nullptr / no-op when the split is off
+	// or this dispatch is not deferring); shared across the receiving clients
+	const std::shared_ptr<void> evtQueue = LuaSnapshotServe::CaptureCmdQueueEvent(unit);
+	const int evtUnitID = unit->id;
+
+	const auto unitAllyTeam = unit->allyteam;
+	for (size_t i = 0; i < listUnitCommand.size(); ) {
+		CEventClient* ec = listUnitCommand[i];
+
+		if (ec->CanReadAllyTeam(unitAllyTeam)) {
+			if (UnsyncedBoundaryQueue::ShouldDefer(ec)) {
+				// std::bind copies Command by value exactly as the generic
+				// EVENTCLIENT_DISPATCH macro did; the outer closure installs the
+				// event-time queue override for the single handler call
+				auto boundFn = std::bind(&CEventClient::UnitCommand, ec, unit, command, playerNum, fromSynced, fromLua);
+				UnsyncedBoundaryQueue::DeferFor(ec, [evtUnitID, evtQueue, boundFn = std::move(boundFn)]() {
+					LuaSnapshotServe::ScopedCmdQueueEventOverride ov(evtUnitID, evtQueue);
+					boundFn();
+				});
+			} else {
+				ec->UnitCommand(unit, command, playerNum, fromSynced, fromLua);
+			}
+		}
+
+		// the call-in may remove itself from the list
+		i += (i < listUnitCommand.size() && ec == listUnitCommand[i]);
+	}
+}
+
+void CEventHandler::UnitCmdDone(const CUnit* unit, const Command& command)
+{
+	ZoneScoped;
+	const std::shared_ptr<void> evtQueue = LuaSnapshotServe::CaptureCmdQueueEvent(unit);
+	const int evtUnitID = unit->id;
+
+	const auto unitAllyTeam = unit->allyteam;
+	for (size_t i = 0; i < listUnitCmdDone.size(); ) {
+		CEventClient* ec = listUnitCmdDone[i];
+
+		if (ec->CanReadAllyTeam(unitAllyTeam)) {
+			if (UnsyncedBoundaryQueue::ShouldDefer(ec)) {
+				auto boundFn = std::bind(&CEventClient::UnitCmdDone, ec, unit, command);
+				UnsyncedBoundaryQueue::DeferFor(ec, [evtUnitID, evtQueue, boundFn = std::move(boundFn)]() {
+					LuaSnapshotServe::ScopedCmdQueueEventOverride ov(evtUnitID, evtQueue);
+					boundFn();
+				});
+			} else {
+				ec->UnitCmdDone(unit, command);
+			}
+		}
+
+		i += (i < listUnitCmdDone.size() && ec == listUnitCmdDone[i]);
+	}
+}
+
+void CEventHandler::UnitLeftLos(const CUnit* unit, int at)
+{
+	ZoneScoped;
+	// LOSCAPTURE loop (fire-time capture clients dispatch immediately, everyone
+	// else defers), with amendment (b): a deferred handler runs after the
+	// snapshot cleared this unit's LOS bits for allyteam <at>, so present
+	// pre-transition (in-LOS) visibility for (unit, at) around its dispatch.
+	const int evtUnitID = unit->id;
+
+	for (size_t i = 0; i < listUnitLeftLos.size(); ) {
+		CEventClient* ec = listUnitLeftLos[i];
+
+		if (ec->CanReadAllyTeam(at)) {
+			if (ec->IsSimPhaseCaptureClient()) {
+				ec->UnitLeftLos(unit, at);
+			} else if (UnsyncedBoundaryQueue::ShouldDefer(ec)) {
+				UnsyncedBoundaryQueue::DeferFor(ec, [ec, unit, evtUnitID, at]() {
+					SimSnapshotLosEvent::ScopedVisibility ov(evtUnitID, at);
+					ec->UnitLeftLos(unit, at);
+				});
+			} else {
+				ec->UnitLeftLos(unit, at);
+			}
+		}
+
+		// the call-in may remove itself from the list
+		i += (i < listUnitLeftLos.size() && ec == listUnitLeftLos[i]);
+	}
 }
 
 

@@ -1123,3 +1123,35 @@ private:
 };
 
 extern SimSnapshot simSnapshot;
+
+
+// ---- PR 38f: event-time LOS-exit visibility override -----------------------
+// Amendment (b) of the PR-38 event-time mechanism. A synced UnitLeftLos event
+// dispatches to unsynced Lua handlers; under the split those handlers run
+// DEFERRED at the SimDrawBarrier, by which point the published snapshot already
+// cleared the unit's LOS bits for the leaving allyteam -- so the UnitRows Pov
+// gates nil out Spring.GetUnitPosition and the handler (e.g. unit_ghostradar_gl4)
+// errors. Master dispatched synchronously, with the unit still readable.
+//
+// ScopedVisibility presents pre-transition (in-LOS) visibility for the single
+// (unit, allyTeam) being dispatched, for the duration of that handler call: the
+// UnitRows::PovUnit{Visible,InLos,Typed} gates and ErrorVector honor it (the
+// masking choke points every position/status twin funnels through). The
+// override is main-thread dispatch-window only -- never installed flag-off or
+// during the diff-gate dual-run (both run the handler immediately at fire time,
+// no deferral), so the Pov reads are inert there and behavior stays
+// byte-identical. UNSYNCED (draw-only): no synced write, no sync-hash impact.
+namespace SimSnapshotLosEvent {
+	struct ScopedVisibility {
+		ScopedVisibility(int unitID, int allyTeam);
+		~ScopedVisibility();
+		ScopedVisibility(const ScopedVisibility&) = delete;
+		ScopedVisibility& operator=(const ScopedVisibility&) = delete;
+	private:
+		int prevUnitID;
+		int prevAllyTeam;
+	};
+
+	// consulted by the UnitRows Pov gates in SimSnapshot.cpp
+	bool Visible(int unitID, int allyTeam);
+}

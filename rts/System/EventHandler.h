@@ -544,7 +544,9 @@ UNIT_CALLIN_INT_PARAMS(Given)
 UNIT_CALLIN_LOS_PARAM(EnteredRadar)
 UNIT_CALLIN_LOS_PARAM(EnteredLos)
 UNIT_CALLIN_LOS_PARAM(LeftRadar)
-UNIT_CALLIN_LOS_PARAM(LeftLos)
+// PR 38f: UnitLeftLos specializes the LOSCAPTURE loop to present event-time
+// (pre-transition) LOS visibility to deferred unsynced handlers -- defined
+// out-of-line in EventHandler.cpp
 
 
 inline void CEventHandler::UnitConstructionDecayed(const CUnit* unit,
@@ -610,15 +612,9 @@ inline bool CEventHandler::UnitFeatureCollision(const CUnit* collider, const CFe
 
 
 
-inline void CEventHandler::UnitCommand(const CUnit* unit, const Command& command, int playerNum, bool fromSynced, bool fromLua)
-{
-	ITERATE_UNIT_ALLYTEAM_EVENTCLIENTLIST(UnitCommand, unit, command, playerNum, fromSynced, fromLua)
-}
-
-inline void CEventHandler::UnitCmdDone(const CUnit* unit, const Command& command)
-{
-	ITERATE_UNIT_ALLYTEAM_EVENTCLIENTLIST(UnitCmdDone, unit, command)
-}
+// PR 38f: UnitCommand / UnitCmdDone specialize the dispatch loop to present the
+// EVENT-TIME command queue to deferred unsynced handlers (see EventHandler.cpp,
+// the GameID out-of-line dispatcher is the precedent)
 
 
 inline void CEventHandler::UnitDamaged(

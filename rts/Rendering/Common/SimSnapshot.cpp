@@ -61,6 +61,35 @@
 
 SimSnapshot simSnapshot;
 
+// PR 38f: event-time LOS-exit visibility override (see SimSnapshot.h). A single
+// (unit, allyTeam) pair, installed by ScopedVisibility while a deferred
+// UnitLeftLos handler runs at the barrier. Main-thread dispatch-window state;
+// -1 (inert) flag-off and outside the window, so the Pov consults below are
+// no-ops there.
+namespace {
+	int losEvtUnitID = -1;
+	int losEvtAllyTeam = -1;
+}
+
+bool SimSnapshotLosEvent::Visible(int unitID, int allyTeam)
+{
+	return (unitID >= 0 && unitID == losEvtUnitID && allyTeam == losEvtAllyTeam);
+}
+
+SimSnapshotLosEvent::ScopedVisibility::ScopedVisibility(int unitID, int allyTeam)
+	: prevUnitID(losEvtUnitID)
+	, prevAllyTeam(losEvtAllyTeam)
+{
+	losEvtUnitID = unitID;
+	losEvtAllyTeam = allyTeam;
+}
+
+SimSnapshotLosEvent::ScopedVisibility::~ScopedVisibility()
+{
+	losEvtUnitID = prevUnitID;
+	losEvtAllyTeam = prevAllyTeam;
+}
+
 // assign-if-different helpers for the team/player boundary copy: the copy is
 // re-extracted EVERY boundary (values must be fresh), but the alloc-carrying
 // fields (strings, customOpts maps) are almost always unchanged -- comparing
@@ -146,6 +175,9 @@ bool SimSnapshot::UnitRows::PovUnitVisible(int unitID, int readAllyTeam, bool fu
 {
 	if (PovAlliedUnit(unitID, readAllyTeam, fullRead))
 		return true;
+	// PR 38f: pre-transition in-LOS presentation during a deferred UnitLeftLos
+	if (SimSnapshotLosEvent::Visible(unitID, readAllyTeam))
+		return true;
 	if (readAllyTeam < 0 || readAllyTeam >= numAllyTeams)
 		return false;
 
@@ -156,6 +188,9 @@ bool SimSnapshot::UnitRows::PovUnitInLos(int unitID, int readAllyTeam, bool full
 {
 	if (PovAlliedUnit(unitID, readAllyTeam, fullRead))
 		return true;
+	// PR 38f: pre-transition in-LOS presentation during a deferred UnitLeftLos
+	if (SimSnapshotLosEvent::Visible(unitID, readAllyTeam))
+		return true;
 	if (readAllyTeam < 0 || readAllyTeam >= numAllyTeams)
 		return false;
 
@@ -165,6 +200,9 @@ bool SimSnapshot::UnitRows::PovUnitInLos(int unitID, int readAllyTeam, bool full
 bool SimSnapshot::UnitRows::PovUnitTyped(int unitID, int readAllyTeam, bool fullRead) const
 {
 	if (PovAlliedUnit(unitID, readAllyTeam, fullRead))
+		return true;
+	// PR 38f: pre-transition in-LOS presentation during a deferred UnitLeftLos
+	if (SimSnapshotLosEvent::Visible(unitID, readAllyTeam))
 		return true;
 	if (readAllyTeam < 0 || readAllyTeam >= numAllyTeams)
 		return false;
@@ -179,6 +217,12 @@ bool SimSnapshot::UnitRows::PovUnitTyped(int unitID, int readAllyTeam, bool full
 
 float3 SimSnapshot::UnitRows::ErrorVector(int unitID, int argAllyTeam) const
 {
+	// PR 38f: during a deferred UnitLeftLos the unit is presented as still
+	// in-LOS (pre-transition), which on the live path means zero position error
+	// (the isVisible switch-case falls through to errorMult 0)
+	if (SimSnapshotLosEvent::Visible(unitID, argAllyTeam))
+		return float3{0.0f, 0.0f, 0.0f};
+
 	// bit-for-bit mirror of CUnit::GetErrorVector (Unit.cpp) from extracted
 	// inputs; keep the float expression order identical to the live code
 	if (argAllyTeam < 0 || argAllyTeam >= numAllyTeams)

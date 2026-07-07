@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include <memory> // PR 38f: CaptureCmdQueueEvent's opaque shared_ptr<void>
+
 struct lua_State;
 class CUnit; // sim|draw PR 30: CompareCmdQueueSlot's live-unit argument
 
@@ -250,6 +252,42 @@ namespace LuaSnapshotServe {
 	/// resets across games, so a stale cache could otherwise alias a fresh
 	/// generation number
 	void ClearCaches();
+
+	// ---- PR 38f: event-time command-queue presentation --------------------
+	// Synced command events (UnitCommand / UnitCmdDone) dispatch to unsynced
+	// Lua handlers. Under the split those handlers run DEFERRED at the
+	// SimDrawBarrier, after the sim published the boundary snapshot and
+	// RefreshCommandQueues copied the LAST-boundary queues -- so a UnitCommand
+	// handler would not see the just-added command (gui_selfd_icons nil), a
+	// UnitCmdDone handler would still see the just-removed one (unit_idle_guard
+	// compare-nil). Master dispatched them synchronously, mid-sim, against the
+	// event-time queue.
+	//
+	// CaptureCmdQueueEvent() runs at FIRE time (sim thread owns the queue) and
+	// flattens the unit's event-time command AI into an opaque, refcounted
+	// snapshot (shared_ptr<void>, deleter retained -- the anon-namespace slot
+	// type never leaks into this header). It returns nullptr when the split is
+	// off or the call is not deferring, so the flag-off / immediate-dispatch
+	// path stays byte-identical (no capture, no override). The deferred
+	// dispatch installs it as a per-unit override via ScopedCmdQueueEventOverride
+	// around the single handler call: GetCmdQueueSlot returns the event-time
+	// slot for that unit for the duration of the call, then it is cleared. The
+	// whole command-queue twin family reads through that one choke point.
+	//
+	// UNSYNCED (draw-only): no synced write, no sync-hash impact, no gsRNG.
+	std::shared_ptr<void> CaptureCmdQueueEvent(const CUnit* unit);
+
+	struct ScopedCmdQueueEventOverride {
+		ScopedCmdQueueEventOverride(int unitID, const std::shared_ptr<void>& snap);
+		~ScopedCmdQueueEventOverride();
+		ScopedCmdQueueEventOverride(const ScopedCmdQueueEventOverride&) = delete;
+		ScopedCmdQueueEventOverride& operator=(const ScopedCmdQueueEventOverride&) = delete;
+	private:
+		// previous override (save/restore, defensive against any nested
+		// dispatch); stored type-erased -- the slot type is anon-namespace
+		const void* prevSlot;
+		int prevUnitID;
+	};
 
 	// unsynced flag/drawer parse-gate family (PR 27b serving batch 2,
 	// family 2): payloads are draw-owned, only the ParseUnit/ParseFeature

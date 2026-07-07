@@ -5187,6 +5187,16 @@ namespace {
 	std::vector<UnitCmdQueueSlot> cmdQueueCache;
 	uint32_t cmdQueueCacheGeneration = 0;
 
+	// PR 38f (event-time command-queue presentation): a per-unit override
+	// consulted FIRST by GetCmdQueueSlot. Installed by ScopedCmdQueueEventOverride
+	// around a deferred UnitCommand/UnitCmdDone dispatch so the command-queue
+	// twins present the event-time queue the sim captured at fire time (see the
+	// appended PR-38f section at the end of this file). Main-thread
+	// dispatch-window only; nullptr otherwise -> inert, so flag-off and the
+	// diff-gate dual-run are byte-identical.
+	const UnitCmdQueueSlot* cmdEvtOverrideSlot = nullptr;
+	int cmdEvtOverrideUnitID = -1;
+
 	void ClearCmdQueueSlot(UnitCmdQueueSlot& slot)
 	{
 		slot.cmdQueVersion = 0;
@@ -5347,6 +5357,11 @@ namespace {
 
 	const UnitCmdQueueSlot* GetCmdQueueSlot(int unitID)
 	{
+		// PR 38f: the event-time override wins for the unit whose command event
+		// is currently being dispatched (see cmdEvtOverrideSlot)
+		if (cmdEvtOverrideSlot != nullptr && unitID == cmdEvtOverrideUnitID)
+			return cmdEvtOverrideSlot;
+
 		if (unitID < 0 || static_cast<size_t>(unitID) >= cmdQueueCache.size())
 			return nullptr;
 
@@ -9045,4 +9060,87 @@ void LuaSnapshotServe::ClearPlacementQueryChannel()
 	placementQueryPending.shrink_to_fit();
 	placementQueryReplies.clear();
 	placementQueryRepliesScratch.clear();
+}
+
+
+/******************************************************************************
+ * PR 38f -- event-time command-queue presentation (specs "PR-38 event-time
+ * mechanism generalization"; the DEAD_THIS_BATCH dispatch-drain sibling).
+ *
+ * Capture (fire time, sim thread owns the queue) + per-unit override install
+ * (drain time, main thread) around the deferred UnitCommand/UnitCmdDone
+ * handler; see the header block for the full contract. UNSYNCED / draw-only.
+ ******************************************************************************/
+
+namespace {
+	// Builds a COMPLETE event-time slot from a unit -- the unconditional
+	// analogue of RefreshCommandQueues' per-unit body (queue + descs + factory
+	// newUnitCommands + bugger-off scalars + worker task). Every command-queue
+	// twin (not just GetUnitCommands) reads the override through GetCmdQueueSlot,
+	// so all fields must be event-time-consistent, not just the queue. Keep in
+	// sync with RefreshCommandQueues above.
+	void BuildCmdQueueSlotFromUnit(UnitCmdQueueSlot& slot, const CUnit* unit)
+	{
+		const CCommandAI* cai = unit->commandAI; // never null
+
+		slot.present = true;
+		slot.isFactoryCAI = (dynamic_cast<const CFactoryCAI*>(cai) != nullptr);
+		slot.isFactoryUnit = (dynamic_cast<const CFactory*>(unit) != nullptr);
+
+		CopyQueueSnap(cai->commandQue, slot.commandQue, slot.commandQueParams);
+		slot.cmdQueVersion = cai->commandQue.GetVersion();
+
+		CopyDescsSnap(cai->GetPossibleCommands(), slot.descs);
+		slot.cmdDescVersion = cai->GetCmdDescVersion();
+
+		if (slot.isFactoryCAI) {
+			const CFactoryCAI* fcai = static_cast<const CFactoryCAI*>(cai);
+			CopyQueueSnap(fcai->newUnitCommands, slot.newUnitCommands, slot.newUnitCommandsParams);
+			slot.newUnitCmdsVersion = fcai->newUnitCommands.GetVersion();
+		}
+
+		if (slot.isFactoryUnit) {
+			const CFactory* fac = static_cast<const CFactory*>(unit);
+			slot.boPerform    = fac->boPerform;
+			slot.boOffset     = fac->boOffset;
+			slot.boRadius     = fac->boRadius;
+			slot.boRelHeading = fac->boRelHeading;
+			slot.boSherical   = fac->boSherical;
+			slot.boForced     = fac->boForced;
+		}
+
+		ResolveWorkerTask(unit, slot);
+	}
+}
+
+std::shared_ptr<void> LuaSnapshotServe::CaptureCmdQueueEvent(const CUnit* unit)
+{
+	// Only capture when the dispatch will actually defer (split on AND in the
+	// sim phase). Flag-off / immediate dispatch runs the handler synchronously
+	// against the live queue -- no override needed, byte-identical.
+	if (unit == nullptr || !SimDrawSplit::DeferUnsyncedNow())
+		return nullptr;
+
+	auto snap = std::make_shared<UnitCmdQueueSlot>();
+	BuildCmdQueueSlotFromUnit(*snap, unit);
+	// shared_ptr<UnitCmdQueueSlot> -> shared_ptr<void>: the typed deleter is
+	// retained, so the slot (and its vectors) frees correctly even after the
+	// closure that owns it is dropped (unregistered client at drain).
+	return snap;
+}
+
+LuaSnapshotServe::ScopedCmdQueueEventOverride::ScopedCmdQueueEventOverride(int unitID, const std::shared_ptr<void>& snap)
+	: prevSlot(cmdEvtOverrideSlot)
+	, prevUnitID(cmdEvtOverrideUnitID)
+{
+	if (snap != nullptr) {
+		cmdEvtOverrideSlot = static_cast<const UnitCmdQueueSlot*>(snap.get());
+		cmdEvtOverrideUnitID = unitID;
+	}
+}
+
+LuaSnapshotServe::ScopedCmdQueueEventOverride::~ScopedCmdQueueEventOverride()
+{
+	cmdEvtOverrideSlot = static_cast<const UnitCmdQueueSlot*>(prevSlot);
+	cmdEvtOverrideUnitID = prevUnitID;
 }
