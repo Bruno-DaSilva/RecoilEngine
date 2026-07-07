@@ -4947,9 +4947,15 @@ int LuaSyncedRead::GetUnitVectors(lua_State* L)
  * @return number yaw Rotation in Y axis
  * @return number roll Rotation in Z axis
  */
+static int GetUnitRotationLive(lua_State* L, const char* caller)
+{
+	return (GetSolidObjectRotation(L, ParseInLosUnit(L, caller, 1)));
+}
+
 int LuaSyncedRead::GetUnitRotation(lua_State* L)
 {
-	return (GetSolidObjectRotation(L, ParseInLosUnit(L, __func__, 1)));
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitRotationLive, &LuaSnapshotServe::GetUnitRotation);
 }
 
 
@@ -6713,9 +6719,9 @@ static void PackCommandQueue(lua_State* L, const CCommandQueue& commands, size_t
  * @return number? ... Command parameters.
  *
  */
-int LuaSyncedRead::GetUnitCurrentCommand(lua_State* L)
+static int GetUnitCurrentCommandLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseAllyUnit(L, __func__, 1);
+	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 
 	if (unit == nullptr)
 		return 0;
@@ -6747,6 +6753,12 @@ int LuaSyncedRead::GetUnitCurrentCommand(lua_State* L)
 	return 3 + numParams;
 }
 
+int LuaSyncedRead::GetUnitCurrentCommand(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitCurrentCommandLive, &LuaSnapshotServe::GetUnitCurrentCommand);
+}
+
 
 // FIXME: Remove the undocumented third argument when deprecations expire: `boolean (Default: true) When true returns a list of commands, otherwise returns the count`
 /***
@@ -6770,9 +6782,9 @@ int LuaSyncedRead::GetUnitCurrentCommand(lua_State* L)
  * @param count 0 Returns the number of commands in the units queue.
  * @return integer The number of commands in the unit queue.
  */
-int LuaSyncedRead::GetUnitCommands(lua_State* L)
+static int GetUnitCommandsLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseAllyUnit(L, __func__, 1);
+	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 
 	if (unit == nullptr)
 		return 0;
@@ -6795,6 +6807,13 @@ int LuaSyncedRead::GetUnitCommands(lua_State* L)
 	}
 
 	return 1;
+}
+
+int LuaSyncedRead::GetUnitCommands(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h);
+	// GetCommandQueue forwards here, so it serves through this route too
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitCommandsLive, &LuaSnapshotServe::GetUnitCommands);
 }
 
 /*** Get the number or list of commands for a factory
@@ -6820,9 +6839,9 @@ int LuaSyncedRead::GetUnitCommands(lua_State* L)
  *
  * @see Spring.GetFactoryCommandCount for replacement function.
  */
-int LuaSyncedRead::GetFactoryCommands(lua_State* L)
+static int GetFactoryCommandsLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseAllyUnit(L, __func__, 1);
+	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 
 	if (unit == nullptr)
 		return 0;
@@ -6849,15 +6868,21 @@ int LuaSyncedRead::GetFactoryCommands(lua_State* L)
 	return 1;
 }
 
+int LuaSyncedRead::GetFactoryCommands(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetFactoryCommandsLive, &LuaSnapshotServe::GetFactoryCommands);
+}
+
 /*** Get the number of commands in a unit's queue.
  *
  * @function Spring.GetUnitCommandCount
  * @param unitID integer
  * @return integer The number of commands in the unit's queue.
  */
-int LuaSyncedRead::GetUnitCommandCount(lua_State* L)
+static int GetUnitCommandCountLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseAllyUnit(L, __func__, 1);
+	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 
 	if (unit == nullptr)
 		return 0;
@@ -6872,6 +6897,12 @@ int LuaSyncedRead::GetUnitCommandCount(lua_State* L)
 	return 1;
 }
 
+int LuaSyncedRead::GetUnitCommandCount(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitCommandCountLive, &LuaSnapshotServe::GetUnitCommandCount);
+}
+
 /*** Get the number of commands in a factory queue.
  *
  * @function Spring.GetFactoryCommandCount
@@ -6881,9 +6912,9 @@ int LuaSyncedRead::GetUnitCommandCount(lua_State* L)
  * @see Spring.GetFactoryCommands to get the factory commands.
  * @see Spring.GetFactoryCounts to get command counts grouped by cmdID.
  */
-int LuaSyncedRead::GetFactoryCommandCount(lua_State* L)
+static int GetFactoryCommandCountLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseAllyUnit(L, __func__, 1);
+	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 
 	if (unit == nullptr)
 		return 0;
@@ -6902,14 +6933,20 @@ int LuaSyncedRead::GetFactoryCommandCount(lua_State* L)
 	return 1;
 }
 
+int LuaSyncedRead::GetFactoryCommandCount(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetFactoryCommandCountLive, &LuaSnapshotServe::GetFactoryCommandCount);
+}
+
 /***
  *
  * @function Spring.GetFactoryBuggerOff
  * @param unitID integer
  */
-int LuaSyncedRead::GetFactoryBuggerOff(lua_State* L)
+static int GetFactoryBuggerOffLive(lua_State* L, const char* caller)
 {
-	const CUnit* u = ParseUnit(L, __func__, 1);
+	const CUnit* u = ParseUnit(L, caller, 1);
 	if (u == nullptr)
 		return 0;
 
@@ -6925,6 +6962,12 @@ int LuaSyncedRead::GetFactoryBuggerOff(lua_State* L)
 	lua_pushboolean(L, f->boForced     );
 
 	return 6;
+}
+
+int LuaSyncedRead::GetFactoryBuggerOff(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetFactoryBuggerOffLive, &LuaSnapshotServe::GetFactoryBuggerOff);
 }
 
 
@@ -6991,9 +7034,9 @@ static void PackFactoryCounts(lua_State* L,
  *
  * @return table<number,number>? counts Build queue count by `unitDefID` or `-cmdID`, or `nil` if unit is not found.
  */
-int LuaSyncedRead::GetFactoryCounts(lua_State* L)
+static int GetFactoryCountsLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseAllyUnit(L, __func__, 1);
+	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 	if (unit == nullptr)
 		return 0;
 
@@ -7015,6 +7058,12 @@ int LuaSyncedRead::GetFactoryCounts(lua_State* L)
 	PackFactoryCounts(L, commandQue, count, noCmds);
 
 	return 1;
+}
+
+int LuaSyncedRead::GetFactoryCounts(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetFactoryCountsLive, &LuaSnapshotServe::GetFactoryCounts);
 }
 
 
@@ -7047,6 +7096,8 @@ int LuaSyncedRead::GetFactoryCounts(lua_State* L)
 int LuaSyncedRead::GetCommandQueue(lua_State* L)
 {
 	LOG_DEPRECATED("Spring.GetCommandQueue is deprecated, please use Spring.GetUnitCommands/Spring.GetUnitCommandCount instead.");
+	// forwards through GetUnitCommands' snapshot route (caller name and error
+	// text stay "GetUnitCommands", exactly as on master)
 	return (GetUnitCommands(L));
 }
 
@@ -7129,9 +7180,15 @@ static int PackBuildQueue(lua_State* L, bool canBuild, const char* caller)
  * @param unitID integer
  * @return table<number,number>? buildqueue indexed by unitDefID with count values
  */
+static int GetFullBuildQueueLive(lua_State* L, const char* caller)
+{
+	return PackBuildQueue(L, false, caller);
+}
+
 int LuaSyncedRead::GetFullBuildQueue(lua_State* L)
 {
-	return PackBuildQueue(L, false, __func__);
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetFullBuildQueueLive, &LuaSnapshotServe::GetFullBuildQueue);
 }
 
 
@@ -7141,9 +7198,15 @@ int LuaSyncedRead::GetFullBuildQueue(lua_State* L)
  * @param unitID integer
  * @return table<number,number>? buildqueue indexed by unitDefID with count values
  */
+static int GetRealBuildQueueLive(lua_State* L, const char* caller)
+{
+	return PackBuildQueue(L, true, caller);
+}
+
 int LuaSyncedRead::GetRealBuildQueue(lua_State* L)
 {
-	return PackBuildQueue(L, true, __func__);
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetRealBuildQueueLive, &LuaSnapshotServe::GetRealBuildQueue);
 }
 
 
@@ -7500,13 +7563,19 @@ int LuaSyncedRead::GetFeatureSeparation(lua_State* L)
  * @return number? yaw Rotation in Y axis
  * @return number? roll Rotation in Z axis
  */
-int LuaSyncedRead::GetFeatureRotation(lua_State* L)
+static int GetFeatureRotationLive(lua_State* L, const char* caller)
 {
-	const CFeature* feature = ParseFeature(L, __func__, 1);
+	const CFeature* feature = ParseFeature(L, caller, 1);
 	if (feature == nullptr || !LuaUtils::IsFeatureVisible(L, feature))
 		return 0;
 
 	return GetSolidObjectRotation(L, feature);
+}
+
+int LuaSyncedRead::GetFeatureRotation(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetFeatureRotationLive, &LuaSnapshotServe::GetFeatureRotation);
 }
 
 /***

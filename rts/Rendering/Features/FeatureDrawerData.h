@@ -43,6 +43,10 @@ public:
 	float GetDrawAlpha(const CFeature* f) const;
 protected:
 	void UpdateObjectDrawFlags(const CSolidObject* o) override;
+	// PR 27b: register non-model features (trees/geo-vents) in the split
+	// resolve cache -- they are alive + LOS-visible so snapshot-serving twins
+	// resolve their ids, but RenderFeaturePreCreated never registers them.
+	void RegisterExtraSplitResolveIDs() override;
 private:
 	void UpdateDrawPos(const CFeature* f);
 	void UpdateUnsyncedTransform(const CFeature* f);

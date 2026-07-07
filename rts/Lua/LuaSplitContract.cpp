@@ -74,8 +74,11 @@ namespace {
 	 *  - rules params: dirty-delta boundary copy; the deltas must ride the
 	 *    RenderEventQueue so creation-clears order against set-deltas under
 	 *    id reuse (same record schema as the stream format)
-	 *  - command queues / weapon state: decision-4 dirty-versioned bounded
-	 *    copies (mutation-rate cost)
+	 *  - command queues: SERVED (PR 27b serving batch 2) via CCommandQueue
+	 *    version ints + barrier copy-on-change (LuaSnapshotServe::
+	 *    RefreshCommandQueues); only the cmd-desc surface remains below
+	 *  - weapon state: decision-4 dirty-versioned bounded copies
+	 *    (mutation-rate cost)
 	 *  - pieces/scripts: piece transforms are extracted since PR 8; the
 	 *    callout surface needs id-keyed piece-tree serving on top
 	 *  - spatial/list queries: core family SERVED in PR 27b (SnapshotPickGrid
@@ -113,11 +116,10 @@ namespace {
 		"GetPlayerRulesParam", "GetPlayerRulesParams",
 		"GetUnitRulesParam", "GetUnitRulesParams",
 		"GetFeatureRulesParam", "GetFeatureRulesParams",
-		// command-queue family (decision-4 copies pending)
-		"GetUnitCommandCount", "GetUnitCommands", "GetUnitCurrentCommand",
-		"GetFactoryCounts", "GetFactoryCommandCount", "GetFactoryCommands",
-		"GetFactoryBuggerOff", "GetCommandQueue", "GetFullBuildQueue",
-		"GetRealBuildQueue", "GetUnitCmdDescs", "FindUnitCmdDesc",
+		// command-queue family: SERVED (PR 27b serving batch 2) -- only the
+		// cmd-desc surface remains (possibleCommands, not the queue; the
+		// worker-task read derefs the builder's current job object)
+		"GetUnitCmdDescs", "FindUnitCmdDesc",
 		"GetUnitWorkerTask",
 		// weapon/shield state family (decision-4 copies pending)
 		"GetUnitShieldState", "GetUnitFlanking", "GetUnitWeaponState",
@@ -168,22 +170,14 @@ namespace {
 		// (b)-class torn-tolerant / wall-clock-dependent
 		"GetGameState", // IsSimLagging reads the wall clock; serving it would false-flag the armed dual-run
 		// unsynced-owned object flags + drawer-backed reads (LuaUnsyncedRead):
-		// the payloads are unsynced/drawer state (luaDraw/noDraw/selection
-		// volumes/icons/transform matrices/camera tests), but the ParseUnit/
-		// ParseFeature visibility gate is a live losStatus read -- 27b: serve
-		// the gate from the snapshot Pov mirrors, payloads stay as-is
-		"IsUnitSelected", "GetUnitLuaDraw", "GetUnitNoDraw",
-		"GetUnitEngineDrawMask", "GetUnitAlwaysUpdateMatrix", "GetUnitDrawFlag",
-		"GetUnitNoMinimap", "GetUnitNoGroup", "GetUnitNoSelect",
-		"UnitIconGetDraw", "GetUnitIcon", "GetUnitIconData",
-		"GetUnitSelectionVolumeData", "GetUnitTransformMatrix",
-		"GetUnitGroup", "IsUnitInView", "IsSphereInView",
-		"GetFeatureLuaDraw", "GetFeatureNoDraw", "GetFeatureEngineDrawMask",
-		"GetFeatureAlwaysUpdateMatrix", "GetFeatureDrawFlag",
-		"GetFeatureSelectionVolumeData", "GetFeatureTransformMatrix",
-		// drawer-matrix-backed rotations (payload draw-safe since PR 3; only
-		// the parse gate is a sim read, same 27b plan as the flag getters)
-		"GetUnitRotation", "GetFeatureRotation",
+		// family SERVED (PR 27b serving batch 2, family 2) -- the ParseUnit/
+		// ParseFeature gates answer from the snapshot Pov mirrors, payloads
+		// stay unsynced/drawer-owned (LuaSnapshotServe parse-gate twins);
+		// only the no-object camera test below remains sanctioned
+		"IsSphereInView",
+		// drawer-matrix-backed rotations: SERVED (PR 27b serving batch 2,
+		// family 2; GetUnitRotation/GetFeatureRotation compose from the
+		// drawer transform + snapshot basis rows)
 		// misc
 		"GetCEGID", // can LOAD a generator (explGenHandler mutation)
 		"GetFeatureFireTime", "GetFeatureSmokeTime",

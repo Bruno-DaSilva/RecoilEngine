@@ -3,6 +3,7 @@
 #include "LuaSnapshotServe.h"
 
 #include <algorithm>
+#include <cassert> // the rotation twins' IsOrthoNormal assert
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -16,22 +17,33 @@
 #include "Game/Camera.h"
 #include "Game/Game.h" // the stats callouts' live `game` null-check
 #include "Game/GlobalUnsynced.h" // gu->myAllyTeam (IsUnitAllied's fullRead answer)
+#include "Game/SelectedUnitsHandler.h" // IsUnitSelected's id-set payload
+#include "Game/UI/Groups/Group.h" // CGroup::id (GetUnitGroup)
+#include "Game/UI/Groups/GroupHandler.h" // uiGroupHandlers (GetUnitGroup)
 #include "Rendering/Common/SimSnapshot.h"
 #include "Rendering/Common/SnapshotDiffGate.h"
 #include "Rendering/Common/SnapshotPickGrid.h"
+#include "Rendering/Features/FeatureDrawer.h" // CFeatureDrawer::GetDrawFlag / GetUnsyncedTransformMatrix
 #include "Rendering/GlobalRendering.h" // timeOffset (draw-owned)
+#include "Rendering/IconHandler.h" // icon data pushes (GetUnitIcon/GetUnitIconData)
 #include "Rendering/Units/UnitDrawer.h"
+#include "Sim/Features/Feature.h" // CFeature member payload reads (luaDraw/noDraw/engineDrawMask/alwaysUpdateMat/selectionVolume)
 #include "Sim/Features/FeatureDef.h"
 #include "Sim/Features/FeatureDefHandler.h"
 #include "Sim/Misc/CollisionVolume.h" // WORLD_TO_OBJECT_SPACE
 #include "Sim/Misc/GlobalConstants.h" // GAME_SPEED
 #include "Sim/Misc/GlobalSynced.h" // GODMODE_*_BIT
 #include "Sim/MoveTypes/MoveDefHandler.h" // immutable MoveDef name (GetUnitMoveDefID)
+#include "Sim/Units/CommandAI/CommandAI.h" // command-queue family boundary copies
+#include "Sim/Units/CommandAI/FactoryCAI.h"
 #include "Sim/Units/Unit.h" // LOS_* bits
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Units/UnitDefHandler.h"
+#include "Sim/Units/UnitHandler.h" // RefreshCommandQueues' barrier walk
+#include "Sim/Units/UnitTypes/Factory.h" // CFactory bugger-off scalars
 #include "System/AABB.hpp" // GetUnitsInBox's boxCheck
 #include "System/ContainerUtil.h" // spring::VectorSortUnique (GetTeamUnitsByDefs)
+#include "System/MainDefines.h" // STRCASECMP (PackBuildQueueSnap)
 #include "System/Cpp11Compat.hpp" // spring::random_shuffle (GetTeamUnitsByDefs)
 #include "System/Log/ILog.h"
 #include "System/SimDrawSplit.h"
@@ -79,6 +91,15 @@ namespace {
 		return lua_toint(L, index);
 	}
 
+	// LuaUnsyncedRead's ParseFeature argument semantics (error text included)
+	inline int ParseFeatureIDUnsynced(lua_State* L, const char* caller, int index)
+	{
+		if (!lua_isnumber(L, index))
+			luaL_error(L, "%s(): Bad featureID", caller);
+
+		return lua_toint(L, index);
+	}
+
 	// LuaUtils::IsFeatureVisible mirror (exact branch order: fullRead bypass,
 	// then the no-access gate, then CFeature::IsInLosForAllyTeam); caller must
 	// have checked rows.Valid(featureID)
@@ -90,6 +111,120 @@ namespace {
 			return false;
 
 		return rows.IsInLosForAllyTeam(featureID, pov.readAllyTeam);
+	}
+
+	// sanctioned draw-side id->pointer resolution for drawer payload reads that
+	// only exist pointer-keyed (GetDrawFlag / the icon-state accessors): the
+	// drawer's boundary resolve cache first, the died-in-burst shell second,
+	// NEVER the sim-owned handler tables (dogfood invariant; same pattern as
+	// the GetUnitDrawFlag live fix, commit 6910e82315). nullptr = dead per
+	// drawer; callers answer the "no such unit" nil shape.
+	inline const CUnit* ResolveDrawUnit(int unitID)
+	{
+		const CUnit* unit = DrawerGetObjectByID<CUnit>(unitID);
+
+		if (unit == nullptr)
+			unit = SimDrawSplit::ShellFallbackUnit(unitID);
+
+		return unit;
+	}
+
+	// draw-side feature resolver for the unsynced-owned payload reads (the
+	// luaDraw/noDraw/drawFlag/selection-volume family): the drawer's boundary
+	// cache first, the died-in-burst shell second -- NEVER the sim-owned
+	// featureHandler (dogfood invariant, doc/pr27b-implementation-notes.md)
+	inline const CFeature* ResolveDrawFeature(int featureID)
+	{
+		const CFeature* feature = DrawerGetObjectByID<CFeature>(featureID);
+
+		if (feature == nullptr)
+			feature = SimDrawSplit::ShellFallbackFeature(featureID);
+
+		return feature;
+	}
+
+	// unit-flags family (PR 27b serving batch 2): the payloads are unsynced-
+	// owned flags on the live CUnit (LuaUnsyncedCtrl / UnitRendering writers);
+	// only the ParseUnit visibility gate is a live sim read. Mirror the gate
+	// from the snapshot rows (LuaUnsyncedRead::ParseUnit branch order, no ally
+	// bypass), then resolve the payload pointer through the boundary-consistent
+	// draw-side path (drawer resolve cache + died-in-burst shell fallback,
+	// LuaUtils::IdToObject) -- NEVER the sim-owned handler tables (dogfood
+	// invariant, doc/pr27b-implementation-notes.md). A resolver miss after a
+	// passing gate returns nullptr = the live path's "no such unit" nil shape.
+	inline const CUnit* PovResolveUnitUnsynced(lua_State* L, const char* caller)
+	{
+		const auto& rows = simSnapshot.Read();
+		const int unitID = ParseUnitIDUnsynced(L, caller, 1);
+		const Pov pov = HandlePov(L);
+
+		// LuaUnsyncedRead::ParseUnit gate mirror
+		if (!rows.Valid(unitID))
+			return nullptr;
+		if (pov.readAllyTeam < 0) {
+			if (!pov.fullRead)
+				return nullptr;
+		} else if ((rows.LosStatus(unitID, pov.readAllyTeam) & (LOS_INLOS | LOS_INRADAR)) == 0) {
+			return nullptr;
+		}
+
+		return LuaUtils::IdToObject<CUnit>(unitID, caller);
+	}
+
+	// mirrors of LuaUnsyncedRead.cpp's file-local Impl::PushIconData /
+	// Impl::GetIconDataImpl (keep in lockstep with the live file); the icon
+	// tables are load-time data mutated only by main-thread Lua ctrl
+	template<bool full>
+	void PushIconDataMirror(lua_State* L, const icon::IconData& iconData)
+	{
+		lua_createtable(L, 0, 2 + 5 * !full);
+
+		LuaPushNamedString(L, "name", iconData.GetName());
+		if constexpr (full) {
+			LuaPushNamedString(L, "fileName", iconData.GetFileName());
+			LuaPushNamedNumber(L, "size", iconData.GetSize());
+			LuaPushNamedNumber(L, "distance", iconData.GetDistance());
+			LuaPushNamedBool(L, "radiusAdjust", iconData.GetRadiusAdjust());
+
+			{
+				const auto& stc = iconData.GetSrcTexCoords();
+				lua_pushliteral(L, "srcTexCoords");
+				lua_createtable(L, 0, 4);
+
+				LuaPushNamedNumber(L, "x0", stc.x1);
+				LuaPushNamedNumber(L, "y0", stc.y1);
+				LuaPushNamedNumber(L, "x1", stc.x2);
+				LuaPushNamedNumber(L, "y1", stc.y2);
+
+				lua_rawset(L, -3);
+			}
+		}
+
+		const auto& atc = iconData.GetTexCoords();
+		{
+			lua_pushliteral(L, "atlasTexCoords");
+			lua_createtable(L, 0, 5);
+
+			LuaPushNamedNumber(L, "x0", atc.x1);
+			LuaPushNamedNumber(L, "y0", atc.y1);
+			LuaPushNamedNumber(L, "x1", atc.x2);
+			LuaPushNamedNumber(L, "y1", atc.y2);
+			LuaPushNamedNumber(L, "atlasIndex", atc.pageNum);
+
+			lua_rawset(L, -3);
+		}
+	}
+
+	template<bool full>
+	int GetIconDataImplMirror(lua_State* L, size_t iconIdx)
+	{
+		if (iconIdx == icon::INVALID_ICON_INDEX)
+			return 0;
+
+		const auto& iconData = icon::iconHandler.GetIconData(iconIdx);
+
+		PushIconDataMirror<full>(L, iconData);
+		return 1;
 	}
 
 	// GetSolidObjectBlocking's seven pushes from the packed row byte
@@ -3432,6 +3567,1210 @@ int LuaSnapshotServe::GetProjectilesInRectangle(lua_State* L, const char* caller
 }
 
 
+/******************************************************************************
+ * Unsynced flag/drawer parse-gate family (PR 27b serving batch 2, family 2).
+ * The payloads are draw-owned (unsynced object flags, drawer icon/draw-flag
+ * state, drawer transforms, UI selection/group tables) -- only the ParseUnit/
+ * ParseFeature visibility gate was a live sim read. Gates mirror the live
+ * parse helpers from the snapshot rows; payload pointers, where needed at
+ * all, resolve through the sanctioned draw-side path (drawer boundary cache
+ * + died-in-burst shell), never the sim-owned handler tables.
+ ******************************************************************************/
+
+// mirror of LuaUnsyncedRead::GetUnitLuaDraw (the luaDraw flag is unsynced-
+// owned object state, written only by Spring.UnitRendering.SetUnitLuaDraw on
+// the draw thread; only the ParseUnit gate was a sim read)
+int LuaSnapshotServe::GetUnitLuaDraw(lua_State* L, const char* caller)
+{
+	const CUnit* unit = PovResolveUnitUnsynced(L, caller);
+
+	if (unit == nullptr)
+		return 0;
+
+	lua_pushboolean(L, unit->luaDraw);
+	return 1;
+}
+
+// mirror of LuaUnsyncedRead::GetUnitNoDraw (the noDraw flag is unsynced-owned
+// object state, boundary-applied by SetUnitNoDraw under the split; only the
+// ParseUnit gate was a sim read)
+int LuaSnapshotServe::GetUnitNoDraw(lua_State* L, const char* caller)
+{
+	const CUnit* unit = PovResolveUnitUnsynced(L, caller);
+
+	if (unit == nullptr)
+		return 0;
+
+	lua_pushboolean(L, unit->noDraw);
+	return 1;
+}
+
+// mirror of LuaUnsyncedRead::GetUnitNoMinimap (the noMinimap flag is
+// unsynced-owned, boundary-applied by SetUnitNoMinimap under the split; only
+// the ParseUnit gate was a sim read)
+int LuaSnapshotServe::GetUnitNoMinimap(lua_State* L, const char* caller)
+{
+	const CUnit* unit = PovResolveUnitUnsynced(L, caller);
+
+	if (unit == nullptr)
+		return 0;
+
+	lua_pushboolean(L, unit->noMinimap);
+	return 1;
+}
+
+// mirror of LuaUnsyncedRead::GetUnitNoGroup (the noGroup flag is unsynced-
+// owned, written synchronously on the draw thread by SetUnitNoGroup; only the
+// ParseUnit gate was a sim read)
+int LuaSnapshotServe::GetUnitNoGroup(lua_State* L, const char* caller)
+{
+	const CUnit* unit = PovResolveUnitUnsynced(L, caller);
+
+	if (unit == nullptr)
+		return 0;
+
+	lua_pushboolean(L, unit->noGroup);
+	return 1;
+}
+
+// mirror of LuaUnsyncedRead::GetUnitNoSelect; the flag is read live off the
+// draw-resolved object rather than the rows.noSelect boundary row so a
+// draw-context SetUnitNoSelect (synchronous poke under the split) keeps its
+// read-your-own-write semantics; the residual is sim's UpdateVoidState
+// two-writer race, a torn single-byte bool -- the tolerated section-C class
+int LuaSnapshotServe::GetUnitNoSelect(lua_State* L, const char* caller)
+{
+	const CUnit* unit = PovResolveUnitUnsynced(L, caller);
+
+	if (unit == nullptr)
+		return 0;
+
+	lua_pushboolean(L, unit->noSelect);
+	return 1;
+}
+
+// mirror of LuaUnsyncedRead::GetUnitEngineDrawMask (the mask is unsynced-
+// owned, boundary-applied by SetUnitEngineDrawMask under the split; only the
+// ParseUnit gate was a sim read)
+int LuaSnapshotServe::GetUnitEngineDrawMask(lua_State* L, const char* caller)
+{
+	const CUnit* unit = PovResolveUnitUnsynced(L, caller);
+
+	if (unit == nullptr)
+		return 0;
+
+	lua_pushinteger(L, unit->engineDrawMask);
+	return 1;
+}
+
+// mirror of LuaUnsyncedRead::GetUnitAlwaysUpdateMatrix (the flag is unsynced-
+// owned, boundary-applied by SetUnitAlwaysUpdateMatrix under the split; only
+// the ParseUnit gate was a sim read)
+int LuaSnapshotServe::GetUnitAlwaysUpdateMatrix(lua_State* L, const char* caller)
+{
+	const CUnit* unit = PovResolveUnitUnsynced(L, caller);
+
+	if (unit == nullptr)
+		return 0;
+
+	lua_pushboolean(L, unit->alwaysUpdateMat);
+	return 1;
+}
+
+// mirror of LuaUnsyncedRead::GetUnitDrawFlag; the flag itself is drawer-owned
+// (id-keyed DrawFlagState storage), only the ParseUnit gate was a live sim
+// read. Folds the dogfood fix (commit 6910e82315): the payload pointer comes
+// from the drawer's boundary resolve cache with the died-in-burst shell as
+// fallback, never the sim-owned handler tables; a double miss answers the
+// same "no such unit" nil shape.
+int LuaSnapshotServe::GetUnitDrawFlag(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDUnsynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// LuaUnsyncedRead::ParseUnit gate mirror
+	if (!rows.Valid(unitID))
+		return 0;
+	if (pov.readAllyTeam < 0) {
+		if (!pov.fullRead)
+			return 0;
+	} else if ((rows.LosStatus(unitID, pov.readAllyTeam) & (LOS_INLOS | LOS_INRADAR)) == 0) {
+		return 0;
+	}
+
+	const CUnit* unit = ResolveDrawUnit(unitID);
+
+	if (unit == nullptr)
+		return 0;
+
+	lua_pushinteger(L, CUnitDrawer::GetDrawFlag(unit));
+	return 1;
+}
+
+// mirror of LuaUnsyncedRead::UnitIconGetDraw; drawIcon is drawer-owned
+// per-unit icon state (id-keyed UnitIconState, PR 5 eviction), written by
+// main-thread Lua ctrl (Spring.SetUnitIconDraw) only -- the ParseUnit gate
+// was the sole live sim read. Pointer-keyed accessor, so resolve through
+// the sanctioned draw-side path.
+int LuaSnapshotServe::UnitIconGetDraw(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDUnsynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// LuaUnsyncedRead::ParseUnit gate mirror
+	if (!rows.Valid(unitID))
+		return 0;
+	if (pov.readAllyTeam < 0) {
+		if (!pov.fullRead)
+			return 0;
+	} else if ((rows.LosStatus(unitID, pov.readAllyTeam) & (LOS_INLOS | LOS_INRADAR)) == 0) {
+		return 0;
+	}
+
+	const CUnit* unit = ResolveDrawUnit(unitID);
+
+	if (unit == nullptr)
+		return 0;
+
+	lua_pushboolean(L, CUnitDrawer::GetUnitDrawIcon(unit));
+	return 1;
+}
+
+// mirror of LuaUnsyncedRead::GetUnitIcon; currentIconIndex is drawer-owned
+// per-unit icon state (PR 5 eviction, authored by the draw-side icon pass)
+// and the iconHandler tables are load-time data mutated only by main-thread
+// Lua ctrl -- the ParseUnit gate was the sole live sim read
+int LuaSnapshotServe::GetUnitIcon(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDUnsynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// LuaUnsyncedRead::ParseUnit gate mirror
+	if (!rows.Valid(unitID))
+		return 0;
+	if (pov.readAllyTeam < 0) {
+		if (!pov.fullRead)
+			return 0;
+	} else if ((rows.LosStatus(unitID, pov.readAllyTeam) & (LOS_INLOS | LOS_INRADAR)) == 0) {
+		return 0;
+	}
+
+	const CUnit* unit = ResolveDrawUnit(unitID);
+
+	if (unit == nullptr)
+		return 0;
+
+	const auto iconIdx = CUnitDrawer::GetUnitIconIndex(unit);
+
+	if (iconIdx == icon::INVALID_ICON_INDEX) {
+		lua_pushstring(L, "");
+	}
+	else {
+		const auto& iconData = icon::iconHandler.GetIconData(iconIdx);
+		lua_pushstring(L, iconData.GetName().c_str());
+	}
+
+	return 1;
+}
+
+// mirror of LuaUnsyncedRead::GetUnitIconData; same ownership story as the
+// GetUnitIcon twin. The optional fullData arg is read BEFORE the gate, like
+// the live body reads it before its nullptr check (stack-order fidelity:
+// a bad arg #2 must raise the same error even for invisible/invalid ids)
+int LuaSnapshotServe::GetUnitIconData(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDUnsynced(L, caller, 1);
+	const auto fullData = luaL_optboolean(L, 2, false);
+	const Pov pov = HandlePov(L);
+
+	// LuaUnsyncedRead::ParseUnit gate mirror
+	if (!rows.Valid(unitID))
+		return 0;
+	if (pov.readAllyTeam < 0) {
+		if (!pov.fullRead)
+			return 0;
+	} else if ((rows.LosStatus(unitID, pov.readAllyTeam) & (LOS_INLOS | LOS_INRADAR)) == 0) {
+		return 0;
+	}
+
+	const CUnit* unit = ResolveDrawUnit(unitID);
+
+	if (unit == nullptr)
+		return 0;
+
+	if (fullData)
+		return GetIconDataImplMirror<true >(L, CUnitDrawer::GetUnitIconIndex(unit));
+	else
+		return GetIconDataImplMirror<false>(L, CUnitDrawer::GetUnitIconIndex(unit));
+}
+
+// mirror of LuaUnsyncedRead::IsUnitSelected; selectedUnits is an id set
+// owned by main-thread UI code (deaths arrive via DeliverBoundaryDeaths
+// under the split), so the payload read stays live and needs no object
+// pointer at all -- only the ParseUnit gate was a sim read
+int LuaSnapshotServe::IsUnitSelected(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDUnsynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// LuaUnsyncedRead::ParseUnit gate mirror
+	if (!rows.Valid(unitID))
+		return 0;
+	if (pov.readAllyTeam < 0) {
+		if (!pov.fullRead)
+			return 0;
+	} else if ((rows.LosStatus(unitID, pov.readAllyTeam) & (LOS_INLOS | LOS_INRADAR)) == 0) {
+		return 0;
+	}
+
+	const auto& selUnits = selectedUnitsHandler.selectedUnits;
+	lua_pushboolean(L, selUnits.find(unitID) != selUnits.end());
+	return 1;
+}
+
+// mirror of LuaUnsyncedRead::GetUnitGroup; the group tables are unsynced
+// UI state (uiGroupHandlers, id-keyed) and CUnit::GetGroup() is just
+// uiGroupHandlers[team].GetUnitGroup(id) -- the live sim reads were the
+// ParseUnit gate and unit->team, both served from the rows (the team row
+// is the boundary answer, consistent with the gate). team == gu->myTeam
+// after the check, so the handler index needs no live team read either.
+int LuaSnapshotServe::GetUnitGroup(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDUnsynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// LuaUnsyncedRead::ParseUnit gate mirror
+	if (!rows.Valid(unitID))
+		return 0;
+	if (pov.readAllyTeam < 0) {
+		if (!pov.fullRead)
+			return 0;
+	} else if ((rows.LosStatus(unitID, pov.readAllyTeam) & (LOS_INLOS | LOS_INRADAR)) == 0) {
+		return 0;
+	}
+
+	if (rows.Team(unitID) != gu->myTeam)
+		return 0;
+
+	const CGroup* group = uiGroupHandlers[gu->myTeam].GetUnitGroup(unitID);
+
+	if (group == nullptr)
+		return 0;
+
+	lua_pushnumber(L, group->id);
+	return 1;
+}
+
+// mirror of LuaUnsyncedRead::IsUnitInView (the camera test is draw-owned;
+// the ParseUnit gate and the midPos/radius payload were live sim reads)
+int LuaSnapshotServe::IsUnitInView(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDUnsynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// LuaUnsyncedRead::ParseUnit gate mirror
+	if (!rows.Valid(unitID))
+		return 0;
+	if (pov.readAllyTeam < 0) {
+		if (!pov.fullRead)
+			return 0;
+	} else if ((rows.LosStatus(unitID, pov.readAllyTeam) & (LOS_INLOS | LOS_INRADAR)) == 0) {
+		return 0;
+	}
+
+	lua_pushboolean(L, camera->InView(rows.midPos[unitID], rows.radius[unitID]));
+	return 1;
+}
+
+// mirror of LuaUnsyncedRead::GetUnitTransformMatrix; the live payload is
+// CUnitDrawer::GetUnsyncedTransformMatrix: drawPos is drawer-owned (id-keyed),
+// but the error offset and the ComposeMatrix basis (frontdir/updir/rightdir)
+// are sim-written every frame -- mirrored from the rows
+int LuaSnapshotServe::GetUnitTransformMatrix(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDUnsynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// LuaUnsyncedRead::ParseUnit gate mirror
+	if (!rows.Valid(unitID))
+		return 0;
+	if (pov.readAllyTeam < 0) {
+		if (!pov.fullRead)
+			return 0;
+	} else if ((rows.LosStatus(unitID, pov.readAllyTeam) & (LOS_INLOS | LOS_INRADAR)) == 0) {
+		return 0;
+	}
+
+	// CUnitDrawerData::GetUnsyncedTransformMatrix mirror (the live call site
+	// passes fullread = false; gu->* are draw-owned unsynced globals and the
+	// live formula reads gu->myAllyTeam, NOT the handle POV)
+	float3 interPos = CUnitDrawer::GetDrawPos(unitID);
+
+	if (!gu->spectatingFullView)
+		interPos += rows.ErrorVector(unitID, gu->myAllyTeam);
+
+	// CSolidObject::ComposeMatrix mirror: CMatrix44f(pos, -rightdir, updir, frontdir)
+	CMatrix44f m(interPos, -rows.rightdir[unitID], rows.updir[unitID], rows.frontdir[unitID]);
+
+	if (luaL_optboolean(L, 2, false))
+		m = m.InvertAffine();
+
+	for (int i = 0; i < 16; i += 4) {
+		lua_pushnumber(L, m[i + 0]);
+		lua_pushnumber(L, m[i + 1]);
+		lua_pushnumber(L, m[i + 2]);
+		lua_pushnumber(L, m[i + 3]);
+	}
+
+	return 16;
+}
+
+// mirror of LuaUnsyncedRead::GetUnitSelectionVolumeData; only the ParseUnit
+// gate was a live losStatus read. The volume itself is unsynced-owned after
+// creation (LuaUnsyncedCtrl::SetUnitSelectionVolumeData is the only
+// post-PreInit writer), so it stays a live read -- through the sanctioned
+// draw-side resolver, which also keeps same-frame set-then-read fresh (the
+// boundary selVol row copy would lag a widget's own mutation)
+int LuaSnapshotServe::GetUnitSelectionVolumeData(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDUnsynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// LuaUnsyncedRead::ParseUnit gate mirror
+	if (!rows.Valid(unitID))
+		return 0;
+	if (pov.readAllyTeam < 0) {
+		if (!pov.fullRead)
+			return 0;
+	} else if ((rows.LosStatus(unitID, pov.readAllyTeam) & (LOS_INLOS | LOS_INRADAR)) == 0) {
+		return 0;
+	}
+
+	// boundary-consistent pointer resolution (drawer cache + died-in-burst
+	// shell); a miss is the same "no such unit" nil shape, never a
+	// unitHandler fallback
+	const CUnit* unit = LuaUtils::IdToObject<CUnit>(unitID, caller);
+
+	if (unit == nullptr)
+		return 0;
+
+	return LuaUtils::PushColVolData(L, &unit->selectionVolume);
+}
+
+// mirror of LuaSyncedRead::GetUnitRotation. GetSolidObjectRotation branches
+// on GetHandleSynced, but ShouldServe rejects synced handles, so only the
+// unsynced branch (CUnitDrawer::GetUnsyncedTransformMatrix) is reachable
+// here -- same drawPos + rows-basis composition as the GetUnitTransformMatrix
+// twin, angles extracted the same way as live
+int LuaSnapshotServe::GetUnitRotation(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// ParseInLosUnit mirror
+	if (!rows.Valid(unitID) || !rows.PovUnitInLos(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	// CUnitDrawerData::GetUnsyncedTransformMatrix mirror (fullread = false at
+	// the live call site; gu->* are draw-owned, the live formula reads
+	// gu->myAllyTeam, not the handle POV) + CSolidObject::ComposeMatrix mirror
+	float3 interPos = CUnitDrawer::GetDrawPos(unitID);
+
+	if (!gu->spectatingFullView)
+		interPos += rows.ErrorVector(unitID, gu->myAllyTeam);
+
+	const CMatrix44f matrix(interPos, -rows.rightdir[unitID], rows.updir[unitID], rows.frontdir[unitID]);
+	const float3 angles = matrix.GetEulerAnglesLftHand();
+
+	assert(matrix.IsOrthoNormal());
+
+	lua_pushnumber(L, angles[CMatrix44f::ANGLE_P]);
+	lua_pushnumber(L, angles[CMatrix44f::ANGLE_Y]);
+	lua_pushnumber(L, angles[CMatrix44f::ANGLE_R]);
+	return 3;
+}
+
+// mirror of LuaUnsyncedRead::GetFeatureLuaDraw (GetSolidObjectLuaDraw with the
+// unsynced ParseFeature gate; luaDraw is unsynced-owned -- FeatureRendering.
+// SetFeatureLuaDraw only exists in LuaRules' unsynced env -- so the payload
+// stays a live read through the draw-side resolver)
+int LuaSnapshotServe::GetFeatureLuaDraw(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.ReadFeatures();
+	const int featureID = ParseFeatureIDUnsynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// LuaUnsyncedRead::ParseFeature gate mirror (fullRead bypass, then the
+	// readAllyTeam<0 deny, then feature LOS -- same observable order)
+	if (!rows.Valid(featureID) || !PovFeatureVisible(rows, featureID, pov))
+		return 0;
+
+	const CFeature* feature = ResolveDrawFeature(featureID);
+
+	if (feature == nullptr)
+		return 0;
+
+	lua_pushboolean(L, feature->luaDraw);
+	return 1;
+}
+
+// mirror of LuaUnsyncedRead::GetFeatureNoDraw (GetSolidObjectNoDraw with the
+// unsynced ParseFeature gate; noDraw is unsynced-owned -- LuaUnsyncedCtrl::
+// SetFeatureNoDraw is the only post-creation writer)
+int LuaSnapshotServe::GetFeatureNoDraw(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.ReadFeatures();
+	const int featureID = ParseFeatureIDUnsynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// LuaUnsyncedRead::ParseFeature gate mirror
+	if (!rows.Valid(featureID) || !PovFeatureVisible(rows, featureID, pov))
+		return 0;
+
+	const CFeature* feature = ResolveDrawFeature(featureID);
+
+	if (feature == nullptr)
+		return 0;
+
+	lua_pushboolean(L, feature->noDraw);
+	return 1;
+}
+
+// mirror of LuaUnsyncedRead::GetFeatureEngineDrawMask (GetSolidObjectEngineDrawMask
+// with the unsynced ParseFeature gate; engineDrawMask is unsynced-owned --
+// LuaUnsyncedCtrl::SetFeatureEngineDrawMask is the only post-creation writer)
+int LuaSnapshotServe::GetFeatureEngineDrawMask(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.ReadFeatures();
+	const int featureID = ParseFeatureIDUnsynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// LuaUnsyncedRead::ParseFeature gate mirror
+	if (!rows.Valid(featureID) || !PovFeatureVisible(rows, featureID, pov))
+		return 0;
+
+	const CFeature* feature = ResolveDrawFeature(featureID);
+
+	if (feature == nullptr)
+		return 0;
+
+	lua_pushinteger(L, feature->engineDrawMask);
+	return 1;
+}
+
+// mirror of LuaUnsyncedRead::GetFeatureAlwaysUpdateMatrix (alwaysUpdateMat is
+// unsynced-owned -- LuaUnsyncedCtrl::SetFeatureAlwaysUpdateMatrix is the only
+// post-creation writer)
+int LuaSnapshotServe::GetFeatureAlwaysUpdateMatrix(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.ReadFeatures();
+	const int featureID = ParseFeatureIDUnsynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// LuaUnsyncedRead::ParseFeature gate mirror
+	if (!rows.Valid(featureID) || !PovFeatureVisible(rows, featureID, pov))
+		return 0;
+
+	const CFeature* feature = ResolveDrawFeature(featureID);
+
+	if (feature == nullptr)
+		return 0;
+
+	lua_pushboolean(L, feature->alwaysUpdateMat);
+	return 1;
+}
+
+// mirror of LuaUnsyncedRead::GetFeatureDrawFlag; folds the dogfood-round
+// drawer-cache/shell fix (commits 6910e82315 / f5e064c252): the payload is
+// DRAWER-owned (CFeatureDrawer::GetDrawFlag), the pointer comes from the
+// drawer's boundary cache + died-in-burst shell, and the visibility gate --
+// the fix's one remaining live sim read (LuaUtils::IsFeatureVisible) -- now
+// answers from the snapshot Pov mirror per the 27b plan of record
+int LuaSnapshotServe::GetFeatureDrawFlag(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.ReadFeatures();
+	const int featureID = ParseFeatureIDUnsynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// LuaUnsyncedRead::ParseFeature gate mirror
+	if (!rows.Valid(featureID) || !PovFeatureVisible(rows, featureID, pov))
+		return 0;
+
+	const CFeature* feature = ResolveDrawFeature(featureID);
+
+	if (feature == nullptr)
+		return 0;
+
+	lua_pushinteger(L, CFeatureDrawer::GetDrawFlag(feature));
+	return 1;
+}
+
+// mirror of LuaUnsyncedRead::GetFeatureSelectionVolumeData
+// (GetSolidObjectSelectionVolume with the unsynced ParseFeature gate; the
+// selection volume is unsynced-owned -- ctor-init happens-before the boundary
+// publish, LuaUnsyncedCtrl::SetFeatureSelectionVolumeData is the only later
+// writer -- so the payload stays a live read through the draw-side resolver,
+// which also keeps same-draw-frame set-then-get read-your-write consistent
+// where the boundary selVol row copy would be one frame stale)
+int LuaSnapshotServe::GetFeatureSelectionVolumeData(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.ReadFeatures();
+	const int featureID = ParseFeatureIDUnsynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// LuaUnsyncedRead::ParseFeature gate mirror
+	if (!rows.Valid(featureID) || !PovFeatureVisible(rows, featureID, pov))
+		return 0;
+
+	const CFeature* feature = ResolveDrawFeature(featureID);
+
+	if (feature == nullptr)
+		return 0;
+
+	return LuaUtils::PushColVolData(L, &feature->selectionVolume);
+}
+
+// mirror of LuaUnsyncedRead::GetFeatureTransformMatrix (GetObjectTransformMatrix
+// over the drawer-owned unsynced transform -- id-keyed accessor, identity on a
+// stale id, exactly the live pointer path's f->id lookup; only the ParseFeature
+// gate was a sim read)
+int LuaSnapshotServe::GetFeatureTransformMatrix(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.ReadFeatures();
+	const int featureID = ParseFeatureIDUnsynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// LuaUnsyncedRead::ParseFeature gate mirror
+	if (!rows.Valid(featureID) || !PovFeatureVisible(rows, featureID, pov))
+		return 0;
+
+	CMatrix44f m = CFeatureDrawer::GetUnsyncedTransformMatrix(featureID);
+
+	// NOTE: read before any pushing (same order as the live helper)
+	if (luaL_optboolean(L, 2, false))
+		m = m.InvertAffine();
+
+	for (int i = 0; i < 16; i += 4) {
+		lua_pushnumber(L, m[i + 0]);
+		lua_pushnumber(L, m[i + 1]);
+		lua_pushnumber(L, m[i + 2]);
+		lua_pushnumber(L, m[i + 3]);
+	}
+
+	return 16;
+}
+
+// mirror of LuaSyncedRead::GetFeatureRotation. GetSolidObjectRotation branches
+// on GetHandleSynced, and ShouldServe() excludes synced handles, so the served
+// leg is always the drawer-owned unsynced transform (draw-safe since PR 3);
+// only the ParseFeature/IsFeatureVisible gate was a live sim read
+int LuaSnapshotServe::GetFeatureRotation(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.ReadFeatures();
+	const int featureID = ParseFeatureIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// ParseFeature mirror (the live body's IsFeatureVisible re-check is the
+	// same predicate ParseFeature already applied)
+	if (!rows.Valid(featureID) || !PovFeatureVisible(rows, featureID, pov))
+		return 0;
+
+	const CMatrix44f matrix = CFeatureDrawer::GetUnsyncedTransformMatrix(featureID);
+	const float3 angles = matrix.GetEulerAnglesLftHand();
+
+	assert(matrix.IsOrthoNormal());
+
+	lua_pushnumber(L, angles[CMatrix44f::ANGLE_P]);
+	lua_pushnumber(L, angles[CMatrix44f::ANGLE_Y]);
+	lua_pushnumber(L, angles[CMatrix44f::ANGLE_R]);
+	return 3;
+}
+
+
+/******************************************************************************
+ * Command-queue family (PR 27b serving batch 2, first family).
+ *
+ * Unlike the row-backed families above, queue contents cannot be read lazily
+ * at callout time: the twins run post-release while the sim thread mutates
+ * the deques. RefreshCommandQueues() below runs AT THE BARRIER (sim parked,
+ * right after the snapshot publish) and re-copies only the queues whose
+ * CCommandQueue version changed since the last boundary (versions are bumped
+ * at every queue mutation, structural or in-place, and are globally unique
+ * across queue instances -- see CommandQueue.h).
+ *
+ * Copies are flattened into SnapCommand + a flat float param buffer instead
+ * of std::vector<Command>: copying/destroying a raw Command with more than
+ * MAX_COMMAND_PARAMS params acquires/releases pages of the sim-owned global
+ * cmdParamsPool, and GetParam on such a copy reads pool storage the sim
+ * thread resizes (AcquirePage grows the page table) -- both races under the
+ * running split. The flatten happens element-wise under the parked sim, the
+ * same per-element copy the WaitCommandsAI deferral does.
+ ******************************************************************************/
+
+namespace {
+	// the Command fields the family's twins serve (params live in the slot's
+	// flat buffer at [paramOffset, paramOffset + numParams))
+	struct SnapCommand {
+		int id;
+		unsigned int tag;
+		unsigned char options;
+		unsigned int paramOffset;
+		unsigned int numParams;
+	};
+
+	struct UnitCmdQueueSlot {
+		// 0 = never copied (real versions are a pre-incremented global counter)
+		uint64_t cmdQueVersion = 0;
+		uint64_t newUnitCmdsVersion = 0;
+
+		bool present = false;
+		bool isFactoryCAI = false;  // CFactoryCAI: unit callouts serve newUnitCommands instead
+		bool isFactoryUnit = false; // CFactory: GetFactoryBuggerOff's dynamic_cast gate
+
+		// GetFactoryBuggerOff payload (CFactory bo*): no version to key on, but
+		// factories are few -- re-copied unconditionally every refresh
+		bool boPerform = false;
+		bool boSherical = false;
+		bool boForced = false;
+		float boOffset = 0.0f;
+		float boRadius = 0.0f;
+		int boRelHeading = 0;
+
+		std::vector<SnapCommand> commandQue;
+		std::vector<float> commandQueParams;
+		std::vector<SnapCommand> newUnitCommands;
+		std::vector<float> newUnitCommandsParams;
+	};
+
+	// indexed by unitID, sized unitHandler.MaxUnits() at first refresh
+	std::vector<UnitCmdQueueSlot> cmdQueueCache;
+	uint32_t cmdQueueCacheGeneration = 0;
+
+	void ClearCmdQueueSlot(UnitCmdQueueSlot& slot)
+	{
+		slot.cmdQueVersion = 0;
+		slot.newUnitCmdsVersion = 0;
+		slot.present = false;
+		slot.isFactoryCAI = false;
+		slot.isFactoryUnit = false;
+		slot.commandQue.clear();
+		slot.commandQueParams.clear();
+		slot.newUnitCommands.clear();
+		slot.newUnitCommandsParams.clear();
+	}
+
+	void CopyQueueSnap(const CCommandQueue& q, std::vector<SnapCommand>& cmds, std::vector<float>& params)
+	{
+		cmds.clear();
+		params.clear();
+		cmds.reserve(q.size());
+
+		for (const Command& c: q) {
+			const unsigned int numParams = c.GetNumParams();
+
+			cmds.push_back({c.GetID(), c.GetTag(), c.GetOpts(), static_cast<unsigned int>(params.size()), numParams});
+
+			for (unsigned int i = 0; i < numParams; ++i)
+				params.push_back(c.GetParam(i));
+		}
+	}
+
+	const UnitCmdQueueSlot* GetCmdQueueSlot(int unitID)
+	{
+		if (unitID < 0 || static_cast<size_t>(unitID) >= cmdQueueCache.size())
+			return nullptr;
+
+		const UnitCmdQueueSlot& slot = cmdQueueCache[unitID];
+
+		return slot.present ? &slot : nullptr;
+	}
+
+	// the family's shared gate: ParseAllyUnit mirror (rows.Valid + PovAlliedUnit,
+	// like GetUnitExperience) followed by the boundary-copy lookup; nullptr IS
+	// the live path's "no such unit" nil shape. A rows-valid id without a slot
+	// cannot happen (refresh and publish share the barrier) -- nil defensively.
+	const UnitCmdQueueSlot* ParseAllyUnitCmdSlot(lua_State* L, const char* caller, int* outUnitID = nullptr)
+	{
+		const auto& rows = simSnapshot.Read();
+		const int unitID = ParseUnitIDSynced(L, caller, 1);
+		const Pov pov = HandlePov(L);
+
+		if (outUnitID != nullptr)
+			*outUnitID = unitID;
+
+		if (!rows.Valid(unitID) || !rows.PovAlliedUnit(unitID, pov.readAllyTeam, pov.fullRead))
+			return nullptr;
+
+		return GetCmdQueueSlot(unitID);
+	}
+
+	// LuaUtils::PushCommandParamsTable mirror over the flat param buffer
+	void PushSnapCommandParamsTable(lua_State* L, const SnapCommand& cmd, const std::vector<float>& params, bool subtable)
+	{
+		if (subtable)
+			HSTR_PUSH(L, "params");
+
+		lua_createtable(L, cmd.numParams, 0);
+
+		for (unsigned int p = 0; p < cmd.numParams; p++) {
+			lua_pushnumber(L, params[cmd.paramOffset + p]);
+			lua_rawseti(L, -2, p + 1);
+		}
+
+		if (subtable)
+			lua_rawset(L, -3);
+	}
+
+	// LuaUtils::PushCommandOptionsTable mirror
+	void PushSnapCommandOptionsTable(lua_State* L, const SnapCommand& cmd, bool subtable)
+	{
+		if (subtable)
+			HSTR_PUSH(L, "options");
+
+		lua_createtable(L, 0, 7);
+		HSTR_PUSH_NUMBER(L, "coded", cmd.options);
+		HSTR_PUSH_BOOL(L, "alt",      !!(cmd.options & ALT_KEY        ));
+		HSTR_PUSH_BOOL(L, "ctrl",     !!(cmd.options & CONTROL_KEY    ));
+		HSTR_PUSH_BOOL(L, "shift",    !!(cmd.options & SHIFT_KEY      ));
+		HSTR_PUSH_BOOL(L, "right",    !!(cmd.options & RIGHT_MOUSE_KEY));
+		HSTR_PUSH_BOOL(L, "meta",     !!(cmd.options & META_KEY       ));
+		HSTR_PUSH_BOOL(L, "internal", !!(cmd.options & INTERNAL_ORDER ));
+
+		if (subtable)
+			lua_rawset(L, -3);
+	}
+
+	// LuaSyncedRead's PackCommand mirror
+	void PackCommandSnap(lua_State* L, const SnapCommand& cmd, const std::vector<float>& params)
+	{
+		lua_createtable(L, 0, 4);
+
+		HSTR_PUSH_NUMBER(L, "id", cmd.id);
+
+		PushSnapCommandParamsTable(L, cmd, params, true);
+		PushSnapCommandOptionsTable(L, cmd, true);
+
+		HSTR_PUSH_NUMBER(L, "tag", cmd.tag);
+	}
+
+	// LuaSyncedRead's PackCommandQueue mirror (identical types: the callers'
+	// int numCmds converts to size_t exactly like the live call, so the inert
+	// `count == -1u` branch and the min() clamp behave bit-identically)
+	void PackCommandQueueSnap(lua_State* L, const std::vector<SnapCommand>& commands, const std::vector<float>& params, size_t count)
+	{
+		size_t c = 0;
+
+		if (count == -1u)
+			count = commands.size();
+
+		lua_createtable(L, std::min(count, commands.size()), 0);
+
+		for (const SnapCommand& command: commands) {
+			if (c >= count)
+				break;
+
+			PackCommandSnap(L, command, params);
+			lua_rawseti(L, -2, ++c);
+		}
+	}
+
+	// LuaSyncedRead's PackFactoryCounts mirror (only reads command ids)
+	void PackFactoryCountsSnap(lua_State* L, const std::vector<SnapCommand>& q, int count, bool noCmds)
+	{
+		lua_createtable(L, count + 1, 0);
+
+		int entry = 0;
+		int currentCmd = 0;
+		int currentCount = 0;
+
+		for (const SnapCommand& sc: q) {
+			if (entry >= count) {
+				currentCount = 0;
+				break;
+			}
+			const int cmdID = sc.id;
+			if (noCmds && (cmdID >= 0))
+				continue;
+
+			if (entry == 0) {
+				currentCmd = cmdID;
+				currentCount = 1;
+				entry = 1;
+			}
+			else if (cmdID == currentCmd) {
+				currentCount++;
+			}
+			else {
+				entry++;
+				// negative integer keys live in the hash part, hence nrec=1
+				// (same note as the live body)
+				lua_createtable(L, 0, 1); {
+					lua_pushnumber(L, currentCount);
+					lua_rawseti(L, -2, -currentCmd);
+				}
+				lua_rawseti(L, -2, entry);
+				currentCmd = cmdID;
+				currentCount = 1;
+			}
+		}
+		if (currentCount > 0) {
+			entry++;
+			lua_createtable(L, 0, 1); {
+				lua_pushnumber(L, currentCount);
+				lua_rawseti(L, -2, -currentCmd);
+			}
+			lua_rawseti(L, -2, entry);
+		}
+
+		HSTR_PUSH_NUMBER(L, "n", entry);
+	}
+
+	// LuaSyncedRead's PackBuildQueue mirror; builderDef comes from the snapshot
+	// defID row (the true def -- the allied gate passed, so no decoy applies),
+	// buildee/builder def derefs are immutable game data
+	int PackBuildQueueSnap(lua_State* L, bool canBuild, const char* caller)
+	{
+		int unitID = -1;
+		const UnitCmdQueueSlot* slot = ParseAllyUnitCmdSlot(L, caller, &unitID);
+
+		if (slot == nullptr)
+			return 0;
+
+		const auto& commandQue = slot->commandQue;
+
+		lua_createtable(L, commandQue.size(), 0);
+
+		int entry = 0;
+		int currentType = -1;
+		int currentCount = 0;
+
+		for (const SnapCommand& cmd: commandQue) {
+			// not a build command
+			if (cmd.id >= 0)
+				continue;
+
+			const int unitDefID = -cmd.id;
+
+			if (canBuild) {
+				// skip build orders that this unit can not start
+				const UnitDef* buildeeDef = unitDefHandler->GetUnitDefByID(unitDefID);
+				const UnitDef* builderDef = unitDefHandler->GetUnitDefByID(simSnapshot.Read().defID[unitID]);
+
+				// if something is wrong, bail
+				if ((buildeeDef == nullptr) || (builderDef == nullptr))
+					continue;
+
+				using P = decltype(UnitDef::buildOptions)::value_type;
+
+				const auto& buildOptCmp = [&](const P& e) { return (STRCASECMP(e.second.c_str(), buildeeDef->name.c_str()) == 0); };
+				const auto& buildOpts = builderDef->buildOptions;
+				const auto  buildOptIt = std::find_if(buildOpts.cbegin(), buildOpts.cend(), buildOptCmp);
+
+				// didn't find a matching entry
+				if (buildOptIt == buildOpts.end())
+					continue;
+			}
+
+			if (currentType == unitDefID) {
+				currentCount++;
+			} else if (currentType == -1) {
+				currentType = unitDefID;
+				currentCount = 1;
+			} else {
+				entry++;
+				lua_newtable(L);
+				lua_pushnumber(L, currentCount);
+				lua_rawseti(L, -2, currentType);
+				lua_rawseti(L, -2, entry);
+				currentType = unitDefID;
+				currentCount = 1;
+			}
+		}
+
+		if (currentCount > 0) {
+			entry++;
+			lua_newtable(L);
+			lua_pushnumber(L, currentCount);
+			lua_rawseti(L, -2, currentType);
+			lua_rawseti(L, -2, entry);
+		}
+
+		lua_pushnumber(L, entry);
+
+		return 2;
+	}
+}
+
+
+void LuaSnapshotServe::RefreshCommandQueues()
+{
+	// barrier-only (sim parked or single-threaded): walks unitHandler and
+	// reads live queues. Generation-gated so the copies always describe the
+	// same boundary as the published rows -- and so the walk is free when the
+	// publish above didn't swap (no sim frame, no boundary mutation).
+	const uint32_t gen = simSnapshot.Generation();
+
+	if (gen == 0 || gen == cmdQueueCacheGeneration)
+		return;
+
+	cmdQueueCacheGeneration = gen;
+
+	const size_t maxUnits = unitHandler.MaxUnits();
+
+	if (cmdQueueCache.size() != maxUnits)
+		cmdQueueCache.resize(maxUnits);
+
+	for (size_t id = 0; id < maxUnits; ++id) {
+		UnitCmdQueueSlot& slot = cmdQueueCache[id];
+		const CUnit* unit = unitHandler.GetUnit(id);
+
+		// dead ids must serve the "no such unit" nil shape, never stale copies
+		if (unit == nullptr) {
+			if (slot.present)
+				ClearCmdQueueSlot(slot);
+			continue;
+		}
+
+		const CCommandAI* cai = unit->commandAI; // never null
+		const uint64_t cmdQueVersion = cai->commandQue.GetVersion();
+
+		if (!slot.present || slot.cmdQueVersion != cmdQueVersion) {
+			// (re)classify here too: a died-and-respawned id always lands in
+			// this branch (queue versions are globally unique), so the flags
+			// can never go stale across id reuse
+			slot.present = true;
+			slot.isFactoryCAI = (dynamic_cast<const CFactoryCAI*>(cai) != nullptr);
+			slot.isFactoryUnit = (dynamic_cast<const CFactory*>(unit) != nullptr);
+
+			CopyQueueSnap(cai->commandQue, slot.commandQue, slot.commandQueParams);
+			slot.cmdQueVersion = cmdQueVersion;
+
+			if (!slot.isFactoryCAI && !slot.newUnitCommands.empty()) {
+				slot.newUnitCommands.clear();
+				slot.newUnitCommandsParams.clear();
+				slot.newUnitCmdsVersion = 0;
+			}
+		}
+
+		if (slot.isFactoryCAI) {
+			const CFactoryCAI* fcai = static_cast<const CFactoryCAI*>(cai);
+			const uint64_t newUnitCmdsVersion = fcai->newUnitCommands.GetVersion();
+
+			if (slot.newUnitCmdsVersion != newUnitCmdsVersion) {
+				CopyQueueSnap(fcai->newUnitCommands, slot.newUnitCommands, slot.newUnitCommandsParams);
+				slot.newUnitCmdsVersion = newUnitCmdsVersion;
+			}
+		}
+
+		if (slot.isFactoryUnit) {
+			const CFactory* fac = static_cast<const CFactory*>(unit);
+
+			slot.boPerform    = fac->boPerform;
+			slot.boOffset     = fac->boOffset;
+			slot.boRadius     = fac->boRadius;
+			slot.boRelHeading = fac->boRelHeading;
+			slot.boSherical   = fac->boSherical;
+			slot.boForced     = fac->boForced;
+		}
+	}
+}
+
+
+// mirror of LuaSyncedRead::GetUnitCommands (also reached via GetCommandQueue,
+// whose live body forwards here exactly like on master)
+int LuaSnapshotServe::GetUnitCommands(lua_State* L, const char* caller)
+{
+	const UnitCmdQueueSlot* slot = ParseAllyUnitCmdSlot(L, caller);
+
+	if (slot == nullptr)
+		return 0;
+
+	// send the new unit commands for factories, otherwise the normal commands
+	const auto& queue  = slot->isFactoryCAI ? slot->newUnitCommands : slot->commandQue;
+	const auto& params = slot->isFactoryCAI ? slot->newUnitCommandsParams : slot->commandQueParams;
+
+	const int  numCmds   = luaL_checkint(L, 2); // must always be given, -1 is a performance pitfall
+	const bool cmdsTable = luaL_optboolean(L, 3, true); // deprecated, prefer to set 2nd arg to 0
+
+	if (cmdsTable && (numCmds != 0)) {
+		// *get wants the actual commands
+		PackCommandQueueSnap(L, queue, params, numCmds);
+	} else {
+		LOG_DEPRECATED("This game is issuing `Spring.GetUnitCommands(unitId, 0)`, `Spring.GetCommandQueue(unitId, 0)` or passing a third argument to these functions. This usage is deprecated, please use `Spring.GetUnitCommandCount(unitId)` instead or fix some underlying bug.");
+		// *get just wants the queue's size
+		lua_pushnumber(L, queue.size());
+	}
+
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetUnitCommandCount
+int LuaSnapshotServe::GetUnitCommandCount(lua_State* L, const char* caller)
+{
+	const UnitCmdQueueSlot* slot = ParseAllyUnitCmdSlot(L, caller);
+
+	if (slot == nullptr)
+		return 0;
+
+	const auto& queue = slot->isFactoryCAI ? slot->newUnitCommands : slot->commandQue;
+
+	lua_pushnumber(L, queue.size());
+
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetUnitCurrentCommand (1-based cmdIndex, negative
+// counts from the queue end, beyond-queue serves nil -- identical arithmetic,
+// including the int/size_t mixed compares)
+int LuaSnapshotServe::GetUnitCurrentCommand(lua_State* L, const char* caller)
+{
+	const UnitCmdQueueSlot* slot = ParseAllyUnitCmdSlot(L, caller);
+
+	if (slot == nullptr)
+		return 0;
+
+	const auto& queue  = slot->isFactoryCAI ? slot->newUnitCommands : slot->commandQue;
+	const auto& params = slot->isFactoryCAI ? slot->newUnitCommandsParams : slot->commandQueParams;
+
+	int cmdIndex = luaL_optint(L, 2, 1);
+	if (cmdIndex > 0) {
+		// - 1 to convert from lua index to C index
+		cmdIndex -= 1;
+	} else {
+		cmdIndex = queue.size() + cmdIndex;
+	}
+
+	if (cmdIndex >= queue.size() || cmdIndex < 0)
+		return 0;
+
+	const SnapCommand& cmd = queue[cmdIndex];
+	lua_pushnumber(L, cmd.id);
+	lua_pushnumber(L, cmd.options);
+	lua_pushnumber(L, cmd.tag);
+
+	const unsigned int numParams = cmd.numParams;
+	for (unsigned int i = 0; i < numParams; ++i)
+		lua_pushnumber(L, params[cmd.paramOffset + i]);
+
+	return 3 + numParams;
+}
+
+// mirror of LuaSyncedRead::GetFactoryCommands (the factory's own commandQue,
+// not newUnitCommands)
+int LuaSnapshotServe::GetFactoryCommands(lua_State* L, const char* caller)
+{
+	const UnitCmdQueueSlot* slot = ParseAllyUnitCmdSlot(L, caller);
+
+	if (slot == nullptr)
+		return 0;
+
+	// bail if not a factory
+	if (!slot->isFactoryCAI)
+		return 0;
+
+	const int  numCmds   = luaL_checkint(L, 2);
+	const bool cmdsTable = luaL_optboolean(L, 3, true); // deprecated, prefer to set 2nd arg to 0
+
+	if (cmdsTable && (numCmds != 0)) {
+		PackCommandQueueSnap(L, slot->commandQue, slot->commandQueParams, numCmds);
+	} else {
+		LOG_DEPRECATED("This game is issuing `Spring.GetFactoryCommands(unitId, 0)`, or passing a third argument. This usage is deprecated, please use `Spring.GetFactoryCommandCount(unitId)` instead or fix some underlying bug.");
+		lua_pushnumber(L, slot->commandQue.size());
+	}
+
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetFactoryCommandCount
+int LuaSnapshotServe::GetFactoryCommandCount(lua_State* L, const char* caller)
+{
+	const UnitCmdQueueSlot* slot = ParseAllyUnitCmdSlot(L, caller);
+
+	if (slot == nullptr)
+		return 0;
+
+	// bail if not a factory
+	if (!slot->isFactoryCAI)
+		return 0;
+
+	lua_pushnumber(L, slot->commandQue.size());
+
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetFactoryCounts
+int LuaSnapshotServe::GetFactoryCounts(lua_State* L, const char* caller)
+{
+	const UnitCmdQueueSlot* slot = ParseAllyUnitCmdSlot(L, caller);
+
+	if (slot == nullptr)
+		return 0;
+
+	if (!slot->isFactoryCAI)
+		return 0; // not a factory, bail
+
+	// get the desired number of commands to return
+	int count = luaL_optint(L, 2, -1);
+	if (count < 0)
+		count = (int)slot->commandQue.size();
+
+	const bool noCmds = !luaL_optboolean(L, 3, false);
+
+	PackFactoryCountsSnap(L, slot->commandQue, count, noCmds);
+
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetFactoryBuggerOff (ParseUnit gate, then the
+// CFactory dynamic_cast gate; the payload scalars are re-copied every refresh)
+int LuaSnapshotServe::GetFactoryBuggerOff(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// ParseUnit mirror
+	if (!rows.Valid(unitID) || !rows.PovUnitVisible(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	const UnitCmdQueueSlot* slot = GetCmdQueueSlot(unitID);
+
+	if (slot == nullptr || !slot->isFactoryUnit)
+		return 0;
+
+	lua_pushboolean(L, slot->boPerform    );
+	lua_pushnumber (L, slot->boOffset     );
+	lua_pushnumber (L, slot->boRadius     );
+	lua_pushnumber (L, slot->boRelHeading );
+	lua_pushboolean(L, slot->boSherical   );
+	lua_pushboolean(L, slot->boForced     );
+
+	return 6;
+}
+
+// mirror of LuaSyncedRead::GetFullBuildQueue
+int LuaSnapshotServe::GetFullBuildQueue(lua_State* L, const char* caller)
+{
+	return PackBuildQueueSnap(L, false, caller);
+}
+
+// mirror of LuaSyncedRead::GetRealBuildQueue
+int LuaSnapshotServe::GetRealBuildQueue(lua_State* L, const char* caller)
+{
+	return PackBuildQueueSnap(L, true, caller);
+}
+
+
 void LuaSnapshotServe::ClearCaches()
 {
 	teamUnitIndex.built = false;
@@ -3441,4 +4780,10 @@ void LuaSnapshotServe::ClearCaches()
 		v.clear();
 	for (auto& m: teamUnitIndex.idsByTeamAndDef)
 		m.clear();
+
+	// command-queue serving cache: unit ids and queue versions restart with
+	// the next game, so a surviving entry could alias fresh ones
+	cmdQueueCache.clear();
+	cmdQueueCache.shrink_to_fit();
+	cmdQueueCacheGeneration = 0;
 }

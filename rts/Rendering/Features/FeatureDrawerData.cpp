@@ -76,6 +76,25 @@ void CFeatureDrawerData::RenderFeaturePreCreated(const CFeature* feature)
 	drawAlphas[feature->id] = 1.0f; // as the old member init was
 }
 
+
+void CFeatureDrawerData::RegisterExtraSplitResolveIDs()
+{
+	// non-model features (DRAWTYPE_TREE, DRAWTYPE_NONE) are never registered by
+	// RenderFeaturePreCreated, so the unsortedObjects pass misses them -- yet
+	// they are alive and LOS-visible, so the snapshot-serving feature twins
+	// (GetFeatureLuaDraw/NoDraw/EngineDrawMask/AlwaysUpdateMatrix/DrawFlag/
+	// SelectionVolumeData) resolve their ids and would otherwise hit a null
+	// pointer (and the DEBUG resolver assert). Runs at the barrier with the sim
+	// parked, so the featureHandler read is the same sanctioned class as
+	// DrawerResolveLiveObjectByID. Model features are already cached by the
+	// unsortedObjects pass; skip them (re-resolving is a redundant handler hit).
+	for (const int id: featureHandler.GetActiveFeatureIDs()) {
+		if (ResolveSplitCachedObject(id) == nullptr)
+			CacheSplitResolveID(id);
+	}
+}
+
+
 //TODO remove
 void CFeatureDrawerData::RenderFeatureCreated(const CFeature* feature)
 {

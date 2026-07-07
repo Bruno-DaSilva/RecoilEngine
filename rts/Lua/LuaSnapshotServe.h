@@ -181,10 +181,64 @@ namespace LuaSnapshotServe {
 	int GetFeaturesInCylinder(lua_State* L, const char* caller);
 	int GetProjectilesInRectangle(lua_State* L, const char* caller);
 
+	// command-queue family (PR 27b serving batch 2, first family): served from
+	// per-unit boundary copies of CCommandAI::commandQue / CFactoryCAI::
+	// newUnitCommands (+ the CFactory bugger-off scalars), refreshed by
+	// RefreshCommandQueues() below. Copies are flattened (id/tag/options +
+	// params in a flat float buffer) because raw Command copies touch the
+	// sim-owned cmdParamsPool (pooled >8-param commands acquire/release pool
+	// pages on copy/destruct, and read pool storage the sim thread resizes).
+	int GetUnitCommands(lua_State* L, const char* caller); // also serves GetCommandQueue (same live body)
+	int GetUnitCommandCount(lua_State* L, const char* caller);
+	int GetUnitCurrentCommand(lua_State* L, const char* caller);
+	int GetFactoryCommands(lua_State* L, const char* caller);
+	int GetFactoryCommandCount(lua_State* L, const char* caller);
+	int GetFactoryCounts(lua_State* L, const char* caller);
+	int GetFactoryBuggerOff(lua_State* L, const char* caller);
+	int GetFullBuildQueue(lua_State* L, const char* caller);
+	int GetRealBuildQueue(lua_State* L, const char* caller);
+
+	/// barrier hook (CGame::SimDrawBarrier, right after the snapshot publish --
+	/// generation-gated, so queue copies and snapshot rows always describe the
+	/// same boundary): re-copies the queues of units whose CCommandQueue
+	/// version changed, drops entries of dead units. Sim must be parked (or
+	/// single-threaded): walks unitHandler and reads live queues.
+	void RefreshCommandQueues();
+
 	/// game teardown: drop the per-generation serving caches (the team-unit
-	/// index); SimSnapshot's generation counter resets across games, so a
-	/// stale cache could otherwise alias a fresh generation number
+	/// index, the command-queue copies); SimSnapshot's generation counter
+	/// resets across games, so a stale cache could otherwise alias a fresh
+	/// generation number
 	void ClearCaches();
+
+	// unsynced flag/drawer parse-gate family (PR 27b serving batch 2,
+	// family 2): payloads are draw-owned, only the ParseUnit/ParseFeature
+	// gate is snapshot-served
+	int GetUnitLuaDraw(lua_State* L, const char* caller);            // LuaUnsyncedRead
+	int GetUnitNoDraw(lua_State* L, const char* caller);             // LuaUnsyncedRead
+	int GetUnitNoMinimap(lua_State* L, const char* caller);          // LuaUnsyncedRead
+	int GetUnitNoGroup(lua_State* L, const char* caller);            // LuaUnsyncedRead
+	int GetUnitNoSelect(lua_State* L, const char* caller);           // LuaUnsyncedRead (unit; feature twin is row-served)
+	int GetUnitEngineDrawMask(lua_State* L, const char* caller);     // LuaUnsyncedRead
+	int GetUnitAlwaysUpdateMatrix(lua_State* L, const char* caller); // LuaUnsyncedRead
+	int GetUnitDrawFlag(lua_State* L, const char* caller);   // LuaUnsyncedRead: drawer-owned flag, pointer via boundary resolve cache + shell
+	int UnitIconGetDraw(lua_State* L, const char* caller);   // LuaUnsyncedRead: drawer icon-state payload (drawIcon)
+	int GetUnitIcon(lua_State* L, const char* caller);       // LuaUnsyncedRead: drawer icon index -> icon name
+	int GetUnitIconData(lua_State* L, const char* caller);   // LuaUnsyncedRead: drawer icon index -> IconData table
+	int IsUnitSelected(lua_State* L, const char* caller);    // LuaUnsyncedRead: selection set is id-keyed, no pointer needed
+	int GetUnitGroup(lua_State* L, const char* caller);      // LuaUnsyncedRead: team gate from rows, uiGroupHandlers lookup is id-keyed
+	int IsUnitInView(lua_State* L, const char* caller);        // LuaUnsyncedRead
+	int GetUnitTransformMatrix(lua_State* L, const char* caller); // LuaUnsyncedRead (drawPos drawer-owned; basis/error mirrored from rows)
+	int GetUnitSelectionVolumeData(lua_State* L, const char* caller); // LuaUnsyncedRead (selVol payload stays live: unsynced-owned, read via IdToObject)
+	int GetUnitRotation(lua_State* L, const char* caller); // unsynced drawer-matrix branch only (ShouldServe rejects synced handles)
+	int GetFeatureLuaDraw(lua_State* L, const char* caller);          // LuaUnsyncedRead
+	int GetFeatureNoDraw(lua_State* L, const char* caller);           // LuaUnsyncedRead
+	int GetFeatureEngineDrawMask(lua_State* L, const char* caller);   // LuaUnsyncedRead
+	int GetFeatureAlwaysUpdateMatrix(lua_State* L, const char* caller); // LuaUnsyncedRead
+	int GetFeatureDrawFlag(lua_State* L, const char* caller);         // LuaUnsyncedRead
+	int GetFeatureSelectionVolumeData(lua_State* L, const char* caller); // LuaUnsyncedRead
+	int GetFeatureTransformMatrix(lua_State* L, const char* caller);  // LuaUnsyncedRead
+	int GetFeatureRotation(lua_State* L, const char* caller);
 
 	int GetGaiaTeamID(lua_State* L, const char* caller);
 	int GetAllyTeamList(lua_State* L, const char* caller);

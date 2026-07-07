@@ -82,6 +82,22 @@ protected:
 	// authors the drawer-owned draw-flag storage (sim/draw §A, PR 4); the
 	// object itself is read-only (draw code cannot mutate sim state, PR 10)
 	virtual void UpdateObjectDrawFlags(const CSolidObject* o) = 0;
+
+	// PR 27b: resolve one id into the split cache (barrier-only; the sim is
+	// parked, so DrawerResolveLiveObjectByID's handler read is sanctioned).
+	// Exposed so derived drawers can register ids their render containers do
+	// not hold (see RegisterExtraSplitResolveIDs / BuildSplitResolveCache).
+	void CacheSplitResolveID(int id) {
+		if (id < 0)
+			return;
+		if (static_cast<size_t>(id) >= splitResolveCache.size())
+			splitResolveCache.resize(id + 1, nullptr);
+
+		splitResolveCache[id] = DrawerResolveLiveObjectByID<T>(id);
+	}
+	// hook: append extra ids after the unsortedObjects pass (default none).
+	// Only the feature drawer overrides it -- every unit is model-registered.
+	virtual void RegisterExtraSplitResolveIDs() {}
 private:
 	void ExtractObjectTransforms(const T* o);
 	void UpdateObjectUniforms(const T* o);
@@ -97,12 +113,13 @@ public:
 
 		std::fill(splitResolveCache.begin(), splitResolveCache.end(), nullptr);
 
-		for (const int id: unsortedObjects) {
-			if (size_t(id) >= splitResolveCache.size())
-				splitResolveCache.resize(id + 1, nullptr);
+		for (const int id: unsortedObjects)
+			CacheSplitResolveID(id);
 
-			splitResolveCache[id] = DrawerResolveLiveObjectByID<T>(id);
-		}
+		// derived drawers contribute ids their render containers never hold but
+		// snapshot-serving twins still resolve boundary-consistently (non-model
+		// features -- trees/geo-vents are alive + LOS-visible yet unregistered)
+		RegisterExtraSplitResolveIDs();
 	}
 
 	// nullptr for unregistered ids; only meaningful after the first build

@@ -1653,6 +1653,15 @@ void CGame::SimDrawBarrier()
 	// (contract in SimSnapshot.h; the team/player copy refreshes every call)
 	simSnapshot.Update();
 
+	// (3b) refresh the draw-side command-queue copies (PR 27b serving batch 2,
+	// LuaSnapshotServe). AFTER the publish, not with the resolve caches at
+	// (1c): the refresh is generation-gated so queue copies and snapshot rows
+	// always describe the same boundary -- and so the unit walk is skipped
+	// entirely when the publish didn't swap. Also after (2b): drained boundary
+	// pokes may have mutated queues, and their version bumps must be visible
+	// to this refresh.
+	LuaSnapshotServe::RefreshCommandQueues();
+
 	// (4) TEST-ONLY (PR 17): when armed via /snapshotdiffgate, verify every
 	// value the snapshot would serve bit-matches the live sim read at this
 	// boundary. A single branch when unarmed.
@@ -1888,6 +1897,11 @@ void CGame::AcquireSimPause()
 		CUnitDrawer::BuildSplitResolveCache();
 		CFeatureDrawer::BuildSplitResolveCache();
 		projectileDrawer->BuildSplitResolveCache();
+
+		// generation-gated no-op today (the valve does not republish the
+		// snapshot, and queue copies must stay boundary-consistent with the
+		// published rows); here so a future valve-side republish stays covered
+		LuaSnapshotServe::RefreshCommandQueues();
 
 		// see barrier step 7: a non-empty drain may have poked sim state
 		if (UnsyncedBoundaryQueue::Drain() > 0)

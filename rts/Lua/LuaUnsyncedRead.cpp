@@ -1314,15 +1314,21 @@ int LuaUnsyncedRead::IsUnitAllied(lua_State* L)
  * @param unitID integer
  * @return boolean? isSelected nil when unitID cannot be parsed
  */
-int LuaUnsyncedRead::IsUnitSelected(lua_State* L)
+static int IsUnitSelectedLive(lua_State* L, const char* caller)
 {
-	CUnit* unit = ParseUnit(L, __func__, 1);
+	CUnit* unit = ParseUnit(L, caller, 1);
 	if (unit == nullptr)
 		return 0;
 
 	const auto& selUnits = selectedUnitsHandler.selectedUnits;
 	lua_pushboolean(L, selUnits.find(unit->id) != selUnits.end());
 	return 1;
+}
+
+int LuaUnsyncedRead::IsUnitSelected(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &IsUnitSelectedLive, &LuaSnapshotServe::IsUnitSelected);
 }
 
 
@@ -1332,9 +1338,15 @@ int LuaUnsyncedRead::IsUnitSelected(lua_State* L)
  * @param unitID integer
  * @return boolean? draw nil when unitID cannot be parsed
  */
+static int GetUnitLuaDrawLive(lua_State* L, const char* caller)
+{
+	return (GetSolidObjectLuaDraw(L, ParseUnit(L, caller, 1)));
+}
+
 int LuaUnsyncedRead::GetUnitLuaDraw(lua_State* L)
 {
-	return (GetSolidObjectLuaDraw(L, ParseUnit(L, __func__, 1)));
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitLuaDrawLive, &LuaSnapshotServe::GetUnitLuaDraw);
 }
 
 /***
@@ -1343,9 +1355,15 @@ int LuaUnsyncedRead::GetUnitLuaDraw(lua_State* L)
  * @param unitID integer
  * @return boolean? nil when unitID cannot be parsed
  */
+static int GetUnitNoDrawLive(lua_State* L, const char* caller)
+{
+	return (GetSolidObjectNoDraw(L, ParseUnit(L, caller, 1)));
+}
+
 int LuaUnsyncedRead::GetUnitNoDraw(lua_State* L)
 {
-	return (GetSolidObjectNoDraw(L, ParseUnit(L, __func__, 1)));
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitNoDrawLive, &LuaSnapshotServe::GetUnitNoDraw);
 }
 
 /***
@@ -1354,9 +1372,15 @@ int LuaUnsyncedRead::GetUnitNoDraw(lua_State* L)
  * @param unitID integer
  * @return boolean? nil when unitID cannot be parsed
  */
+static int GetUnitEngineDrawMaskLive(lua_State* L, const char* caller)
+{
+	return (GetSolidObjectEngineDrawMask(L, ParseUnit(L, caller, 1)));
+}
+
 int LuaUnsyncedRead::GetUnitEngineDrawMask(lua_State* L)
 {
-	return (GetSolidObjectEngineDrawMask(L, ParseUnit(L, __func__, 1)));
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitEngineDrawMaskLive, &LuaSnapshotServe::GetUnitEngineDrawMask);
 }
 
 /***
@@ -1365,9 +1389,9 @@ int LuaUnsyncedRead::GetUnitEngineDrawMask(lua_State* L)
  * @param unitID integer
  * @return boolean? nil when unitID cannot be parsed
  */
-int LuaUnsyncedRead::GetUnitAlwaysUpdateMatrix(lua_State* L)
+static int GetUnitAlwaysUpdateMatrixLive(lua_State* L, const char* caller)
 {
-	CUnit* unit = ParseUnit(L, __func__, 1);
+	CUnit* unit = ParseUnit(L, caller, 1);
 
 	if (unit == nullptr)
 		return 0;
@@ -1376,13 +1400,19 @@ int LuaUnsyncedRead::GetUnitAlwaysUpdateMatrix(lua_State* L)
 	return 1;
 }
 
+int LuaUnsyncedRead::GetUnitAlwaysUpdateMatrix(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitAlwaysUpdateMatrixLive, &LuaSnapshotServe::GetUnitAlwaysUpdateMatrix);
+}
+
 /***
  *
  * @function Spring.GetUnitDrawFlag
  * @param unitID integer
  * @return number? nil when unitID cannot be parsed
  */
-int LuaUnsyncedRead::GetUnitDrawFlag(lua_State* L)
+static int GetUnitDrawFlagLive(lua_State* L, const char* caller)
 {
 	// the field is DRAWER-owned; only ParseUnit's id walk touches the
 	// sim-owned handler tables. Under the running split resolve through the
@@ -1407,7 +1437,7 @@ int LuaUnsyncedRead::GetUnitDrawFlag(lua_State* L)
 		return 1;
 	}
 
-	CUnit* unit = ParseUnit(L, __func__, 1);
+	CUnit* unit = ParseUnit(L, caller, 1);
 
 	if (unit == nullptr)
 		return 0;
@@ -1416,21 +1446,33 @@ int LuaUnsyncedRead::GetUnitDrawFlag(lua_State* L)
 	return 1;
 }
 
+int LuaUnsyncedRead::GetUnitDrawFlag(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitDrawFlagLive, &LuaSnapshotServe::GetUnitDrawFlag);
+}
+
 /***
  *
  * @function Spring.GetUnitNoMinimap
  * @param unitID integer
  * @return boolean? nil when unitID cannot be parsed
  */
-int LuaUnsyncedRead::GetUnitNoMinimap(lua_State* L)
+static int GetUnitNoMinimapLive(lua_State* L, const char* caller)
 {
-	CUnit* unit = ParseUnit(L, __func__, 1);
+	CUnit* unit = ParseUnit(L, caller, 1);
 
 	if (unit == nullptr)
 		return 0;
 
 	lua_pushboolean(L, unit->noMinimap);
 	return 1;
+}
+
+int LuaUnsyncedRead::GetUnitNoMinimap(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitNoMinimapLive, &LuaSnapshotServe::GetUnitNoMinimap);
 }
 
 /***
@@ -1440,9 +1482,9 @@ int LuaUnsyncedRead::GetUnitNoMinimap(lua_State* L)
  * @param unitID integer
  * @return boolean? noGroup `true` if the unit is not allowed to be added to a group, `false` if it is allowed to be added to a group, or `nil` when `unitID` is not valid.
  */
-int LuaUnsyncedRead::GetUnitNoGroup(lua_State* L)
+static int GetUnitNoGroupLive(lua_State* L, const char* caller)
 {
-	CUnit* unit = ParseUnit(L, __func__, 1);
+	CUnit* unit = ParseUnit(L, caller, 1);
 
 	if (unit == nullptr)
 		return 0;
@@ -1451,21 +1493,33 @@ int LuaUnsyncedRead::GetUnitNoGroup(lua_State* L)
 	return 1;
 }
 
+int LuaUnsyncedRead::GetUnitNoGroup(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitNoGroupLive, &LuaSnapshotServe::GetUnitNoGroup);
+}
+
 /***
  *
  * @function Spring.GetUnitNoSelect
  * @param unitID integer
  * @return boolean? noSelect `nil` when `unitID` cannot be parsed.
  */
-int LuaUnsyncedRead::GetUnitNoSelect(lua_State* L)
+static int GetUnitNoSelectLive(lua_State* L, const char* caller)
 {
-	CUnit* unit = ParseUnit(L, __func__, 1);
+	CUnit* unit = ParseUnit(L, caller, 1);
 
 	if (unit == nullptr)
 		return 0;
 
 	lua_pushboolean(L, unit->noSelect);
 	return 1;
+}
+
+int LuaUnsyncedRead::GetUnitNoSelect(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitNoSelectLive, &LuaSnapshotServe::GetUnitNoSelect);
 }
 
 
@@ -1476,14 +1530,21 @@ int LuaUnsyncedRead::GetUnitNoSelect(lua_State* L)
  * @return boolean? drawIcon
  * `true` if icon is being drawn, `nil` when unitID is invalid, otherwise `false`.
  */
-int LuaUnsyncedRead::UnitIconGetDraw(lua_State* L) {
-	CUnit* unit = ParseUnit(L, __func__, 1);
+static int UnitIconGetDrawLive(lua_State* L, const char* caller)
+{
+	CUnit* unit = ParseUnit(L, caller, 1);
 
 	if (unit == nullptr)
 		return 0;
 
 	lua_pushboolean(L, CUnitDrawer::GetUnitDrawIcon(unit));
 	return 1;
+}
+
+int LuaUnsyncedRead::UnitIconGetDraw(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &UnitIconGetDrawLive, &LuaSnapshotServe::UnitIconGetDraw);
 }
 
 /*** Icon Data
@@ -1568,9 +1629,9 @@ namespace Impl {
  * @return IconData iconData
  * @see Spring.GetIconData
  */
-int LuaUnsyncedRead::GetUnitIconData(lua_State* L)
+static int GetUnitIconDataLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseUnit(L, __func__, 1);
+	const CUnit* unit = ParseUnit(L, caller, 1);
 	const auto fullData = luaL_optboolean(L, 2, false);
 
 	if (unit == nullptr)
@@ -1582,15 +1643,21 @@ int LuaUnsyncedRead::GetUnitIconData(lua_State* L)
 		return Impl::GetIconDataImpl<false>(L, CUnitDrawer::GetUnitIconIndex(unit));
 }
 
+int LuaUnsyncedRead::GetUnitIconData(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitIconDataLive, &LuaSnapshotServe::GetUnitIconData);
+}
+
 /*** Get unit icon name
  *
  * @function Spring.GetUnitIcon
  * @param unitID number
  * @return string iconName
  */
-int LuaUnsyncedRead::GetUnitIcon(lua_State* L)
+static int GetUnitIconLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseUnit(L, __func__, 1);
+	const CUnit* unit = ParseUnit(L, caller, 1);
 
 	if (unit == nullptr)
 		return 0;
@@ -1606,6 +1673,12 @@ int LuaUnsyncedRead::GetUnitIcon(lua_State* L)
 	}
 
 	return 1;
+}
+
+int LuaUnsyncedRead::GetUnitIcon(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitIconLive, &LuaSnapshotServe::GetUnitIcon);
 }
 
 /*** Get icon data
@@ -1672,9 +1745,15 @@ int LuaUnsyncedRead::GetAllIconDataArray(lua_State* L)
  * @return number getPrimaryAxis
  * @return boolean ignoreHits
  */
+static int GetUnitSelectionVolumeDataLive(lua_State* L, const char* caller)
+{
+	return GetSolidObjectSelectionVolume(L, ParseUnit(L, caller, 1));
+}
+
 int LuaUnsyncedRead::GetUnitSelectionVolumeData(lua_State* L)
 {
-	return GetSolidObjectSelectionVolume(L, ParseUnit(L, __func__, 1));
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitSelectionVolumeDataLive, &LuaSnapshotServe::GetUnitSelectionVolumeData);
 }
 
 
@@ -1690,9 +1769,15 @@ int LuaUnsyncedRead::GetUnitSelectionVolumeData(lua_State* L)
  * @param featureID integer
  * @return boolean? nil when featureID cannot be parsed
  */
+static int GetFeatureLuaDrawLive(lua_State* L, const char* caller)
+{
+	return (GetSolidObjectLuaDraw(L, ParseFeature(L, caller, 1)));
+}
+
 int LuaUnsyncedRead::GetFeatureLuaDraw(lua_State* L)
 {
-	return (GetSolidObjectLuaDraw(L, ParseFeature(L, __func__, 1)));
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetFeatureLuaDrawLive, &LuaSnapshotServe::GetFeatureLuaDraw);
 }
 
 /***
@@ -1701,9 +1786,15 @@ int LuaUnsyncedRead::GetFeatureLuaDraw(lua_State* L)
  * @param featureID integer
  * @return boolean? nil when featureID cannot be parsed
  */
+static int GetFeatureNoDrawLive(lua_State* L, const char* caller)
+{
+	return (GetSolidObjectNoDraw(L, ParseFeature(L, caller, 1)));
+}
+
 int LuaUnsyncedRead::GetFeatureNoDraw(lua_State* L)
 {
-	return (GetSolidObjectNoDraw(L, ParseFeature(L, __func__, 1)));
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetFeatureNoDrawLive, &LuaSnapshotServe::GetFeatureNoDraw);
 }
 
 /***
@@ -1712,9 +1803,15 @@ int LuaUnsyncedRead::GetFeatureNoDraw(lua_State* L)
  * @param featureID integer
  * @return boolean? nil when featureID cannot be parsed
  */
+static int GetFeatureEngineDrawMaskLive(lua_State* L, const char* caller)
+{
+	return (GetSolidObjectEngineDrawMask(L, ParseFeature(L, caller, 1)));
+}
+
 int LuaUnsyncedRead::GetFeatureEngineDrawMask(lua_State* L)
 {
-	return (GetSolidObjectEngineDrawMask(L, ParseFeature(L, __func__, 1)));
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetFeatureEngineDrawMaskLive, &LuaSnapshotServe::GetFeatureEngineDrawMask);
 }
 
 /***
@@ -1723,9 +1820,9 @@ int LuaUnsyncedRead::GetFeatureEngineDrawMask(lua_State* L)
  * @param featureID integer
  * @return boolean? nil when featureID cannot be parsed
  */
-int LuaUnsyncedRead::GetFeatureAlwaysUpdateMatrix(lua_State* L)
+static int GetFeatureAlwaysUpdateMatrixLive(lua_State* L, const char* caller)
 {
-	CFeature* feature = ParseFeature(L, __func__, 1);
+	CFeature* feature = ParseFeature(L, caller, 1);
 
 	if (feature == nullptr)
 		return 0;
@@ -1734,13 +1831,19 @@ int LuaUnsyncedRead::GetFeatureAlwaysUpdateMatrix(lua_State* L)
 	return 1;
 }
 
+int LuaUnsyncedRead::GetFeatureAlwaysUpdateMatrix(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetFeatureAlwaysUpdateMatrixLive, &LuaSnapshotServe::GetFeatureAlwaysUpdateMatrix);
+}
+
 /***
  *
  * @function Spring.GetFeatureDrawFlag
  * @param featureID integer
  * @return number? nil when featureID cannot be parsed
  */
-int LuaUnsyncedRead::GetFeatureDrawFlag(lua_State* L)
+static int GetFeatureDrawFlagLive(lua_State* L, const char* caller)
 {
 	// see GetUnitDrawFlag
 	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
@@ -1759,13 +1862,19 @@ int LuaUnsyncedRead::GetFeatureDrawFlag(lua_State* L)
 		return 1;
 	}
 
-	CFeature* feature = ParseFeature(L, __func__, 1);
+	CFeature* feature = ParseFeature(L, caller, 1);
 
 	if (feature == nullptr)
 		return 0;
 
 	lua_pushinteger(L, CFeatureDrawer::GetDrawFlag(feature));
 	return 1;
+}
+
+int LuaUnsyncedRead::GetFeatureDrawFlag(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetFeatureDrawFlagLive, &LuaSnapshotServe::GetFeatureDrawFlag);
 }
 
 /***
@@ -1783,9 +1892,15 @@ int LuaUnsyncedRead::GetFeatureDrawFlag(lua_State* L)
  * @return number getPrimaryAxis
  * @return boolean ignoreHits
  */
+static int GetFeatureSelectionVolumeDataLive(lua_State* L, const char* caller)
+{
+	return GetSolidObjectSelectionVolume(L, ParseFeature(L, caller, 1));
+}
+
 int LuaUnsyncedRead::GetFeatureSelectionVolumeData(lua_State* L)
 {
-	return GetSolidObjectSelectionVolume(L, ParseFeature(L, __func__, 1));
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetFeatureSelectionVolumeDataLive, &LuaSnapshotServe::GetFeatureSelectionVolumeData);
 }
 
 
@@ -1842,7 +1957,13 @@ static int GetObjectTransformMatrix(const TObj* o, lua_State* L)
  * @return number m43
  * @return number m44
  */
-int LuaUnsyncedRead::GetUnitTransformMatrix(lua_State* L) { return (GetObjectTransformMatrix(ParseUnit(L, __func__, 1), L)); }
+static int GetUnitTransformMatrixLive(lua_State* L, const char* caller) { return (GetObjectTransformMatrix(ParseUnit(L, caller, 1), L)); }
+
+int LuaUnsyncedRead::GetUnitTransformMatrix(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitTransformMatrixLive, &LuaSnapshotServe::GetUnitTransformMatrix);
+}
 
 
 /***
@@ -1866,7 +1987,16 @@ int LuaUnsyncedRead::GetUnitTransformMatrix(lua_State* L) { return (GetObjectTra
  * @return number m43
  * @return number m44
  */
-int LuaUnsyncedRead::GetFeatureTransformMatrix(lua_State* L) { return (GetObjectTransformMatrix(ParseFeature(L, __func__, 1), L)); }
+static int GetFeatureTransformMatrixLive(lua_State* L, const char* caller)
+{
+	return (GetObjectTransformMatrix(ParseFeature(L, caller, 1), L));
+}
+
+int LuaUnsyncedRead::GetFeatureTransformMatrix(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetFeatureTransformMatrixLive, &LuaSnapshotServe::GetFeatureTransformMatrix);
+}
 
 
 /******************************************************************************
@@ -1881,15 +2011,21 @@ int LuaUnsyncedRead::GetFeatureTransformMatrix(lua_State* L) { return (GetObject
  * @param unitID integer
  * @return boolean? inView nil when unitID cannot be parsed
  */
-int LuaUnsyncedRead::IsUnitInView(lua_State* L)
+static int IsUnitInViewLive(lua_State* L, const char* caller)
 {
-	CUnit* unit = ParseUnit(L, __func__, 1);
+	CUnit* unit = ParseUnit(L, caller, 1);
 
 	if (unit == nullptr)
 		return 0;
 
 	lua_pushboolean(L, camera->InView(unit->midPos, unit->radius));
 	return 1;
+}
+
+int LuaUnsyncedRead::IsUnitInView(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &IsUnitInViewLive, &LuaSnapshotServe::IsUnitInView);
 }
 
 
@@ -4541,9 +4677,9 @@ int LuaUnsyncedRead::GetSelectedGroup(lua_State* L)
  * @param unitID integer
  * @return integer? groupID
  */
-int LuaUnsyncedRead::GetUnitGroup(lua_State* L)
+static int GetUnitGroupLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseUnit(L, __func__, 1);
+	const CUnit* unit = ParseUnit(L, caller, 1);
 
 	if (unit == nullptr)
 		return 0;
@@ -4557,6 +4693,12 @@ int LuaUnsyncedRead::GetUnitGroup(lua_State* L)
 
 	lua_pushnumber(L, group->id);
 	return 1;
+}
+
+int LuaUnsyncedRead::GetUnitGroup(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitGroupLive, &LuaSnapshotServe::GetUnitGroup);
 }
 
 static inline const CGroup* GetGroupFromArg(lua_State* L, int arg)
