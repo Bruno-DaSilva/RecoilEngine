@@ -2918,12 +2918,16 @@ int LuaSnapshotServe::GetTeamRulesParams(lua_State* L, const char* caller)
 {
 	const auto& trows = simSnapshot.ReadTeams();
 
-	// live: ParseTeam(1) -> null-check + game null-check; ParseTeam never returns
-	// null for a valid team (the twin's ValidTeam gate mirrors it). `game` is
-	// non-null whenever the draw phase runs. Match the live "return 0" on an
-	// invalid teamID (ParseTeam's null path), NOT ParseTeamIDSynced's luaL_error.
+	// live: ParseTeam(1) -> null-check + game null-check. ParseTeam returns null
+	// ONLY on its DenyLiveRead branch; for an out-of-range teamID (split off) it
+	// raises luaL_error("Bad teamID"). Mirror that: an invalid teamID raises here
+	// too (not a silent nil), else a widget calling GetTeamRulesParams(badID)
+	// would get nil under flag-ON where master raises. The game==null case stays a
+	// live "return 0".
 	const int teamID = luaL_checkint(L, 1);
-	if (!trows.ValidTeam(teamID) || game == nullptr)
+	if (!trows.ValidTeam(teamID))
+		luaL_error(L, "Bad teamID in %s\n", caller);
+	if (game == nullptr)
 		return 0;
 
 	return PushRulesParamsMirror(L, trows.teamRulesParams[teamID], TeamRulesLosMask(L, trows, teamID));
@@ -2934,8 +2938,12 @@ int LuaSnapshotServe::GetTeamRulesParam(lua_State* L, const char* caller)
 {
 	const auto& trows = simSnapshot.ReadTeams();
 
+	// See GetTeamRulesParams: mirror live ParseTeam's luaL_error on an invalid
+	// teamID rather than returning a silent nil; game==null stays "return 0".
 	const int teamID = luaL_checkint(L, 1);
-	if (!trows.ValidTeam(teamID) || game == nullptr)
+	if (!trows.ValidTeam(teamID))
+		luaL_error(L, "Bad teamID in %s\n", caller);
+	if (game == nullptr)
 		return 0;
 
 	return GetRulesParamMirror(L, 2, trows.teamRulesParams[teamID], TeamRulesLosMask(L, trows, teamID));
