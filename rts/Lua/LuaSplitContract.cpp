@@ -179,12 +179,10 @@ namespace {
 		"InitPathNodeCostsArray", "FreePathNodeCostsArray",
 		"SetPathNodeCosts", "GetPathNodeCosts", "SetPathNodeCost",
 		"GetPathNodeCost",
-		// team/player misc (start data / stats / AI tables; event-rate)
-		"GetTeamStatsHistory", "GetTeamLuaAI", "GetTeamMaxUnits",
-		"GetTeamStartPosition", "GetAllyTeamStartBox", "GetMapStartPositions",
-		"GetPlayerControlledUnit", "GetAIInfo", "GetAllyTeamInfo",
-		"AreTeamsAllied", "ArePlayersAllied", "GetPlayerTraffic",
-		"GetPlayerStatistics",
+		// team/player misc: SERVED (sim|draw PR 36) via the TeamRows/PlayerRows
+		// extensions + the SimSnapshot map-start cache; only GetPlayerTraffic
+		// remains (its CGame per-player net-traffic map is not a snapshot row)
+		"GetPlayerTraffic",
 		// (b)-class torn-tolerant / wall-clock-dependent
 		"GetGameState", // IsSimLagging reads the wall clock; serving it would false-flag the armed dual-run
 		// unsynced-owned object flags + drawer-backed reads (LuaUnsyncedRead):

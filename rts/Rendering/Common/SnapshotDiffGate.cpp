@@ -7,11 +7,15 @@
 
 #include "SimSnapshot.h"
 #include "DrawMapMirrors.h"
+#include "ExternalAI/SkirmishAIData.h"     // PR 36: team:misc AI-block recompute
 #include "ExternalAI/SkirmishAIHandler.h"
 #include "Game/Game.h"
 #include "Game/GameSetup.h"
 #include "Game/Players/Player.h"
 #include "Game/Players/PlayerHandler.h"
+#include "Game/Players/PlayerStatistics.h" // PR 36: player:misc recompute
+#include "Sim/Misc/AllyTeam.h"             // PR 36: team:allyInfo recompute
+#include "Sim/Misc/GlobalConstants.h"      // PR 36: SQUARE_SIZE (team:allyInfo)
 #include "Sim/Features/Feature.h"
 #include "Sim/Features/FeatureDef.h"
 #include "Sim/Features/FeatureHandler.h"
@@ -194,6 +198,10 @@ static constexpr const char* FIELD_NAMES[] = {
 	"unit:transportees",
 	"unit:tooltip",
 	"unit:losVariants",
+	// PR 36 (team/player misc): appended to match the enum tail T_MISC..PL_MISC
+	"team:misc",
+	"team:allyInfo",
+	"player:misc",
 };
 
 // structural compare for the copied customOpts maps (emilib::HashMap has no
@@ -1087,6 +1095,67 @@ void SnapshotDiffGate::CheckTeamPlayerRows()
 			OptsEqual(trows.customOpts[t], team->GetAllValues());
 		if (Bump(fields[T_STRINGS], stringsEqual))
 			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d team=%d field=team:strings mismatch", gs->frameNum, t);
+
+		// ---- PR 36: team-misc (startPos/hasValidStartPos/maxUnits + luaAIName +
+		// teamAIs[0] block + full statHistory) ----
+		const std::vector<uint8_t>& teamAIs = skirmishAIHandler.GetSkirmishAIsInTeam(t);
+		std::string liveLuaAIName;
+		bool liveHasLuaAI = false;
+		for (uint8_t id: teamAIs) {
+			const SkirmishAIData* aiData = skirmishAIHandler.GetSkirmishAI(id);
+			if (!aiData->isLuaAI)
+				continue;
+			liveLuaAIName = aiData->shortName;
+			liveHasLuaAI = true;
+			break;
+		}
+		bool miscEqual =
+			BitEqual(trows.startPos[t], team->GetStartPos()) &&
+			(bool(trows.hasValidStartPos[t]) == team->HasValidStartPos()) &&
+			(trows.maxUnits[t] == static_cast<int32_t>(team->GetMaxUnits())) &&
+			(bool(trows.hasLuaAI[t]) == liveHasLuaAI) &&
+			(!liveHasLuaAI || trows.luaAIName[t] == liveLuaAIName) &&
+			(trows.statHistory[t].size() == team->statHistory.size());
+		if (miscEqual && !team->statHistory.empty()) // TeamStatistics is pack(1), memcmp-safe
+			miscEqual = (std::memcmp(trows.statHistory[t].data(), team->statHistory.data(),
+				team->statHistory.size() * sizeof(TeamStatistics)) == 0);
+		if (teamAIs.empty()) {
+			miscEqual = miscEqual && (trows.aiHasAI[t] == 0);
+		} else {
+			const size_t skirmishAIId = teamAIs[0];
+			const SkirmishAIData* aiData = skirmishAIHandler.GetSkirmishAI(skirmishAIId);
+			const bool isLocal = skirmishAIHandler.IsLocalSkirmishAI(skirmishAIId);
+			miscEqual = miscEqual &&
+				(trows.aiHasAI[t] != 0) &&
+				(trows.aiID[t] == static_cast<int32_t>(skirmishAIId)) &&
+				(trows.aiName[t] == aiData->name) &&
+				(trows.aiHostPlayer[t] == aiData->hostPlayer) &&
+				(bool(trows.aiIsLocal[t]) == isLocal);
+			if (isLocal) {
+				miscEqual = miscEqual &&
+					(trows.aiShortName[t] == aiData->shortName) &&
+					(trows.aiVersion[t] == aiData->version) &&
+					OptsEqual(trows.aiOptions[t], aiData->options);
+			}
+		}
+		if (Bump(fields[T_MISC], miscEqual))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d team=%d field=team:misc mismatch", gs->frameNum, t);
+	}
+
+	// PR 36: per-allyteam start box + custom options (GetAllyTeamStartBox /
+	// GetAllyTeamInfo); recomputes the live float expression bit-for-bit
+	for (int at = 0; at < trows.activeAllyTeams && at < teamHandler.ActiveAllyTeams(); ++at) {
+		const AllyTeam& ally = teamHandler.GetAllyTeam(at);
+		const float4 liveBox(
+			(mapDims.mapx * SQUARE_SIZE) * ally.startRectLeft,
+			(mapDims.mapy * SQUARE_SIZE) * ally.startRectTop,
+			(mapDims.mapx * SQUARE_SIZE) * ally.startRectRight,
+			(mapDims.mapy * SQUARE_SIZE) * ally.startRectBottom);
+		const bool allyEqual =
+			BitEqual(trows.allyStartBox[at], liveBox) &&
+			OptsEqual(trows.allyTeamOpts[at], ally.GetAllValues());
+		if (Bump(fields[T_ALLYINFO], allyEqual))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d allyTeam=%d field=team:allyInfo mismatch", gs->frameNum, at);
 	}
 
 	{
@@ -1126,6 +1195,23 @@ void SnapshotDiffGate::CheckTeamPlayerRows()
 
 		if (Bump(fields[PL_OPTS], OptsEqual(prows.customOpts[p], player->GetAllValues())))
 			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d player=%d field=player:opts mismatch", gs->frameNum, p);
+
+		// ---- PR 36: GetPlayerControlledUnit + GetPlayerStatistics ----
+		const CUnit* controllee = player->fpsController.GetControllee();
+		const int liveControlleeID = (controllee != nullptr) ? controllee->id : -1;
+		const int liveControlleeAllyTeam = (controllee != nullptr) ? controllee->allyteam : -1;
+		const PlayerStatistics& lps = player->currentStats;
+		const PlayerStatistics& sps = prows.currentStats[p];
+		const bool miscEqual =
+			(prows.controlleeID[p] == liveControlleeID) &&
+			(prows.controlleeAllyTeam[p] == liveControlleeAllyTeam) &&
+			(sps.mousePixels == lps.mousePixels) &&
+			(sps.mouseClicks == lps.mouseClicks) &&
+			(sps.keyPresses == lps.keyPresses) &&
+			(sps.numCommands == lps.numCommands) &&
+			(sps.unitCommands == lps.unitCommands);
+		if (Bump(fields[PL_MISC], miscEqual))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d player=%d field=player:misc mismatch", gs->frameNum, p);
 	}
 }
 

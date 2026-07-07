@@ -1692,13 +1692,9 @@ int LuaSyncedRead::GetGaiaTeamID(lua_State* L)
  * @return number? xMax
  * @return number? zMax
  */
-int LuaSyncedRead::GetAllyTeamStartBox(lua_State* L)
+static int GetAllyTeamStartBoxLive(lua_State* L, const char* caller)
 {
 	const unsigned int allyTeamID = luaL_checkint(L, 1);
-
-	// split-contract gate (PR 27a): reads teamHandler ally-team tables directly (no ParseTeam)
-	if (LuaSplitContract::DenyLiveRead(L, __func__))
-		return 0;
 
 	if (!teamHandler.IsValidAllyTeam(allyTeamID))
 		return 0;
@@ -1716,6 +1712,12 @@ int LuaSyncedRead::GetAllyTeamStartBox(lua_State* L)
 	return 4;
 }
 
+int LuaSyncedRead::GetAllyTeamStartBox(lua_State* L)
+{
+	// boundary-copy-served from draw context (sim|draw PR 36, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetAllyTeamStartBoxLive, &LuaSnapshotServe::GetAllyTeamStartBox);
+}
+
 
 /***
  *
@@ -1727,9 +1729,9 @@ int LuaSyncedRead::GetAllyTeamStartBox(lua_State* L)
  * @return number? y
  * @return number? x
  */
-int LuaSyncedRead::GetTeamStartPosition(lua_State* L)
+static int GetTeamStartPositionLive(lua_State* L, const char* caller)
 {
-	const CTeam* team = ParseTeam(L, __func__, 1);
+	const CTeam* team = ParseTeam(L, caller, 1);
 
 	if (team == nullptr)
 		return 0;
@@ -1745,19 +1747,19 @@ int LuaSyncedRead::GetTeamStartPosition(lua_State* L)
 	return 4;
 }
 
+int LuaSyncedRead::GetTeamStartPosition(lua_State* L)
+{
+	// boundary-copy-served from draw context (sim|draw PR 36, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetTeamStartPositionLive, &LuaSnapshotServe::GetTeamStartPosition);
+}
+
 /***
  *
  * @function Spring.GetMapStartPositions
  * @return float3[] array of positions indexed by teamID
  */
-int LuaSyncedRead::GetMapStartPositions(lua_State* L)
+static int GetMapStartPositionsLive(lua_State* L, const char* caller)
 {
-	// split-contract gate (PR 27a): reads mutable gameSetup state (start positions) directly
-	if (LuaSplitContract::DenyLiveRead(L, __func__)) {
-		lua_createtable(L, 0, 0);
-		return 1;
-	}
-
 	lua_createtable(L, MAX_TEAMS, 0);
 	gameSetup->LoadStartPositionsFromMap(MAX_TEAMS, [&](MapParser& mapParser, int teamNum) {
 		float3 pos;
@@ -1774,6 +1776,12 @@ int LuaSyncedRead::GetMapStartPositions(lua_State* L)
 	});
 
 	return 1;
+}
+
+int LuaSyncedRead::GetMapStartPositions(lua_State* L)
+{
+	// boundary-copy-served from draw context (sim|draw PR 36, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetMapStartPositionsLive, &LuaSnapshotServe::GetMapStartPositions);
 }
 
 
@@ -2237,9 +2245,9 @@ int LuaSyncedRead::GetTeamDamageStats(lua_State* L)
  * @param endIndex integer? (Default: startIndex)
  * @return TeamStats[] The team stats history, or `nil` if unable to resolve team.
  */
-int LuaSyncedRead::GetTeamStatsHistory(lua_State* L)
+static int GetTeamStatsHistoryLive(lua_State* L, const char* caller)
 {
-	const CTeam* team = ParseTeam(L, __func__, 1);
+	const CTeam* team = ParseTeam(L, caller, 1);
 
 	if (team == nullptr || game == nullptr)
 		return 0;
@@ -2321,6 +2329,12 @@ int LuaSyncedRead::GetTeamStatsHistory(lua_State* L)
 	return 1;
 }
 
+int LuaSyncedRead::GetTeamStatsHistory(lua_State* L)
+{
+	// boundary-copy-served from draw context (sim|draw PR 36, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetTeamStatsHistoryLive, &LuaSnapshotServe::GetTeamStatsHistory);
+}
+
 
 /***
  *
@@ -2328,9 +2342,9 @@ int LuaSyncedRead::GetTeamStatsHistory(lua_State* L)
  * @param teamID integer
  * @return string
  */
-int LuaSyncedRead::GetTeamLuaAI(lua_State* L)
+static int GetTeamLuaAILive(lua_State* L, const char* caller)
 {
-	const CTeam* team = ParseTeam(L, __func__, 1);
+	const CTeam* team = ParseTeam(L, caller, 1);
 	if (team == nullptr)
 		return 0;
 
@@ -2354,6 +2368,12 @@ int LuaSyncedRead::GetTeamLuaAI(lua_State* L)
 	return 1;
 }
 
+int LuaSyncedRead::GetTeamLuaAI(lua_State* L)
+{
+	// boundary-copy-served from draw context (sim|draw PR 36, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetTeamLuaAILive, &LuaSnapshotServe::GetTeamLuaAI);
+}
+
 
 /*** Returns a team's unit cap.
  *
@@ -2364,9 +2384,9 @@ int LuaSyncedRead::GetTeamLuaAI(lua_State* L)
  * @return number maxUnits
  * @return number? currentUnits
  */
-int LuaSyncedRead::GetTeamMaxUnits(lua_State* L)
+static int GetTeamMaxUnitsLive(lua_State* L, const char* caller)
 {
-	const auto team = ParseTeam(L, __func__, 1);
+	const auto team = ParseTeam(L, caller, 1);
 	if (team == nullptr)
 		return 0;
 
@@ -2378,6 +2398,12 @@ int LuaSyncedRead::GetTeamMaxUnits(lua_State* L)
 		lua_pushnil(L);
 
 	return 2;
+}
+
+int LuaSyncedRead::GetTeamMaxUnits(lua_State* L)
+{
+	// boundary-copy-served from draw context (sim|draw PR 36, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetTeamMaxUnitsLive, &LuaSnapshotServe::GetTeamMaxUnits);
 }
 
 /***
@@ -2457,13 +2483,9 @@ int LuaSyncedRead::GetPlayerInfo(lua_State* L)
  * @param playerID integer
  * @return number?
  */
-int LuaSyncedRead::GetPlayerControlledUnit(lua_State* L)
+static int GetPlayerControlledUnitLive(lua_State* L, const char* caller)
 {
 	const int playerID = luaL_checkint(L, 1);
-
-	// split-contract gate (PR 27a): reads playerHandler + the controllee unit directly (no ParseUnit)
-	if (LuaSplitContract::DenyLiveRead(L, __func__))
-		return 0;
 
 	if (!playerHandler.IsValidPlayer(playerID))
 		return 0;
@@ -2491,6 +2513,12 @@ int LuaSyncedRead::GetPlayerControlledUnit(lua_State* L)
 	return 1;
 }
 
+int LuaSyncedRead::GetPlayerControlledUnit(lua_State* L)
+{
+	// boundary-copy-served from draw context (sim|draw PR 36, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetPlayerControlledUnitLive, &LuaSnapshotServe::GetPlayerControlledUnit);
+}
+
 
 /***
  *
@@ -2503,15 +2531,11 @@ int LuaSyncedRead::GetPlayerControlledUnit(lua_State* L)
  * @return string version When synced `"SYNCED_NOVERSION"`, otherwise the AI version or `"UNKNOWN"`.
  * @return table<string,string> options
  */
-int LuaSyncedRead::GetAIInfo(lua_State* L)
+static int GetAIInfoLive(lua_State* L, const char* caller)
 {
 	int numVals = 0;
 
 	const int teamId = luaL_checkint(L, 1);
-
-	// split-contract gate (PR 27a): reads teamHandler + skirmishAIHandler directly (no ParseTeam)
-	if (LuaSplitContract::DenyLiveRead(L, __func__))
-		return 0;
 
 	if (!teamHandler.IsValidTeam(teamId))
 		return numVals;
@@ -2555,6 +2579,12 @@ int LuaSyncedRead::GetAIInfo(lua_State* L)
 	return numVals;
 }
 
+int LuaSyncedRead::GetAIInfo(lua_State* L)
+{
+	// boundary-copy-served from draw context (sim|draw PR 36, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetAIInfoLive, &LuaSnapshotServe::GetAIInfo);
+}
+
 
 /***
  *
@@ -2562,13 +2592,9 @@ int LuaSyncedRead::GetAIInfo(lua_State* L)
  * @param allyTeamID integer
  * @return table<string,string>?
  */
-int LuaSyncedRead::GetAllyTeamInfo(lua_State* L)
+static int GetAllyTeamInfoLive(lua_State* L, const char* caller)
 {
 	const size_t allyteam = (size_t)luaL_checkint(L, -1);
-
-	// split-contract gate (PR 27a): reads teamHandler ally-team tables directly (no ParseTeam)
-	if (LuaSplitContract::DenyLiveRead(L, __func__))
-		return 0;
 
 	if (!teamHandler.ValidAllyTeam(allyteam))
 		return 0;
@@ -2586,6 +2612,12 @@ int LuaSyncedRead::GetAllyTeamInfo(lua_State* L)
 	return 1;
 }
 
+int LuaSyncedRead::GetAllyTeamInfo(lua_State* L)
+{
+	// boundary-copy-served from draw context (sim|draw PR 36, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetAllyTeamInfoLive, &LuaSnapshotServe::GetAllyTeamInfo);
+}
+
 
 /***
  *
@@ -2594,20 +2626,22 @@ int LuaSyncedRead::GetAllyTeamInfo(lua_State* L)
  * @param teamID2 number
  * @return boolean?
  */
-int LuaSyncedRead::AreTeamsAllied(lua_State* L)
+static int AreTeamsAlliedLive(lua_State* L, const char* caller)
 {
 	const int teamId1 = (int)luaL_checkint(L, -1);
 	const int teamId2 = (int)luaL_checkint(L, -2);
-
-	// split-contract gate (PR 27a): reads teamHandler alliance tables directly (no ParseTeam)
-	if (LuaSplitContract::DenyLiveRead(L, __func__))
-		return 0;
 
 	if (!teamHandler.IsValidTeam(teamId1) || !teamHandler.IsValidTeam(teamId2))
 		return 0;
 
 	lua_pushboolean(L, teamHandler.AlliedTeams(teamId1, teamId2));
 	return 1;
+}
+
+int LuaSyncedRead::AreTeamsAllied(lua_State* L)
+{
+	// boundary-copy-served from draw context (sim|draw PR 36, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &AreTeamsAlliedLive, &LuaSnapshotServe::AreTeamsAllied);
 }
 
 
@@ -2618,14 +2652,10 @@ int LuaSyncedRead::AreTeamsAllied(lua_State* L)
  * @param playerID2 number
  * @return boolean?
  */
-int LuaSyncedRead::ArePlayersAllied(lua_State* L)
+static int ArePlayersAlliedLive(lua_State* L, const char* caller)
 {
 	const int player1 = luaL_checkint(L, -1);
 	const int player2 = luaL_checkint(L, -2);
-
-	// split-contract gate (PR 27a): reads playerHandler + teamHandler alliance tables directly
-	if (LuaSplitContract::DenyLiveRead(L, __func__))
-		return 0;
 
 	if (!playerHandler.IsValidPlayer(player1) || !playerHandler.IsValidPlayer(player2))
 		return 0;
@@ -2641,6 +2671,12 @@ int LuaSyncedRead::ArePlayersAllied(lua_State* L)
 
 	lua_pushboolean(L, teamHandler.AlliedTeams(p1->team, p2->team));
 	return 1;
+}
+
+int LuaSyncedRead::ArePlayersAllied(lua_State* L)
+{
+	// boundary-copy-served from draw context (sim|draw PR 36, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &ArePlayersAlliedLive, &LuaSnapshotServe::ArePlayersAllied);
 }
 
 

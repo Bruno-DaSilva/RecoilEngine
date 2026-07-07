@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "Game/Players/PlayerStatistics.h"
 #include "Sim/Misc/CollisionVolume.h"
 #include "Sim/Misc/Resource.h"
 #include "Sim/Misc/TeamStatistics.h"
@@ -815,8 +816,46 @@ public:
 		std::vector<SResourcePack> resPrevExcess;
 		std::vector<spring::unordered_map<std::string, std::string>> customOpts;
 
+		// ---- PR 36 (pathing + team/player misc + misc tail): team/player misc ----
+		// Serves GetTeamStartPosition/GetTeamMaxUnits/GetTeamLuaAI/GetAIInfo/
+		// GetTeamStatsHistory (per-team) and GetAllyTeamStartBox/GetAllyTeamInfo
+		// (per-allyteam). Same unconditional per-boundary re-extraction as the
+		// rest of this struct. startPos/maxUnits are synced (hashed); the AI
+		// short-name/version/options and luaAIName are the LOCAL machine's view
+		// (GetAIInfo returns SYNCED_* for synced handles), so like sideName they
+		// are excluded from the SnapshotHash.
+		std::vector<float3> startPos;            // TeamBase::GetStartPos()
+		std::vector<uint8_t> hasValidStartPos;   // TeamBase::HasValidStartPos()
+		std::vector<int32_t> maxUnits;           // CTeam::GetMaxUnits()
+		std::vector<uint8_t> hasLuaAI;           // GetTeamLuaAI: any isLuaAI in the team (distinguishes nil from an empty shortName)
+		std::vector<std::string> luaAIName;      // GetTeamLuaAI: first isLuaAI shortName
+		// GetAIInfo per-team first-AI block (teamAIs[0]); aiID/aiName/aiHostPlayer
+		// are the "synced AI info" the live body pushes unconditionally,
+		// aiIsLocal/aiShortName/aiVersion/aiOptions the local unsynced view
+		std::vector<uint8_t> aiHasAI;            // !GetSkirmishAIsInTeam(t).empty()
+		std::vector<int32_t> aiID;               // teamAIs[0]
+		std::vector<std::string> aiName;
+		std::vector<int32_t> aiHostPlayer;
+		std::vector<uint8_t> aiIsLocal;          // skirmishAIHandler.IsLocalSkirmishAI
+		std::vector<std::string> aiShortName;
+		std::vector<std::string> aiVersion;
+		std::vector<spring::unordered_map<std::string, std::string>> aiOptions;
+		// GetTeamStatsHistory: the full append-only statHistory copy (grows only
+		// at the stats interval). currentStats == statHistory.back() is already
+		// its own row; the whole vector is copied so the range form is served.
+		std::vector<std::vector<TeamStatistics>> statHistory;
+		// per-allyteam global block (sized to activeAllyTeams). GetAllyTeamStartBox
+		// stores the pre-computed corners in the live float-expression order
+		// ((mapDims.mapx * SQUARE_SIZE) * startRect...), so the twin push is
+		// bit-identical without a mapDims dependency; allyTeamOpts is the custom
+		// options map GetAllyTeamInfo returns.
+		std::vector<float4> allyStartBox;        // [activeAllyTeams] {xMin,zMin,xMax,zMax}
+		std::vector<spring::unordered_map<std::string, std::string>> allyTeamOpts; // [activeAllyTeams]
+
 		// teamHandler.IsValidTeam mirror
 		bool ValidTeam(int teamID) const { return (teamID >= 0 && teamID < activeTeams); }
+		// teamHandler.ValidAllyTeam mirror (the ally-team callouts' own gate)
+		bool ValidAllyTeam(int allyTeamID) const { return (allyTeamID >= 0 && allyTeamID < activeAllyTeams); }
 
 		// LuaUtils::IsAlliedTeam mirror; readAllyTeam/fullRead are the handle POV
 		bool PovAlliedTeam(int teamID, int readAllyTeam, bool fullRead) const {
@@ -851,6 +890,16 @@ public:
 		std::vector<uint8_t> isFromDemo;
 		std::vector<uint8_t> desynced;
 		std::vector<spring::unordered_map<std::string, std::string>> customOpts;
+
+		// ---- PR 36: GetPlayerControlledUnit + GetPlayerStatistics ----
+		// controlleeID is the FPS-controlled unit's id (-1 = none) and
+		// controlleeAllyTeam its allyteam (the access-gate input, captured so the
+		// twin needs no live unit deref); currentStats is the input/command stat
+		// block GetPlayerStatistics returns. Net-layer state, excluded from the
+		// SnapshotHash like the rest of PlayerRows.
+		std::vector<int32_t> controlleeID;
+		std::vector<int32_t> controlleeAllyTeam;
+		std::vector<PlayerStatistics> currentStats;
 
 		// playerHandler.IsValidPlayer mirror
 		bool ValidPlayer(int playerID) const { return (playerID >= 0 && playerID < activePlayers); }
@@ -939,6 +988,20 @@ public:
 	const PlayerRows& ReadPlayers() const { return *playerFront; }
 	const GlobalRows& ReadGlobals() const { return *globFront; }
 	uint32_t Generation() const { return generation; }
+
+	// PR 36: GetMapStartPositions -- the map-defined start positions are
+	// immutable map data, so they are parsed once (LoadStartPositionsFromMap is
+	// expensive) into a SimSnapshot-level cache, not a double-buffered TeamRows
+	// field, and reused every boundary. Not hashed; verified by the Route
+	// dual-run (the twin's table vs the live re-parse). Accessors below serve
+	// the twin.
+	int MapStartPosCount() const { return static_cast<int>(mapStartPos.size()); }
+	bool MapStartPosValid(int teamNum) const {
+		return (static_cast<size_t>(teamNum) < mapStartPosValid.size() && mapStartPosValid[teamNum] != 0);
+	}
+	float3 MapStartPos(int teamNum) const {
+		return MapStartPosValid(teamNum) ? mapStartPos[teamNum] : float3{};
+	}
 private:
 	void Extract(UnitRows& rows);
 	void ExtractProjectiles(ProjectileRows& rows);
@@ -946,6 +1009,8 @@ private:
 	void ExtractTeams(TeamRows& rows);
 	void ExtractPlayers(PlayerRows& rows);
 	void ExtractGlobals(GlobalRows& rows);
+	// PR 36: fill mapStartPos/mapStartPosValid once (LoadStartPositionsFromMap)
+	void CacheMapStartPositions();
 	static void Resize(UnitRows& rows, size_t maxUnits, int numAllyTeams);
 private:
 	UnitRows buffers[2];
@@ -980,6 +1045,11 @@ private:
 	TeamRows hashTeamScratch;
 
 	uint32_t generation = 0;
+
+	// PR 36: GetMapStartPositions cache (immutable map data, parsed once)
+	std::vector<float3> mapStartPos;
+	std::vector<uint8_t> mapStartPosValid;
+	bool mapStartPosCached = false;
 
 	// see MarkMutatedOutsideFrame(); cleared by the extraction it forces
 	bool mutatedOutsideFrame = false;

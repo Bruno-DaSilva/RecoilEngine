@@ -396,4 +396,19 @@ namespace LuaSnapshotServe {
 	int IsUnitInLos(lua_State* L, const char* caller);              // ParseTypedUnit
 	int IsUnitInAirLos(lua_State* L, const char* caller);           // ParseTypedUnit
 	int IsUnitInJammer(lua_State* L, const char* caller);           // ParseTypedUnit
+
+	// team/player misc family (PR 36; TeamRows/PlayerRows extensions + the
+	// SimSnapshot map-start cache -- see LuaSnapshotServe.cpp's PR-36 section)
+	int GetTeamStartPosition(lua_State* L, const char* caller);
+	int GetAllyTeamStartBox(lua_State* L, const char* caller);
+	int GetMapStartPositions(lua_State* L, const char* caller);
+	int GetTeamMaxUnits(lua_State* L, const char* caller);
+	int GetTeamLuaAI(lua_State* L, const char* caller);
+	int GetAIInfo(lua_State* L, const char* caller);
+	int GetAllyTeamInfo(lua_State* L, const char* caller);
+	int AreTeamsAllied(lua_State* L, const char* caller);
+	int ArePlayersAllied(lua_State* L, const char* caller);
+	int GetPlayerControlledUnit(lua_State* L, const char* caller);
+	int GetTeamStatsHistory(lua_State* L, const char* caller);
+	int GetPlayerStatistics(lua_State* L, const char* caller); // LuaUnsyncedRead
 }

@@ -5,11 +5,15 @@
 #include <cstring>
 
 #include "SnapshotHash.h"
+#include "ExternalAI/SkirmishAIData.h"     // PR 36: GetTeamLuaAI / GetAIInfo per-team AI block
 #include "ExternalAI/SkirmishAIHandler.h"
 #include "Game/Game.h"
 #include "Game/GameSetup.h"
 #include "Game/Players/Player.h"
 #include "Game/Players/PlayerHandler.h"
+#include "Map/MapParser.h"                 // PR 36: GetMapStartPositions capture
+#include "Sim/Misc/AllyTeam.h"             // PR 36: GetAllyTeamStartBox / GetAllyTeamInfo
+#include "Sim/Misc/GlobalConstants.h"      // PR 36: SQUARE_SIZE / MAX_TEAMS
 #include "Sim/Features/Feature.h"
 #include "Sim/Features/FeatureDef.h"
 #include "Sim/Features/FeatureHandler.h"
@@ -222,6 +226,12 @@ void SimSnapshot::Update()
 {
 	SCOPED_TIMER("Update::SimSnapshot");
 
+	// PR 36: GetMapStartPositions -- immutable map data, parsed once. Cached
+	// here (draw/main thread) rather than inside ExtractTeams, which also runs
+	// on the sim thread via HashCompletedFrame; LoadStartPositionsFromMap uses
+	// the MapParser and must stay off the sim thread.
+	CacheMapStartPositions();
+
 	// team/player boundary copy (PR 26, section E.3): re-extracted EVERY
 	// boundary, no due check -- net messages mutate these tables between sim
 	// frames (share/resign transfers, NETMSG_PLAYERINFO ping/cpu at net rate),
@@ -338,6 +348,11 @@ void SimSnapshot::Clear()
 		rows.activeTeams = 0;
 	for (PlayerRows& rows : playerBuffers)
 		rows.activePlayers = 0;
+
+	// PR 36: force the immutable map-start cache to re-parse for the next game
+	mapStartPosCached = false;
+	mapStartPos.clear();
+	mapStartPosValid.clear();
 
 	generation = 0;
 	mutatedOutsideFrame = false;
@@ -1097,6 +1112,29 @@ void SimSnapshot::ExtractTeams(TeamRows& rows)
 		rows.resPrevReceived.resize(activeTeams);
 		rows.resPrevExcess.resize(activeTeams);
 		rows.customOpts.resize(activeTeams);
+		// ---- PR 36: team-misc per-team vectors (same activeTeams sizing) ----
+		rows.startPos.resize(activeTeams);
+		rows.hasValidStartPos.resize(activeTeams);
+		rows.maxUnits.resize(activeTeams);
+		rows.hasLuaAI.resize(activeTeams);
+		rows.luaAIName.resize(activeTeams);
+		rows.aiHasAI.resize(activeTeams);
+		rows.aiID.resize(activeTeams);
+		rows.aiName.resize(activeTeams);
+		rows.aiHostPlayer.resize(activeTeams);
+		rows.aiIsLocal.resize(activeTeams);
+		rows.aiShortName.resize(activeTeams);
+		rows.aiVersion.resize(activeTeams);
+		rows.aiOptions.resize(activeTeams);
+		rows.statHistory.resize(activeTeams);
+	}
+
+	// PR 36: per-allyteam block (GetAllyTeamStartBox / GetAllyTeamInfo); sized
+	// to activeAllyTeams, which differs from activeTeams -> its own resize guard
+	const int activeAllyTeams = teamHandler.ActiveAllyTeams();
+	if (rows.allyStartBox.size() != static_cast<size_t>(activeAllyTeams)) {
+		rows.allyStartBox.resize(activeAllyTeams);
+		rows.allyTeamOpts.resize(activeAllyTeams);
 	}
 
 	for (int t = 0; t < activeTeams; ++t) {
@@ -1122,7 +1160,98 @@ void SimSnapshot::ExtractTeams(TeamRows& rows)
 		rows.resPrevReceived[t] = team->resPrevReceived;
 		rows.resPrevExcess[t] = team->resPrevExcess;
 		CopyOpts(rows.customOpts[t], team->GetAllValues());
+
+		// ---- PR 36: team-misc ----
+		rows.startPos[t] = team->GetStartPos();
+		rows.hasValidStartPos[t] = team->HasValidStartPos();
+		rows.maxUnits[t] = static_cast<int32_t>(team->GetMaxUnits());
+		// the back() entry is the mutating currentStats, so this is copied every
+		// boundary (vector assign reuses capacity; the history is short)
+		rows.statHistory[t] = team->statHistory;
+
+		// GetTeamLuaAI: first isLuaAI shortName ("" = none)
+		const std::vector<uint8_t>& teamAIs = skirmishAIHandler.GetSkirmishAIsInTeam(t);
+		const std::string* luaAIName = nullptr;
+		for (uint8_t id: teamAIs) {
+			const SkirmishAIData* aiData = skirmishAIHandler.GetSkirmishAI(id);
+			if (!aiData->isLuaAI)
+				continue;
+			luaAIName = &aiData->shortName;
+			break;
+		}
+		rows.hasLuaAI[t] = (luaAIName != nullptr);
+		CopyString(rows.luaAIName[t], (luaAIName != nullptr) ? *luaAIName : std::string());
+
+		// GetAIInfo: teamAIs[0] block
+		if (teamAIs.empty()) {
+			rows.aiHasAI[t] = 0;
+			rows.aiID[t] = -1;
+			rows.aiHostPlayer[t] = -1;
+			rows.aiIsLocal[t] = 0;
+			CopyString(rows.aiName[t], std::string());
+			CopyString(rows.aiShortName[t], std::string());
+			CopyString(rows.aiVersion[t], std::string());
+			if (!rows.aiOptions[t].empty())
+				rows.aiOptions[t].clear();
+		} else {
+			const size_t skirmishAIId = teamAIs[0];
+			const SkirmishAIData* aiData = skirmishAIHandler.GetSkirmishAI(skirmishAIId);
+			rows.aiHasAI[t] = 1;
+			rows.aiID[t] = static_cast<int32_t>(skirmishAIId);
+			rows.aiHostPlayer[t] = aiData->hostPlayer;
+			CopyString(rows.aiName[t], aiData->name);
+			rows.aiIsLocal[t] = skirmishAIHandler.IsLocalSkirmishAI(skirmishAIId);
+			if (rows.aiIsLocal[t] != 0) {
+				CopyString(rows.aiShortName[t], aiData->shortName);
+				CopyString(rows.aiVersion[t], aiData->version);
+				CopyOpts(rows.aiOptions[t], aiData->options);
+			} else {
+				CopyString(rows.aiShortName[t], std::string());
+				CopyString(rows.aiVersion[t], std::string());
+				if (!rows.aiOptions[t].empty())
+					rows.aiOptions[t].clear();
+			}
+		}
 	}
+
+	// PR 36: per-allyteam start box (live float order) + custom options
+	for (int at = 0; at < activeAllyTeams; ++at) {
+		const AllyTeam& ally = teamHandler.GetAllyTeam(at);
+		rows.allyStartBox[at] = float4(
+			(mapDims.mapx * SQUARE_SIZE) * ally.startRectLeft,
+			(mapDims.mapy * SQUARE_SIZE) * ally.startRectTop,
+			(mapDims.mapx * SQUARE_SIZE) * ally.startRectRight,
+			(mapDims.mapy * SQUARE_SIZE) * ally.startRectBottom);
+		CopyOpts(rows.allyTeamOpts[at], ally.GetAllValues());
+	}
+}
+
+// PR 36: parse the map-defined start positions once (LoadStartPositionsFromMap
+// re-parses the map file on every call, so the live GetMapStartPositions cost is
+// paid a single time here). Runs at the boundary with the sim parked (or single-
+// threaded), the same context the live callout ran in.
+void SimSnapshot::CacheMapStartPositions()
+{
+	if (mapStartPosCached)
+		return;
+
+	mapStartPos.assign(MAX_TEAMS, float3());
+	mapStartPosValid.assign(MAX_TEAMS, uint8_t(0));
+
+	if (gameSetup != nullptr) {
+		gameSetup->LoadStartPositionsFromMap(MAX_TEAMS, [&](MapParser& mapParser, int teamNum) {
+			float3 pos;
+			if (!mapParser.GetStartPos(teamNum, pos))
+				return false;
+			if (teamNum >= 0 && teamNum < MAX_TEAMS) {
+				mapStartPos[teamNum] = pos;
+				mapStartPosValid[teamNum] = 1;
+			}
+			return true;
+		});
+	}
+
+	mapStartPosCached = true;
 }
 
 void SimSnapshot::ExtractPlayers(PlayerRows& rows)
@@ -1144,6 +1273,10 @@ void SimSnapshot::ExtractPlayers(PlayerRows& rows)
 		rows.isFromDemo.resize(activePlayers);
 		rows.desynced.resize(activePlayers);
 		rows.customOpts.resize(activePlayers);
+		// ---- PR 36: GetPlayerControlledUnit / GetPlayerStatistics ----
+		rows.controlleeID.resize(activePlayers);
+		rows.controlleeAllyTeam.resize(activePlayers);
+		rows.currentStats.resize(activePlayers);
 	}
 
 	for (int p = 0; p < activePlayers; ++p) {
@@ -1160,6 +1293,14 @@ void SimSnapshot::ExtractPlayers(PlayerRows& rows)
 		rows.isFromDemo[p] = player->isFromDemo;
 		rows.desynced[p] = player->desynced;
 		CopyOpts(rows.customOpts[p], player->GetAllValues());
+
+		// ---- PR 36 ----
+		// GetPlayerControlledUnit: the FPS-controlled unit's id + allyteam
+		const CUnit* controllee = player->fpsController.GetControllee();
+		rows.controlleeID[p] = (controllee != nullptr) ? controllee->id : -1;
+		rows.controlleeAllyTeam[p] = (controllee != nullptr) ? controllee->allyteam : -1;
+		// GetPlayerStatistics: the input/command stat block (POD copy)
+		rows.currentStats[p] = player->currentStats;
 	}
 }
 

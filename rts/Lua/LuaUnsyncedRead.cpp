@@ -4910,13 +4910,9 @@ int LuaUnsyncedRead::GetPlayerTraffic(lua_State* L)
  * @return number numCommands
  * @return number unitCommands
  */
-int LuaUnsyncedRead::GetPlayerStatistics(lua_State* L)
+static int GetPlayerStatisticsLive(lua_State* L, const char* caller)
 {
 	const int playerID = luaL_checkint(L, 1);
-
-	// split-contract gate (PR 27a): reads playerHandler + the player's live stats directly
-	if (LuaSplitContract::DenyLiveRead(L, __func__))
-		return 0;
 
 	if (!playerHandler.IsValidPlayer(playerID))
 		return 0;
@@ -4934,6 +4930,12 @@ int LuaUnsyncedRead::GetPlayerStatistics(lua_State* L)
 	lua_pushnumber(L, pStats.unitCommands);
 
 	return 5;
+}
+
+int LuaUnsyncedRead::GetPlayerStatistics(lua_State* L)
+{
+	// boundary-copy-served from draw context (sim|draw PR 36, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetPlayerStatisticsLive, &LuaSnapshotServe::GetPlayerStatistics);
 }
 
 

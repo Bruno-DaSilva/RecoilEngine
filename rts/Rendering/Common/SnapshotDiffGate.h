@@ -230,6 +230,11 @@ private:
 		D_TRANSPORTEES, // transportedUnits id list
 		D_TOOLTIP,      // customTooltip (unitToolTipMap)
 		D_LOSVARIANTS,  // unitInLos/InAirLos/InJammer per-allyteam answers
+		// PR 36 (team/player misc): appended at the enum tail to keep every prior
+		// field index stable (FIELD_NAMES appended in lockstep)
+		T_MISC,         // per-team startPos/hasValidStartPos/maxUnits/luaAIName + AI block + statHistory
+		T_ALLYINFO,     // per-allyteam allyStartBox + allyTeamOpts
+		PL_MISC,        // per-player controlleeID/controlleeAllyTeam + currentStats
 		F_COUNT
 	};
 
