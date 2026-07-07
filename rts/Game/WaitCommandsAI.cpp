@@ -293,6 +293,8 @@ void CWaitCommandsAI::AddLocalUnit(CUnit* unit, const CUnit* builder)
 					waitMap[tw->GetKey()] = tw;
 					// should not affect the sync state
 					const_cast<Command&>(cmd).SetParam(1, Wait::GetFloatFromKey(tw->GetKey()));
+					// in-place edit of a queued command (sim context; dq is a const view)
+					const_cast<CCommandQueue&>(dq).BumpVersion();
 				}
 			}
 		}

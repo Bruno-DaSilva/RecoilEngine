@@ -55,7 +55,8 @@ CR_BIND(CCommandQueue, )
 CR_REG_METADATA(CCommandQueue, (
 	CR_MEMBER(queue),
 	CR_MEMBER(queueType),
-	CR_MEMBER(tagCounter)
+	CR_MEMBER(tagCounter),
+	CR_IGNORED(version) // ctor-unique on load; the serving cache must not match a pre-load copy
 ))
 
 CR_BIND_DERIVED(CCommandAI, CObject, )
@@ -1801,6 +1802,7 @@ void CCommandAI::PushOrUpdateReturnFight(const float3& cmdPos1, const float3& cm
 	const float3 pos = ClosestPointOnLine(cmdPos1, cmdPos2, owner->pos);
 	if (c.GetNumParams() >= 6) {
 		c.SetPos(0, pos);
+		commandQue.BumpVersion(); // in-place edit of the queued front command
 	} else {
 		// make the new fight command inherit <c>'s options
 		Command c2(CMD_FIGHT, c.GetOpts(), pos);

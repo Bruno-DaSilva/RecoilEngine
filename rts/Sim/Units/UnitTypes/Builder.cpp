@@ -471,6 +471,7 @@ bool CBuilder::UpdateResurrect(const Command& fCommand)
 			// increment the number of wasted hours below:
 			//   number_of_hours_wasted = 3;
 			c.SetParam(0, INT_MAX / 2);
+			resurrecterCAI->commandQue.BumpVersion(); // c aliases its queued front command
 		}
 
 		// this takes one simframe to do the deletion

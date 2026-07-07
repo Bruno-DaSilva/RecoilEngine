@@ -1154,6 +1154,7 @@ void CBuilderCAI::ExecuteResurrect(Command& c)
 					} else {
 						c = Command(CMD_REPAIR, c.GetOpts() | INTERNAL_ORDER, ownerBuilder->lastResurrected);
 					}
+					commandQue.BumpVersion(); // c aliases the queued front command
 					ownerBuilder->lastResurrected = 0;
 					inCommand = CMD_STOP;
 					SlowUpdate();

@@ -264,6 +264,7 @@ void CFactoryCAI::GiveCommandReal(const Command& c, bool fromSynced)
 				}
 			}
 		}
+		commandQue.BumpVersion(); // in-place STOP overwrites through operator[]
 	} else {
 		if (c.GetOpts() & ALT_KEY) {
 			Command nc(c);
@@ -328,6 +329,7 @@ bool CFactoryCAI::RemoveBuildCommand(CCommandQueue::iterator& it)
 	if (cmd.GetID() < 0) {
 		// build command, convert into a stop command
 		cmd = Command(CMD_STOP);
+		commandQue.BumpVersion(); // in-place overwrite through the iterator
 	}
 
 	return false;
