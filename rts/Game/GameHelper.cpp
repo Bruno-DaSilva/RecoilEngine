@@ -1065,7 +1065,7 @@ void CGameHelper::BuggerOff(const float3& pos, float radius, bool spherical, boo
 }
 
 
-float3 CGameHelper::Pos2BuildPos(const BuildInfo& buildInfo, bool synced)
+float3 CGameHelper::Pos2BuildPos(const BuildInfo& buildInfo, bool synced, const float2* currHeightBoundsOverride)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	float3 pos;
@@ -1083,7 +1083,7 @@ float3 CGameHelper::Pos2BuildPos(const BuildInfo& buildInfo, bool synced)
 	else
 		pos.z = math::floor((buildInfo.pos.z + SQUARE_SIZE) / BUILD_SQUARE_SIZE) * BUILD_SQUARE_SIZE;
 
-	pos.y = CGameHelper::GetBuildHeight(pos, buildInfo.def, synced);
+	pos.y = CGameHelper::GetBuildHeight(pos, buildInfo.def, synced, currHeightBoundsOverride);
 	return pos;
 }
 
@@ -1272,7 +1272,7 @@ float3 CGameHelper::ClosestBuildPos(
 
 // find the reference height for a build-position
 // against which to compare all footprint squares
-float CGameHelper::GetBuildHeight(const float3& pos, const UnitDef* unitdef, bool synced)
+float CGameHelper::GetBuildHeight(const float3& pos, const UnitDef* unitdef, bool synced, const float2* currHeightBoundsOverride)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	// we are not going to terraform the ground for mobile units
@@ -1295,8 +1295,12 @@ float CGameHelper::GetBuildHeight(const float3& pos, const UnitDef* unitdef, boo
 
 	const float maxDifHgt = unitdef->maxHeightDif;
 
-	float minHgt = readMap->GetCurrMinHeight();
-	float maxHgt = readMap->GetCurrMaxHeight();
+	// sim|draw PR 29: the served draw-thread twin routes these sim-mutable
+	// currHeightBounds scalars through its SimSnapshot mirror (boundary-consistent)
+	// rather than reading readMap live cross-thread. nullptr => live read, which is
+	// bit-identical to the pre-split single-threaded sim path for all sim callers.
+	float minHgt = currHeightBoundsOverride ? currHeightBoundsOverride->x : readMap->GetCurrMinHeight();
+	float maxHgt = currHeightBoundsOverride ? currHeightBoundsOverride->y : readMap->GetCurrMaxHeight();
 
 	unsigned int numBorderSquares = 0;
 	float sumBorderSquareHeight = 0.0f;

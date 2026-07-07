@@ -146,7 +146,13 @@ public:
 	static void BuggerOff(const float3& pos, float radius, bool spherical, bool forced, int teamId, const CUnit* excludeUnit);
 	static void BuggerOffRectangle(const float3& mins, const float3& maxs, bool forced, int teamId, const CUnit* excludeUnit);
 	static void BuggerOff(const float3& pos, float radius, bool spherical, bool forced, int teamId, const CUnit* excludeUnit, const std::vector<const UnitDef*> excludeUnitDefs);
-	static float3 Pos2BuildPos(const BuildInfo& buildInfo, bool synced);
+	// currHeightBoundsOverride (sim|draw PR 29): when non-null, the immobile
+	// levelGround build-height clamp uses these currMin/Max scalars instead of
+	// the live readMap->GetCurrMin/MaxHeight() reads. Sim callers pass nullptr
+	// (bit-identical to before); the draw-thread served twin passes the mirrored
+	// SimSnapshot GlobalRows scalars so the read is boundary-consistent, not a
+	// cross-thread live read of the sim-mutable currHeightBounds float2.
+	static float3 Pos2BuildPos(const BuildInfo& buildInfo, bool synced, const float2* currHeightBoundsOverride = nullptr);
 	static float4 BuildPosToRect(const float3& midPoint, int facing, int xsize, int zsize);
 
 	static int GetYardMapIndex(int buildFacing,
@@ -186,7 +192,7 @@ public:
 		int threadOwner = 0
 	);
 
-	static float GetBuildHeight(const float3& pos, const UnitDef* unitdef, bool synced = true);
+	static float GetBuildHeight(const float3& pos, const UnitDef* unitdef, bool synced = true, const float2* currHeightBoundsOverride = nullptr);
 	static Command GetBuildCommand(const float3& pos, const float3& dir);
 
 	static bool CheckTerrainConstraints(

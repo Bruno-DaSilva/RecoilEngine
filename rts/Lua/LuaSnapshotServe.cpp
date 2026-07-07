@@ -6347,11 +6347,21 @@ int LuaSnapshotServe::Pos2BuildPos(lua_State* L, const char* caller)
 
 	// build-grid snap over the UNSYNCED heightmap: CGameHelper::Pos2BuildPos with
 	// synced=false reads GetCornerHeightMapUnsynced / GetHeight{Real,AboveWater}
-	// (draw-safe, the reference dirty-rect split) plus the GetCurrMin/MaxHeight
-	// scalars -- no sim-owned mutable state -> the live helper is itself the
-	// twin. ShouldServe rejects synced handles, so GetHandleSynced is always
-	// false here; passing it mirrors the live callout's exact argument.
-	const float3 buildPos = CGameHelper::Pos2BuildPos({ud, worldPos, luaL_optint(L, 5, FACING_SOUTH)}, CLuaHandle::GetHandleSynced(L));
+	// (draw-safe, the reference dirty-rect split). ShouldServe rejects synced
+	// handles, so GetHandleSynced is always false here; passing it mirrors the
+	// live callout's exact argument.
+	//
+	// sim|draw PR 29 integration fix: for immobile+levelGround unitdefs (most
+	// buildings -- the primary use of this callout) GetBuildHeight also clamps
+	// against readMap->GetCurrMin/MaxHeight(), the sim-mutable currHeightBounds
+	// float2 written by the synced heightmap/terraform path. That is a live
+	// cross-thread read the armed diff-gate cannot catch (both legs read the same
+	// live scalar -> EQUAL). Route it through the SimSnapshot GlobalRows mirror --
+	// the same boundary-consistent scalars the GetGroundExtremes twin already
+	// serves -- so the read is one-boundary-stale, never torn/half-updated.
+	const auto& gRows = simSnapshot.ReadGlobals();
+	const float2 currHeightBounds{gRows.currMinHeight, gRows.currMaxHeight};
+	const float3 buildPos = CGameHelper::Pos2BuildPos({ud, worldPos, luaL_optint(L, 5, FACING_SOUTH)}, CLuaHandle::GetHandleSynced(L), &currHeightBounds);
 
 	lua_pushnumber(L, buildPos.x);
 	lua_pushnumber(L, buildPos.y);
