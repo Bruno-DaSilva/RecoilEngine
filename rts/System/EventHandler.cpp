@@ -680,10 +680,15 @@ void CEventHandler::UnitLeftLos(const CUnit* unit, int at)
 {
 	ZoneScoped;
 	// LOSCAPTURE loop (fire-time capture clients dispatch immediately, everyone
-	// else defers), with amendment (b): a deferred handler runs after the
-	// snapshot cleared this unit's LOS bits for allyteam <at>, so present
-	// pre-transition (in-LOS) visibility for (unit, at) around its dispatch.
+	// else defers), with amendment (b) as refined by PR 38g: a deferred handler
+	// runs after the boundary published the END-of-frame LOS state, past what
+	// master's synchronous mid-sim handler saw. Capture the EXACT at-dispatch
+	// losStatus byte here (sim thread owns the unit; SetLosStatus cleared
+	// LOS_INLOS before firing, and the radar bit -- if also leaving this same
+	// call -- clears only in a later block, so it is still set) and present it as
+	// the residual visibility for allyteam <at> around the deferred dispatch.
 	const int evtUnitID = unit->id;
+	const uint8_t evtLosStatus = unit->losStatus[at];
 
 	for (size_t i = 0; i < listUnitLeftLos.size(); ) {
 		CEventClient* ec = listUnitLeftLos[i];
@@ -692,8 +697,8 @@ void CEventHandler::UnitLeftLos(const CUnit* unit, int at)
 			if (ec->IsSimPhaseCaptureClient()) {
 				ec->UnitLeftLos(unit, at);
 			} else if (UnsyncedBoundaryQueue::ShouldDefer(ec)) {
-				UnsyncedBoundaryQueue::DeferFor(ec, [ec, unit, evtUnitID, at]() {
-					SimSnapshotLosEvent::ScopedVisibility ov(evtUnitID, at);
+				UnsyncedBoundaryQueue::DeferFor(ec, [ec, unit, evtUnitID, at, evtLosStatus]() {
+					SimSnapshotLosEvent::ScopedVisibility ov(evtUnitID, at, evtLosStatus);
 					ec->UnitLeftLos(unit, at);
 				});
 			} else {

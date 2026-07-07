@@ -1125,33 +1125,58 @@ private:
 extern SimSnapshot simSnapshot;
 
 
-// ---- PR 38f: event-time LOS-exit visibility override -----------------------
-// Amendment (b) of the PR-38 event-time mechanism. A synced UnitLeftLos event
+// ---- PR 38f/38g: event-time LOS-exit visibility override -------------------
+// Amendment (b) of the PR-38 event-time mechanism, refined by PR 38g (operator
+// ruling: option (b) = NO behavior change vs master). A synced UnitLeftLos event
 // dispatches to unsynced Lua handlers; under the split those handlers run
-// DEFERRED at the SimDrawBarrier, by which point the published snapshot already
-// cleared the unit's LOS bits for the leaving allyteam -- so the UnitRows Pov
-// gates nil out Spring.GetUnitPosition and the handler (e.g. unit_ghostradar_gl4)
-// errors. Master dispatched synchronously, with the unit still readable.
+// DEFERRED at the SimDrawBarrier, by which point the published snapshot reflects
+// the END-of-frame LOS state -- which may have cleared the unit's radar/LOS bits
+// for the leaving allyteam past what master's SYNCHRONOUS mid-sim handler saw --
+// so the UnitRows Pov gates nil out Spring.GetUnitPosition and the handler (e.g.
+// unit_ghostradar_gl4) errors.
 //
-// ScopedVisibility presents pre-transition (in-LOS) visibility for the single
-// (unit, allyTeam) being dispatched, for the duration of that handler call: the
-// UnitRows::PovUnit{Visible,InLos,Typed} gates and ErrorVector honor it (the
-// masking choke points every position/status twin funnels through). The
-// override is main-thread dispatch-window only -- never installed flag-off or
-// during the diff-gate dual-run (both run the handler immediately at fire time,
-// no deferral), so the Pov reads are inert there and behavior stays
-// byte-identical. UNSYNCED (draw-only): no synced write, no sync-hash impact.
+// Master's real behavior (CUnit::SetLosStatus, Unit.cpp): LOS_INLOS is cleared
+// BEFORE eventHandler.UnitLeftLos fires; the radar bit, if also leaving this
+// same call, clears only in a LATER block, so it is still set at dispatch. The
+// synchronous handler thus observes the POST-transition losStatus, and
+// GetUnitPosition -> GetErrorVector returns a FUZZY radar-error-offset position
+// (AllyTeamRadarErrorSize on radar, BaseRadarErrorSize*2 when neither radar nor
+// ghost, zero error only when seenGhost).
+//
+// PR 38g captures the EXACT at-dispatch losStatus byte at FIRE time (the sim
+// thread owns the unit; unit->losStatus[at] there == master's observed value)
+// and presents it as a per-(unit, allyTeam) override for the deferred handler
+// call. The UnitRows::PovUnit{Visible,InLos,Typed} gates and ErrorVector, when
+// the override matches, substitute this residual byte for the row's end-of-frame
+// losStatusAll byte and run their UNCHANGED logic. So the read gate re-opens
+// exactly when master's did (residual radar/ghost) -- fixing the nil -- and the
+// bit-for-bit GetErrorVector mirror reproduces master's radar-error position
+// EXACTLY, with NO forced in-LOS and NO forced zero error. If the residual byte
+// is neither-visible, the gate stays closed -> nil, matching master (no
+// over-disclosure). PR 38f previously forced in-LOS + zero error, over-
+// disclosing exact positions; 38g removes both.
+//
+// Main-thread dispatch-window only -- never installed flag-off or during the
+// diff-gate dual-run (both dispatch immediately at fire time), so the Pov reads
+// are inert there and behavior stays byte-identical. UNSYNCED (draw-only): the
+// fire-time unit->losStatus[at] access is a READ, stored into draw-side state;
+// no synced write, no sync-hash impact, no gsRNG/streflop.
 namespace SimSnapshotLosEvent {
 	struct ScopedVisibility {
-		ScopedVisibility(int unitID, int allyTeam);
+		ScopedVisibility(int unitID, int allyTeam, uint8_t losStatus);
 		~ScopedVisibility();
 		ScopedVisibility(const ScopedVisibility&) = delete;
 		ScopedVisibility& operator=(const ScopedVisibility&) = delete;
 	private:
 		int prevUnitID;
 		int prevAllyTeam;
+		uint8_t prevLosStatus;
 	};
 
-	// consulted by the UnitRows Pov gates in SimSnapshot.cpp
-	bool Visible(int unitID, int allyTeam);
+	// consulted by the UnitRows Pov gates + ErrorVector in SimSnapshot.cpp:
+	// Active() reports whether the override matches (unit, allyTeam); when it
+	// does, LosStatus() is master's captured at-dispatch losStatus byte, used in
+	// place of the row's end-of-frame losStatusAll byte.
+	bool Active(int unitID, int allyTeam);
+	uint8_t LosStatus();
 }

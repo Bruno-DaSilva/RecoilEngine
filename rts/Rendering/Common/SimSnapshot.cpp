@@ -61,33 +61,42 @@
 
 SimSnapshot simSnapshot;
 
-// PR 38f: event-time LOS-exit visibility override (see SimSnapshot.h). A single
-// (unit, allyTeam) pair, installed by ScopedVisibility while a deferred
-// UnitLeftLos handler runs at the barrier. Main-thread dispatch-window state;
-// -1 (inert) flag-off and outside the window, so the Pov consults below are
-// no-ops there.
+// PR 38f/38g: event-time LOS-exit visibility override (see SimSnapshot.h). A
+// single (unit, allyTeam) pair plus master's captured at-dispatch losStatus
+// byte, installed by ScopedVisibility while a deferred UnitLeftLos handler runs
+// at the barrier. Main-thread dispatch-window state; -1 (inert) flag-off and
+// outside the window, so the Pov/ErrorVector consults below are no-ops there.
 namespace {
 	int losEvtUnitID = -1;
 	int losEvtAllyTeam = -1;
+	uint8_t losEvtLosStatus = 0;
 }
 
-bool SimSnapshotLosEvent::Visible(int unitID, int allyTeam)
+bool SimSnapshotLosEvent::Active(int unitID, int allyTeam)
 {
 	return (unitID >= 0 && unitID == losEvtUnitID && allyTeam == losEvtAllyTeam);
 }
 
-SimSnapshotLosEvent::ScopedVisibility::ScopedVisibility(int unitID, int allyTeam)
+uint8_t SimSnapshotLosEvent::LosStatus()
+{
+	return losEvtLosStatus;
+}
+
+SimSnapshotLosEvent::ScopedVisibility::ScopedVisibility(int unitID, int allyTeam, uint8_t losStatus)
 	: prevUnitID(losEvtUnitID)
 	, prevAllyTeam(losEvtAllyTeam)
+	, prevLosStatus(losEvtLosStatus)
 {
 	losEvtUnitID = unitID;
 	losEvtAllyTeam = allyTeam;
+	losEvtLosStatus = losStatus;
 }
 
 SimSnapshotLosEvent::ScopedVisibility::~ScopedVisibility()
 {
 	losEvtUnitID = prevUnitID;
 	losEvtAllyTeam = prevAllyTeam;
+	losEvtLosStatus = prevLosStatus;
 }
 
 // assign-if-different helpers for the team/player boundary copy: the copy is
@@ -175,41 +184,51 @@ bool SimSnapshot::UnitRows::PovUnitVisible(int unitID, int readAllyTeam, bool fu
 {
 	if (PovAlliedUnit(unitID, readAllyTeam, fullRead))
 		return true;
-	// PR 38f: pre-transition in-LOS presentation during a deferred UnitLeftLos
-	if (SimSnapshotLosEvent::Visible(unitID, readAllyTeam))
-		return true;
 	if (readAllyTeam < 0 || readAllyTeam >= numAllyTeams)
 		return false;
 
-	return ((losStatusAll[readAllyTeam * MaxUnits() + unitID] & (LOS_INLOS | LOS_INRADAR)) != 0);
+	// PR 38g: during a deferred UnitLeftLos, present master's captured
+	// at-dispatch (post-INLOS-clear) losStatus in place of the row's end-of-
+	// frame byte, so the gate opens exactly when master's synchronous handler's
+	// did (residual radar) and nils exactly when master's would.
+	const uint8_t losStatus = SimSnapshotLosEvent::Active(unitID, readAllyTeam)
+		? SimSnapshotLosEvent::LosStatus()
+		: losStatusAll[readAllyTeam * MaxUnits() + unitID];
+
+	return ((losStatus & (LOS_INLOS | LOS_INRADAR)) != 0);
 }
 
 bool SimSnapshot::UnitRows::PovUnitInLos(int unitID, int readAllyTeam, bool fullRead) const
 {
 	if (PovAlliedUnit(unitID, readAllyTeam, fullRead))
 		return true;
-	// PR 38f: pre-transition in-LOS presentation during a deferred UnitLeftLos
-	if (SimSnapshotLosEvent::Visible(unitID, readAllyTeam))
-		return true;
 	if (readAllyTeam < 0 || readAllyTeam >= numAllyTeams)
 		return false;
 
-	return ((losStatusAll[readAllyTeam * MaxUnits() + unitID] & LOS_INLOS) != 0);
+	// PR 38g: residual at-dispatch losStatus during a deferred UnitLeftLos
+	// (LOS_INLOS is cleared before master fires the event, so this reads false --
+	// matching master's synchronous handler).
+	const uint8_t losStatus = SimSnapshotLosEvent::Active(unitID, readAllyTeam)
+		? SimSnapshotLosEvent::LosStatus()
+		: losStatusAll[readAllyTeam * MaxUnits() + unitID];
+
+	return ((losStatus & LOS_INLOS) != 0);
 }
 
 bool SimSnapshot::UnitRows::PovUnitTyped(int unitID, int readAllyTeam, bool fullRead) const
 {
 	if (PovAlliedUnit(unitID, readAllyTeam, fullRead))
 		return true;
-	// PR 38f: pre-transition in-LOS presentation during a deferred UnitLeftLos
-	if (SimSnapshotLosEvent::Visible(unitID, readAllyTeam))
-		return true;
 	if (readAllyTeam < 0 || readAllyTeam >= numAllyTeams)
 		return false;
 
 	// LuaUtils::IsUnitTyped mirror: currently in LOS, or not lost from radar
-	// since last being visible
-	const uint8_t losStatus = losStatusAll[readAllyTeam * MaxUnits() + unitID];
+	// since last being visible.
+	// PR 38g: residual at-dispatch losStatus during a deferred UnitLeftLos, in
+	// place of the row's end-of-frame byte, matching master's synchronous handler.
+	const uint8_t losStatus = SimSnapshotLosEvent::Active(unitID, readAllyTeam)
+		? SimSnapshotLosEvent::LosStatus()
+		: losStatusAll[readAllyTeam * MaxUnits() + unitID];
 	constexpr uint8_t prevMask = (LOS_PREVLOS | LOS_CONTRADAR);
 
 	return ((losStatus & LOS_INLOS) != 0 || (losStatus & prevMask) == prevMask);
@@ -217,19 +236,20 @@ bool SimSnapshot::UnitRows::PovUnitTyped(int unitID, int readAllyTeam, bool full
 
 float3 SimSnapshot::UnitRows::ErrorVector(int unitID, int argAllyTeam) const
 {
-	// PR 38f: during a deferred UnitLeftLos the unit is presented as still
-	// in-LOS (pre-transition), which on the live path means zero position error
-	// (the isVisible switch-case falls through to errorMult 0)
-	if (SimSnapshotLosEvent::Visible(unitID, argAllyTeam))
-		return float3{0.0f, 0.0f, 0.0f};
-
 	// bit-for-bit mirror of CUnit::GetErrorVector (Unit.cpp) from extracted
 	// inputs; keep the float expression order identical to the live code
 	if (argAllyTeam < 0 || argAllyTeam >= numAllyTeams)
 		return (posErrorVector[unitID] * baseRadarErrorSize * 2.0f);
 
 	const int atErrorMask = (posErrorBits[argAllyTeam * MaxUnits() + unitID] != 0);
-	const int atSightMask = losStatusAll[argAllyTeam * MaxUnits() + unitID];
+	// PR 38g: during a deferred UnitLeftLos, feed master's captured at-dispatch
+	// losStatus (LOS_INLOS cleared, radar/ghost residual) into the UNCHANGED
+	// error math, so the mirror reproduces master's fuzzy radar-error position
+	// EXACTLY (case 8 -> AllyTeamRadarErrorSize, case 0 -> BaseRadarErrorSize*2,
+	// seenGhost -> zero) instead of PR 38f's forced zero error.
+	const int atSightMask = SimSnapshotLosEvent::Active(unitID, argAllyTeam)
+		? SimSnapshotLosEvent::LosStatus()
+		: losStatusAll[argAllyTeam * MaxUnits() + unitID];
 
 	const int isVisible = 2 * ((atSightMask & LOS_INLOS  ) != 0 || Allied(argAllyTeam, allyTeam[unitID])); // in LOS or allied, no error
 	const int seenGhost = 4 * ((atSightMask & LOS_PREVLOS) != 0 && leavesGhost[unitID] != 0);              // seen ghosted immobiles, no error
