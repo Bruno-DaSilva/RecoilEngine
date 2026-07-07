@@ -1179,4 +1179,13 @@ namespace SimSnapshotLosEvent {
 	// place of the row's end-of-frame losStatusAll byte.
 	bool Active(int unitID, int allyTeam);
 	uint8_t LosStatus();
+
+	// PR 38j: Installed() is a cheap flag-off/inert fast-reject (true only while
+	// a deferred UnitLeftLos handler is dispatching). ActiveForUnit() is the
+	// allyTeam-agnostic unit match used by the position/direction callouts to
+	// decide, at their top, whether to serve arg#1's unit via the snapshot twin
+	// (whose Pov gates then apply the precise per-allyTeam Active() check). The
+	// override globals are inert (-1) flag-off and during the diff-gate dual-run.
+	bool Installed();
+	bool ActiveForUnit(int unitID);
 }

@@ -5013,6 +5013,14 @@ static int GetUnitPositionLive(lua_State* L, const char* caller)
 
 int LuaSyncedRead::GetUnitPosition(lua_State* L)
 {
+	// PR 38j: a deferred UnitLeftLos handler (barrier drain) installs a residual-
+	// LOS override for the leaving unit. Route()'s live leg would nil it out; the
+	// snapshot twin's Pov gates substitute the captured at-dispatch losStatus (38g)
+	// and serve master's radar-error position. Consult the override at the top,
+	// independent of the barrier's live exception, so it applies for that one unit
+	// without forcing the rest of the handler strict.
+	if (LuaSnapshotServe::LosEventOverrideActive(L))
+		return LuaSnapshotServe::GetUnitPosition(L, __func__);
 	// snapshot-served from draw context (sim|draw PR 18, see LuaSnapshotServe.h);
 	// GetUnitBasePosition routes through here too
 	return LuaSnapshotServe::Route(L, __func__, &GetUnitPositionLive, &LuaSnapshotServe::GetUnitPosition);
@@ -5127,6 +5135,10 @@ static int GetUnitDirectionLive(lua_State* L, const char* caller)
 
 int LuaSyncedRead::GetUnitDirection(lua_State* L)
 {
+	// PR 38j: honor a deferred UnitLeftLos residual-LOS override at the top (see
+	// GetUnitPosition) so the leaving unit's direction serves under barrierLive
+	if (LuaSnapshotServe::LosEventOverrideActive(L))
+		return LuaSnapshotServe::GetUnitDirection(L, __func__);
 	// snapshot-served from draw context (sim|draw PR 27a, see LuaSnapshotServe.h)
 	return LuaSnapshotServe::Route(L, __func__, &GetUnitDirectionLive, &LuaSnapshotServe::GetUnitDirection);
 }
@@ -7039,6 +7051,11 @@ static int GetUnitCurrentCommandLive(lua_State* L, const char* caller)
 
 int LuaSyncedRead::GetUnitCurrentCommand(lua_State* L)
 {
+	// PR 38j: honor a deferred UnitCommand/UnitCmdDone event-time queue override
+	// at the top (see GetUnitCommands) so the event-changed queue serves under
+	// barrierLive without forcing the rest of the handler strict
+	if (LuaSnapshotServe::CmdQueueEventOverrideActive(L))
+		return LuaSnapshotServe::GetUnitCurrentCommand(L, __func__);
 	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
 	return LuaSnapshotServe::Route(L, __func__, &GetUnitCurrentCommandLive, &LuaSnapshotServe::GetUnitCurrentCommand);
 }
@@ -7098,6 +7115,14 @@ static int GetUnitCommandsLive(lua_State* L, const char* caller)
 
 int LuaSyncedRead::GetUnitCommands(lua_State* L)
 {
+	// PR 38j: a deferred UnitCommand/UnitCmdDone handler (barrier drain) installs
+	// an event-time command-queue override for the unit. Route()'s live leg (run
+	// under the barrier's live exception) reads the parked-live queue, PAST the
+	// event; consult the override at the top so the event-time queue serves via
+	// the snapshot twin (GetCmdQueueSlot returns it) for that one unit, without
+	// forcing the rest of the handler strict.
+	if (LuaSnapshotServe::CmdQueueEventOverrideActive(L))
+		return LuaSnapshotServe::GetUnitCommands(L, __func__);
 	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h);
 	// GetCommandQueue forwards here, so it serves through this route too
 	return LuaSnapshotServe::Route(L, __func__, &GetUnitCommandsLive, &LuaSnapshotServe::GetUnitCommands);
@@ -7192,6 +7217,10 @@ static int GetUnitCommandCountLive(lua_State* L, const char* caller)
 
 int LuaSyncedRead::GetUnitCommandCount(lua_State* L)
 {
+	// PR 38j: honor a deferred command-event queue override at the top (see
+	// GetUnitCommands) so the event-time count serves under barrierLive
+	if (LuaSnapshotServe::CmdQueueEventOverrideActive(L))
+		return LuaSnapshotServe::GetUnitCommandCount(L, __func__);
 	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
 	return LuaSnapshotServe::Route(L, __func__, &GetUnitCommandCountLive, &LuaSnapshotServe::GetUnitCommandCount);
 }

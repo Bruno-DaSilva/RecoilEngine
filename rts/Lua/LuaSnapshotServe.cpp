@@ -523,25 +523,27 @@ int LuaSnapshotServe::Route(lua_State* L, const char* caller, ServeFn liveFn, Se
 		return snapFn(L, caller);
 	}
 
-	// EXPECTED-DIVERGENCE NOTE (PR 38f/38g/38h, sim|draw): three sim-fired
-	// deferred EVENT handlers -- gui_selfd_icons (UnitCommand -> cmd queue),
-	// unit_idle_guard (UnitCmdDone -> cmd queue/count) and unit_ghostradar_gl4
-	// (UnitLeftLos -> position) -- carry an event-time override on their
-	// snapshot leg (ScopedCmdQueueEventOverride / SimSnapshotLosEvent) so the
-	// deferred read sees the state as it was AT the event, not at the parked
-	// end-of-frame the live leg observes. Pre-38h these handlers reached Route
-	// with ShouldServe()==false (drained under barrierLive, Enforced()==false)
-	// and returned the live leg directly, no dual-run. 38h's
-	// ScopedContractReassert re-asserts Enforced() for the dispatch so the read
-	// routes to the twin where the override lives; that also means the sim is
-	// parked (IsSimParked()==true), the SimThreadRunning early-out above does
-	// NOT fire, and -- if the diff gate is armed flag-ON -- the dual-run below
-	// bit-compares the override-bearing snapshot leg against the live leg's
-	// last-boundary/nil queue or gone-from-LOS position. Those legs are
-	// DESIGNED to differ: such mismatches for these three callers are BENIGN
-	// (the snapshot is still served; no game/sync effect) and must NOT be
-	// treated as regressions by any downstream PR that arms the gate flag-ON.
-	// Flag-off is unaffected (no deferral -> handlers run live as before).
+	// EVENT-TIME NOTE (PR 38f/38g/38j, sim|draw): three sim-fired deferred EVENT
+	// handlers -- gui_selfd_icons (UnitCommand -> cmd queue), unit_idle_guard
+	// (UnitCmdDone -> cmd queue/count) and unit_ghostradar_gl4 (UnitLeftLos ->
+	// position) -- read state that changed AT the event, which the parked
+	// end-of-frame the live leg observes no longer reflects. They carry an
+	// event-time override (ScopedCmdQueueEventOverride / SimSnapshotLosEvent)
+	// installed around the deferred dispatch. PR 38h briefly re-asserted
+	// Enforced() for the WHOLE dispatch to route these reads to the twin, but
+	// that forced every OTHER read the handler makes onto the strict path and
+	// nil'd the ones that are neither snapshot-served nor sanctioned-live (a 4th
+	// widget error); 38j reverted it. Under 38j the override is consulted at the
+	// TOP of only the specific affected callouts (GetUnitCommands/CommandCount/
+	// CurrentCommand, GetUnitPosition/Direction): when arg#1's unit has an
+	// override those callouts serve its snapshot twin DIRECTLY (short-circuit
+	// above the dual-run), and every other read the deferred handler makes stays
+	// on the live leg via ShouldServe()==false. So these handlers no longer reach
+	// the armed dual-run below with an override in play: the diff gate never
+	// dispatches deferred (immediate at fire time -> no override installed), so
+	// the override globals are inert during any dual-run and there is no
+	// event-time divergence for the gate to flag. Flag-off is unaffected (no
+	// deferral -> handlers run live as before).
 	//
 	// armed: run BOTH real paths, bit-compare their actual return slots
 	// (masking and gating included by construction), serve the snapshot values.
@@ -9163,4 +9165,45 @@ LuaSnapshotServe::ScopedCmdQueueEventOverride::~ScopedCmdQueueEventOverride()
 {
 	cmdEvtOverrideSlot = static_cast<const UnitCmdQueueSlot*>(prevSlot);
 	cmdEvtOverrideUnitID = prevUnitID;
+}
+
+
+/******************************************************************************
+ * PR 38j -- top-of-callout event-time override consults.
+ *
+ * A deferred UnitCommand/UnitCmdDone / UnitLeftLos handler runs at the barrier
+ * under a live exception, so Route() serves the LIVE leg and never consults the
+ * event-time overrides installed around the handler (38f/38g). These predicates
+ * let the specific affected callouts detect, at their top and INDEPENDENT of the
+ * live exception, that arg#1's unit currently has an override installed, and
+ * serve it via the snapshot twin (where the override lives) for that ONE unit --
+ * without the whole-handler strict enforcement 38h wrongly imposed (reverted).
+ *
+ * Both fast-reject on their inert global before touching the lua stack. The
+ * overrides are only ever installed while a deferred handler dispatches at the
+ * barrier (main thread, post-publish); flag-off and the armed diff-gate dual-run
+ * install nothing (they dispatch immediately at fire time), so these return
+ * false there and the callouts fall through to the normal Route() ->
+ * byte-identical. The Generation()!=0 guard is defensive: the snapshot has
+ * always published by the time an override can be installed.
+ ******************************************************************************/
+
+bool LuaSnapshotServe::CmdQueueEventOverrideActive(lua_State* L)
+{
+	if (cmdEvtOverrideSlot == nullptr) // no deferred command event dispatching
+		return false;
+	if (!lua_isnumber(L, 1))
+		return false;
+
+	return (lua_toint(L, 1) == cmdEvtOverrideUnitID) && (simSnapshot.Generation() != 0);
+}
+
+bool LuaSnapshotServe::LosEventOverrideActive(lua_State* L)
+{
+	if (!SimSnapshotLosEvent::Installed()) // no deferred UnitLeftLos dispatching
+		return false;
+	if (!lua_isnumber(L, 1))
+		return false;
+
+	return SimSnapshotLosEvent::ActiveForUnit(lua_toint(L, 1)) && (simSnapshot.Generation() != 0);
 }

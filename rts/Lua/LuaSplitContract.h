@@ -119,18 +119,14 @@ namespace LuaSplitContract {
 		~ScopedLiveException();
 	};
 
-	// PR 38h: re-assert enforcement inside an active ScopedLiveException, so a
-	// snapshot-served read routes to its twin again. The barrier drain
-	// (CGame::SimDrawBarrier) runs under a ScopedLiveException so its Render*/
-	// Cob2Lua dispatches may read the parked sim live; but the sim-fired
-	// unsynced EVENT callins deferred there (UnitCommand/UnitCmdDone/
-	// UnitLeftLos) must be snapshot-served like every other draw-thread widget
-	// callin, so their event-time overrides (LuaSnapshotServe::GetCmdQueueSlot /
-	// SimSnapshotLosEvent) actually apply -- the live path never consults them.
-	// Saves and zeroes the live-exception depth for its scope, then restores.
-	struct ScopedContractReassert {
-		ScopedContractReassert();
-		~ScopedContractReassert();
-		int savedDepth;
-	};
+	// PR 38j: reverted PR 38h's ScopedContractReassert. Blanket-re-asserting
+	// enforcement for the whole deferred event dispatch forced EVERY read the
+	// handler makes onto the strict snapshot path, nil-ing the handler's OTHER
+	// (neither-snapshot-served-nor-sanctioned-live) reads -- surfacing a 4th
+	// widget error (cmd_stop_selfd) that 38h's own review predicted. The
+	// event-time override is now consulted at the TOP of the specific affected
+	// callouts instead (LuaSyncedRead GetUnitCommands/CommandCount/CurrentCommand
+	// + GetUnitPosition/Direction), independent of the barrier's live exception,
+	// so only the event-changed reads are presented event-time and every other
+	// read the deferred handler makes stays on the working live path.
 }

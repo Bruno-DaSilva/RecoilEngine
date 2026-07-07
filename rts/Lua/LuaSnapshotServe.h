@@ -289,6 +289,23 @@ namespace LuaSnapshotServe {
 		int prevUnitID;
 	};
 
+	// PR 38j: top-of-callout override consults. The deferred UnitCommand/
+	// UnitCmdDone / UnitLeftLos handlers run at the barrier under a live
+	// exception (Route() then serves the LIVE leg, which never consults the
+	// event-time overrides installed above). These predicates let the specific
+	// affected callouts (LuaSyncedRead GetUnitCommands/CommandCount/
+	// CurrentCommand and GetUnitPosition/Direction) detect, at their TOP and
+	// INDEPENDENT of the live exception, that arg#1's unit currently has an
+	// event-time override installed, so they can serve via the snapshot twin
+	// (where the override lives) for that one unit -- without forcing the rest of
+	// the handler strict (the 38h over-reach, now reverted). Each fast-rejects on
+	// its inert global before touching the lua stack; both are false flag-off and
+	// during the armed diff-gate dual-run (no override is ever installed there),
+	// so those paths stay byte-identical. Reads arg#1 (the unitID) non-
+	// destructively.
+	bool CmdQueueEventOverrideActive(lua_State* L); // command-queue family
+	bool LosEventOverrideActive(lua_State* L);      // position/LOS-exit family
+
 	// unsynced flag/drawer parse-gate family (PR 27b serving batch 2,
 	// family 2): payloads are draw-owned, only the ParseUnit/ParseFeature
 	// gate is snapshot-served

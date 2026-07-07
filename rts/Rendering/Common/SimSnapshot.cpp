@@ -82,6 +82,20 @@ uint8_t SimSnapshotLosEvent::LosStatus()
 	return losEvtLosStatus;
 }
 
+// PR 38j: fast-reject accessor + allyTeam-agnostic unit match for the top-of-
+// callout override consults (see SimSnapshot.h). Inert (losEvtUnitID == -1)
+// flag-off and during the diff-gate dual-run, so the position/direction
+// callouts fall through to the normal Route() there -> byte-identical.
+bool SimSnapshotLosEvent::Installed()
+{
+	return (losEvtUnitID >= 0);
+}
+
+bool SimSnapshotLosEvent::ActiveForUnit(int unitID)
+{
+	return (unitID >= 0 && unitID == losEvtUnitID);
+}
+
 SimSnapshotLosEvent::ScopedVisibility::ScopedVisibility(int unitID, int allyTeam, uint8_t losStatus)
 	: prevUnitID(losEvtUnitID)
 	, prevAllyTeam(losEvtAllyTeam)
