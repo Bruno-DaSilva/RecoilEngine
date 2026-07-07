@@ -326,6 +326,10 @@ local function ExerciseFamily()
 	for i = 1, #allyTeams do
 		Spring.GetTeamList(allyTeams[i])
 	end
+	-- PR 38: game rules-params (singleton; no POV). GetGameRulesParams returns the
+	-- whole table (twin push vs live push), GetGameRulesParam a single lookup.
+	Spring.GetGameRulesParams()
+	Spring.GetGameRulesParam("__diffgate_probe_missing__") -- nil both sides (miss)
 	local teams = Spring.GetTeamList()
 	for i = 1, #teams do
 		local tid = teams[i]
@@ -341,6 +345,9 @@ local function ExerciseFamily()
 		Spring.GetTeamUnitCount(tid)
 		Spring.GetTeamColor(tid)
 		Spring.GetTeamOrigColor(tid)
+		-- PR 38: per-team rules-params (POV-masked); whole table + single lookup
+		Spring.GetTeamRulesParams(tid)
+		Spring.GetTeamRulesParam(tid, "__diffgate_probe_missing__")
 		Spring.GetPlayerList(tid)
 		Spring.GetPlayerList(tid, true)
 	end

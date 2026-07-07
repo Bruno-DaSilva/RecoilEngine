@@ -14,6 +14,7 @@
 #include "LuaHandle.h"
 #include "LuaHashString.h" // HSTR_PUSH_BOOL
 #include "LuaInclude.h"
+#include "LuaRulesParams.h" // PR 38: game+team rules-params twins (Params/Param)
 #include "LuaSplitContract.h"
 #include "LuaUtils.h" // allegiance constants (spatial-list twins)
 
@@ -2801,6 +2802,143 @@ int LuaSnapshotServe::GetPlayerStatistics(lua_State* L, const char* caller)
 	lua_pushnumber(L, pStats.unitCommands);
 
 	return 5;
+}
+
+
+/******************************************************************************/
+//
+//  PR 38 (zero-sanction flip): game+team rules-params serving
+//
+//  Served from SimSnapshot::GlobalRows::gameRulesParams (singleton) and
+//  TeamRows::teamRulesParams (per-team). The two mirror helpers below are
+//  byte-equivalent to LuaSyncedRead.cpp's file-static PushRulesParams /
+//  GetRulesParam (which are not visible outside that TU) -- keep them in
+//  lockstep with the live helpers. The game twins have no POV (always
+//  PRIVATE_MASK); the team twins reproduce the live losMask decision over the
+//  snapshot alliance rows (see the per-twin comments).
+//
+
+namespace {
+	// byte-equivalent mirror of LuaSyncedRead.cpp::PushRulesParams
+	int PushRulesParamsMirror(lua_State* L, const LuaRulesParams::Params& params, const int losStatus)
+	{
+		lua_createtable(L, 0, params.size());
+
+		for (const auto& it: params) {
+			const std::string& name = it.first;
+			const LuaRulesParams::Param& param = it.second;
+			if (!(param.los & losStatus))
+				continue;
+
+			std::visit ([L, &name](auto&& value) {
+				using T = std::decay_t <decltype(value)>;
+				if constexpr (std::is_same_v <T, float>)
+					LuaPushNamedNumber(L, name, value);
+				else if constexpr (std::is_same_v <T, bool>)
+					LuaPushNamedBool(L, name, value);
+				else if constexpr (std::is_same_v <T, std::string>)
+					LuaPushNamedString(L, name, value);
+			}, param.value);
+		}
+
+		return 1;
+	}
+
+	// byte-equivalent mirror of LuaSyncedRead.cpp::GetRulesParam
+	int GetRulesParamMirror(lua_State* L, int index, const LuaRulesParams::Params& params, const int losStatus)
+	{
+		const std::string& key = luaL_checkstring(L, index);
+		const auto it = params.find(key);
+		if (it == params.end())
+			return 0;
+
+		const LuaRulesParams::Param& param = it->second;
+		if (!(param.los & losStatus))
+			return 0;
+
+		std::visit ([L](auto&& value) {
+			using T = std::decay_t <decltype(value)>;
+			if constexpr (std::is_same_v <T, float>)
+				lua_pushnumber(L, value);
+			else if constexpr (std::is_same_v <T, bool>)
+				lua_pushboolean(L, value);
+			else if constexpr (std::is_same_v <T, std::string>)
+				lua_pushsstring(L, value);
+		}, param.value);
+
+		return 1;
+	}
+
+	// mirror of LuaSyncedRead::GetTeamRulesParam(s) losMask computation:
+	//   PUBLIC, |= PRIVATE_MASK if IsAlliedTeam || gameOver,
+	//   else |= ALLIED_MASK if teamHandler.AlliedTeams(teamNum, readTeam).
+	// PovAlliedTeam mirrors LuaUtils::IsAlliedTeam; the AlliedTeams leg is
+	// reproduced over the snapshot alliance matrix (UnitRows::Allied) + the
+	// per-team allyTeam rows. The AlliedTeams branch is only reached when
+	// PovAlliedTeam is false, which for a served (unsynced draw-context) handle
+	// implies readAllyTeam >= 0 and thus a valid readTeam -- the ValidTeam guard's
+	// false fallback is defensive (a degenerate/negative readTeam that master would
+	// index out of the fixed teams[] array); enumerated as an equivalence
+	// assumption in the commit message.
+	int TeamRulesLosMask(lua_State* L, const SimSnapshot::TeamRows& trows, int teamID)
+	{
+		const Pov pov = HandlePov(L);
+		int losMask = LuaRulesParams::RULESPARAMLOS_PUBLIC;
+
+		if (trows.PovAlliedTeam(teamID, pov.readAllyTeam, pov.fullRead) || trows.gameOver != 0) {
+			losMask |= LuaRulesParams::RULESPARAMLOS_PRIVATE_MASK;
+		} else {
+			const int readTeam = CLuaHandle::GetHandleReadTeam(L);
+			if (trows.ValidTeam(readTeam) &&
+			    simSnapshot.Read().Allied(trows.allyTeam[teamID], trows.allyTeam[readTeam])) {
+				losMask |= LuaRulesParams::RULESPARAMLOS_ALLIED_MASK;
+			}
+		}
+
+		return losMask;
+	}
+}
+
+// mirror of LuaSyncedRead::GetGameRulesParams (always readable for all)
+int LuaSnapshotServe::GetGameRulesParams(lua_State* L, const char* caller)
+{
+	return PushRulesParamsMirror(L, simSnapshot.ReadGlobals().gameRulesParams,
+		LuaRulesParams::RULESPARAMLOS_PRIVATE_MASK);
+}
+
+// mirror of LuaSyncedRead::GetGameRulesParam
+int LuaSnapshotServe::GetGameRulesParam(lua_State* L, const char* caller)
+{
+	return GetRulesParamMirror(L, 1, simSnapshot.ReadGlobals().gameRulesParams,
+		LuaRulesParams::RULESPARAMLOS_PRIVATE_MASK);
+}
+
+// mirror of LuaSyncedRead::GetTeamRulesParams
+int LuaSnapshotServe::GetTeamRulesParams(lua_State* L, const char* caller)
+{
+	const auto& trows = simSnapshot.ReadTeams();
+
+	// live: ParseTeam(1) -> null-check + game null-check; ParseTeam never returns
+	// null for a valid team (the twin's ValidTeam gate mirrors it). `game` is
+	// non-null whenever the draw phase runs. Match the live "return 0" on an
+	// invalid teamID (ParseTeam's null path), NOT ParseTeamIDSynced's luaL_error.
+	const int teamID = luaL_checkint(L, 1);
+	if (!trows.ValidTeam(teamID) || game == nullptr)
+		return 0;
+
+	return PushRulesParamsMirror(L, trows.teamRulesParams[teamID], TeamRulesLosMask(L, trows, teamID));
+}
+
+// mirror of LuaSyncedRead::GetTeamRulesParam
+int LuaSnapshotServe::GetTeamRulesParam(lua_State* L, const char* caller)
+{
+	const auto& trows = simSnapshot.ReadTeams();
+
+	const int teamID = luaL_checkint(L, 1);
+	if (!trows.ValidTeam(teamID) || game == nullptr)
+		return 0;
+
+	return GetRulesParamMirror(L, 2, trows.teamRulesParams[teamID], TeamRulesLosMask(L, trows, teamID));
 }
 
 

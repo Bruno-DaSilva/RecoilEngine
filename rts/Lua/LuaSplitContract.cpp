@@ -119,9 +119,14 @@ namespace {
 		// Jammer}) are SERVED in PR 32 -- the computed losHandler->In*(unit, at)
 		// answers are extracted into the unitIn*All stride rows (the inRadarAll
 		// precedent), with the new cloak/stealth/water per-unit rows this PR adds.
-		// rules params (dirty-delta copy pending)
-		"GetGameRulesParam", "GetGameRulesParams",
-		"GetTeamRulesParam", "GetTeamRulesParams",
+		// rules params: GAME + TEAM SERVED (sim|draw PR 38) from the SimSnapshot
+		// GlobalRows::gameRulesParams / TeamRows::teamRulesParams boundary mirrors
+		// (game singleton + fixed-count teams -> no id-reuse ordering hazard, a
+		// plain per-boundary copy like customOpts/statHistory). The PLAYER/UNIT/
+		// FEATURE namespaces stay sanctioned: unit/feature ids reuse, so their
+		// per-object param maps need the RenderEventQueue-ordered dirty-delta
+		// mechanism (creation-clears must order against set-deltas under id reuse)
+		// -- deferred/escalated as a distinct follow-up (see the PR 38 commit).
 		"GetPlayerRulesParam", "GetPlayerRulesParams",
 		"GetUnitRulesParam", "GetUnitRulesParams",
 		"GetFeatureRulesParam", "GetFeatureRulesParams",

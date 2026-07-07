@@ -54,6 +54,7 @@
 #include "Sim/Weapons/BombDropper.h"
 #include "Sim/Weapons/WeaponTarget.h"
 #include "Sim/Misc/DamageArray.h"
+#include "Lua/LuaHandleSynced.h"           // PR 38: CSplitLuaHandle::GetGameParams (game rules params)
 #include "System/Log/ILog.h"
 #include "System/Misc/SpringTime.h"
 #include "System/TimeProfiler.h"
@@ -1127,6 +1128,8 @@ void SimSnapshot::ExtractTeams(TeamRows& rows)
 		rows.aiVersion.resize(activeTeams);
 		rows.aiOptions.resize(activeTeams);
 		rows.statHistory.resize(activeTeams);
+		// ---- PR 38: per-team rules-params mirror (same activeTeams sizing) ----
+		rows.teamRulesParams.resize(activeTeams);
 	}
 
 	// PR 36: per-allyteam block (GetAllyTeamStartBox / GetAllyTeamInfo); sized
@@ -1168,6 +1171,10 @@ void SimSnapshot::ExtractTeams(TeamRows& rows)
 		// the back() entry is the mutating currentStats, so this is copied every
 		// boundary (vector assign reuses capacity; the history is short)
 		rows.statHistory[t] = team->statHistory;
+
+		// ---- PR 38: per-team rules-params (values only; the Param variant is a
+		// bool/float/std::string, no pointer/sim-owned container) ----
+		rows.teamRulesParams[t] = team->modParams;
 
 		// GetTeamLuaAI: first isLuaAI shortName ("" = none)
 		const std::vector<uint8_t>& teamAIs = skirmishAIHandler.GetSkirmishAIsInTeam(t);
@@ -1337,4 +1344,9 @@ void SimSnapshot::ExtractGlobals(GlobalRows& rows)
 	for (int at = 0; at < numAllyTeams; ++at) {
 		rows.globalLos[at] = losHandler->GetGlobalLOS(at);
 	}
+
+	// ---- PR 38: game rules-params (values only; the singleton game param map,
+	// mutated only by synced Spring.SetGameRulesParam, safe to read at the parked
+	// barrier / single-threaded) ----
+	rows.gameRulesParams = CSplitLuaHandle::GetGameParams();
 }

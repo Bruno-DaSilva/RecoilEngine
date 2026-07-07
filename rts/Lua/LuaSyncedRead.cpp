@@ -1109,16 +1109,16 @@ int LuaSyncedRead::GetWind(lua_State* L)
  *
  * @return RulesParams rulesParams map with rules names as key and values as values
  */
+static int GetGameRulesParamsLive(lua_State* L, const char* caller)
+{
+	// always readable for all
+	return PushRulesParams(L, caller, CSplitLuaHandle::GetGameParams(), LuaRulesParams::RULESPARAMLOS_PRIVATE_MASK);
+}
+
 int LuaSyncedRead::GetGameRulesParams(lua_State* L)
 {
-	// split-contract gate (PR 27a): reads the sim-mutable game rules params via CSplitLuaHandle::GetGameParams
-	if (LuaSplitContract::DenyLiveRead(L, __func__)) {
-		lua_createtable(L, 0, 0);
-		return 1;
-	}
-
-	// always readable for all
-	return PushRulesParams(L, __func__, CSplitLuaHandle::GetGameParams(), LuaRulesParams::RULESPARAMLOS_PRIVATE_MASK);
+	// boundary-copy-served from draw context (sim|draw PR 38, GlobalRows::gameRulesParams)
+	return LuaSnapshotServe::Route(L, __func__, &GetGameRulesParamsLive, &LuaSnapshotServe::GetGameRulesParams);
 }
 
 
@@ -1130,9 +1130,9 @@ int LuaSyncedRead::GetGameRulesParams(lua_State* L)
  *
  * @return RulesParams rulesParams map with rules names as key and values as values
  */
-int LuaSyncedRead::GetTeamRulesParams(lua_State* L)
+static int GetTeamRulesParamsLive(lua_State* L, const char* caller)
 {
-	const CTeam* team = ParseTeam(L, __func__, 1);
+	const CTeam* team = ParseTeam(L, caller, 1);
 	if (team == nullptr || game == nullptr)
 		return 0;
 
@@ -1145,7 +1145,13 @@ int LuaSyncedRead::GetTeamRulesParams(lua_State* L)
 		losMask |= LuaRulesParams::RULESPARAMLOS_ALLIED_MASK;
 	}
 
-	return PushRulesParams(L, __func__, team->modParams, losMask);
+	return PushRulesParams(L, caller, team->modParams, losMask);
+}
+
+int LuaSyncedRead::GetTeamRulesParams(lua_State* L)
+{
+	// boundary-copy-served from draw context (sim|draw PR 38, TeamRows::teamRulesParams)
+	return LuaSnapshotServe::Route(L, __func__, &GetTeamRulesParamsLive, &LuaSnapshotServe::GetTeamRulesParams);
 }
 
 /***
@@ -1286,14 +1292,16 @@ int LuaSyncedRead::GetFeatureRulesParams(lua_State* L)
  *
  * @return number?|string value
  */
+static int GetGameRulesParamLive(lua_State* L, const char* caller)
+{
+	// always readable for all
+	return GetRulesParam(L, caller, 1, CSplitLuaHandle::GetGameParams(), LuaRulesParams::RULESPARAMLOS_PRIVATE_MASK);
+}
+
 int LuaSyncedRead::GetGameRulesParam(lua_State* L)
 {
-	// split-contract gate (PR 27a): reads the sim-mutable game rules params via CSplitLuaHandle::GetGameParams
-	if (LuaSplitContract::DenyLiveRead(L, __func__))
-		return 0;
-
-	// always readable for all
-	return GetRulesParam(L, __func__, 1, CSplitLuaHandle::GetGameParams(), LuaRulesParams::RULESPARAMLOS_PRIVATE_MASK);
+	// boundary-copy-served from draw context (sim|draw PR 38, GlobalRows::gameRulesParams)
+	return LuaSnapshotServe::Route(L, __func__, &GetGameRulesParamLive, &LuaSnapshotServe::GetGameRulesParam);
 }
 
 
@@ -1306,9 +1314,9 @@ int LuaSyncedRead::GetGameRulesParam(lua_State* L)
  *
  * @return number|string|nil value
  */
-int LuaSyncedRead::GetTeamRulesParam(lua_State* L)
+static int GetTeamRulesParamLive(lua_State* L, const char* caller)
 {
-	const CTeam* team = ParseTeam(L, __func__, 1);
+	const CTeam* team = ParseTeam(L, caller, 1);
 	if (team == nullptr || game == nullptr)
 		return 0;
 
@@ -1321,7 +1329,13 @@ int LuaSyncedRead::GetTeamRulesParam(lua_State* L)
 		losMask |= LuaRulesParams::RULESPARAMLOS_ALLIED_MASK;
 	}
 
-	return GetRulesParam(L, __func__, 2, team->modParams, losMask);
+	return GetRulesParam(L, caller, 2, team->modParams, losMask);
+}
+
+int LuaSyncedRead::GetTeamRulesParam(lua_State* L)
+{
+	// boundary-copy-served from draw context (sim|draw PR 38, TeamRows::teamRulesParams)
+	return LuaSnapshotServe::Route(L, __func__, &GetTeamRulesParamLive, &LuaSnapshotServe::GetTeamRulesParam);
 }
 
 

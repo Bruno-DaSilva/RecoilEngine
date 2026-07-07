@@ -412,6 +412,19 @@ namespace LuaSnapshotServe {
 	int GetTeamStatsHistory(lua_State* L, const char* caller);
 	int GetPlayerStatistics(lua_State* L, const char* caller); // LuaUnsyncedRead
 
+	// ---- PR 38 (zero-sanction flip): game+team rules-params serving ----
+	// Served from the SimSnapshot GlobalRows::gameRulesParams (singleton) and
+	// TeamRows::teamRulesParams (per-team) mirrors. The game twins have no POV
+	// (always PRIVATE_MASK, "readable for all"); the team twins mirror the live
+	// losMask computation (PovAlliedTeam private / AlliedTeams-mirror allied /
+	// public) over the snapshot alliance rows. Only game+team are served here:
+	// the player/unit/feature namespaces stay sanctioned (unit/feature ids reuse
+	// -> need the RenderEventQueue-ordered delta mechanism; escalated).
+	int GetGameRulesParam(lua_State* L, const char* caller);   // LuaSyncedRead
+	int GetGameRulesParams(lua_State* L, const char* caller);  // LuaSyncedRead
+	int GetTeamRulesParam(lua_State* L, const char* caller);   // LuaSyncedRead
+	int GetTeamRulesParams(lua_State* L, const char* caller);  // LuaSyncedRead
+
 	// ======================= PR 35: weapon trace tests =======================
 	// GetUnitWeaponTryTarget/TestTarget/TestRange/HaveFreeLineOfFire served by a
 	// SIM-SIDE QUERY/REPLY channel (Batch-3 amendment; NOT the draw-side

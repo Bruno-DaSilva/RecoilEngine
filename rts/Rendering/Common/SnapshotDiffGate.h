@@ -235,6 +235,11 @@ private:
 		T_MISC,         // per-team startPos/hasValidStartPos/maxUnits/luaAIName + AI block + statHistory
 		T_ALLYINFO,     // per-allyteam allyStartBox + allyTeamOpts
 		PL_MISC,        // per-player controlleeID/controlleeAllyTeam + currentStats
+		// PR 38 (zero-sanction flip): game+team rules-params mirror; appended at
+		// the enum tail to keep every prior field index stable (FIELD_NAMES
+		// appended in lockstep). Structural map compare (RulesParamsEqual).
+		T_RULES,        // per-team modParams mirror vs live CTeam::modParams
+		G_GAMERULES,    // global gameRulesParams mirror vs CSplitLuaHandle::GetGameParams
 		F_COUNT
 	};
 

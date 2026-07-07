@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "Game/Players/PlayerStatistics.h"
+#include "Lua/LuaRulesParams.h" // PR 38: game+team rules-params mirror (Params map)
 #include "Sim/Misc/CollisionVolume.h"
 #include "Sim/Misc/Resource.h"
 #include "Sim/Misc/TeamStatistics.h"
@@ -852,6 +853,23 @@ public:
 		std::vector<float4> allyStartBox;        // [activeAllyTeams] {xMin,zMin,xMax,zMax}
 		std::vector<spring::unordered_map<std::string, std::string>> allyTeamOpts; // [activeAllyTeams]
 
+		// ===== PR 38 (zero-sanction flip): game+team rules-params serving =====
+		// Per-team LuaRulesParams::Params (CTeam::modParams) mirror, serving
+		// GetTeamRulesParam/GetTeamRulesParams from draw context. Rules params are
+		// SYNCED state (Spring.SetTeamRulesParam is synced ctrl), but -- like
+		// sideName/customOpts/statHistory above -- they are EXCLUDED from the
+		// SnapshotHash: an order-independent fold of an unordered_map<string,
+		// variant> (string bytes + float bits) buys only marginal desync
+		// localization (any unit-row or demo-stream divergence pinpoints better),
+		// so correctness is covered instead by the SnapshotDiffGate field pass
+		// (team:rules) + the serving dual-run. Re-copied unconditionally every
+		// boundary like the rest of TeamRows. Teams are fixed-count and never
+		// recreated mid-game, so there is NO id-reuse ordering hazard -- the
+		// unit/feature/player rules-params namespaces (unit/feature ids DO reuse)
+		// stay sanctioned and are deferred to the RenderEventQueue-ordered delta
+		// mechanism (see the PR-38 escalation note in the commit message).
+		std::vector<LuaRulesParams::Params> teamRulesParams; // [activeTeams]
+
 		// teamHandler.IsValidTeam mirror
 		bool ValidTeam(int teamID) const { return (teamID >= 0 && teamID < activeTeams); }
 		// teamHandler.ValidAllyTeam mirror (the ally-team callouts' own gate)
@@ -950,6 +968,15 @@ public:
 		// GetGlobalLos, one byte per allyteam
 		int32_t numAllyTeams = 0;
 		std::vector<uint8_t> globalLos;
+
+		// ===== PR 38 (zero-sanction flip): game rules-params serving =====
+		// The global game rules-params map (CSplitLuaHandle::GetGameParams(), the
+		// singleton behind GetGameRulesParam/GetGameRulesParams). SYNCED state, but
+		// EXCLUDED from the SnapshotHash for the same reason as the per-team mirror
+		// in TeamRows (see there); verified by the SnapshotDiffGate glob:gameRules
+		// field pass + the serving dual-run. Re-copied unconditionally every
+		// boundary like the rest of GlobalRows.
+		LuaRulesParams::Params gameRulesParams;
 
 		// teamHandler.IsValidAllyTeam mirror
 		bool ValidAllyTeam(int allyTeam) const { return (allyTeam >= 0 && allyTeam < numAllyTeams); }

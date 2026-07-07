@@ -3,6 +3,8 @@
 #include "SnapshotDiffGate.h"
 
 #include <cstring>
+#include <type_traits> // PR 38: RulesParamsEqual value-variant visit
+#include <variant>     // PR 38: RulesParamsEqual value-variant visit
 #include <vector>
 
 #include "SimSnapshot.h"
@@ -61,6 +63,7 @@
 #include "Sim/Misc/DamageArray.h"
 #include "Game/Players/Player.h" // fpsControlPlayer gate compare
 #include "Lua/LuaSnapshotServe.h" // sim|draw PR 30: command-queue serving-cache compare
+#include "Lua/LuaHandleSynced.h"  // PR 38: CSplitLuaHandle::GetGameParams (game rules params compare)
 #include "System/Log/ILog.h"
 
 SnapshotDiffGate snapshotDiffGate;
@@ -202,6 +205,10 @@ static constexpr const char* FIELD_NAMES[] = {
 	"team:misc",
 	"team:allyInfo",
 	"player:misc",
+	// PR 38 (zero-sanction flip): rules-params mirror, appended to match the
+	// enum tail T_RULES..G_GAMERULES
+	"team:rules",
+	"glob:gameRules",
 };
 
 // structural compare for the copied customOpts maps (emilib::HashMap has no
@@ -215,6 +222,47 @@ static bool OptsEqual(const spring::unordered_map<std::string, std::string>& a,
 	for (const auto& [key, value] : a) {
 		const auto it = b.find(key);
 		if (it == b.end() || it->second != value)
+			return false;
+	}
+
+	return true;
+}
+
+// PR 38 (zero-sanction flip): structural compare for the copied rules-params
+// maps (LuaRulesParams::Params has no operator==). Sizes equal + every key of a
+// maps to a b entry with an equal los mask AND a bit-equal value; the value is a
+// std::variant<bool, float, std::string>, so float legs compare bit-exact
+// (master copies the raw value) and the variant index must match too (a legit
+// type change reuses the key). Order-independent (map iteration order is
+// irrelevant to the served Lua table, which is string-keyed).
+static bool RulesParamsEqual(const LuaRulesParams::Params& a, const LuaRulesParams::Params& b)
+{
+	if (a.size() != b.size())
+		return false;
+
+	for (const auto& [key, param] : a) {
+		const auto it = b.find(key);
+		if (it == b.end())
+			return false;
+
+		const LuaRulesParams::Param& lp = it->second;
+		if (param.los != lp.los)
+			return false;
+		if (param.value.index() != lp.value.index())
+			return false;
+
+		// bit-exact value compare (float leg via BitEqual, bool/string via ==)
+		bool valueEqual = false;
+		std::visit([&](auto&& av) {
+			using T = std::decay_t<decltype(av)>;
+			const T& bv = std::get<T>(lp.value);
+			if constexpr (std::is_same_v<T, float>)
+				valueEqual = BitEqual(av, bv);
+			else
+				valueEqual = (av == bv);
+		}, param.value);
+
+		if (!valueEqual)
 			return false;
 	}
 
@@ -1140,6 +1188,11 @@ void SnapshotDiffGate::CheckTeamPlayerRows()
 		}
 		if (Bump(fields[T_MISC], miscEqual))
 			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d team=%d field=team:misc mismatch", gs->frameNum, t);
+
+		// ---- PR 38: per-team rules-params mirror vs live CTeam::modParams ----
+		if (Bump(fields[T_RULES], RulesParamsEqual(trows.teamRulesParams[t], team->modParams)))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d team=%d field=team:rules mismatch (snap=%zu live=%zu)",
+				gs->frameNum, t, trows.teamRulesParams[t].size(), team->modParams.size());
 	}
 
 	// PR 36: per-allyteam start box + custom options (GetAllyTeamStartBox /
@@ -1269,6 +1322,11 @@ void SnapshotDiffGate::CheckGlobalRows()
 		losEqual = (bool(grows.globalLos[at]) == losHandler->GetGlobalLOS(at));
 	if (Bump(fields[G_GLOBALLOS], losEqual))
 		LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=glob:globalLos mismatch", gs->frameNum);
+
+	// ---- PR 38: game rules-params mirror vs CSplitLuaHandle::GetGameParams ----
+	if (Bump(fields[G_GAMERULES], RulesParamsEqual(grows.gameRulesParams, CSplitLuaHandle::GetGameParams())))
+		LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=glob:gameRules mismatch (snap=%zu live=%zu)",
+			gs->frameNum, grows.gameRulesParams.size(), CSplitLuaHandle::GetGameParams().size());
 }
 
 // PR 28: the DrawMapMirrors compare pass. Drained at the barrier (before the
