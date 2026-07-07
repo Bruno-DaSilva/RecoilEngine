@@ -6,6 +6,7 @@
 
 #include "Map/MapDimensions.h"
 #include "Map/MapInfo.h"
+#include "Map/MetalMap.h"                  // PR 38d: metal distribution mirror source
 #include "Map/ReadMap.h"
 #include "Sim/Features/Feature.h"          // PR 29: blocking cell[0] classification
 #include "Sim/Misc/GlobalConstants.h"
@@ -121,6 +122,38 @@ void DrawMapMirrors::DrainAtBarrier()
 		terrainTypesDrained = terrainTypesVersion;
 	}
 
+	// --- typemap (PR 38d): per-square terrain-type index, version-gated ---
+	// Near-static: Spring.SetMapSquareTerrainType is the sole runtime writer; the
+	// load-time fill is caught by the size-mismatch clause on the first drain.
+	{
+		const size_t n = static_cast<size_t>(mapDims.hmapx) * static_cast<size_t>(mapDims.hmapy);
+		if (typeMapDrained != typeMapVersion || typeMap.size() != n) {
+			const uint8_t* src = readMap->GetTypeMapSynced();
+			typeMap.assign(src, src + n);
+			typeMapDrained = typeMapVersion;
+		}
+	}
+
+	// --- metal distribution map (PR 38d): version-gated whole copy ---
+	// Near-static: Spring.SetMetalAmount is the sole runtime writer. sizeX/Z and
+	// metalScale are Init-time constants (captured unconditionally -- cheap
+	// scalars); the distributionMap copy is gated on the version / a size change
+	// (which also catches the load-time metalMap.Init fill on the first drain).
+	{
+		metalSizeX = metalMap.GetSizeX();
+		metalSizeZ = metalMap.GetSizeZ();
+		metalScale = metalMap.GetMetalScale();
+		const size_t n = static_cast<size_t>(metalSizeX) * static_cast<size_t>(metalSizeZ);
+		if (metalMapDrained != metalMapVersion || metalDistribution.size() != n) {
+			const unsigned char* src = metalMap.GetDistributionMap();
+			if (n > 0)
+				metalDistribution.assign(src, src + n);
+			else
+				metalDistribution.clear();
+			metalMapDrained = metalMapVersion;
+		}
+	}
+
 	// --- smooth-height mesh (version-gated whole copy; window updater) ---
 	smoothMaxX = smoothGround.GetMaxX();
 	smoothMaxY = smoothGround.GetMaxY();
@@ -205,6 +238,14 @@ void DrawMapMirrors::Clear()
 	terrainTypesDrained = 0xffffffffu;
 	smoothMeshDrained = 0xffffffffu;
 	origHeightDrained = 0xffffffffu;
+
+	// PR 38d: typemap + metal mirrors -- force a re-copy on the next game's first drain
+	typeMap.clear();
+	typeMapDrained = 0xffffffffu;
+	metalDistribution.clear();
+	metalSizeX = metalSizeZ = 0;
+	metalScale = 0.0f;
+	metalMapDrained = 0xffffffffu;
 
 	numAllyTeams = 0;
 	baseRadarErrorSize = baseRadarErrorMult = 0.0f;
@@ -379,4 +420,33 @@ float DrawMapMirrors::SmoothMeshHeight(float x, float y) const
 	const float hi1 = mix(h1, h2, dx);
 	const float hi2 = mix(h3, h4, dx);
 	return mix(hi1, hi2, dy);
+}
+
+// ---------------------------------------------------------------------------
+// PR 38d: GetGroundInfo mirrors (typemap index + metal amount)
+// ---------------------------------------------------------------------------
+
+// terrain-type index at a typemap square (mirror of readMap->GetTypeMapSynced()
+// [sqrIndex]); bounds-safe. The caller pre-clamps sqrIndex with the live
+// ix/iz/hmapx math, so an out-of-range value only happens pre-drain.
+int DrawMapMirrors::TypeMapAt(int sqrIndex) const
+{
+	if (sqrIndex < 0 || sqrIndex >= static_cast<int>(typeMap.size()))
+		return 0;
+
+	return typeMap[sqrIndex];
+}
+
+// CMetalMap::GetMetalAmount(x, z) mirror -- clamp to [0,size-1] then
+// distributionMap[z*sizeX+x] * metalScale over the copied distribution map.
+// Empty mirror -> 0 (pre-drain / unloaded metal map).
+float DrawMapMirrors::MetalAmount(int x, int z) const
+{
+	if (metalSizeX <= 0 || metalSizeZ <= 0 || metalDistribution.empty())
+		return 0.0f;
+
+	x = std::clamp(x, 0, metalSizeX - 1);
+	z = std::clamp(z, 0, metalSizeZ - 1);
+
+	return metalDistribution[(z * metalSizeX) + x] * metalScale;
 }

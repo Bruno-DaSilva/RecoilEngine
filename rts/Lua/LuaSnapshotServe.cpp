@@ -6931,6 +6931,48 @@ int LuaSnapshotServe::GetGroundOrigHeight(lua_State* L, const char* caller)
 	return 1;
 }
 
+// sim|draw PR 38d: GetGroundInfo. Line-by-line mirror of
+// LuaSyncedRead::GetGroundInfo + PushTerrainTypeData(tt, true). The two sim
+// reads -- readMap->GetTypeMapSynced()[sqrIndex] and LuaMetalMap::GetMetalAmount
+// (metalMap distribution map) -- are swapped for the drawMapMirrors typemap +
+// metal queries (added by PR 38d); the terrain-type struct is the PR-28 table
+// copy. Argument parsing, the pop-2/push-ix/push-iz stack shuffle (so the metal
+// scratch coords match the live body) and the 9-value return are identical.
+int LuaSnapshotServe::GetGroundInfo(lua_State* L, const char* caller)
+{
+	const float x = luaL_checkfloat(L, 1);
+	const float z = luaL_checkfloat(L, 2);
+
+	const int ix = std::clamp(x, 0.0f, float3::maxxpos) / (SQUARE_SIZE * 2);
+	const int iz = std::clamp(z, 0.0f, float3::maxzpos) / (SQUARE_SIZE * 2);
+
+	const int maxIndex = (mapDims.hmapx * mapDims.hmapy) - 1;
+	const int sqrIndex = std::min(maxIndex, (mapDims.hmapx * iz) + ix);
+	const int ttIndex  = drawMapMirrors.TypeMapAt(sqrIndex);
+
+	// the live body pops x/z and pushes ix/iz so LuaMetalMap::GetMetalAmount's
+	// absolute-index read sees the quantized coords; keep the same stack shape
+	// (the ix/iz scratch is below the return window), then read metal from the
+	// mirror directly with the same clamp+scale
+	lua_pop(L, 2);
+	lua_pushnumber(L, ix);
+	lua_pushnumber(L, iz);
+
+	// PushTerrainTypeData(L, &mapInfo->terrainTypes[ttIndex], true) mirror
+	// (9 returns: index + name + metalAmount + 5 speed/hardness floats + receiveTracks)
+	const DrawMapMirrors::TerrainType& tt = drawMapMirrors.TerrainTypeAt(ttIndex);
+	lua_pushinteger(L, ttIndex);                          // tt - &mapInfo->terrainTypes[0]
+	lua_pushsstring(L, tt.name);
+	lua_pushnumber(L, drawMapMirrors.MetalAmount(ix, iz)); // LuaMetalMap::GetMetalAmount(ix, iz)
+	lua_pushnumber(L, tt.hardness);
+	lua_pushnumber(L, tt.tankSpeed);
+	lua_pushnumber(L, tt.kbotSpeed);
+	lua_pushnumber(L, tt.hoverSpeed);
+	lua_pushnumber(L, tt.shipSpeed);
+	lua_pushboolean(L, tt.receiveTracks);
+	return 9;
+}
+
 // ===========================================================================
 // sim|draw PR 29: blocking-map mirror + placement family
 // GetGroundBlocked reads the DrawMapMirrors blocking mirror (per-square cell[0]

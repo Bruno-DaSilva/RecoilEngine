@@ -22,6 +22,7 @@
 #include "Sim/Features/FeatureDef.h"
 #include "Sim/Features/FeatureHandler.h"
 #include "Map/MapInfo.h"
+#include "Map/MetalMap.h" // PR 38d: metal distribution mirror compare
 #include "Map/ReadMap.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/GroundBlockingObjectMap.h" // sim|draw PR 29: blocking-mirror compare
@@ -213,6 +214,10 @@ static constexpr const char* FIELD_NAMES[] = {
 	"unit:rules",
 	"feature:rules",
 	"player:rules",
+	// PR 38d (GetGroundInfo mirrors): appended to match the enum tail
+	// MM_TYPEMAP..MM_METALMAP
+	"map:typeMap",
+	"map:metalMap",
 };
 
 // structural compare for the copied customOpts maps (emilib::HashMap has no
@@ -1469,6 +1474,37 @@ void SnapshotDiffGate::CheckMapMirrors()
 		if (Bump(fields[MM_BLOCKING], eq))
 			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=map:blocking mismatch (square=%zu mirror-id=%d live-id=%d)",
 				gs->frameNum, badSq, mirId, liveId);
+	}
+
+	// --- typemap (PR 38d): per-square terrain-type index array ---
+	// A mismatch means a missed MarkTypeMapDirty choke point (a typeMap writer
+	// that did not bump the version). memcmp vs readMap->GetTypeMapSynced().
+	{
+		const std::vector<uint8_t>& mm = drawMapMirrors.TypeMapData();
+		const size_t n = static_cast<size_t>(mapDims.hmapx) * static_cast<size_t>(mapDims.hmapy);
+		const bool eq = (mm.size() == n) &&
+			(mm.empty() || std::memcmp(mm.data(), readMap->GetTypeMapSynced(), n * sizeof(uint8_t)) == 0);
+		if (Bump(fields[MM_TYPEMAP], eq))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=map:typeMap mismatch", gs->frameNum);
+	}
+
+	// --- metal distribution map (PR 38d): distributionMap + sizeX/sizeZ/scale ---
+	// A mismatch means a missed MarkMetalMapDirty choke point. memcmp of the
+	// distribution map + a bit-compare of the Init-time sizeX/sizeZ/metalScale
+	// (which the mirror also captures each drain).
+	{
+		const std::vector<uint8_t>& mm = drawMapMirrors.MetalDistributionData();
+		const int sx = metalMap.GetSizeX();
+		const int sz = metalMap.GetSizeZ();
+		const size_t n = static_cast<size_t>(sx) * static_cast<size_t>(sz);
+		const bool eq =
+			(drawMapMirrors.MetalSizeX() == sx) &&
+			(drawMapMirrors.MetalSizeZ() == sz) &&
+			BitEqual(drawMapMirrors.MetalScale(), metalMap.GetMetalScale()) &&
+			(mm.size() == n) &&
+			(mm.empty() || std::memcmp(mm.data(), metalMap.GetDistributionMap(), n * sizeof(uint8_t)) == 0);
+		if (Bump(fields[MM_METALMAP], eq))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=map:metalMap mismatch", gs->frameNum);
 	}
 }
 

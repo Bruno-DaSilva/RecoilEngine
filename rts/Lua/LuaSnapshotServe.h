@@ -296,6 +296,12 @@ namespace LuaSnapshotServe {
 	int GetTerrainTypeData(lua_State* L, const char* caller);
 	int GetSmoothMeshHeight(lua_State* L, const char* caller);
 	int GetGroundOrigHeight(lua_State* L, const char* caller);
+	// ---- sim|draw PR 38d ----
+	// GetGroundInfo reads the DrawMapMirrors typemap + metal-distribution mirrors
+	// (added by PR 38d) plus the PR-28 terrain-type table copy; it is a line-by-
+	// line mirror of the live body with the readMap->GetTypeMapSynced() and
+	// LuaMetalMap::GetMetalAmount reads swapped for the mirror queries.
+	int GetGroundInfo(lua_State* L, const char* caller);    // LuaSyncedRead
 
 	// ---- sim|draw PR 29 (blocking-map mirror + placement family) ----
 	// GetGroundBlocked reads the DrawMapMirrors blocking mirror (per-square

@@ -91,6 +91,16 @@ public:
 	/// LuaSyncedCtrl::SetTerrainTypeData -- the sole runtime writer of
 	/// mapInfo->terrainTypes
 	void MarkTerrainTypesDirty() { ++terrainTypesVersion; }
+	/// PR 38d: LuaSyncedCtrl::SetMapSquareTerrainType -- the sole runtime writer
+	/// of readMap's per-square typeMap (the terrain-type index array GetGroundInfo
+	/// reads via readMap->GetTypeMapSynced()). The load-time fill is picked up by
+	/// the first drain (size-mismatch clause).
+	void MarkTypeMapDirty() { ++typeMapVersion; }
+	/// PR 38d: LuaMetalMap::SetMetalAmount (Spring.SetMetalAmount) -- the sole
+	/// runtime writer of metalMap's distributionMap (the metal-amount array
+	/// GetGroundInfo reads via LuaMetalMap::GetMetalAmount). The load-time
+	/// metalMap.Init fill is picked up by the first drain (size-mismatch clause).
+	void MarkMetalMapDirty() { ++metalMapVersion; }
 	/// SmoothHeightMesh::UpdateSmoothMesh / MakeSmoothMesh -- the mesh's own
 	/// window updater (the sole writer of its height array via its Set/Add
 	/// helpers)
@@ -130,6 +140,16 @@ public:
 	// ---- map-info queries ----
 	float OrigHeight(float x, float z) const;
 	float SmoothMeshHeight(float x, float z) const;
+
+	// ---- PR 38d: GetGroundInfo map-info queries ----
+	// terrain-type INDEX at a typemap square (the readMap->GetTypeMapSynced()
+	// [sqrIndex] read); bounds-safe (0 for an out-of-range / not-yet-drained
+	// square). The caller computes sqrIndex with the live ix/iz/hmapx math.
+	int TypeMapAt(int sqrIndex) const;
+	// metal amount at metal-map square (x, z) -- CMetalMap::GetMetalAmount(x, z)
+	// mirror (clamp + distributionMap[z*sizeX+x] * metalScale); 0 when the mirror
+	// is empty (matches an unloaded metal map).
+	float MetalAmount(int x, int z) const;
 
 	// ---- PR 29: blocking-map query ----
 	// cell[0] object id + kind (BLOCK_KIND_*) at map square (x, z); returns id
@@ -175,6 +195,14 @@ public:
 	const std::vector<float>& OrigHeightMap() const { return origHeight; }
 	const std::vector<float>& SmoothMeshData() const { return smoothMesh; }
 
+	// PR 38d diff-gate accessors (typemap + metal distribution mirrors;
+	// SnapshotDiffGate::CheckMapMirrors memcmps these against the live sim)
+	const std::vector<uint8_t>& TypeMapData() const { return typeMap; }
+	int   MetalSizeX() const { return metalSizeX; }
+	int   MetalSizeZ() const { return metalSizeZ; }
+	float MetalScale() const { return metalScale; }
+	const std::vector<uint8_t>& MetalDistributionData() const { return metalDistribution; }
+
 	// PR 29: blocking-mirror diff-gate accessors (SnapshotDiffGate::
 	// CheckMapMirrors compares these per map square against the live
 	// groundBlockingObjectMap cell[0])
@@ -217,6 +245,24 @@ private:
 	uint32_t terrainTypesDrained = 0xffffffffu;  // != version -> copy on next drain
 	uint32_t smoothMeshDrained = 0xffffffffu;
 	uint32_t origHeightDrained = 0xffffffffu;
+
+	// PR 38d: GetGroundInfo mirrors. Per-square terrain-type index (readMap's
+	// typeMap) + the metal distribution map (metalMap). Both are near-static --
+	// only Spring.SetMapSquareTerrainType / Spring.SetMetalAmount mutate them at
+	// runtime -- so both use the version-gated whole-copy pattern (copy when the
+	// version moved since the last drain, or the mirror size mismatches). The
+	// twin reproduces the live GetTypeMapSynced() index read and the
+	// CMetalMap::GetMetalAmount clamp+scale formula over these copies.
+	std::vector<uint8_t> typeMap;                // [hmapx*hmapy]
+	uint32_t typeMapVersion = 0;
+	uint32_t typeMapDrained = 0xffffffffu;
+
+	std::vector<uint8_t> metalDistribution;      // [metalSizeX*metalSizeZ]
+	int   metalSizeX = 0;
+	int   metalSizeZ = 0;
+	float metalScale = 0.0f;                      // Init-time constant (maxMetal)
+	uint32_t metalMapVersion = 0;
+	uint32_t metalMapDrained = 0xffffffffu;
 
 	// radar-error scalars (GetRadarErrorParams)
 	int numAllyTeams = 0;

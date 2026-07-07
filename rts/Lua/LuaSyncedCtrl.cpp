@@ -7096,6 +7096,11 @@ int LuaSyncedCtrl::SetMapSquareTerrainType(lua_State* L)
 	readMap->GetTypeMapSynced()[tz * mapDims.hmapx + tx] = std::max(0, std::min(ntt, (CMapInfo::NUM_TERRAIN_TYPES - 1)));
 	pathManager->TerrainChange(hx, hz,  hx + 1, hz + 1,  TERRAINCHANGE_SQUARE_TYPEMAP_INDEX);
 
+	// PR 38d choke point: the sole runtime writer of readMap's per-square
+	// typeMap -> mark the DrawMapMirrors typemap copy for the barrier drain
+	// (served by Spring.GetGroundInfo)
+	drawMapMirrors.MarkTypeMapDirty();
+
 	lua_pushnumber(L, ott);
 	return 1;
 }

@@ -246,6 +246,11 @@ private:
 		U_RULES,        // per-unit modParams mirror vs live CUnit::modParams
 		F_RULES,        // per-feature modParams mirror vs live CFeature::modParams
 		PL_RULES,       // per-player modParams mirror vs live CPlayer::modParams
+		// PR 38d (GetGroundInfo mirrors): appended at the enum tail to keep every
+		// prior field index stable (FIELD_NAMES appended in lockstep). memcmp-grade
+		// passes against the live readMap typeMap / metalMap distribution map.
+		MM_TYPEMAP,     // readMap per-square terrain-type index array copy
+		MM_METALMAP,    // metalMap distribution map copy + sizeX/sizeZ/metalScale
 		F_COUNT
 	};
 

@@ -8840,14 +8840,10 @@ int LuaSyncedRead::GetGroundNormal(lua_State* L)
  * @return number shipSpeed
  * @return boolean receiveTracks
  */
-int LuaSyncedRead::GetGroundInfo(lua_State* L)
+static int GetGroundInfoLive(lua_State* L, const char* caller)
 {
 	const float x = luaL_checkfloat(L, 1);
 	const float z = luaL_checkfloat(L, 2);
-
-	// split-contract gate (PR 27a): reads the synced type map + mutable terrain-type table directly
-	if (LuaSplitContract::DenyLiveRead(L, __func__))
-		return 0;
 
 	const int ix = std::clamp(x, 0.0f, float3::maxxpos) / (SQUARE_SIZE * 2);
 	const int iz = std::clamp(z, 0.0f, float3::maxzpos) / (SQUARE_SIZE * 2);
@@ -8866,6 +8862,15 @@ int LuaSyncedRead::GetGroundInfo(lua_State* L)
 	lua_pushnumber(L, iz);
 
 	return (PushTerrainTypeData(L, &mapInfo->terrainTypes[ttIndex], true));
+}
+
+int LuaSyncedRead::GetGroundInfo(lua_State* L)
+{
+	// map-mirror-served from draw context (sim|draw PR 38d, see LuaSnapshotServe.h):
+	// the DrawMapMirrors typemap + metal-distribution copies (PR 38d) replace the
+	// readMap->GetTypeMapSynced() and LuaMetalMap::GetMetalAmount (metalMap) reads;
+	// the terrain-type table is the PR-28 copy
+	return LuaSnapshotServe::Route(L, __func__, &GetGroundInfoLive, &LuaSnapshotServe::GetGroundInfo);
 }
 
 

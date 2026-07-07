@@ -106,12 +106,12 @@ namespace {
 		"TestBuildOrder",
 		"TestMoveOrder",
 		"ClosestBuildPos",
-		// map info reads without an unsynced mirror yet: GetGroundOrigHeight
-		// (orig-heightmap), GetTerrainTypeData (terrain-type table) and
-		// GetSmoothMeshHeight (smooth mesh) are SERVED from DrawMapMirrors
-		// (PR 28); GetGroundInfo also reads the metal + type maps (metal-map
-		// mirror deferred, headless-stubbed) so it stays live for now
-		"GetGroundInfo",
+		// map info reads: GetGroundOrigHeight (orig-heightmap), GetTerrainTypeData
+		// (terrain-type table) and GetSmoothMeshHeight (smooth mesh) are SERVED
+		// from DrawMapMirrors (PR 28). GetGroundInfo (typemap + terrain-type table
+		// + metal distribution map) is SERVED by PR 38d, which added the per-square
+		// typemap + metal-distribution mirrors to DrawMapMirrors -- so it is no
+		// longer sanctioned here.
 		// positional LOS-map queries (fog/attack-preview widgets): the
 		// POSITION family (GetPositionLosState/IsPosIn{Los,Radar,AirLos}) and
 		// GetRadarErrorParams are SERVED from the DrawMapMirrors LOS maps +
