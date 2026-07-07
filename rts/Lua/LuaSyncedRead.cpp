@@ -7828,9 +7828,13 @@ int LuaSyncedRead::GetFeatureResurrect(lua_State* L)
  * @return string|""|nil Last hit piece name
  * @return integer? frame it was last hit on, nil when featureID is not valid
  */
+static int GetFeatureLastAttackedPieceLive(lua_State* L, const char* caller)
+{
+	return (GetSolidObjectLastHitPiece(L, ParseFeature(L, caller, 1)));
+}
 int LuaSyncedRead::GetFeatureLastAttackedPiece(lua_State* L)
 {
-	return (GetSolidObjectLastHitPiece(L, ParseFeature(L, __func__, 1)));
+	return LuaSnapshotServe::Route(L, __func__, &GetFeatureLastAttackedPieceLive, &LuaSnapshotServe::GetFeatureLastAttackedPiece);
 }
 
 /*** Parameters related to a collision volume.
@@ -7857,14 +7861,18 @@ int LuaSyncedRead::GetFeatureLastAttackedPiece(lua_State* L)
  * @param featureID integer
  * @return CollisionVolumeData?
  */
-int LuaSyncedRead::GetFeatureCollisionVolumeData(lua_State* L)
+static int GetFeatureCollisionVolumeDataLive(lua_State* L, const char* caller)
 {
-	const CFeature* feature = ParseFeature(L, __func__, 1);
+	const CFeature* feature = ParseFeature(L, caller, 1);
 
 	if (feature == nullptr)
 		return 0;
 
 	return LuaUtils::PushColVolData(L, &feature->collisionVolume);
+}
+int LuaSyncedRead::GetFeatureCollisionVolumeData(lua_State* L)
+{
+	return LuaSnapshotServe::Route(L, __func__, &GetFeatureCollisionVolumeDataLive, &LuaSnapshotServe::GetFeatureCollisionVolumeData);
 }
 
 /***
@@ -7873,9 +7881,13 @@ int LuaSyncedRead::GetFeatureCollisionVolumeData(lua_State* L)
  * @param featureID integer
  * @return CollisionVolumeData?
  */
+static int GetFeaturePieceCollisionVolumeDataLive(lua_State* L, const char* caller)
+{
+	return (PushPieceCollisionVolumeData(L, ParseFeature(L, caller, 1)));
+}
 int LuaSyncedRead::GetFeaturePieceCollisionVolumeData(lua_State* L)
 {
-	return (PushPieceCollisionVolumeData(L, ParseFeature(L, __func__, 1)));
+	return LuaSnapshotServe::Route(L, __func__, &GetFeaturePieceCollisionVolumeDataLive, &LuaSnapshotServe::GetFeaturePieceCollisionVolumeData);
 }
 
 
@@ -8035,9 +8047,9 @@ int LuaSyncedRead::GetProjectileGravity(lua_State* L)
  * @return number spinVectorY
  * @return number spinVectorZ
  */
-int LuaSyncedRead::GetPieceProjectileParams(lua_State* L)
+static int GetPieceProjectileParamsLive(lua_State* L, const char* caller)
 {
-	const CProjectile* pro = ParseProjectile(L, __func__, 1);
+	const CProjectile* pro = ParseProjectile(L, caller, 1);
 
 	if (pro == nullptr || !pro->piece)
 		return 0;
@@ -8051,6 +8063,10 @@ int LuaSyncedRead::GetPieceProjectileParams(lua_State* L)
 	lua_pushnumber(L, ppro->spinVec.y);
 	lua_pushnumber(L, ppro->spinVec.z);
 	return (1 + 1 + 1 + 3);
+}
+int LuaSyncedRead::GetPieceProjectileParams(lua_State* L)
+{
+	return LuaSnapshotServe::Route(L, __func__, &GetPieceProjectileParamsLive, &LuaSnapshotServe::GetPieceProjectileParams);
 }
 
 
@@ -8310,9 +8326,9 @@ int LuaSyncedRead::GetProjectileDefID(lua_State* L)
  * @param projectileID integer
  * @return string? pieceName
  */
-int LuaSyncedRead::GetPieceProjectileName(lua_State* L)
+static int GetPieceProjectileNameLive(lua_State* L, const char* caller)
 {
-	const auto* pro = ParseProjectile(L, __func__, 1);
+	const auto* pro = ParseProjectile(L, caller, 1);
 
 	if (pro == nullptr)
 		return 0;
@@ -8326,6 +8342,10 @@ int LuaSyncedRead::GetPieceProjectileName(lua_State* L)
 
 	lua_pushsstring(L, ppro->omp->name);
 	return 1;
+}
+int LuaSyncedRead::GetPieceProjectileName(lua_State* L)
+{
+	return LuaSnapshotServe::Route(L, __func__, &GetPieceProjectileNameLive, &LuaSnapshotServe::GetPieceProjectileName);
 }
 
 
@@ -9609,8 +9629,12 @@ int LuaSyncedRead::GetModelPieceList(lua_State* L) {
  * @param unitID integer
  * @return number index of the root piece
  */
+static int GetUnitRootPieceLive(lua_State* L, const char* caller) {
+	return (GetSolidObjectRootPiece(L, ParseTypedUnit(L, caller, 1)));
+}
 int LuaSyncedRead::GetUnitRootPiece(lua_State* L) {
-	return (GetSolidObjectRootPiece(L, ParseTypedUnit(L, __func__, 1)));
+	// pieces/scripts served from draw context (sim|draw PR 33, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitRootPieceLive, &LuaSnapshotServe::GetUnitRootPiece);
 }
 
 /***
@@ -9619,8 +9643,11 @@ int LuaSyncedRead::GetUnitRootPiece(lua_State* L) {
  * @param unitID integer
  * @return table<string,number>? pieceInfos where keys are piece names and values are indices
  */
+static int GetUnitPieceMapLive(lua_State* L, const char* caller) {
+	return (GetSolidObjectPieceMap(L, ParseTypedUnit(L, caller, 1)));
+}
 int LuaSyncedRead::GetUnitPieceMap(lua_State* L) {
-	return (GetSolidObjectPieceMap(L, ParseTypedUnit(L, __func__, 1)));
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitPieceMapLive, &LuaSnapshotServe::GetUnitPieceMap);
 }
 
 
@@ -9630,8 +9657,11 @@ int LuaSyncedRead::GetUnitPieceMap(lua_State* L) {
  * @param unitID integer
  * @return string[] pieceNames
  */
+static int GetUnitPieceListLive(lua_State* L, const char* caller) {
+	return (GetSolidObjectPieceList(L, ParseTypedUnit(L, caller, 1)));
+}
 int LuaSyncedRead::GetUnitPieceList(lua_State* L) {
-	return (GetSolidObjectPieceList(L, ParseTypedUnit(L, __func__, 1)));
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitPieceListLive, &LuaSnapshotServe::GetUnitPieceList);
 }
 
 
@@ -9642,8 +9672,11 @@ int LuaSyncedRead::GetUnitPieceList(lua_State* L) {
  * @param pieceIndex integer
  * @return PieceInfo? pieceInfo
  */
+static int GetUnitPieceInfoLive(lua_State* L, const char* caller) {
+	return (GetSolidObjectPieceInfo(L, ParseTypedUnit(L, caller, 1)));
+}
 int LuaSyncedRead::GetUnitPieceInfo(lua_State* L) {
-	return (GetSolidObjectPieceInfo(L, ParseTypedUnit(L, __func__, 1)));
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitPieceInfoLive, &LuaSnapshotServe::GetUnitPieceInfo);
 }
 
 
@@ -9659,8 +9692,11 @@ int LuaSyncedRead::GetUnitPieceInfo(lua_State* L) {
  * @return number     dirY
  * @return number     dirZ
  */
+static int GetUnitPiecePosDirLive(lua_State* L, const char* caller) {
+	return (GetSolidObjectPiecePosDir(L, ParseTypedUnit(L, caller, 1)));
+}
 int LuaSyncedRead::GetUnitPiecePosDir(lua_State* L) {
-	return (GetSolidObjectPiecePosDir(L, ParseTypedUnit(L, __func__, 1)));
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitPiecePosDirLive, &LuaSnapshotServe::GetUnitPiecePosDir);
 }
 
 
@@ -9673,8 +9709,11 @@ int LuaSyncedRead::GetUnitPiecePosDir(lua_State* L) {
  * @return number     posY
  * @return number     posZ
  */
+static int GetUnitPiecePositionLive(lua_State* L, const char* caller) {
+	return (GetSolidObjectPiecePosition(L, ParseTypedUnit(L, caller, 1)));
+}
 int LuaSyncedRead::GetUnitPiecePosition(lua_State* L) {
-	return (GetSolidObjectPiecePosition(L, ParseTypedUnit(L, __func__, 1)));
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitPiecePositionLive, &LuaSnapshotServe::GetUnitPiecePosition);
 }
 
 
@@ -9687,8 +9726,11 @@ int LuaSyncedRead::GetUnitPiecePosition(lua_State* L) {
  * @return number     dirY
  * @return number     dirZ
  */
+static int GetUnitPieceDirectionLive(lua_State* L, const char* caller) {
+	return (GetSolidObjectPieceDirection(L, ParseTypedUnit(L, caller, 1)));
+}
 int LuaSyncedRead::GetUnitPieceDirection(lua_State* L) {
-	return (GetSolidObjectPieceDirection(L, ParseTypedUnit(L, __func__, 1)));
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitPieceDirectionLive, &LuaSnapshotServe::GetUnitPieceDirection);
 }
 
 
@@ -9714,8 +9756,11 @@ int LuaSyncedRead::GetUnitPieceDirection(lua_State* L) {
  * @return number m43
  * @return number m44
  */
+static int GetUnitPieceMatrixLive(lua_State* L, const char* caller) {
+	return (GetSolidObjectPieceMatrix(L, ParseTypedUnit(L, caller, 1)));
+}
 int LuaSyncedRead::GetUnitPieceMatrix(lua_State* L) {
-	return (GetSolidObjectPieceMatrix(L, ParseTypedUnit(L, __func__, 1)));
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitPieceMatrixLive, &LuaSnapshotServe::GetUnitPieceMatrix);
 }
 
 /***
@@ -9724,8 +9769,11 @@ int LuaSyncedRead::GetUnitPieceMatrix(lua_State* L) {
  * @param featureID integer
  * @return number index of the root piece
  */
+static int GetFeatureRootPieceLive(lua_State* L, const char* caller) {
+	return (GetSolidObjectRootPiece(L, ParseFeature(L, caller, 1)));
+}
 int LuaSyncedRead::GetFeatureRootPiece(lua_State* L) {
-	return (GetSolidObjectRootPiece(L, ParseFeature(L, __func__, 1)));
+	return LuaSnapshotServe::Route(L, __func__, &GetFeatureRootPieceLive, &LuaSnapshotServe::GetFeatureRootPiece);
 }
 
 /***
@@ -9734,8 +9782,11 @@ int LuaSyncedRead::GetFeatureRootPiece(lua_State* L) {
  * @param featureID integer
  * @return table<string,number> pieceInfos where keys are piece names and values are indices
  */
+static int GetFeaturePieceMapLive(lua_State* L, const char* caller) {
+	return (GetSolidObjectPieceMap(L, ParseFeature(L, caller, 1)));
+}
 int LuaSyncedRead::GetFeaturePieceMap(lua_State* L) {
-	return (GetSolidObjectPieceMap(L, ParseFeature(L, __func__, 1)));
+	return LuaSnapshotServe::Route(L, __func__, &GetFeaturePieceMapLive, &LuaSnapshotServe::GetFeaturePieceMap);
 }
 
 
@@ -9745,8 +9796,11 @@ int LuaSyncedRead::GetFeaturePieceMap(lua_State* L) {
  * @param featureID integer
  * @return string[] pieceNames
  */
+static int GetFeaturePieceListLive(lua_State* L, const char* caller) {
+	return (GetSolidObjectPieceList(L, ParseFeature(L, caller, 1)));
+}
 int LuaSyncedRead::GetFeaturePieceList(lua_State* L) {
-	return (GetSolidObjectPieceList(L, ParseFeature(L, __func__, 1)));
+	return LuaSnapshotServe::Route(L, __func__, &GetFeaturePieceListLive, &LuaSnapshotServe::GetFeaturePieceList);
 }
 
 
@@ -9757,8 +9811,11 @@ int LuaSyncedRead::GetFeaturePieceList(lua_State* L) {
  * @param pieceIndex integer
  * @return PieceInfo? pieceInfo
  */
+static int GetFeaturePieceInfoLive(lua_State* L, const char* caller) {
+	return (GetSolidObjectPieceInfo(L, ParseFeature(L, caller, 1)));
+}
 int LuaSyncedRead::GetFeaturePieceInfo(lua_State* L) {
-	return (GetSolidObjectPieceInfo(L, ParseFeature(L, __func__, 1)));
+	return LuaSnapshotServe::Route(L, __func__, &GetFeaturePieceInfoLive, &LuaSnapshotServe::GetFeaturePieceInfo);
 }
 
 
@@ -9774,8 +9831,11 @@ int LuaSyncedRead::GetFeaturePieceInfo(lua_State* L) {
  * @return number     dirY
  * @return number     dirZ
  */
+static int GetFeaturePiecePosDirLive(lua_State* L, const char* caller) {
+	return (GetSolidObjectPiecePosDir(L, ParseFeature(L, caller, 1)));
+}
 int LuaSyncedRead::GetFeaturePiecePosDir(lua_State* L) {
-	return (GetSolidObjectPiecePosDir(L, ParseFeature(L, __func__, 1)));
+	return LuaSnapshotServe::Route(L, __func__, &GetFeaturePiecePosDirLive, &LuaSnapshotServe::GetFeaturePiecePosDir);
 }
 
 
@@ -9788,8 +9848,11 @@ int LuaSyncedRead::GetFeaturePiecePosDir(lua_State* L) {
  * @return number     posY
  * @return number     posZ
  */
+static int GetFeaturePiecePositionLive(lua_State* L, const char* caller) {
+	return (GetSolidObjectPiecePosition(L, ParseFeature(L, caller, 1)));
+}
 int LuaSyncedRead::GetFeaturePiecePosition(lua_State* L) {
-	return (GetSolidObjectPiecePosition(L, ParseFeature(L, __func__, 1)));
+	return LuaSnapshotServe::Route(L, __func__, &GetFeaturePiecePositionLive, &LuaSnapshotServe::GetFeaturePiecePosition);
 }
 
 
@@ -9802,8 +9865,11 @@ int LuaSyncedRead::GetFeaturePiecePosition(lua_State* L) {
  * @return number     dirY
  * @return number     dirZ
  */
+static int GetFeaturePieceDirectionLive(lua_State* L, const char* caller) {
+	return (GetSolidObjectPieceDirection(L, ParseFeature(L, caller, 1)));
+}
 int LuaSyncedRead::GetFeaturePieceDirection(lua_State* L) {
-	return (GetSolidObjectPieceDirection(L, ParseFeature(L, __func__, 1)));
+	return LuaSnapshotServe::Route(L, __func__, &GetFeaturePieceDirectionLive, &LuaSnapshotServe::GetFeaturePieceDirection);
 }
 
 
@@ -9829,8 +9895,11 @@ int LuaSyncedRead::GetFeaturePieceDirection(lua_State* L) {
  * @return number m43
  * @return number m44
  */
+static int GetFeaturePieceMatrixLive(lua_State* L, const char* caller) {
+	return (GetSolidObjectPieceMatrix(L, ParseFeature(L, caller, 1)));
+}
 int LuaSyncedRead::GetFeaturePieceMatrix(lua_State* L) {
-	return (GetSolidObjectPieceMatrix(L, ParseFeature(L, __func__, 1)));
+	return LuaSnapshotServe::Route(L, __func__, &GetFeaturePieceMatrixLive, &LuaSnapshotServe::GetFeaturePieceMatrix);
 }
 
 /***
@@ -9848,9 +9917,9 @@ int LuaSyncedRead::GetFeaturePieceMatrix(lua_State* L) {
  * @param scriptPiece integer
  * @return integer pieceIndex
  */
-int LuaSyncedRead::GetUnitScriptPiece(lua_State* L)
+static int GetUnitScriptPieceLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseTypedUnit(L, __func__, 1);
+	const CUnit* unit = ParseTypedUnit(L, caller, 1);
 	if (unit == nullptr)
 		return 0;
 
@@ -9878,6 +9947,11 @@ int LuaSyncedRead::GetUnitScriptPiece(lua_State* L)
 	return 1;
 }
 
+int LuaSyncedRead::GetUnitScriptPiece(lua_State* L)
+{
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitScriptPieceLive, &LuaSnapshotServe::GetUnitScriptPiece);
+}
+
 
 /***
  *
@@ -9887,9 +9961,9 @@ int LuaSyncedRead::GetUnitScriptPiece(lua_State* L)
  *
  * @return table<string,number> where keys are piece names and values are piece indices
  */
-int LuaSyncedRead::GetUnitScriptNames(lua_State* L)
+static int GetUnitScriptNamesLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseTypedUnit(L, __func__, 1);
+	const CUnit* unit = ParseTypedUnit(L, caller, 1);
 
 	if (unit == nullptr)
 		return 0;
@@ -9905,6 +9979,11 @@ int LuaSyncedRead::GetUnitScriptNames(lua_State* L)
 	}
 
 	return 1;
+}
+
+int LuaSyncedRead::GetUnitScriptNames(lua_State* L)
+{
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitScriptNamesLive, &LuaSnapshotServe::GetUnitScriptNames);
 }
 
 static int TraceRayGroundImpl(lua_State *const L, const float3 &pos, const float3 &dir, const float maxLen, const bool testWater)

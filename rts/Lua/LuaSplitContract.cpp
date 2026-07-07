@@ -134,20 +134,18 @@ namespace {
 		"GetUnitBuildParams", "GetUnitInBuildStance", "GetUnitNanoPieces",
 		"GetUnitEffectiveBuildRange", "GetUnitCurrentBuildPower",
 		"GetUnitTransporter", "GetUnitIsTransporting", "GetUnitLastAttacker",
+		// GetUnitLastAttackedPiece stays live here: reassigned to PR 32 (per
+		// the SPECS amendments), not part of PR 33's served piece/script set.
 		"GetUnitLastAttackedPiece", "GetUnitTooltip", "GetUnitMetalExtraction",
 		"GetUnitPosErrorParams", "GetUnitBuildeeRadius", "GetUnitStorage",
 		"GetUnitCollisionVolumeData", "GetUnitPieceCollisionVolumeData",
-		// piece/script reads (piece-tree serving pending)
-		"GetUnitRootPiece", "GetUnitPieceMap", "GetUnitPieceList",
-		"GetUnitPieceInfo", "GetUnitPiecePosition", "GetUnitPieceDirection",
-		"GetUnitPiecePosDir", "GetUnitPieceMatrix", "GetUnitScriptPiece",
-		"GetUnitScriptNames",
-		"GetFeatureRootPiece", "GetFeaturePieceMap", "GetFeaturePieceList",
-		"GetFeaturePieceInfo", "GetFeaturePiecePosition",
-		"GetFeaturePieceDirection", "GetFeaturePiecePosDir",
-		"GetFeaturePieceMatrix", "GetFeatureCollisionVolumeData",
-		"GetFeaturePieceCollisionVolumeData", "GetFeatureLastAttackedPiece",
-		"GetPieceProjectileParams", "GetPieceProjectileName",
+		// piece/script reads: SERVED (PR 33 pieces/scripts) via the
+		// barrier-refreshed piece cache (LuaSnapshotServe::RefreshPieces --
+		// static model metadata + captured piece transforms) plus the
+		// ProjectileRows piece-projectile fields; the unit/feature Get*Piece*
+		// + GetUnitScript* + GetFeatureCollisionVolumeData/LastAttackedPiece
+		// + GetPieceProjectile* callouts route through their serving twins.
+		// (The two UNIT collision-volume reads above are PR 32's, not PR 33's.)
 		// spatial/list-query remainder (the core family is served, PR 27b)
 		"GetUnitsInPlanes", "GetUnitArrayCentroid", "GetUnitMapCentroid",
 		"GetAllProjectiles",

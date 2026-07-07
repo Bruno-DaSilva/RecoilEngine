@@ -199,6 +199,9 @@ private:
 		CQ_DESCS,       // cmd-desc copy vs live possibleCommands
 		CQ_WORKER,      // resolved GetUnitWorkerTask answer
 		CQ_FACTORY,     // classification flags + bugger-off scalars
+		// PR 33 piece/script family: CPieceProjectile params (appended last to
+		// keep every prior field index stable)
+		P_PIECEPARAMS,  // explFlags / spinAngle / spinSpeed / spinVec / pieceName
 		F_COUNT
 	};
 

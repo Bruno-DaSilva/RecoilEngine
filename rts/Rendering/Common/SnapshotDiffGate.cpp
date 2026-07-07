@@ -26,6 +26,8 @@
 #include "Sim/Misc/Wind.h"
 #include "Sim/MoveTypes/MoveDefHandler.h"
 #include "Sim/Projectiles/ProjectileHandler.h"
+#include "Sim/Projectiles/PieceProjectile.h" // PR 33 GetPieceProjectileParams/Name
+#include "Rendering/Models/3DModelPiece.hpp" // PR 33 S3DModelPiece::name (ppro->omp)
 #include "Sim/Projectiles/WeaponProjectiles/WeaponProjectile.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitDef.h"
@@ -144,6 +146,8 @@ static constexpr const char* FIELD_NAMES[] = {
 	"cq:descs",
 	"cq:worker",
 	"cq:factory",
+	// PR 33 piece/script family (appended last, matches P_PIECEPARAMS)
+	"proj:pieceParams",
 };
 
 // structural compare for the copied customOpts maps (emilib::HashMap has no
@@ -570,6 +574,33 @@ void SnapshotDiffGate::CheckProjectileRows()
 			if (Bump(fields[P_TTLFLAGS], ttlFlagsEqual))
 				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d proj=%d field=proj:ttlFlags mismatch (ttl snap=%d live=%d)",
 					gs->frameNum, id, rows.ttl[id], liveTtl);
+		}
+
+		// PR 33 piece-projectile params (GetPieceProjectileParams/Name serving)
+		{
+			int32_t liveExplFlags = 0;
+			float liveSpinAngle = 0.0f;
+			float liveSpinSpeed = 0.0f;
+			float3 liveSpinVec;
+			std::string liveName;
+			if (p->piece) {
+				const CPieceProjectile* ppro = static_cast<const CPieceProjectile*>(p);
+				liveExplFlags = ppro->explFlags;
+				liveSpinAngle = ppro->spinAngle;
+				liveSpinSpeed = ppro->spinSpeed;
+				liveSpinVec = ppro->spinVec;
+				if (ppro->omp != nullptr)
+					liveName = ppro->omp->name;
+			}
+			const bool pieceEqual =
+				(rows.pieceExplFlags[id] == liveExplFlags) &&
+				BitEqual(rows.pieceSpinAngle[id], liveSpinAngle) &&
+				BitEqual(rows.pieceSpinSpeed[id], liveSpinSpeed) &&
+				BitEqual(rows.pieceSpinVec[id], liveSpinVec) &&
+				(rows.pieceName[id] == liveName);
+			if (Bump(fields[P_PIECEPARAMS], pieceEqual))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d proj=%d field=proj:pieceParams mismatch (explFlags snap=%d live=%d)",
+					gs->frameNum, id, rows.pieceExplFlags[id], liveExplFlags);
 		}
 
 		if (p->weapon) {

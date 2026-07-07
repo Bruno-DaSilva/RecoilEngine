@@ -251,7 +251,7 @@ static inline uint64_t HashTeamRow(const SimSnapshot::TeamRows& r, int t)
 // job, projectile rows just extend divergence *detection* coverage.
 static inline uint64_t HashProjectileRow(const SimSnapshot::ProjectileRows& r, int id)
 {
-	uint32_t w[24];
+	uint32_t w[30];
 	w[0]  = static_cast<uint32_t>(id);
 	w[1]  = std::bit_cast<uint32_t>(r.pos[id].x);
 	w[2]  = std::bit_cast<uint32_t>(r.pos[id].y);
@@ -284,6 +284,17 @@ static inline uint64_t HashProjectileRow(const SimSnapshot::ProjectileRows& r, i
 	w[22] = static_cast<uint32_t>(r.ttl[id]);
 	w[23] = static_cast<uint32_t>(r.isPiece[id])
 	      | (static_cast<uint32_t>(r.intercepted[id]) << 8);
+
+	// PR 33 piece-projectile params, fixed order appended; all synced state
+	// (0/default for non-piece projectiles). pieceName is model-derived
+	// (defID-deterministic) so it is NOT hashed as independent synced state --
+	// any name divergence implies a model/defID divergence already covered.
+	w[24] = static_cast<uint32_t>(r.pieceExplFlags[id]);
+	w[25] = std::bit_cast<uint32_t>(r.pieceSpinAngle[id]);
+	w[26] = std::bit_cast<uint32_t>(r.pieceSpinSpeed[id]);
+	w[27] = std::bit_cast<uint32_t>(r.pieceSpinVec[id].x);
+	w[28] = std::bit_cast<uint32_t>(r.pieceSpinVec[id].y);
+	w[29] = std::bit_cast<uint32_t>(r.pieceSpinVec[id].z);
 
 	return Mix(w, sizeof(w), UNIT_SEED);
 }

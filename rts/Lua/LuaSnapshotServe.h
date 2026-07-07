@@ -293,4 +293,38 @@ namespace LuaSnapshotServe {
 	int GetPlayerInfo(lua_State* L, const char* caller);
 	int GetTeamColor(lua_State* L, const char* caller);     // LuaUnsyncedRead
 	int GetTeamOrigColor(lua_State* L, const char* caller); // LuaUnsyncedRead
+
+	// ---- PR 33 (pieces/scripts family) ----
+	// RefreshPieces() runs at the barrier (right after simSnapshot.Update(),
+	// generation-gated) and captures per-object piece dynamic state + immutable
+	// model metadata so the unit/feature piece twins below serve pointer-free
+	// under the running split (see the serving-section header in the .cpp).
+	// Piece-projectile params/name are served from SimSnapshot::ProjectileRows.
+	void RefreshPieces();
+
+	int GetUnitRootPiece(lua_State* L, const char* caller);
+	int GetUnitPieceMap(lua_State* L, const char* caller);
+	int GetUnitPieceList(lua_State* L, const char* caller);
+	int GetUnitPieceInfo(lua_State* L, const char* caller);
+	int GetUnitPiecePosition(lua_State* L, const char* caller);
+	int GetUnitPieceDirection(lua_State* L, const char* caller);
+	int GetUnitPiecePosDir(lua_State* L, const char* caller);
+	int GetUnitPieceMatrix(lua_State* L, const char* caller);
+	int GetUnitScriptPiece(lua_State* L, const char* caller);
+	int GetUnitScriptNames(lua_State* L, const char* caller);
+
+	int GetFeatureRootPiece(lua_State* L, const char* caller);
+	int GetFeaturePieceMap(lua_State* L, const char* caller);
+	int GetFeaturePieceList(lua_State* L, const char* caller);
+	int GetFeaturePieceInfo(lua_State* L, const char* caller);
+	int GetFeaturePiecePosition(lua_State* L, const char* caller);
+	int GetFeaturePieceDirection(lua_State* L, const char* caller);
+	int GetFeaturePiecePosDir(lua_State* L, const char* caller);
+	int GetFeaturePieceMatrix(lua_State* L, const char* caller);
+	int GetFeatureCollisionVolumeData(lua_State* L, const char* caller);
+	int GetFeaturePieceCollisionVolumeData(lua_State* L, const char* caller);
+	int GetFeatureLastAttackedPiece(lua_State* L, const char* caller);
+
+	int GetPieceProjectileParams(lua_State* L, const char* caller);
+	int GetPieceProjectileName(lua_State* L, const char* caller);
 }

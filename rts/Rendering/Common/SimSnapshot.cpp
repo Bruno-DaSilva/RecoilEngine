@@ -23,6 +23,8 @@
 #include "Sim/MoveTypes/MoveDefHandler.h"
 #include "Sim/Units/UnitDefHandler.h"
 #include "Sim/Projectiles/ProjectileHandler.h"
+#include "Sim/Projectiles/PieceProjectile.h" // PR 33 GetPieceProjectileParams/Name
+#include "Rendering/Models/3DModelPiece.hpp" // PR 33 S3DModelPiece::name (ppro->omp)
 #include "Sim/Projectiles/WeaponProjectiles/WeaponProjectile.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitDef.h"
@@ -468,6 +470,12 @@ void SimSnapshot::ExtractProjectiles(ProjectileRows& rows)
 		rows.teamID.resize(n);
 		rows.ttl.resize(n);
 		rows.intercepted.resize(n);
+		// PR 33 piece-projectile params
+		rows.pieceExplFlags.resize(n);
+		rows.pieceSpinAngle.resize(n);
+		rows.pieceSpinSpeed.resize(n);
+		rows.pieceSpinVec.resize(n);
+		rows.pieceName.resize(n);
 		rows.inLosAll.resize(size_t(numAllyTeams) * n);
 	}
 
@@ -495,6 +503,25 @@ void SimSnapshot::ExtractProjectiles(ProjectileRows& rows)
 		rows.targetPos[id] = ZeroVector;
 		rows.ttl[id] = 0;
 		rows.intercepted[id] = 0;
+		// PR 33 piece-projectile params (default; filled for piece projectiles)
+		rows.pieceExplFlags[id] = 0;
+		rows.pieceSpinAngle[id] = 0.0f;
+		rows.pieceSpinSpeed[id] = 0.0f;
+		rows.pieceSpinVec[id] = ZeroVector;
+		rows.pieceName[id].clear();
+
+		if (p->piece) {
+			// GetPieceProjectileParams/Name serving (all synced state; the
+			// piece-projectile ctor passes isSynced=true so these ids resolve
+			// via GetProjectileBySyncedID, exactly as the live callouts require)
+			const CPieceProjectile* ppro = static_cast<const CPieceProjectile*>(p);
+			rows.pieceExplFlags[id] = ppro->explFlags;
+			rows.pieceSpinAngle[id] = ppro->spinAngle;
+			rows.pieceSpinSpeed[id] = ppro->spinSpeed;
+			rows.pieceSpinVec[id] = ppro->spinVec;
+			if (ppro->omp != nullptr)
+				rows.pieceName[id] = ppro->omp->name;
+		}
 
 		if (p->weapon) {
 			const CWeaponProjectile* wpro = static_cast<const CWeaponProjectile*>(p);

@@ -1674,6 +1674,14 @@ void CGame::SimDrawBarrier()
 	// to this refresh.
 	LuaSnapshotServe::RefreshCommandQueues();
 
+	// (3b') refresh the draw-side piece caches (PR 33 pieces/scripts serving).
+	// AFTER the publish: generation-gated so the piece copies always describe
+	// the same boundary as the published rows, and the walk is skipped when the
+	// publish didn't swap. Captures final piece transforms via the live
+	// accessors while the sim is parked (single-threaded pre-flip), so the
+	// served values are bit-identical to the live callouts.
+	LuaSnapshotServe::RefreshPieces();
+
 	// (4) TEST-ONLY (PR 17): when armed via /snapshotdiffgate, verify every
 	// value the snapshot would serve bit-matches the live sim read at this
 	// boundary. A single branch when unarmed.

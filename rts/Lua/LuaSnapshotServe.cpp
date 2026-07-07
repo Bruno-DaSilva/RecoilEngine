@@ -27,23 +27,30 @@
 #include "Rendering/Features/FeatureDrawer.h" // CFeatureDrawer::GetDrawFlag / GetUnsyncedTransformMatrix
 #include "Rendering/GlobalRendering.h" // timeOffset (draw-owned)
 #include "Rendering/IconHandler.h" // icon data pushes (GetUnitIcon/GetUnitIconData)
+#include "Rendering/Models/3DModelPiece.hpp" // PR 33 S3DModel / S3DModelPiece (piece metadata)
+#include "Rendering/Models/LocalModel.hpp" // PR 33 barrier piece capture
+#include "Rendering/Models/LocalModelPiece.hpp" // PR 33 barrier piece capture
 #include "Rendering/Units/UnitDrawer.h"
-#include "Sim/Features/Feature.h" // CFeature member payload reads (luaDraw/noDraw/engineDrawMask/alwaysUpdateMat/selectionVolume)
+#include "Sim/Features/Feature.h" // CFeature payload reads (luaDraw/noDraw/engineDrawMask/alwaysUpdateMat/selectionVolume); PR 33 feature colvol / hitModelPieces / allyteam
 #include "Sim/Features/FeatureDef.h"
 #include "Sim/Features/FeatureDefHandler.h"
+#include "Sim/Features/FeatureHandler.h" // PR 33 feature-piece refresh walk
 #include "Sim/Misc/CollisionVolume.h" // WORLD_TO_OBJECT_SPACE
 #include "Sim/Misc/GlobalConstants.h" // GAME_SPEED
 #include "Sim/Misc/GlobalSynced.h" // GODMODE_*_BIT
 #include "Sim/MoveTypes/MoveDefHandler.h" // immutable MoveDef name (GetUnitMoveDefID)
+#include "Sim/Projectiles/PieceProjectile.h" // PR 33 GetPieceProjectileParams/Name twins
 #include "Sim/Units/CommandAI/CommandAI.h" // command-queue family boundary copies
 #include "Sim/Units/CommandAI/FactoryCAI.h"
 #include "Sim/Units/Unit.h" // LOS_* bits
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Units/UnitDefHandler.h"
-#include "Sim/Units/UnitHandler.h" // RefreshCommandQueues' barrier walk
+#include "Sim/Units/UnitHandler.h" // RefreshCommandQueues' barrier walk; PR 33 unit-piece refresh walk
+#include "Sim/Units/Scripts/UnitScript.h" // PR 33 GetUnitScriptPiece/Names
 #include "Sim/Units/UnitTypes/Builder.h" // sim|draw PR 30: GetUnitWorkerTask builder decode
 #include "Sim/Units/UnitTypes/Factory.h" // CFactory bugger-off scalars
 #include "Game/BoundaryStats.h" // sim|draw PR 30: block-copy telemetry
+#include "System/Matrix44f.h" // PR 33 GetUnitPieceMatrix (captured model-space matrix)
 #include "System/AABB.hpp" // GetUnitsInBox's boxCheck
 #include "System/ContainerUtil.h" // spring::VectorSortUnique (GetTeamUnitsByDefs)
 #include "System/MainDefines.h" // STRCASECMP (PackBuildQueueSnap)
@@ -5131,6 +5138,622 @@ LuaSnapshotServe::CmdQueueCompareResult LuaSnapshotServe::CompareCmdQueueSlot(in
 }
 
 
+/******************************************************************************
+ * BEGIN PR 33 (pieces/scripts family) -- serving section
+ *
+ * Serves the 23 piece/script sanctioned callouts (10 unit piece/script, 11
+ * feature piece/colvol/last-hit, 2 piece-projectile). Two mechanisms:
+ *
+ *  - unit/feature piece + script + feature colvol/last-hit: a BARRIER-REFRESHED
+ *    cache (RefreshPieces, same shape as the command-queue serving pattern).
+ *    Dynamic piece transforms cannot be read lazily post-release under the
+ *    running split -- LocalModelPiece::GetModelSpaceMatrix recomputes a dirty
+ *    piece, mutating sim-side caches mid-draw (exactly what PR 8's
+ *    ExtractTransforms forbids). RefreshPieces() runs AT THE BARRIER (sim
+ *    parked / single-threaded, right after simSnapshot.Update()) and captures
+ *    the FINAL computed values via the live LocalModelPiece/CSolidObject
+ *    accessors, so served values are bit-identical to the live callouts by
+ *    construction. Static piece metadata (names/hierarchy/geometry/offsets/
+ *    emit-dir) is model-immutable: cached per-model once (keyed by the shared
+ *    root S3DModelPiece*), served directly, never recopied per boundary.
+ *
+ *  - piece-projectile params/name: SimSnapshot::ProjectileRows extension (the
+ *    add-a-field recipe); CPieceProjectile is a synced projectile so its ids
+ *    resolve like every other projectile row, verified by SnapshotDiffGate's
+ *    P_PIECEPARAMS field pass rather than the Route() dual-run.
+ *
+ * POV: unit piece callouts mirror ParseTypedUnit (rows.Valid + PovUnitTyped);
+ * feature callouts mirror ParseFeature (featRows.Valid + PovFeatureVisible);
+ * piece-projectile callouts mirror ParseProjectile (ProjectileRows::PovVisible).
+ * Enumerated deviations (see the commit message): (a) piece dynamic values are
+ * captured at the barrier, memory cost is one boundary of transforms/matrices
+ * per object (bounded, generation-gated, documented follow-up: expose PR 8's
+ * transformsMemStorage by id); (b) the unreachable GetPieceProjectileName
+ * omp==null defensive branch is not reproduced; (c) draw-side interpolation
+ * side-effect (integration review): RefreshPieces walks GetModelSpaceMatrix/
+ * GetAbsolutePos/GetEmitDirPos over ALL pieces of ALL units and features,
+ * including out-of-LOS objects. For a dirty piece GetModelSpaceMatrix runs
+ * UpdateParentMatricesRec, which clears `dirty`, sets wasUpdated[0]=true and
+ * rewrites modelSpaceMat. PR 8's ExtractTransforms (later the same frame in
+ * worldDrawer.Update) is LOS-gated and leaves hidden pieces lazy, so under an
+ * armed gate / SimDrawSplit=1 RefreshPieces pre-touches the unsynced
+ * interpolation bookkeeping (wasUpdated / prevModelSpaceTra path) of hidden
+ * pieces that master/PR 8 would not recompute at that point. This is NOT a
+ * sync deviation (wasUpdated is CR_IGNORED, modelSpaceMat is unsynced), does
+ * NOT affect flag-off (RefreshPieces early-outs) or served Lua values (served
+ * from the separate cache): it only advances the same recompute PR 8 would do
+ * later to earlier in the frame for hidden pieces. Verified no LOS-entry
+ * interpolation artifact under the split's resim gate (checksum-clean).
+ ******************************************************************************/
+
+namespace {
+	// per-model immutable metadata (names/hierarchy/geometry/offset/emit-dir),
+	// keyed by the shared root S3DModelPiece* -- all instances of a model share
+	// the same original piece tree, so this is built once and reused
+	struct ModelPieceMeta {
+		struct PieceStatic {
+			std::string name;
+			std::string parentName;             // parent ? parent->name : "[null]"
+			std::vector<std::string> children;  // child piece names, in order
+			bool hasGeometry = false;
+			float3 mins;
+			float3 maxs;
+			float3 offset;
+			float3 emitDir;                     // LocalModelPiece::GetDirection() == original->GetEmitDir()
+		};
+		int32_t rootPieceIndex = 0;
+		std::vector<PieceStatic> pieces;
+	};
+
+	spring::unordered_map<const void*, ModelPieceMeta> modelMetaCache;
+
+	// captured dynamic (per-boundary) piece state, final computed values
+	struct PieceDynamic {
+		float3 absPos;               // LocalModelPiece::GetAbsolutePos()
+		CMatrix44f modelSpaceMat;    // LocalModelPiece::GetModelSpaceMatrix()
+		float3 posDirPos;            // GetSolidObjectPiecePosDir's pos (object space)
+		float3 posDirDir;            // GetSolidObjectPiecePosDir's dir (object space)
+		CollisionVolume pieceColVol; // LocalModelPiece::GetCollisionVolume() (features)
+	};
+
+	struct ObjectPieceSlot {
+		bool present = false;
+		const void* metaKey = nullptr;   // ModelPieceMeta key (root original piece ptr)
+		int32_t rootPieceIndex = 0;
+		int32_t numPieces = 0;
+		std::vector<PieceDynamic> pieces;
+		// unit script mapping (fixed after script init; empty for features).
+		// scriptToModel[sp] == CUnitScript::ScriptToModel(sp) (-1 = none)
+		std::vector<int32_t> scriptToModel;
+		// feature-only extras
+		bool hasColVol = false;
+		CollisionVolume colVol;          // CFeature::collisionVolume
+		int32_t lastHitPieceIndex = -1;  // hitModelPieces[true] lmodel index, -1 = none
+		int32_t lastHitFrame = -1;       // pieceHitFrames[true]
+	};
+
+	// indexed by unitID / featureID, sized at first refresh
+	std::vector<ObjectPieceSlot> unitPieceCache;
+	std::vector<ObjectPieceSlot> featurePieceCache;
+	uint32_t pieceCacheGeneration = 0;
+
+	// build (once) the immutable metadata for o's model from a live LocalModel
+	const ModelPieceMeta& GetOrBuildModelMeta(const void* key, const LocalModel& lm)
+	{
+		auto it = modelMetaCache.find(key);
+		if (it != modelMetaCache.end())
+			return it->second;
+
+		ModelPieceMeta meta;
+		meta.rootPieceIndex = lm.GetRoot()->GetLModelPieceIndex();
+		meta.pieces.resize(lm.pieces.size());
+
+		for (size_t i = 0; i < lm.pieces.size(); ++i) {
+			const S3DModelPiece& op = *(lm.pieces[i].original);
+			ModelPieceMeta::PieceStatic& ps = meta.pieces[i];
+			ps.name = op.name;
+			ps.parentName = (op.parent != nullptr) ? op.parent->name : "[null]";
+			ps.children.resize(op.children.size());
+			for (size_t c = 0; c < op.children.size(); ++c)
+				ps.children[c] = op.children[c]->name;
+			ps.hasGeometry = op.HasGeometryData();
+			ps.mins = op.mins;
+			ps.maxs = op.maxs;
+			ps.offset = op.offset;
+			ps.emitDir = lm.pieces[i].GetDirection();
+		}
+
+		return modelMetaCache.emplace(key, std::move(meta)).first->second;
+	}
+
+	// capture o's dynamic piece state + static-metadata key at the barrier
+	void RefreshObjectPieceSlot(ObjectPieceSlot& slot, const CSolidObject* o,
+	                            bool captureScript, bool captureColVol, bool captureLastHit)
+	{
+		const LocalModel& lm = o->localModel;
+		const size_t numPieces = lm.pieces.size();
+
+		slot.present = true;
+		// GetRoot() == GetPiece(0) asserts HasPiece(0) then derefs pieces[0];
+		// under NDEBUG the assert is gone, so an empty LocalModel (pieceless
+		// model, e.g. some map features / not-yet-initialized) would OOB-deref.
+		// RefreshPieces walks ALL active objects unconditionally (the live
+		// callouts only ever run per-queried-object), so guard the root read
+		// with the same (numPieces > 0) test the metaKey line below already uses.
+		slot.numPieces = static_cast<int32_t>(numPieces);
+		slot.rootPieceIndex = (numPieces > 0) ? lm.GetRoot()->GetLModelPieceIndex() : -1;
+		slot.metaKey = (numPieces > 0) ? static_cast<const void*>(lm.pieces[0].original) : nullptr;
+
+		if (slot.metaKey != nullptr)
+			GetOrBuildModelMeta(slot.metaKey, lm); // ensure metadata exists
+
+		slot.pieces.resize(numPieces);
+		for (size_t i = 0; i < numPieces; ++i) {
+			const LocalModelPiece& lmp = lm.pieces[i];
+			PieceDynamic& pd = slot.pieces[i];
+
+			// final values via the exact live accessors (bit-identical serving)
+			pd.absPos = lmp.GetAbsolutePos();
+			pd.modelSpaceMat = lmp.GetModelSpaceMatrix();
+
+			float3 emitPos;
+			float3 emitDir;
+			lmp.GetEmitDirPos(emitPos, emitDir);
+			pd.posDirPos = o->GetObjectSpacePos(emitPos);
+			pd.posDirDir = o->GetObjectSpaceVec(emitDir);
+
+			if (captureColVol)
+				pd.pieceColVol = *(lmp.GetCollisionVolume());
+		}
+
+		slot.scriptToModel.clear();
+		if (captureScript) {
+			const CUnit* u = static_cast<const CUnit*>(o);
+			const CUnitScript* script = u->script; // never null for a live unit
+			slot.scriptToModel.resize(script->pieces.size());
+			for (size_t sp = 0; sp < script->pieces.size(); ++sp)
+				slot.scriptToModel[sp] = script->ScriptToModel(static_cast<int>(sp));
+		}
+
+		slot.hasColVol = captureColVol;
+		if (captureColVol)
+			slot.colVol = o->collisionVolume;
+
+		slot.lastHitPieceIndex = -1;
+		slot.lastHitFrame = -1;
+		if (captureLastHit && o->hitModelPieces[true] != nullptr) {
+			slot.lastHitPieceIndex = static_cast<int32_t>(o->hitModelPieces[true]->GetLModelPieceIndex());
+			slot.lastHitFrame = o->pieceHitFrames[true];
+		}
+	}
+
+	const ObjectPieceSlot* GetUnitPieceSlot(int unitID)
+	{
+		if (unitID < 0 || static_cast<size_t>(unitID) >= unitPieceCache.size())
+			return nullptr;
+		const ObjectPieceSlot& s = unitPieceCache[unitID];
+		return s.present ? &s : nullptr;
+	}
+
+	const ObjectPieceSlot* GetFeaturePieceSlot(int featureID)
+	{
+		if (featureID < 0 || static_cast<size_t>(featureID) >= featurePieceCache.size())
+			return nullptr;
+		const ObjectPieceSlot& s = featurePieceCache[featureID];
+		return s.present ? &s : nullptr;
+	}
+
+	// ParseTypedUnit mirror (rows.Valid + PovUnitTyped) + piece-slot lookup
+	const ObjectPieceSlot* ParseTypedUnitPieceSlot(lua_State* L, const char* caller)
+	{
+		const auto& rows = simSnapshot.Read();
+		const int unitID = ParseUnitIDSynced(L, caller, 1);
+		const Pov pov = HandlePov(L);
+
+		if (!rows.Valid(unitID) || !rows.PovUnitTyped(unitID, pov.readAllyTeam, pov.fullRead))
+			return nullptr;
+
+		return GetUnitPieceSlot(unitID);
+	}
+
+	// ParseFeature mirror (featRows.Valid + PovFeatureVisible) + piece-slot lookup
+	const ObjectPieceSlot* ParseFeaturePieceSlot(lua_State* L, const char* caller)
+	{
+		const auto& rows = simSnapshot.ReadFeatures();
+		const int featureID = ParseFeatureIDSynced(L, caller, 1);
+		const Pov pov = HandlePov(L);
+
+		if (!rows.Valid(featureID) || !PovFeatureVisible(rows, featureID, pov))
+			return nullptr;
+
+		return GetFeaturePieceSlot(featureID);
+	}
+
+	// the piece-index arg (#2) mirror of ParseObjectConstLocalModelPiece:
+	// luaL_checkint - 1, then HasPiece bounds check. returns -1 on miss.
+	int ParsePieceIndex(lua_State* L, const ObjectPieceSlot* slot)
+	{
+		const int pieceIdx = luaL_checkint(L, 2) - 1;
+		if (pieceIdx < 0 || pieceIdx >= slot->numPieces)
+			return -1;
+		return pieceIdx;
+	}
+
+	const ModelPieceMeta* GetSlotMeta(const ObjectPieceSlot* slot)
+	{
+		if (slot->metaKey == nullptr)
+			return nullptr;
+		auto it = modelMetaCache.find(slot->metaKey);
+		return (it != modelMetaCache.end()) ? &it->second : nullptr;
+	}
+
+	// GetSolidObjectPieceInfoHelper mirror over cached metadata
+	int PushPieceInfoSnap(lua_State* L, const ModelPieceMeta::PieceStatic& ps)
+	{
+		lua_createtable(L, 0, 7);
+		HSTR_PUSH_STRING(L, "name", ps.name);
+		HSTR_PUSH_STRING(L, "parent", ps.parentName);
+
+		HSTR_PUSH(L, "children");
+		lua_createtable(L, ps.children.size(), 0);
+		for (size_t c = 0; c < ps.children.size(); c++) {
+			lua_pushsstring(L, ps.children[c]);
+			lua_rawseti(L, -2, c + 1);
+		}
+		lua_rawset(L, -3);
+
+		HSTR_PUSH(L, "isEmpty");
+		lua_pushboolean(L, !ps.hasGeometry);
+		lua_rawset(L, -3);
+
+		HSTR_PUSH(L, "min");
+		lua_createtable(L, 3, 0); {
+			lua_pushnumber(L, ps.mins.x); lua_rawseti(L, -2, 1);
+			lua_pushnumber(L, ps.mins.y); lua_rawseti(L, -2, 2);
+			lua_pushnumber(L, ps.mins.z); lua_rawseti(L, -2, 3);
+		}
+		lua_rawset(L, -3);
+
+		HSTR_PUSH(L, "max");
+		lua_createtable(L, 3, 0); {
+			lua_pushnumber(L, ps.maxs.x); lua_rawseti(L, -2, 1);
+			lua_pushnumber(L, ps.maxs.y); lua_rawseti(L, -2, 2);
+			lua_pushnumber(L, ps.maxs.z); lua_rawseti(L, -2, 3);
+		}
+		lua_rawset(L, -3);
+
+		HSTR_PUSH(L, "offset");
+		lua_createtable(L, 3, 0); {
+			lua_pushnumber(L, ps.offset.x); lua_rawseti(L, -2, 1);
+			lua_pushnumber(L, ps.offset.y); lua_rawseti(L, -2, 2);
+			lua_pushnumber(L, ps.offset.z); lua_rawseti(L, -2, 3);
+		}
+		lua_rawset(L, -3);
+		return 1;
+	}
+
+	// ---- shared serving bodies over an already-resolved ObjectPieceSlot ----
+
+	int ServeRootPiece(lua_State* L, const ObjectPieceSlot* slot)
+	{
+		if (slot == nullptr)
+			return 0;
+		lua_pushnumber(L, slot->rootPieceIndex + 1);
+		return 1;
+	}
+
+	int ServePieceMap(lua_State* L, const ObjectPieceSlot* slot)
+	{
+		if (slot == nullptr)
+			return 0;
+		const ModelPieceMeta* meta = GetSlotMeta(slot);
+		lua_createtable(L, 0, slot->numPieces);
+		if (meta != nullptr) {
+			for (int i = 0; i < slot->numPieces; i++) {
+				lua_pushsstring(L, meta->pieces[i].name);
+				lua_pushnumber(L, i + 1);
+				lua_rawset(L, -3);
+			}
+		}
+		return 1;
+	}
+
+	int ServePieceList(lua_State* L, const ObjectPieceSlot* slot)
+	{
+		if (slot == nullptr)
+			return 0;
+		const ModelPieceMeta* meta = GetSlotMeta(slot);
+		lua_createtable(L, slot->numPieces, 0);
+		if (meta != nullptr) {
+			for (int i = 0; i < slot->numPieces; i++) {
+				lua_pushsstring(L, meta->pieces[i].name);
+				lua_rawseti(L, -2, i + 1);
+			}
+		}
+		return 1;
+	}
+
+	int ServePieceInfo(lua_State* L, const ObjectPieceSlot* slot)
+	{
+		if (slot == nullptr)
+			return 0;
+		const int pieceIdx = ParsePieceIndex(L, slot);
+		if (pieceIdx < 0)
+			return 0;
+		const ModelPieceMeta* meta = GetSlotMeta(slot);
+		if (meta == nullptr)
+			return 0;
+		return PushPieceInfoSnap(L, meta->pieces[pieceIdx]);
+	}
+
+	int ServePiecePosition(lua_State* L, const ObjectPieceSlot* slot)
+	{
+		if (slot == nullptr)
+			return 0;
+		const int pieceIdx = ParsePieceIndex(L, slot);
+		if (pieceIdx < 0)
+			return 0;
+		const float3& pos = slot->pieces[pieceIdx].absPos;
+		lua_pushnumber(L, pos.x);
+		lua_pushnumber(L, pos.y);
+		lua_pushnumber(L, pos.z);
+		return 3;
+	}
+
+	int ServePieceDirection(lua_State* L, const ObjectPieceSlot* slot)
+	{
+		if (slot == nullptr)
+			return 0;
+		const int pieceIdx = ParsePieceIndex(L, slot);
+		if (pieceIdx < 0)
+			return 0;
+		const ModelPieceMeta* meta = GetSlotMeta(slot);
+		if (meta == nullptr)
+			return 0;
+		const float3& dir = meta->pieces[pieceIdx].emitDir;
+		lua_pushnumber(L, dir.x);
+		lua_pushnumber(L, dir.y);
+		lua_pushnumber(L, dir.z);
+		return 3;
+	}
+
+	int ServePiecePosDir(lua_State* L, const ObjectPieceSlot* slot)
+	{
+		if (slot == nullptr)
+			return 0;
+		const int pieceIdx = ParsePieceIndex(L, slot);
+		if (pieceIdx < 0)
+			return 0;
+		const PieceDynamic& pd = slot->pieces[pieceIdx];
+		lua_pushnumber(L, pd.posDirPos.x);
+		lua_pushnumber(L, pd.posDirPos.y);
+		lua_pushnumber(L, pd.posDirPos.z);
+		lua_pushnumber(L, pd.posDirDir.x);
+		lua_pushnumber(L, pd.posDirDir.y);
+		lua_pushnumber(L, pd.posDirDir.z);
+		return 6;
+	}
+
+	int ServePieceMatrix(lua_State* L, const ObjectPieceSlot* slot)
+	{
+		if (slot == nullptr)
+			return 0;
+		const int pieceIdx = ParsePieceIndex(L, slot);
+		if (pieceIdx < 0)
+			return 0;
+		for (float mi: slot->pieces[pieceIdx].modelSpaceMat.m)
+			lua_pushnumber(L, mi);
+		return 16;
+	}
+
+	// GetSolidObjectLastHitPiece mirror (feature only in PR 33)
+	int ServeLastHitPiece(lua_State* L, const ObjectPieceSlot* slot)
+	{
+		if (slot == nullptr)
+			return 0;
+		if (slot->lastHitPieceIndex < 0)
+			return 0;
+		const ModelPieceMeta* meta = GetSlotMeta(slot);
+
+		if (lua_isboolean(L, 1) && lua_toboolean(L, 1)) {
+			lua_pushnumber(L, slot->lastHitPieceIndex + 1);
+		} else {
+			if (meta == nullptr)
+				return 0;
+			lua_pushsstring(L, meta->pieces[slot->lastHitPieceIndex].name);
+		}
+		lua_pushnumber(L, slot->lastHitFrame);
+		return 2;
+	}
+}
+
+
+void LuaSnapshotServe::RefreshPieces()
+{
+	// barrier-only (sim parked / single-threaded), right after simSnapshot.Update().
+	// generation-gated so the copies always describe the same boundary as the
+	// published rows, and so the walk is free when the publish did not swap.
+	const uint32_t gen = simSnapshot.Generation();
+
+	if (gen == 0 || gen == pieceCacheGeneration)
+		return;
+
+	// flag-off (no contract, gate unarmed) never serves these twins -- skip the
+	// whole capture so flag-off pays only the generation compare above
+	if (!LuaSplitContract::Enabled() && !snapshotDiffGate.Armed())
+		return;
+
+	pieceCacheGeneration = gen;
+
+	const size_t maxUnits = unitHandler.MaxUnits();
+	if (unitPieceCache.size() != maxUnits)
+		unitPieceCache.resize(maxUnits);
+	for (ObjectPieceSlot& s: unitPieceCache)
+		s.present = false;
+
+	for (const CUnit* u: unitHandler.GetActiveUnits())
+		RefreshObjectPieceSlot(unitPieceCache[u->id], u, /*script*/true, /*colVol*/false, /*lastHit*/false);
+
+	const auto& activeFeatureIDs = featureHandler.GetActiveFeatureIDs();
+	int maxFeatureID = -1;
+	for (const int id: activeFeatureIDs)
+		maxFeatureID = std::max(maxFeatureID, id);
+	const size_t wantFeatSlots = static_cast<size_t>(maxFeatureID + 1);
+	if (featurePieceCache.size() < wantFeatSlots)
+		featurePieceCache.resize(std::max(wantFeatSlots, featurePieceCache.size()));
+	for (ObjectPieceSlot& s: featurePieceCache)
+		s.present = false;
+
+	for (const int id: activeFeatureIDs) {
+		const CFeature* f = featureHandler.GetFeature(id);
+		if (f != nullptr)
+			RefreshObjectPieceSlot(featurePieceCache[id], f, /*script*/false, /*colVol*/true, /*lastHit*/true);
+	}
+}
+
+
+// ---- unit piece/script twins (mirror LuaSyncedRead, ParseTypedUnit gate) ----
+int LuaSnapshotServe::GetUnitRootPiece(lua_State* L, const char* caller)   { return ServeRootPiece(L, ParseTypedUnitPieceSlot(L, caller)); }
+int LuaSnapshotServe::GetUnitPieceMap(lua_State* L, const char* caller)    { return ServePieceMap(L, ParseTypedUnitPieceSlot(L, caller)); }
+int LuaSnapshotServe::GetUnitPieceList(lua_State* L, const char* caller)   { return ServePieceList(L, ParseTypedUnitPieceSlot(L, caller)); }
+int LuaSnapshotServe::GetUnitPieceInfo(lua_State* L, const char* caller)   { return ServePieceInfo(L, ParseTypedUnitPieceSlot(L, caller)); }
+int LuaSnapshotServe::GetUnitPiecePosition(lua_State* L, const char* caller){ return ServePiecePosition(L, ParseTypedUnitPieceSlot(L, caller)); }
+int LuaSnapshotServe::GetUnitPieceDirection(lua_State* L, const char* caller){ return ServePieceDirection(L, ParseTypedUnitPieceSlot(L, caller)); }
+int LuaSnapshotServe::GetUnitPiecePosDir(lua_State* L, const char* caller) { return ServePiecePosDir(L, ParseTypedUnitPieceSlot(L, caller)); }
+int LuaSnapshotServe::GetUnitPieceMatrix(lua_State* L, const char* caller) { return ServePieceMatrix(L, ParseTypedUnitPieceSlot(L, caller)); }
+
+// mirror of LuaSyncedRead::GetUnitScriptPiece
+int LuaSnapshotServe::GetUnitScriptPiece(lua_State* L, const char* caller)
+{
+	const ObjectPieceSlot* slot = ParseTypedUnitPieceSlot(L, caller);
+	if (slot == nullptr)
+		return 0;
+
+	const std::vector<int32_t>& scriptToModel = slot->scriptToModel;
+
+	if (!lua_isnumber(L, 2)) {
+		// whole script->piece map
+		lua_newtable(L);
+		for (size_t sp = 0; sp < scriptToModel.size(); sp++) {
+			const int piece = scriptToModel[sp];
+			if (piece != -1) {
+				lua_pushnumber(L, piece + 1);
+				lua_rawseti(L, -2, sp);
+			}
+		}
+		return 1;
+	}
+
+	const int scriptPiece = lua_toint(L, 2);
+	const int piece = (scriptPiece >= 0 && static_cast<size_t>(scriptPiece) < scriptToModel.size())
+		? scriptToModel[scriptPiece] : -1;
+	if (piece < 0)
+		return 0;
+
+	lua_pushnumber(L, piece + 1);
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetUnitScriptNames
+int LuaSnapshotServe::GetUnitScriptNames(lua_State* L, const char* caller)
+{
+	const ObjectPieceSlot* slot = ParseTypedUnitPieceSlot(L, caller);
+	if (slot == nullptr)
+		return 0;
+
+	const ModelPieceMeta* meta = GetSlotMeta(slot);
+	const std::vector<int32_t>& scriptToModel = slot->scriptToModel;
+
+	lua_createtable(L, scriptToModel.size(), 0);
+	if (meta != nullptr) {
+		for (size_t sp = 0; sp < scriptToModel.size(); sp++) {
+			const int piece = scriptToModel[sp];
+			if (piece < 0)
+				continue; // live derefs pieces[sp]->original directly (non-null in practice)
+			lua_pushsstring(L, meta->pieces[piece].name);
+			lua_pushnumber(L, sp);
+			lua_rawset(L, -3);
+		}
+	}
+	return 1;
+}
+
+
+// ---- feature piece / colvol / last-hit twins (ParseFeature gate) ----
+int LuaSnapshotServe::GetFeatureRootPiece(lua_State* L, const char* caller)   { return ServeRootPiece(L, ParseFeaturePieceSlot(L, caller)); }
+int LuaSnapshotServe::GetFeaturePieceMap(lua_State* L, const char* caller)    { return ServePieceMap(L, ParseFeaturePieceSlot(L, caller)); }
+int LuaSnapshotServe::GetFeaturePieceList(lua_State* L, const char* caller)   { return ServePieceList(L, ParseFeaturePieceSlot(L, caller)); }
+int LuaSnapshotServe::GetFeaturePieceInfo(lua_State* L, const char* caller)   { return ServePieceInfo(L, ParseFeaturePieceSlot(L, caller)); }
+int LuaSnapshotServe::GetFeaturePiecePosition(lua_State* L, const char* caller){ return ServePiecePosition(L, ParseFeaturePieceSlot(L, caller)); }
+int LuaSnapshotServe::GetFeaturePieceDirection(lua_State* L, const char* caller){ return ServePieceDirection(L, ParseFeaturePieceSlot(L, caller)); }
+int LuaSnapshotServe::GetFeaturePiecePosDir(lua_State* L, const char* caller) { return ServePiecePosDir(L, ParseFeaturePieceSlot(L, caller)); }
+int LuaSnapshotServe::GetFeaturePieceMatrix(lua_State* L, const char* caller) { return ServePieceMatrix(L, ParseFeaturePieceSlot(L, caller)); }
+int LuaSnapshotServe::GetFeatureLastAttackedPiece(lua_State* L, const char* caller) { return ServeLastHitPiece(L, ParseFeaturePieceSlot(L, caller)); }
+
+// mirror of LuaSyncedRead::GetFeatureCollisionVolumeData
+int LuaSnapshotServe::GetFeatureCollisionVolumeData(lua_State* L, const char* caller)
+{
+	const ObjectPieceSlot* slot = ParseFeaturePieceSlot(L, caller);
+	if (slot == nullptr)
+		return 0;
+	return LuaUtils::PushColVolData(L, &slot->colVol);
+}
+
+// mirror of LuaSyncedRead::GetFeaturePieceCollisionVolumeData (PushPieceCollisionVolumeData)
+int LuaSnapshotServe::GetFeaturePieceCollisionVolumeData(lua_State* L, const char* caller)
+{
+	const ObjectPieceSlot* slot = ParseFeaturePieceSlot(L, caller);
+	if (slot == nullptr)
+		return 0;
+	const int pieceIdx = ParsePieceIndex(L, slot);
+	if (pieceIdx < 0)
+		return 0;
+	return LuaUtils::PushColVolData(L, &slot->pieces[pieceIdx].pieceColVol);
+}
+
+
+// ---- piece-projectile twins (ProjectileRows extension, ParseProjectile gate) ----
+// mirror of LuaSyncedRead::GetPieceProjectileParams
+int LuaSnapshotServe::GetPieceProjectileParams(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.ReadProjectiles();
+	const int projID = luaL_checkint(L, 1);
+	const Pov pov = HandlePov(L);
+
+	if (!rows.Valid(projID) || !rows.PovVisible(projID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+	if (rows.isPiece[projID] == 0)
+		return 0;
+
+	lua_pushnumber(L, rows.pieceExplFlags[projID]);
+	lua_pushnumber(L, rows.pieceSpinAngle[projID]);
+	lua_pushnumber(L, rows.pieceSpinSpeed[projID]);
+	lua_pushnumber(L, rows.pieceSpinVec[projID].x);
+	lua_pushnumber(L, rows.pieceSpinVec[projID].y);
+	lua_pushnumber(L, rows.pieceSpinVec[projID].z);
+	return (1 + 1 + 1 + 3);
+}
+
+// mirror of LuaSyncedRead::GetPieceProjectileName
+int LuaSnapshotServe::GetPieceProjectileName(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.ReadProjectiles();
+	const int projID = luaL_checkint(L, 1);
+	const Pov pov = HandlePov(L);
+
+	if (!rows.Valid(projID) || !rows.PovVisible(projID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+	if (rows.isPiece[projID] == 0)
+		return 0;
+	// deviation: the live path's unreachable omp==null guard maps here to an
+	// empty pieceName -- a piece projectile always has a non-null omp
+	lua_pushsstring(L, rows.pieceName[projID]);
+	return 1;
+}
+
+/* END PR 33 (pieces/scripts family) -- serving section */
+
+
 void LuaSnapshotServe::ClearCaches()
 {
 	teamUnitIndex.built = false;
@@ -5146,6 +5769,15 @@ void LuaSnapshotServe::ClearCaches()
 	cmdQueueCache.clear();
 	cmdQueueCache.shrink_to_fit();
 	cmdQueueCacheGeneration = 0;
+
+	// PR 33 piece caches: unit/feature ids and model pointers restart with the
+	// next game, so a surviving entry could alias fresh ones
+	unitPieceCache.clear();
+	unitPieceCache.shrink_to_fit();
+	featurePieceCache.clear();
+	featurePieceCache.shrink_to_fit();
+	modelMetaCache.clear();
+	pieceCacheGeneration = 0;
 }
 
 

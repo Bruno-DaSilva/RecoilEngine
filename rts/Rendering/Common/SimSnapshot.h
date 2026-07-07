@@ -386,6 +386,16 @@ public:
 		std::vector<int32_t> teamID;      // CProjectile::GetTeamID()
 		std::vector<int32_t> ttl;         // CWeaponProjectile::GetTimeToLive(); 0 when !isWeapon
 		std::vector<uint8_t> intercepted; // CWeaponProjectile::IsBeingIntercepted(); 0 when !isWeapon
+		// ---- PR 33 (piece/script family): CPieceProjectile params ----
+		// GetPieceProjectileParams/Name reads. explFlags/spinSpeed/spinVec are
+		// creation-fixed, spinAngle animates per frame; all are synced state
+		// (CPieceProjectile is spawned with isSynced=true). pieceName mirrors
+		// ppro->omp->name (the spawning model piece); empty when !isPiece.
+		std::vector<int32_t> pieceExplFlags; // 0 when !isPiece
+		std::vector<float> pieceSpinAngle;
+		std::vector<float> pieceSpinSpeed;
+		std::vector<float3> pieceSpinVec;
+		std::vector<std::string> pieceName;  // empty when !isPiece
 		std::vector<uint8_t> inLosAll;    // [numAllyTeams * MaxSlots()], row-major by allyteam
 
 		bool Valid(int projID) const {
