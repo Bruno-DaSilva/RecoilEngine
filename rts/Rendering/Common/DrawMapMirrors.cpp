@@ -7,11 +7,15 @@
 #include "Map/MapDimensions.h"
 #include "Map/MapInfo.h"
 #include "Map/ReadMap.h"
+#include "Sim/Features/Feature.h"          // PR 29: blocking cell[0] classification
 #include "Sim/Misc/GlobalConstants.h"
+#include "Sim/Misc/GroundBlockingObjectMap.h" // PR 29: blocking-map source
 #include "Sim/Misc/LosHandler.h"
 #include "Sim/Misc/ModInfo.h"
 #include "Sim/Misc/SmoothHeightMesh.h"
 #include "Sim/Misc/TeamHandler.h"
+#include "Sim/Objects/SolidObject.h"       // PR 29: CSolidObject cell[0]
+#include "Sim/Units/Unit.h"                // PR 29: blocking cell[0] classification
 #include "System/Log/ILog.h"
 #include "System/SpringMath.h"
 
@@ -143,6 +147,37 @@ void DrawMapMirrors::DrainAtBarrier()
 		}
 	}
 
+	// --- blocking map (PR 29): per-square cell[0] id + kind ---
+	// Whole-map re-walk when a blocking mutation dirtied it (or on the first
+	// drain / a map-size change). GroundBlockedUnsafe(sq) returns the same
+	// cell[0] object the live placement callouts read; classify it once here so
+	// the served twins never dereference a live CSolidObject.
+	{
+		const size_t nSquares = static_cast<size_t>(mapDims.mapx) * static_cast<size_t>(mapDims.mapy);
+		if (blockingDirty || blockId.size() != nSquares) {
+			blockId.assign(nSquares, -1);
+			blockKind.assign(nSquares, BLOCK_KIND_NONE);
+
+			for (size_t sq = 0; sq < nSquares; ++sq) {
+				const CSolidObject* s = groundBlockingObjectMap.GroundBlockedUnsafe(static_cast<unsigned int>(sq));
+				if (s == nullptr)
+					continue;
+
+				// live GetGroundBlocked order: feature cast first, then unit;
+				// anything else stays NONE (the twin's "neither" fall-through)
+				if (const CFeature* f = dynamic_cast<const CFeature*>(s)) {
+					blockId[sq] = f->id;
+					blockKind[sq] = BLOCK_KIND_FEATURE;
+				} else if (const CUnit* u = dynamic_cast<const CUnit*>(s)) {
+					blockId[sq] = u->id;
+					blockKind[sq] = BLOCK_KIND_UNIT;
+				}
+			}
+
+			blockingDirty = false;
+		}
+	}
+
 	ready = true;
 }
 
@@ -175,7 +210,31 @@ void DrawMapMirrors::Clear()
 	baseRadarErrorSize = baseRadarErrorMult = 0.0f;
 	radarErrorSizes.clear();
 
+	// PR 29: blocking mirror -- force a full re-walk on the next game's first
+	// drain (empty + dirty)
+	blockId.clear();
+	blockKind.clear();
+	blockingDirty = true;
+
 	ready = false;
+}
+
+// PR 29: cell[0] id + kind at map square (x, z). Mirrors
+// CGroundBlockingObjectMap::GroundBlocked's bounds check + cell[0] read.
+int DrawMapMirrors::BlockedAt(int x, int z, uint8_t& kindOut) const
+{
+	kindOut = BLOCK_KIND_NONE;
+
+	if (static_cast<unsigned int>(x) >= static_cast<unsigned int>(mapDims.mapx) ||
+	    static_cast<unsigned int>(z) >= static_cast<unsigned int>(mapDims.mapy))
+		return -1;
+
+	const size_t sq = static_cast<size_t>(z) * static_cast<size_t>(mapDims.mapx) + static_cast<size_t>(x);
+	if (sq >= blockId.size())
+		return -1;
+
+	kindOut = blockKind[sq];
+	return blockId[sq];
 }
 
 // ---------------------------------------------------------------------------

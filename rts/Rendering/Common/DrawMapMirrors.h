@@ -73,6 +73,14 @@ public:
 	static constexpr int LOS_MIRROR_TYPE_SONAR_JAMMER = 6;
 	static constexpr int LOS_MIRROR_TYPE_COUNT        = 7;
 
+	// PR 29: blocking-map mirror -- the kind of the first (cell[0]) blocking
+	// object mirrored per map square (matches the live GroundBlocked dynamic_cast
+	// chain: feature first, then unit; anything else -> NONE, which the placement
+	// twins skip exactly as the live code's "neither cast matched" fall-through).
+	static constexpr uint8_t BLOCK_KIND_NONE    = 0;
+	static constexpr uint8_t BLOCK_KIND_UNIT    = 1;
+	static constexpr uint8_t BLOCK_KIND_FEATURE = 2;
+
 	// ---- sim-side choke points (cheap, lock-free, safe before the first
 	// drain: they only set flags / bump versions) ----
 
@@ -90,6 +98,13 @@ public:
 	/// LuaSyncedCtrl {Set,Level,Revert}OriginalHeightMap -- the Spring.
 	/// SetOriginalHeight-class writers of readMap's originalHeightMap
 	void MarkOrigHeightDirty() { ++origHeightVersion; }
+	/// PR 29: CGroundBlockingObjectMap {Add,Remove}GroundBlockingObject (and
+	/// thus Open/CloseBlockingYard, which call Remove+Add) -- the object-move
+	/// funnels through which every cell[0] change flows. A dirty mark forces a
+	/// whole-map re-walk of the blocking mirror on the next drain (blocking
+	/// state churns most frames, so this is the LOS whole-map class, not the
+	/// near-static version-gated class).
+	void MarkBlockingDirty() { blockingDirty = true; }
 
 	// ---- barrier + lifecycle ----
 
@@ -115,6 +130,14 @@ public:
 	// ---- map-info queries ----
 	float OrigHeight(float x, float z) const;
 	float SmoothMeshHeight(float x, float z) const;
+
+	// ---- PR 29: blocking-map query ----
+	// cell[0] object id + kind (BLOCK_KIND_*) at map square (x, z); returns id
+	// < 0 with kindOut == BLOCK_KIND_NONE for an empty cell or an out-of-range /
+	// not-yet-drained square. Mirrors CGroundBlockingObjectMap::GroundBlocked's
+	// cell[0] read -- the single object every placement callout inspects per
+	// square (GroundBlocked/GroundBlockedUnsafe both return cell[0]).
+	int BlockedAt(int x, int z, uint8_t& kindOut) const;
 
 	// terrain-type mirror access (the serving twin reads these; count is the
 	// fixed CMapInfo::NUM_TERRAIN_TYPES)
@@ -151,6 +174,13 @@ public:
 	}
 	const std::vector<float>& OrigHeightMap() const { return origHeight; }
 	const std::vector<float>& SmoothMeshData() const { return smoothMesh; }
+
+	// PR 29: blocking-mirror diff-gate accessors (SnapshotDiffGate::
+	// CheckMapMirrors compares these per map square against the live
+	// groundBlockingObjectMap cell[0])
+	int BlockMapSquares() const { return static_cast<int>(blockId.size()); }
+	const std::vector<int32_t>& BlockIds() const { return blockId; }
+	const std::vector<uint8_t>& BlockKinds() const { return blockKind; }
 
 private:
 	// InSight(type, pos, at): CLosMap::At(ILosType::PosToSquare(pos)) != 0 over
@@ -193,6 +223,14 @@ private:
 	float baseRadarErrorSize = 0.0f;
 	float baseRadarErrorMult = 0.0f;
 	std::vector<float> radarErrorSizes;          // [numAllyTeams]
+
+	// PR 29: blocking-map mirror. Per map square (row-major, mapx*mapy), the
+	// cell[0] object id (blockId, -1 == empty) and its kind (blockKind,
+	// BLOCK_KIND_*). Whole-map dirty flag (blocking churns most frames), full
+	// re-walk on dirty via CGroundBlockingObjectMap::GroundBlockedUnsafe.
+	std::vector<int32_t> blockId;                // [mapx*mapy], -1 == empty
+	std::vector<uint8_t> blockKind;              // [mapx*mapy], BLOCK_KIND_*
+	bool blockingDirty = true;
 
 	bool ready = false;
 };

@@ -18,6 +18,7 @@
 #include "Map/MapInfo.h"
 #include "Map/ReadMap.h"
 #include "Sim/Misc/GlobalSynced.h"
+#include "Sim/Misc/GroundBlockingObjectMap.h" // sim|draw PR 29: blocking-mirror compare
 #include "Sim/Misc/LosHandler.h"
 #include "Sim/Misc/ModInfo.h"
 #include "Sim/Misc/SmoothHeightMesh.h"
@@ -150,6 +151,9 @@ static constexpr const char* FIELD_NAMES[] = {
 	"proj:pieceParams",
 	// PR 34 (spatial/list remainder): appended to match the enum tail P_RADIUS
 	"proj:radius",
+	// sim|draw PR 29 (blocking-map mirror): appended to match the enum tail
+	// MM_BLOCKING
+	"map:blocking",
 };
 
 // structural compare for the copied customOpts maps (emilib::HashMap has no
@@ -1044,6 +1048,47 @@ void SnapshotDiffGate::CheckMapMirrors()
 			eq = BitEqual(drawMapMirrors.AllyTeamRadarErrorSize(at), losHandler->GetAllyTeamRadarErrorSize(at));
 		if (Bump(fields[MM_RADARERR], eq))
 			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=map:radarError mismatch", gs->frameNum);
+	}
+
+	// --- blocking-map mirror (PR 29): per-square cell[0] id + kind ---
+	// A mismatch means a missed MarkBlockingDirty choke point (a writer that
+	// changed a cell[0] without re-walking the mirror). One MM_BLOCKING counter
+	// over the whole grid; report the first diverging square.
+	{
+		const size_t nSquares = static_cast<size_t>(mapDims.mapx) * static_cast<size_t>(mapDims.mapy);
+		const std::vector<int32_t>& mid = drawMapMirrors.BlockIds();
+		const std::vector<uint8_t>& mkind = drawMapMirrors.BlockKinds();
+
+		bool eq = (mid.size() == nSquares) && (mkind.size() == nSquares);
+		size_t badSq = 0;
+		int liveId = -1, mirId = -1;
+
+		for (size_t sq = 0; eq && sq < nSquares; ++sq) {
+			const CSolidObject* s = groundBlockingObjectMap.GroundBlockedUnsafe(static_cast<unsigned int>(sq));
+
+			int32_t lid = -1;
+			uint8_t lkind = DrawMapMirrors::BLOCK_KIND_NONE;
+			if (s != nullptr) {
+				if (const CFeature* f = dynamic_cast<const CFeature*>(s)) {
+					lid = f->id;
+					lkind = DrawMapMirrors::BLOCK_KIND_FEATURE;
+				} else if (const CUnit* u = dynamic_cast<const CUnit*>(s)) {
+					lid = u->id;
+					lkind = DrawMapMirrors::BLOCK_KIND_UNIT;
+				}
+			}
+
+			if (mid[sq] != lid || mkind[sq] != lkind) {
+				eq = false;
+				badSq = sq;
+				liveId = lid;
+				mirId = mid[sq];
+			}
+		}
+
+		if (Bump(fields[MM_BLOCKING], eq))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=map:blocking mismatch (square=%zu mirror-id=%d live-id=%d)",
+				gs->frameNum, badSq, mirId, liveId);
 	}
 }
 

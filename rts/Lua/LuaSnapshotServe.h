@@ -297,6 +297,15 @@ namespace LuaSnapshotServe {
 	int GetSmoothMeshHeight(lua_State* L, const char* caller);
 	int GetGroundOrigHeight(lua_State* L, const char* caller);
 
+	// ---- sim|draw PR 29 (blocking-map mirror + placement family) ----
+	// GetGroundBlocked reads the DrawMapMirrors blocking mirror (per-square
+	// cell[0] id + kind) and gates visibility through the snapshot unit/feature
+	// rows. Pos2BuildPos snaps to the build grid over the already-draw-safe
+	// unsynced heightmap (no sim-owned mutable state), so its twin reuses the
+	// live CGameHelper helper directly with synced=false.
+	int GetGroundBlocked(lua_State* L, const char* caller); // LuaSyncedRead
+	int Pos2BuildPos(lua_State* L, const char* caller);     // LuaSyncedRead
+
 	int GetGaiaTeamID(lua_State* L, const char* caller);
 	int GetAllyTeamList(lua_State* L, const char* caller);
 	int GetTeamList(lua_State* L, const char* caller);

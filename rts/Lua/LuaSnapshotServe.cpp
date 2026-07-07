@@ -17,10 +17,12 @@
 
 #include "Game/Camera.h"
 #include "Game/Game.h" // the stats callouts' live `game` null-check
+#include "Game/GameHelper.h" // sim|draw PR 29: Pos2BuildPos build-grid snap (draw-safe unsynced heightmap)
 #include "Game/GlobalUnsynced.h" // gu->myAllyTeam (IsUnitAllied's fullRead answer)
 #include "Game/SelectedUnitsHandler.h" // IsUnitSelected's id-set payload; PR 34 GetSelectedUnits* draw-owned id set
 #include "Game/UI/Groups/Group.h" // CGroup::id (GetUnitGroup); PR 34 CGroup::units (GetGroupUnits*)
 #include "Game/UI/Groups/GroupHandler.h" // uiGroupHandlers (GetUnitGroup / PR 34 GetGroupUnits*)
+#include "Map/MapDimensions.h" // sim|draw PR 29: GetGroundBlocked map-coord clamp
 #include "Rendering/Common/DrawMapMirrors.h" // PR 28: map-layer mirror serving
 #include "Rendering/Common/SimSnapshot.h"
 #include "Rendering/Common/SnapshotDiffGate.h"
@@ -41,6 +43,7 @@
 #include "Sim/Misc/GlobalSynced.h" // GODMODE_*_BIT
 #include "Sim/MoveTypes/MoveDefHandler.h" // immutable MoveDef name (GetUnitMoveDefID)
 #include "Sim/Projectiles/PieceProjectile.h" // PR 33 GetPieceProjectileParams/Name twins
+#include "Sim/Units/BuildInfo.h" // sim|draw PR 29: Pos2BuildPos
 #include "Sim/Units/CommandAI/CommandAI.h" // command-queue family boundary copies
 #include "Sim/Units/CommandAI/FactoryCAI.h"
 #include "Sim/Units/Unit.h" // LOS_* bits
@@ -6236,4 +6239,122 @@ int LuaSnapshotServe::GetGroundOrigHeight(lua_State* L, const char* caller)
 
 	lua_pushnumber(L, drawMapMirrors.OrigHeight(x, z));
 	return 1;
+}
+
+// ===========================================================================
+// sim|draw PR 29: blocking-map mirror + placement family
+// GetGroundBlocked reads the DrawMapMirrors blocking mirror (per-square cell[0]
+// id + kind) and gates visibility through the published unit/feature rows;
+// Pos2BuildPos snaps to the build grid over the already-draw-safe unsynced
+// heightmap. Line-by-line mirrors of the live LuaSyncedRead bodies; argument
+// parsing, error text and return shapes identical by construction.
+// ===========================================================================
+
+namespace {
+	// LuaSyncedRead.cpp's file-local ParseMapCoords mirror (keep in lockstep):
+	// pure arg parse + quantize/clamp against mapDims -- no sim state.
+	void ParseMapCoordsMirror(lua_State* L, const char* caller,
+	                          int& tx1, int& tz1, int& tx2, int& tz2)
+	{
+		float fx1 = 0, fz1 = 0, fx2 = 0, fz2 = 0;
+
+		const int args = lua_gettop(L);
+		if (args == 2) {
+			fx1 = fx2 = luaL_checkfloat(L, 1);
+			fz1 = fz2 = luaL_checkfloat(L, 2);
+		}
+		else if (args == 4) {
+			fx1 = luaL_checkfloat(L, 1);
+			fz1 = luaL_checkfloat(L, 2);
+			fx2 = luaL_checkfloat(L, 3);
+			fz2 = luaL_checkfloat(L, 4);
+		}
+		else {
+			luaL_error(L, "Incorrect arguments to %s()", caller);
+		}
+
+		tx1 = std::clamp((int)(fx1 / SQUARE_SIZE), 0, mapDims.mapxm1);
+		tx2 = std::clamp((int)(fx2 / SQUARE_SIZE), 0, mapDims.mapxm1);
+		tz1 = std::clamp((int)(fz1 / SQUARE_SIZE), 0, mapDims.mapym1);
+		tz2 = std::clamp((int)(fz2 / SQUARE_SIZE), 0, mapDims.mapym1);
+	}
+}
+
+int LuaSnapshotServe::GetGroundBlocked(lua_State* L, const char* caller)
+{
+	const Pov pov = HandlePov(L);
+
+	// POV gate (before ParseMapCoords, exactly as the live body): a handle
+	// without a read allyteam and without fullRead sees nothing
+	if ((pov.readAllyTeam < 0) && !pov.fullRead)
+		return 0;
+
+	int tx1, tx2, tz1, tz2;
+	ParseMapCoordsMirror(L, caller, tx1, tz1, tx2, tz2);
+
+	const SimSnapshot::UnitRows& urows = simSnapshot.Read();
+	const SimSnapshot::FeatureRows& frows = simSnapshot.ReadFeatures();
+
+	for (int z = tz1; z <= tz2; z++) {
+		for (int x = tx1; x <= tx2; x++) {
+			// cell[0] mirror lookup replaces groundBlockingObjectMap.GroundBlocked
+			uint8_t kind = DrawMapMirrors::BLOCK_KIND_NONE;
+			const int id = drawMapMirrors.BlockedAt(x, z, kind);
+
+			if (kind == DrawMapMirrors::BLOCK_KIND_FEATURE) {
+				// LuaUtils::IsFeatureVisible(L, feature) mirror (PovFeatureVisible
+				// needs a valid row; the mirror captured this feature alive at the
+				// same boundary, so Valid holds -- the guard is the stale/nil
+				// contract, not an expected branch)
+				if (frows.Valid(id) && PovFeatureVisible(frows, id, pov)) {
+					HSTR_PUSH(L, "feature");
+					lua_pushnumber(L, id);
+					return 2;
+				}
+				continue;
+			}
+
+			if (kind == DrawMapMirrors::BLOCK_KIND_UNIT) {
+				// unit->losStatus[readAllyTeam] & LOS_INLOS, mirrored from the
+				// published all-allyteam losStatus stride (F_LOSSTATUS-verified);
+				// fullRead short-circuits before the (guaranteed >= 0) allyteam read
+				if (!urows.Valid(id))
+					continue;
+				if (pov.fullRead || (urows.LosStatus(id, pov.readAllyTeam) & LOS_INLOS)) {
+					HSTR_PUSH(L, "unit");
+					lua_pushnumber(L, id);
+					return 2;
+				}
+				continue;
+			}
+			// BLOCK_KIND_NONE: empty cell or a non-unit/non-feature CSolidObject
+			// -- the live "neither dynamic_cast matched" fall-through
+		}
+	}
+
+	lua_pushboolean(L, false);
+	return 1;
+}
+
+int LuaSnapshotServe::Pos2BuildPos(lua_State* L, const char* caller)
+{
+	const int unitDefID = luaL_checkint(L, 1);
+	const UnitDef* ud = unitDefHandler->GetUnitDefByID(unitDefID);
+	if (ud == nullptr)
+		return 0;
+
+	const float3 worldPos = {luaL_checkfloat(L, 2), luaL_checkfloat(L, 3), luaL_checkfloat(L, 4)};
+
+	// build-grid snap over the UNSYNCED heightmap: CGameHelper::Pos2BuildPos with
+	// synced=false reads GetCornerHeightMapUnsynced / GetHeight{Real,AboveWater}
+	// (draw-safe, the reference dirty-rect split) plus the GetCurrMin/MaxHeight
+	// scalars -- no sim-owned mutable state -> the live helper is itself the
+	// twin. ShouldServe rejects synced handles, so GetHandleSynced is always
+	// false here; passing it mirrors the live callout's exact argument.
+	const float3 buildPos = CGameHelper::Pos2BuildPos({ud, worldPos, luaL_optint(L, 5, FACING_SOUTH)}, CLuaHandle::GetHandleSynced(L));
+
+	lua_pushnumber(L, buildPos.x);
+	lua_pushnumber(L, buildPos.y);
+	lua_pushnumber(L, buildPos.z);
+	return 3;
 }

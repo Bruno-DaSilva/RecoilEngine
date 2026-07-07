@@ -206,6 +206,10 @@ private:
 		// projectile group) to keep the FIELD_NAMES append-only discipline; the
 		// report grouping is cosmetic, the static_assert enforces alignment
 		P_RADIUS,       // projectile radius (GetProjectilesInSphere input)
+		// sim|draw PR 29 (blocking-map mirror): appended at the enum tail to keep
+		// every prior field index stable; verified whole-map against the live
+		// groundBlockingObjectMap cell[0] set in CheckMapMirrors
+		MM_BLOCKING,    // per-square cell[0] id + kind
 		F_COUNT
 	};
 

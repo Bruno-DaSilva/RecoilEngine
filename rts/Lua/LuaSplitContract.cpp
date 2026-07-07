@@ -93,12 +93,19 @@ namespace {
 	 */
 	const spring::unordered_set<std::string> sanctionedLive = {
 		// placement/build tests (GuiHandler-driven widgets call these per
-		// mouse position from draw context)
+		// mouse position from draw context). sim|draw PR 29 landed the
+		// DrawMapMirrors blocking-map mirror (per-square cell[0] id + kind) and
+		// SERVED Pos2BuildPos (draw-safe unsynced-heightmap build-grid snap) and
+		// GetGroundBlocked (blocking mirror + snapshot unit/feature visibility).
+		// The three below stay live: their test logic bottoms out in the SYNCED
+		// terrain-speedmod arrays (maxHeightMap/typeMap/slopeMap/centerNormals2D
+		// via CheckCollisionQuery elevation + CMoveMath::GetPosSpeedMod), which
+		// need their own draw-side terrain mirror + a faithful CMoveMath/
+		// TestUnitBuildSquare re-host -- a distinct, gate-verified follow-up (the
+		// blocking mirror is in place; see the PR 29 escalation note).
 		"TestBuildOrder",
 		"TestMoveOrder",
-		"Pos2BuildPos",
 		"ClosestBuildPos",
-		"GetGroundBlocked",
 		// map info reads without an unsynced mirror yet: GetGroundOrigHeight
 		// (orig-heightmap), GetTerrainTypeData (terrain-type table) and
 		// GetSmoothMeshHeight (smooth mesh) are SERVED from DrawMapMirrors

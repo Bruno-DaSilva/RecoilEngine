@@ -8639,16 +8639,16 @@ static void ParseMapCoords(lua_State* L, const char* caller,
  *
  * @function Spring.GetGroundBlocked
  */
-int LuaSyncedRead::GetGroundBlocked(lua_State* L)
+static int GetGroundBlockedLive(lua_State* L, const char* caller)
 {
 	if ((CLuaHandle::GetHandleReadAllyTeam(L) < 0) && !CLuaHandle::GetHandleFullRead(L))
 		return 0;
 
 	int tx1, tx2, tz1, tz2;
-	ParseMapCoords(L, __func__, tx1, tz1, tx2, tz2);
+	ParseMapCoords(L, caller, tx1, tz1, tx2, tz2);
 
 	// split-contract gate (PR 27a): reads the groundBlockingObjectMap + live objects directly
-	if (LuaSplitContract::DenyLiveRead(L, __func__))
+	if (LuaSplitContract::DenyLiveRead(L, caller))
 		return 0;
 
 	for (int z = tz1; z <= tz2; z++){
@@ -8681,6 +8681,14 @@ int LuaSyncedRead::GetGroundBlocked(lua_State* L)
 
 	lua_pushboolean(L, false);
 	return 1;
+}
+
+int LuaSyncedRead::GetGroundBlocked(lua_State* L)
+{
+	// blocking-mirror-served from draw context (sim|draw PR 29): the
+	// DrawMapMirrors per-square cell[0] mirror + the snapshot unit/feature rows
+	// replace the groundBlockingObjectMap + live-object visibility reads
+	return LuaSnapshotServe::Route(L, __func__, &GetGroundBlockedLive, &LuaSnapshotServe::GetGroundBlocked);
 }
 
 
@@ -8923,7 +8931,7 @@ int LuaSyncedRead::TestBuildOrder(lua_State* L)
  * @return number buildPosY
  * @return number buildPosZ
  */
-int LuaSyncedRead::Pos2BuildPos(lua_State* L)
+static int Pos2BuildPosLive(lua_State* L, const char* caller)
 {
 	const int unitDefID = luaL_checkint(L, 1);
 	const UnitDef* ud = unitDefHandler->GetUnitDefByID(unitDefID);
@@ -8933,7 +8941,7 @@ int LuaSyncedRead::Pos2BuildPos(lua_State* L)
 	const float3 worldPos = {luaL_checkfloat(L, 2), luaL_checkfloat(L, 3), luaL_checkfloat(L, 4)};
 
 	// split-contract gate (PR 27a): Pos2BuildPos reads the (synced-for-synced) heightmap for build placement
-	if (LuaSplitContract::DenyLiveRead(L, __func__))
+	if (LuaSplitContract::DenyLiveRead(L, caller))
 		return 0;
 
 	const float3 buildPos = CGameHelper::Pos2BuildPos({ud, worldPos, luaL_optint(L, 5, FACING_SOUTH)}, CLuaHandle::GetHandleSynced(L));
@@ -8942,6 +8950,14 @@ int LuaSyncedRead::Pos2BuildPos(lua_State* L)
 	lua_pushnumber(L, buildPos.y);
 	lua_pushnumber(L, buildPos.z);
 	return 3;
+}
+
+int LuaSyncedRead::Pos2BuildPos(lua_State* L)
+{
+	// served from draw context (sim|draw PR 29): for an unsynced handle the live
+	// path already snaps over the draw-safe UNSYNCED heightmap (synced=false), so
+	// the twin reuses this body verbatim -- no sim-owned mutable state is read
+	return LuaSnapshotServe::Route(L, __func__, &Pos2BuildPosLive, &LuaSnapshotServe::Pos2BuildPos);
 }
 
 

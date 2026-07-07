@@ -12,6 +12,7 @@
 #include "Sim/Units/Unit.h"
 #include "System/ContainerUtil.h"
 #include "System/SpringHash.h"
+#include "Rendering/Common/DrawMapMirrors.h" // sim|draw PR 29: blocking-mirror dirty mark
 
 #include "System/Misc/TracyDefs.h"
 
@@ -56,6 +57,9 @@ void CGroundBlockingObjectMap::AddGroundBlockingObject(CSolidObject* object)
 			CellInsertUnique(zSqr * mapDims.mapx + xSqr, object);
 		}
 	}
+
+	// sim|draw PR 29: cell[0] may have changed -> re-walk the blocking mirror
+	drawMapMirrors.MarkBlockingDirty();
 
 	// FIXME: needs dependency injection (observer pattern?)
 	if (object->moveDef != nullptr)
@@ -106,6 +110,9 @@ void CGroundBlockingObjectMap::AddGroundBlockingObject(CSolidObject* object, con
 		}
 	}
 
+	// sim|draw PR 29: cell[0] may have changed -> re-walk the blocking mirror
+	drawMapMirrors.MarkBlockingDirty();
+
 	// FIXME: needs dependency injection (observer pattern?)
 	if (object->moveDef != nullptr)
 		return;
@@ -147,6 +154,9 @@ void CGroundBlockingObjectMap::RemoveGroundBlockingObject(CSolidObject* object)
 			CellErase(z * mapDims.mapx + x, object);
 		}
 	}
+
+	// sim|draw PR 29: cell[0] may have changed -> re-walk the blocking mirror
+	drawMapMirrors.MarkBlockingDirty();
 
 	// FIXME: needs dependency injection (observer pattern?)
 	if (object->moveDef != nullptr)
