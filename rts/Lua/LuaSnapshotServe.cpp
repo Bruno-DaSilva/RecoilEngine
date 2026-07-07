@@ -523,6 +523,26 @@ int LuaSnapshotServe::Route(lua_State* L, const char* caller, ServeFn liveFn, Se
 		return snapFn(L, caller);
 	}
 
+	// EXPECTED-DIVERGENCE NOTE (PR 38f/38g/38h, sim|draw): three sim-fired
+	// deferred EVENT handlers -- gui_selfd_icons (UnitCommand -> cmd queue),
+	// unit_idle_guard (UnitCmdDone -> cmd queue/count) and unit_ghostradar_gl4
+	// (UnitLeftLos -> position) -- carry an event-time override on their
+	// snapshot leg (ScopedCmdQueueEventOverride / SimSnapshotLosEvent) so the
+	// deferred read sees the state as it was AT the event, not at the parked
+	// end-of-frame the live leg observes. Pre-38h these handlers reached Route
+	// with ShouldServe()==false (drained under barrierLive, Enforced()==false)
+	// and returned the live leg directly, no dual-run. 38h's
+	// ScopedContractReassert re-asserts Enforced() for the dispatch so the read
+	// routes to the twin where the override lives; that also means the sim is
+	// parked (IsSimParked()==true), the SimThreadRunning early-out above does
+	// NOT fire, and -- if the diff gate is armed flag-ON -- the dual-run below
+	// bit-compares the override-bearing snapshot leg against the live leg's
+	// last-boundary/nil queue or gone-from-LOS position. Those legs are
+	// DESIGNED to differ: such mismatches for these three callers are BENIGN
+	// (the snapshot is still served; no game/sync effect) and must NOT be
+	// treated as regressions by any downstream PR that arms the gate flag-ON.
+	// Flag-off is unaffected (no deferral -> handlers run live as before).
+	//
 	// armed: run BOTH real paths, bit-compare their actual return slots
 	// (masking and gating included by construction), serve the snapshot values.
 	// The live returns are stashed in the registry and the stack is reset to
