@@ -49,7 +49,7 @@ static inline uint64_t HashUnitRow(const SimSnapshot::UnitRows& r, int id)
 		w[1] = std::bit_cast<uint32_t>(p.energy);
 	};
 
-	uint32_t w[71];
+	uint32_t w[72];
 	w[0]  = static_cast<uint32_t>(id);
 	f3(&w[1], r.pos[id]);
 	w[4]  = std::bit_cast<uint32_t>(r.speed[id].x);
@@ -125,6 +125,50 @@ static inline uint64_t HashUnitRow(const SimSnapshot::UnitRows& r, int id)
 	pack(&w[66], r.harvestStorage[id]);
 	pack(&w[68], r.cost[id]);
 	w[70] = std::bit_cast<uint32_t>(r.buildTime[id]);
+
+	// PR 31 (weapon/shield family): the whole per-unit weapon block folded into
+	// one word (variable-length per unit, like the losStatusAll fold above). All
+	// synced state; only the independent discrete runtime + config scalars are
+	// folded (the derived experience values AccuracyExperience/... are redundant
+	// with `experience`, already hashed, and the position-derived vectors track
+	// pos/target which are hashed too -- keeps this cheap and low-noise). The
+	// flattened damage arrays are def-/Lua-ctrl-derived and excluded like selVol.
+	uint32_t wpnAcc = 2166136261u;
+	const auto fnvU32 = [&wpnAcc](uint32_t v) { wpnAcc = (wpnAcc ^ v) * 16777619u; };
+	const auto fnvF   = [&](float v) { fnvU32(std::bit_cast<uint32_t>(v)); };
+	fnvU32(static_cast<uint32_t>(r.weaponCount[id]));
+	fnvU32(static_cast<uint32_t>(r.flankingMode[id]));
+	fnvF(r.flankingDir[id].x); fnvF(r.flankingDir[id].y); fnvF(r.flankingDir[id].z);
+	fnvF(r.flankingMoveFactor[id]);
+	fnvF(r.flankingAvgDamage[id]);
+	fnvF(r.flankingDifDamage[id]);
+	fnvF(r.flankingMobility[id]);
+	fnvU32(static_cast<uint32_t>(r.hasStockpile[id]) | (static_cast<uint32_t>(r.hasShieldWeapon[id]) << 8)
+	     | (static_cast<uint32_t>(r.shieldWeaponEnabled[id]) << 16));
+	fnvU32(static_cast<uint32_t>(r.stockpileNumStockpiled[id]));
+	fnvU32(static_cast<uint32_t>(r.stockpileNumQueued[id]));
+	fnvF(r.stockpileBuildPercent[id]);
+	fnvF(r.shieldWeaponPower[id]);
+	{
+		const int base = r.weaponOffset[id];
+		for (int wn = 0; wn < r.weaponCount[id]; ++wn) {
+			const int wi = base + wn;
+			fnvU32(static_cast<uint32_t>(r.wReloadStatus[wi]));
+			fnvU32(static_cast<uint32_t>(r.wSalvoLeft[wi]));
+			fnvU32(static_cast<uint32_t>(r.wNumStockpiled[wi]));
+			fnvU32(static_cast<uint32_t>(r.wNextSalvo[wi]));
+			fnvU32(static_cast<uint32_t>(r.wAngleGood[wi])
+			     | (static_cast<uint32_t>(r.wTargetType[wi]) << 8)
+			     | (static_cast<uint32_t>(r.wIsShield[wi])   << 16)
+			     | (static_cast<uint32_t>(r.wShieldEnabled[wi]) << 24));
+			fnvU32(static_cast<uint32_t>(r.wTargetUnitID[wi]));
+			fnvU32(static_cast<uint32_t>(r.wTargetInterceptID[wi]));
+			fnvF(r.wTargetGroundPos[wi].x); fnvF(r.wTargetGroundPos[wi].y); fnvF(r.wTargetGroundPos[wi].z);
+			fnvF(r.wRange[wi]);
+			fnvF(r.wShieldPower[wi]);
+		}
+	}
+	w[71] = wpnAcc;
 
 	return Mix(w, sizeof(w), UNIT_SEED);
 }

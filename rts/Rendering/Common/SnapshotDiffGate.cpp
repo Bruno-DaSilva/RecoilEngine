@@ -35,6 +35,13 @@
 #include "Sim/Units/UnitDefHandler.h"
 #include "Sim/Units/UnitHandler.h"
 #include "Sim/Weapons/WeaponDef.h"
+// PR 31 (weapon/shield scalar family): live weapon/shield/damages compare
+#include "Sim/Weapons/Weapon.h"
+#include "Sim/Weapons/PlasmaRepulser.h"
+#include "Sim/Weapons/BombDropper.h"
+#include "Sim/Weapons/WeaponTarget.h"
+#include "Sim/Misc/DamageArray.h"
+#include "Game/Players/Player.h" // fpsControlPlayer gate compare
 #include "Lua/LuaSnapshotServe.h" // sim|draw PR 30: command-queue serving-cache compare
 #include "System/Log/ILog.h"
 
@@ -154,6 +161,14 @@ static constexpr const char* FIELD_NAMES[] = {
 	// sim|draw PR 29 (blocking-map mirror): appended to match the enum tail
 	// MM_BLOCKING
 	"map:blocking",
+	// PR 31 (weapon/shield scalar family): appended to match the enum tail
+	"wpn:unit",
+	"wpn:unitDamages",
+	"wpn:state",
+	"wpn:vectors",
+	"wpn:target",
+	"wpn:shield",
+	"wpn:damages",
 };
 
 // structural compare for the copied customOpts maps (emilib::HashMap has no
@@ -504,6 +519,7 @@ void SnapshotDiffGate::CheckBoundary()
 	CheckGlobalRows();
 	CheckMapMirrors();
 	CheckCmdQueueRows();
+	CheckWeaponRows();
 }
 
 void SnapshotDiffGate::CheckProjectileRows()
@@ -1128,5 +1144,159 @@ void SnapshotDiffGate::CheckCmdQueueRows()
 
 		if (Bump(fields[CQ_FACTORY], r.factoryOk))
 			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=cq:factory mismatch", gs->frameNum, int(id));
+	}
+}
+
+// PR 31 mirror-verification: the UnitRows weapon block was extracted at
+// simSnapshot.Update() this same boundary, so every compare must trivially pass;
+// a missed/torn weapon field becomes a deterministic gate failure. Mirrors
+// SimSnapshot::Extract's two weapon passes exactly (same live reads, same order,
+// same flatten). The flattened damage arrays compare field-wise against the live
+// DynDamageArray (avoids the null-vs-empty and pointer-identity traps).
+static bool WpnDamagesEqual(const SimSnapshot::UnitRows::DamagesSnap& s, const DynDamageArray* live)
+{
+	if ((s.valid != 0) != (live != nullptr))
+		return false;
+	if (live == nullptr)
+		return true;
+
+	if (s.paralyzeDamageTime != live->paralyzeDamageTime)  return false;
+	if (!BitEqual(s.impulseFactor, live->impulseFactor))   return false;
+	if (!BitEqual(s.impulseBoost, live->impulseBoost))     return false;
+	if (!BitEqual(s.craterMult, live->craterMult))         return false;
+	if (!BitEqual(s.craterBoost, live->craterBoost))       return false;
+	if (!BitEqual(s.dynDamageExp, live->dynDamageExp))     return false;
+	if (!BitEqual(s.dynDamageMin, live->dynDamageMin))     return false;
+	if (!BitEqual(s.dynDamageRange, live->dynDamageRange)) return false;
+	if ((s.dynDamageInverted != 0) != live->dynDamageInverted)          return false;
+	if (!BitEqual(s.craterAreaOfEffect, live->craterAreaOfEffect))      return false;
+	if (!BitEqual(s.damageAreaOfEffect, live->damageAreaOfEffect))      return false;
+	if (!BitEqual(s.edgeEffectiveness, live->edgeEffectiveness))        return false;
+	if (!BitEqual(s.explosionSpeed, live->explosionSpeed))              return false;
+	if (int(s.damages.size()) != live->GetNumTypes())     return false;
+	for (int i = 0; i < live->GetNumTypes(); ++i)
+		if (!BitEqual(s.damages[i], live->Get(i)))        return false;
+
+	return true;
+}
+
+void SnapshotDiffGate::CheckWeaponRows()
+{
+	const SimSnapshot::UnitRows& rows = simSnapshot.Read();
+	const size_t maxUnits = rows.MaxUnits();
+
+	for (size_t i = 0; i < maxUnits; ++i) {
+		const int id = static_cast<int>(i);
+		const CUnit* u = unitHandler.GetUnitUnsafe(id); // id < maxUnits
+
+		// weapon rows share UnitRows validity; a validity mismatch is already
+		// reported by the main unit field pass, so only cross-check both-valid
+		if (u == nullptr || rows.valid[i] == 0)
+			continue;
+
+		// per-unit weapon block (flanking / stockpile / shield-default / fps)
+		{
+			const CPlayer* fpsPlayer = u->fpsControlPlayer;
+			const bool liveFpsNoFire = (fpsPlayer != nullptr && !fpsPlayer->fpsController.mouse1 && !fpsPlayer->fpsController.mouse2);
+			const CWeapon* stockpile = u->stockpileWeapon;
+			const CPlasmaRepulser* shield = static_cast<const CPlasmaRepulser*>(u->shieldWeapon);
+
+			const bool unitEqual =
+				(rows.weaponCount[i] == int32_t(u->weapons.size())) &&
+				BitEqual(rows.reloadSpeed[i], u->reloadSpeed) &&
+				((rows.fpsNoFire[i] != 0) == liveFpsNoFire) &&
+				(rows.flankingMode[i] == u->flankingBonusMode) &&
+				BitEqual(rows.flankingDir[i], u->flankingBonusDir) &&
+				BitEqual(rows.flankingMoveFactor[i], u->flankingBonusMobilityAdd) &&
+				BitEqual(rows.flankingAvgDamage[i], u->flankingBonusAvgDamage) &&
+				BitEqual(rows.flankingDifDamage[i], u->flankingBonusDifDamage) &&
+				BitEqual(rows.flankingMobility[i], u->flankingBonusMobility) &&
+				((rows.hasStockpile[i] != 0) == (stockpile != nullptr)) &&
+				(rows.stockpileNumStockpiled[i] == (stockpile != nullptr ? stockpile->numStockpiled : 0)) &&
+				(rows.stockpileNumQueued[i] == (stockpile != nullptr ? stockpile->numStockpileQued : 0)) &&
+				BitEqual(rows.stockpileBuildPercent[i], (stockpile != nullptr ? stockpile->buildPercent : 0.0f)) &&
+				((rows.hasShieldWeapon[i] != 0) == (shield != nullptr)) &&
+				((rows.shieldWeaponEnabled[i] != 0) == (shield != nullptr ? shield->IsEnabled() : false)) &&
+				BitEqual(rows.shieldWeaponPower[i], (shield != nullptr ? shield->GetCurPower() : 0.0f));
+			if (Bump(fields[W_UNIT], unitEqual))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=wpn:unit mismatch", gs->frameNum, id);
+
+			const bool udEqual =
+				WpnDamagesEqual(rows.deathExpDamages[i], u->deathExpDamages) &&
+				WpnDamagesEqual(rows.selfdExpDamages[i], u->selfdExpDamages);
+			if (Bump(fields[W_UNITDAMAGES], udEqual))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=wpn:unitDamages mismatch", gs->frameNum, id);
+		}
+
+		// per-weapon block
+		const int base = rows.weaponOffset[i];
+		for (size_t w = 0; w < u->weapons.size(); ++w) {
+			const CWeapon* weapon = u->weapons[w];
+			const WeaponDef* wdef = weapon->weaponDef;
+			const int wi = base + static_cast<int>(w);
+
+			const bool stateEqual =
+				((rows.wAngleGood[wi] != 0) == weapon->angleGood) &&
+				(rows.wReloadStatus[wi] == weapon->reloadStatus) &&
+				(rows.wSalvoLeft[wi] == weapon->salvoLeft) &&
+				(rows.wNumStockpiled[wi] == weapon->numStockpiled) &&
+				(rows.wNextSalvo[wi] == weapon->nextSalvo) &&
+				(rows.wReloadTime[wi] == weapon->reloadTime) &&
+				(rows.wReaimTime[wi] == weapon->reaimTime) &&
+				BitEqual(rows.wAccuracyExp[wi], weapon->AccuracyExperience()) &&
+				BitEqual(rows.wSprayAngleExp[wi], weapon->SprayAngleExperience()) &&
+				BitEqual(rows.wSalvoError[wi], weapon->SalvoErrorExperience()) &&
+				BitEqual(rows.wMoveErrorExp[wi], weapon->MoveErrorExperience()) &&
+				BitEqual(rows.wRange[wi], weapon->range) &&
+				BitEqual(rows.wProjectileSpeed[wi], weapon->projectileSpeed) &&
+				BitEqual(rows.wAutoTargetRangeBoost[wi], weapon->autoTargetRangeBoost) &&
+				(rows.wSalvoSize[wi] == weapon->salvoSize) &&
+				(rows.wSalvoDelay[wi] == weapon->salvoDelay) &&
+				(rows.wSalvoWindup[wi] == weapon->salvoWindup) &&
+				(rows.wProjectilesPerShot[wi] == weapon->projectilesPerShot) &&
+				(rows.wAvoidFlags[wi] == weapon->avoidFlags) &&
+				(rows.wCollisionFlags[wi] == weapon->collisionFlags) &&
+				(rows.wTtl[wi] == weapon->ttl);
+			if (Bump(fields[W_STATE], stateEqual))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d weapon=%d field=wpn:state mismatch", gs->frameNum, id, int(w));
+
+			const bool vecEqual =
+				BitEqual(rows.wMuzzlePos[wi], weapon->weaponMuzzlePos) &&
+				BitEqual(rows.wWantedDir[wi], weapon->wantedDir) &&
+				BitEqual(rows.wWeaponDir[wi], weapon->weaponDir) &&
+				(rows.wProjectileType[wi] == int32_t(wdef->projectileType)) &&
+				((rows.wDefStockpile[wi] != 0) == wdef->stockpile) &&
+				((rows.wDefFireSubmersed[wi] != 0) == wdef->fireSubmersed) &&
+				BitEqual(rows.wDefMaxFireAngle[wi], wdef->maxFireAngle) &&
+				((rows.wIsBombDropper[wi] != 0) == (dynamic_cast<const CBombDropper*>(weapon) != nullptr)) &&
+				BitEqual(rows.wAimFromPosY[wi], weapon->aimFromPos.y) &&
+				BitEqual(rows.wLastRequestedDir[wi], weapon->lastRequestedDir);
+			if (Bump(fields[W_VECTORS], vecEqual))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d weapon=%d field=wpn:vectors mismatch", gs->frameNum, id, int(w));
+
+			const SWeaponTarget& tgt = weapon->GetCurrentTarget();
+			const int liveTgtUnit = (tgt.type == Target_Unit && tgt.unit != nullptr) ? tgt.unit->id : 0;
+			const int liveTgtInt  = (tgt.type == Target_Intercept && tgt.intercept != nullptr) ? tgt.intercept->id : 0;
+			const float3 liveTgtPos = (tgt.type == Target_Pos) ? tgt.groundPos : ZeroVector;
+			const bool tgtEqual =
+				(rows.wTargetType[wi] == uint8_t(tgt.type)) &&
+				((rows.wTargetIsUser[wi] != 0) == tgt.isUserTarget) &&
+				(rows.wTargetUnitID[wi] == liveTgtUnit) &&
+				(rows.wTargetInterceptID[wi] == liveTgtInt) &&
+				BitEqual(rows.wTargetGroundPos[wi], liveTgtPos);
+			if (Bump(fields[W_TARGET], tgtEqual))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d weapon=%d field=wpn:target mismatch", gs->frameNum, id, int(w));
+
+			const CPlasmaRepulser* repulser = dynamic_cast<const CPlasmaRepulser*>(weapon);
+			const bool shEqual =
+				((rows.wIsShield[wi] != 0) == (repulser != nullptr)) &&
+				((rows.wShieldEnabled[wi] != 0) == (repulser != nullptr ? repulser->IsEnabled() : false)) &&
+				BitEqual(rows.wShieldPower[wi], repulser != nullptr ? repulser->GetCurPower() : 0.0f);
+			if (Bump(fields[W_SHIELD], shEqual))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d weapon=%d field=wpn:shield mismatch", gs->frameNum, id, int(w));
+
+			if (Bump(fields[W_DAMAGES], WpnDamagesEqual(rows.wDamages[wi], weapon->damages)))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d weapon=%d field=wpn:damages mismatch", gs->frameNum, id, int(w));
+		}
 	}
 }

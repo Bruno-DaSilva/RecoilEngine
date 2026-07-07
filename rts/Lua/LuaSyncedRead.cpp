@@ -4231,9 +4231,9 @@ int LuaSyncedRead::GetUnitSelfDTime(lua_State* L)
  * @return integer? numStockpileQued
  * @return number? buildPercent
  */
-int LuaSyncedRead::GetUnitStockpile(lua_State* L)
+static int GetUnitStockpileLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseAllyUnit(L, __func__, 1);
+	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 	if (unit == nullptr)
 		return 0;
 
@@ -4244,6 +4244,12 @@ int LuaSyncedRead::GetUnitStockpile(lua_State* L)
 	lua_pushnumber(L, unit->stockpileWeapon->numStockpileQued);
 	lua_pushnumber(L, unit->stockpileWeapon->buildPercent);
 	return 3;
+}
+
+int LuaSyncedRead::GetUnitStockpile(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 31, weapon/shield family)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitStockpileLive, &LuaSnapshotServe::GetUnitStockpile);
 }
 
 
@@ -5505,9 +5511,9 @@ int LuaSyncedRead::GetUnitIsTransporting(lua_State* L)
  * @return number isEnabled Warning, number not boolean. 0 or 1
  * @return number currentPower
  */
-int LuaSyncedRead::GetUnitShieldState(lua_State* L)
+static int GetUnitShieldStateLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseInLosUnit(L, __func__, 1);
+	const CUnit* unit = ParseInLosUnit(L, caller, 1);
 	if (unit == nullptr)
 		return 0;
 
@@ -5528,15 +5534,21 @@ int LuaSyncedRead::GetUnitShieldState(lua_State* L)
 	return 2;
 }
 
+int LuaSyncedRead::GetUnitShieldState(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 31, weapon/shield family)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitShieldStateLive, &LuaSnapshotServe::GetUnitShieldState);
+}
+
 
 /***
  *
  * @function Spring.GetUnitFlanking
  * @param unitID integer
  */
-int LuaSyncedRead::GetUnitFlanking(lua_State* L)
+static int GetUnitFlankingLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseAllyUnit(L, __func__, 1);
+	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 	if (unit == nullptr)
 		return 0;
 
@@ -5585,6 +5597,12 @@ int LuaSyncedRead::GetUnitFlanking(lua_State* L)
 	}
 
 	return 0;
+}
+
+int LuaSyncedRead::GetUnitFlanking(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 31, weapon/shield family)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitFlankingLive, &LuaSnapshotServe::GetUnitFlanking);
 }
 
 
@@ -5655,9 +5673,9 @@ int LuaSyncedRead::GetUnitMaxRange(lua_State* L)
  * @param stateName string
  * @return number stateValue
  */
-int LuaSyncedRead::GetUnitWeaponState(lua_State* L)
+static int GetUnitWeaponStateLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseAllyUnit(L, __func__, 1);
+	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 	if (unit == nullptr)
 		return 0;
 
@@ -5765,6 +5783,12 @@ int LuaSyncedRead::GetUnitWeaponState(lua_State* L)
 	return 1;
 }
 
+int LuaSyncedRead::GetUnitWeaponState(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 31, weapon/shield family)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitWeaponStateLive, &LuaSnapshotServe::GetUnitWeaponState);
+}
+
 
 static inline int PushDamagesKey(lua_State* L, const DynDamageArray& damages, int index)
 {
@@ -5838,9 +5862,9 @@ static inline int PushDamagesKey(lua_State* L, const DynDamageArray& damages, in
  * @function Spring.GetUnitWeaponDamages
  * @param unitID integer
  */
-int LuaSyncedRead::GetUnitWeaponDamages(lua_State* L)
+static int GetUnitWeaponDamagesLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseAllyUnit(L, __func__, 1);
+	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 	if (unit == nullptr)
 		return 0;
 
@@ -5871,15 +5895,21 @@ int LuaSyncedRead::GetUnitWeaponDamages(lua_State* L)
 	return PushDamagesKey(L, *damages, 3);
 }
 
+int LuaSyncedRead::GetUnitWeaponDamages(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 31, weapon/shield family)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitWeaponDamagesLive, &LuaSnapshotServe::GetUnitWeaponDamages);
+}
+
 
 /***
  *
  * @function Spring.GetUnitWeaponVectors
  * @param unitID integer
  */
-int LuaSyncedRead::GetUnitWeaponVectors(lua_State* L)
+static int GetUnitWeaponVectorsLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseAllyUnit(L, __func__, 1);
+	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 
 	if (unit == nullptr)
 		return 0;
@@ -5909,6 +5939,12 @@ int LuaSyncedRead::GetUnitWeaponVectors(lua_State* L)
 	lua_pushnumber(L, dir->z);
 
 	return 6;
+}
+
+int LuaSyncedRead::GetUnitWeaponVectors(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 31, weapon/shield family)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitWeaponVectorsLive, &LuaSnapshotServe::GetUnitWeaponVectors);
 }
 
 
@@ -6104,9 +6140,9 @@ int LuaSyncedRead::GetUnitWeaponHaveFreeLineOfFire(lua_State* L)
  * @function Spring.GetUnitWeaponCanFire
  * @param unitID integer
  */
-int LuaSyncedRead::GetUnitWeaponCanFire(lua_State* L)
+static int GetUnitWeaponCanFireLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseAllyUnit(L, __func__, 1);
+	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 
 	if (unit == nullptr)
 		return 0;
@@ -6122,6 +6158,12 @@ int LuaSyncedRead::GetUnitWeaponCanFire(lua_State* L)
 
 	lua_pushboolean(L, unit->weapons[weaponNum]->CanFire(ignoreAngleGood, ignoreTargetType, ignoreRequestedDir));
 	return 1;
+}
+
+int LuaSyncedRead::GetUnitWeaponCanFire(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 31, weapon/shield family)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitWeaponCanFireLive, &LuaSnapshotServe::GetUnitWeaponCanFire);
 }
 
 /***
@@ -6183,9 +6225,9 @@ int LuaSyncedRead::GetUnitWeaponCanFire(lua_State* L)
  * @return boolean isUserTarget
  * @return integer targetProjectileId
  */
-int LuaSyncedRead::GetUnitWeaponTarget(lua_State* L)
+static int GetUnitWeaponTargetLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseAllyUnit(L, __func__, 1);
+	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 
 	if (unit == nullptr)
 		return 0;
@@ -6225,6 +6267,12 @@ int LuaSyncedRead::GetUnitWeaponTarget(lua_State* L)
 	}
 
 	return 3;
+}
+
+int LuaSyncedRead::GetUnitWeaponTarget(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 31, weapon/shield family)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitWeaponTargetLive, &LuaSnapshotServe::GetUnitWeaponTarget);
 }
 
 

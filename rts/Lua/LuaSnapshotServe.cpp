@@ -9,6 +9,7 @@
 #include <map>    // PR 34: PushUnitListSortedByDefSnap's ordered def buckets
 #include <vector>
 
+#include "LuaConfig.h" // PR 31: LUA_WEAPON_BASE_INDEX (weapon/shield family)
 #include "LuaHandle.h"
 #include "LuaHashString.h" // HSTR_PUSH_BOOL
 #include "LuaInclude.h"
@@ -43,6 +44,8 @@
 #include "Sim/Misc/GlobalSynced.h" // GODMODE_*_BIT
 #include "Sim/MoveTypes/MoveDefHandler.h" // immutable MoveDef name (GetUnitMoveDefID)
 #include "Sim/Projectiles/PieceProjectile.h" // PR 33 GetPieceProjectileParams/Name twins
+#include "Sim/Projectiles/WeaponProjectiles/WeaponProjectileTypes.h" // PR 31 WEAPON_*_PROJECTILE (GetUnitWeaponVectors)
+#include "Sim/Weapons/WeaponTarget.h" // PR 31 Target_* (GetUnitWeaponTarget/CanFire)
 #include "Sim/Units/BuildInfo.h" // sim|draw PR 29: Pos2BuildPos
 #include "Sim/Units/CommandAI/CommandAI.h" // command-queue family boundary copies
 #include "Sim/Units/CommandAI/FactoryCAI.h"
@@ -6366,5 +6369,468 @@ int LuaSnapshotServe::Pos2BuildPos(lua_State* L, const char* caller)
 	lua_pushnumber(L, buildPos.x);
 	lua_pushnumber(L, buildPos.y);
 	lua_pushnumber(L, buildPos.z);
+	return 3;
+}
+
+/******************************************************************************
+ * PR 31 (weapon/shield scalar family) serving twins. Served from the
+ * SimSnapshot::UnitRows weapon block (per-unit scalars + a flat per-weapon SoA,
+ * index = weaponOffset[unitID] + weaponNum). Line-by-line mirrors of the live
+ * bodies in LuaSyncedRead.cpp; every sim-object read is replaced by a snapshot
+ * row read, float expression order kept identical for bit equality. POV: all
+ * gate on ParseAllyUnit (PovAlliedUnit) except GetUnitShieldState (ParseInLosUnit
+ * -> PovUnitInLos). gs->frameNum is mirrored by rows.simFrame (the boundary
+ * frame). Trace tests (TryTarget/TestTarget/TestRange/HaveFreeLineOfFire) are
+ * PR 35's, not served here.
+ ******************************************************************************/
+
+namespace {
+	// mirror of PushDamagesKey (LuaSyncedRead.cpp) over the flattened DamagesSnap;
+	// same key set, same push types, same GetNumTypes/Get(index) semantics
+	int PushDamagesKeySnap(lua_State* L, const SimSnapshot::UnitRows::DamagesSnap& damages, int index)
+	{
+		if (lua_isnumber(L, index)) {
+			const unsigned armType = lua_toint(L, index);
+
+			if (armType >= damages.damages.size())
+				return 0;
+
+			lua_pushnumber(L, damages.damages[armType]);
+			return 1;
+		}
+
+		switch (hashString(luaL_checkstring(L, index))) {
+			case hashString("paralyzeDamageTime"): { lua_pushnumber(L, damages.paralyzeDamageTime); } break;
+
+			case hashString("impulseFactor"): { lua_pushnumber(L, damages.impulseFactor); } break;
+			case hashString("impulseBoost"):  { lua_pushnumber(L, damages.impulseBoost);  } break;
+
+			case hashString("craterMult"):  { lua_pushnumber(L, damages.craterMult);  } break;
+			case hashString("craterBoost"): { lua_pushnumber(L, damages.craterBoost); } break;
+
+			case hashString("dynDamageExp"):      { lua_pushnumber(L, damages.dynDamageExp);   } break;
+			case hashString("dynDamageMin"):      { lua_pushnumber(L, damages.dynDamageMin);   } break;
+			case hashString("dynDamageRange"):    { lua_pushnumber(L, damages.dynDamageRange); } break;
+			case hashString("dynDamageInverted"): { lua_pushboolean(L, damages.dynDamageInverted); } break;
+
+			case hashString("craterAreaOfEffect"): { lua_pushnumber(L, damages.craterAreaOfEffect); } break;
+			case hashString("damageAreaOfEffect"): { lua_pushnumber(L, damages.damageAreaOfEffect); } break;
+
+			case hashString("edgeEffectiveness"): { lua_pushnumber(L, damages.edgeEffectiveness); } break;
+			case hashString("explosionSpeed"):    { lua_pushnumber(L, damages.explosionSpeed);    } break;
+
+			default: { return 0; } break;
+		}
+
+		return 1;
+	}
+}
+
+// mirror of LuaSyncedRead::GetUnitStockpile (ParseAllyUnit gate)
+int LuaSnapshotServe::GetUnitStockpile(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// ParseAllyUnit mirror
+	if (!rows.Valid(unitID) || !rows.PovAlliedUnit(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	if (rows.hasStockpile[unitID] == 0)
+		return 0;
+
+	lua_pushnumber(L, rows.stockpileNumStockpiled[unitID]);
+	lua_pushnumber(L, rows.stockpileNumQueued[unitID]);
+	lua_pushnumber(L, rows.stockpileBuildPercent[unitID]);
+	return 3;
+}
+
+// mirror of LuaSyncedRead::GetUnitShieldState (ParseInLosUnit gate)
+int LuaSnapshotServe::GetUnitShieldState(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// ParseInLosUnit mirror
+	if (!rows.Valid(unitID) || !rows.PovUnitInLos(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	const size_t idx = luaL_optint(L, 2, -1) - LUA_WEAPON_BASE_INDEX;
+
+	bool hasShield;
+	uint8_t shieldEnabled;
+	float shieldPower;
+
+	if (idx >= static_cast<size_t>(rows.weaponCount[unitID])) {
+		// default: unit->shieldWeapon (static_cast in the live path)
+		hasShield = (rows.hasShieldWeapon[unitID] != 0);
+		shieldEnabled = rows.shieldWeaponEnabled[unitID];
+		shieldPower = rows.shieldWeaponPower[unitID];
+	} else {
+		// explicit weapon index (dynamic_cast to CPlasmaRepulser in the live path)
+		const int wi = rows.weaponOffset[unitID] + static_cast<int>(idx);
+		hasShield = (rows.wIsShield[wi] != 0);
+		shieldEnabled = rows.wShieldEnabled[wi];
+		shieldPower = rows.wShieldPower[wi];
+	}
+
+	if (!hasShield)
+		return 0;
+
+	lua_pushnumber(L, shieldEnabled);
+	lua_pushnumber(L, shieldPower);
+	return 2;
+}
+
+// mirror of LuaSyncedRead::GetUnitFlanking (ParseAllyUnit gate)
+int LuaSnapshotServe::GetUnitFlanking(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// ParseAllyUnit mirror
+	if (!rows.Valid(unitID) || !rows.PovAlliedUnit(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	if (lua_israwstring(L, 2)) {
+		const char* key = lua_tostring(L, 2);
+
+		switch (hashString(key)) {
+			case hashString("mode"): {
+				lua_pushnumber(L, rows.flankingMode[unitID]);
+				return 1;
+			} break;
+			case hashString("dir"): {
+				lua_pushnumber(L, rows.flankingDir[unitID].x);
+				lua_pushnumber(L, rows.flankingDir[unitID].y);
+				lua_pushnumber(L, rows.flankingDir[unitID].z);
+				return 3;
+			} break;
+			case hashString("moveFactor"): {
+				lua_pushnumber(L, rows.flankingMoveFactor[unitID]);
+				return 1;
+			} break;
+			case hashString("minDamage"): {
+				lua_pushnumber(L, rows.flankingAvgDamage[unitID] - rows.flankingDifDamage[unitID]);
+				return 1;
+			} break;
+			case hashString("maxDamage"): {
+				lua_pushnumber(L, rows.flankingAvgDamage[unitID] + rows.flankingDifDamage[unitID]);
+				return 1;
+			} break;
+			default: {
+			} break;
+		}
+	}
+	else if (lua_isnoneornil(L, 2)) {
+		lua_pushnumber(L, rows.flankingMode[unitID]);
+		lua_pushnumber(L, rows.flankingMoveFactor[unitID]);
+		lua_pushnumber(L, rows.flankingAvgDamage[unitID] - // min
+		                  rows.flankingDifDamage[unitID]);
+		lua_pushnumber(L, rows.flankingAvgDamage[unitID] + // max
+		                  rows.flankingDifDamage[unitID]);
+		lua_pushnumber(L, rows.flankingDir[unitID].x);
+		lua_pushnumber(L, rows.flankingDir[unitID].y);
+		lua_pushnumber(L, rows.flankingDir[unitID].z);
+		lua_pushnumber(L, rows.flankingMobility[unitID]);
+		return 8;
+	}
+
+	return 0;
+}
+
+// mirror of LuaSyncedRead::GetUnitWeaponState (ParseAllyUnit gate)
+int LuaSnapshotServe::GetUnitWeaponState(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// ParseAllyUnit mirror
+	if (!rows.Valid(unitID) || !rows.PovAlliedUnit(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	const size_t weaponNum = luaL_checkint(L, 2) - LUA_WEAPON_BASE_INDEX;
+
+	if (weaponNum >= static_cast<size_t>(rows.weaponCount[unitID]))
+		return 0;
+
+	const int wi = rows.weaponOffset[unitID] + static_cast<int>(weaponNum);
+	const char* key = luaL_optstring(L, 3, "");
+
+	if (key[0] == 0) { // backwards compatible
+		lua_pushboolean(L, rows.wAngleGood[wi]);
+		lua_pushboolean(L, rows.wReloadStatus[wi] <= rows.simFrame);
+		lua_pushnumber(L,  rows.wReloadStatus[wi]);
+		lua_pushnumber(L,  rows.wSalvoLeft[wi]);
+		lua_pushnumber(L,  rows.wNumStockpiled[wi]);
+		return 5;
+	}
+
+	switch (hashString(key)) {
+		case hashString("reloadState"):
+		case hashString("reloadFrame"): {
+			lua_pushnumber(L, rows.wReloadStatus[wi]);
+		} break;
+
+		case hashString("reloadTime"): {
+			lua_pushnumber(L, rows.wReloadTime[wi] * INV_GAME_SPEED);
+		} break;
+		case hashString("reloadTimeXP"): {
+			// reloadSpeed is affected by unit experience
+			lua_pushnumber(L, (rows.wReloadTime[wi] / rows.reloadSpeed[unitID]) / GAME_SPEED);
+		} break;
+		case hashString("reaimTime"): {
+			lua_pushnumber(L, rows.wReaimTime[wi]);
+		} break;
+
+		case hashString("accuracy"): {
+			lua_pushnumber(L, rows.wAccuracyExp[wi]);
+		} break;
+		case hashString("sprayAngle"): {
+			lua_pushnumber(L, rows.wSprayAngleExp[wi]);
+		} break;
+
+		case hashString("range"): {
+			lua_pushnumber(L, rows.wRange[wi]);
+		} break;
+		case hashString("projectileSpeed"): {
+			lua_pushnumber(L, rows.wProjectileSpeed[wi]);
+		} break;
+
+		case hashString("autoTargetRangeBoost"): {
+			lua_pushnumber(L, rows.wAutoTargetRangeBoost[wi]);
+		} break;
+
+		case hashString("burst"): {
+			lua_pushnumber(L, rows.wSalvoSize[wi]);
+		} break;
+		case hashString("burstRate"): {
+			lua_pushnumber(L, rows.wSalvoDelay[wi] * INV_GAME_SPEED);
+		} break;
+		case hashString("windup"): {
+			lua_pushnumber(L, float(rows.wSalvoWindup[wi]) / GAME_SPEED);
+		} break;
+
+		case hashString("projectiles"): {
+			lua_pushnumber(L, rows.wProjectilesPerShot[wi]);
+		} break;
+
+		case hashString("salvoError"): {
+			const float3 salvoError = rows.wSalvoError[wi];
+
+			lua_createtable(L, 3, 0);
+			lua_pushnumber(L, salvoError.x); lua_rawseti(L, -2, 1);
+			lua_pushnumber(L, salvoError.y); lua_rawseti(L, -2, 2);
+			lua_pushnumber(L, salvoError.z); lua_rawseti(L, -2, 3);
+		} break;
+
+		case hashString("salvoLeft"): {
+			lua_pushnumber(L, rows.wSalvoLeft[wi]);
+		} break;
+		case hashString("nextSalvo"): {
+			lua_pushnumber(L, rows.wNextSalvo[wi]);
+		} break;
+
+		case hashString("targetMoveError"): {
+			lua_pushnumber(L, rows.wMoveErrorExp[wi]);
+		} break;
+
+		case hashString("avoidFlags"): {
+			lua_pushnumber(L, rows.wAvoidFlags[wi]);
+		} break;
+		case hashString("collisionFlags"): {
+			lua_pushnumber(L, rows.wCollisionFlags[wi]);
+		} break;
+		case hashString("ttl"): {
+			lua_pushnumber(L, rows.wTtl[wi] * INV_GAME_SPEED);
+		} break;
+
+		default: {
+			return 0;
+		} break;
+	}
+
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetUnitWeaponDamages (ParseAllyUnit gate)
+int LuaSnapshotServe::GetUnitWeaponDamages(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// ParseAllyUnit mirror
+	if (!rows.Valid(unitID) || !rows.PovAlliedUnit(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	const SimSnapshot::UnitRows::DamagesSnap* damages = nullptr;
+
+	if (lua_israwstring(L, 2)) {
+		const char* key = lua_tostring(L, 2);
+
+		switch (hashString(key)) {
+			case hashString("explode"     ): { damages = &rows.deathExpDamages[unitID]; } break;
+			case hashString("selfDestruct"): { damages = &rows.selfdExpDamages[unitID]; } break;
+			default                        : {                              return 0; } break;
+		}
+	} else {
+		const size_t weaponNum = luaL_checkint(L, 2) - LUA_WEAPON_BASE_INDEX;
+
+		if (weaponNum >= static_cast<size_t>(rows.weaponCount[unitID]))
+			return 0;
+
+		damages = &rows.wDamages[rows.weaponOffset[unitID] + static_cast<int>(weaponNum)];
+	}
+
+	// valid==0 reproduces the live "damages == nullptr" nil shape
+	if (damages->valid == 0)
+		return 0;
+
+	return PushDamagesKeySnap(L, *damages, 3);
+}
+
+// mirror of LuaSyncedRead::GetUnitWeaponVectors (ParseAllyUnit gate)
+int LuaSnapshotServe::GetUnitWeaponVectors(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// ParseAllyUnit mirror
+	if (!rows.Valid(unitID) || !rows.PovAlliedUnit(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	const size_t weaponNum = luaL_checkint(L, 2) - LUA_WEAPON_BASE_INDEX;
+
+	if (weaponNum >= static_cast<size_t>(rows.weaponCount[unitID]))
+		return 0;
+
+	const int wi = rows.weaponOffset[unitID] + static_cast<int>(weaponNum);
+	const float3& pos = rows.wMuzzlePos[wi];
+	const float3* dir = &rows.wWantedDir[wi];
+
+	switch (rows.wProjectileType[wi]) {
+		case WEAPON_MISSILE_PROJECTILE  : { dir = &rows.wWeaponDir[wi]; } break;
+		case WEAPON_TORPEDO_PROJECTILE  : { dir = &rows.wWeaponDir[wi]; } break;
+		case WEAPON_STARBURST_PROJECTILE: { dir = &rows.wWeaponDir[wi]; } break;
+		default                         : {                            } break;
+	}
+
+	lua_pushnumber(L, pos.x);
+	lua_pushnumber(L, pos.y);
+	lua_pushnumber(L, pos.z);
+
+	lua_pushnumber(L, dir->x);
+	lua_pushnumber(L, dir->y);
+	lua_pushnumber(L, dir->z);
+
+	return 6;
+}
+
+// mirror of LuaSyncedRead::GetUnitWeaponCanFire (ParseAllyUnit gate). CanFire is
+// a pure-scalar predicate (no spatial/LOS query, unlike the PR-35 trace tests),
+// so it is reproduced from the snapshot scalars: CWeapon::CanFire's decision
+// tree (Weapon.cpp), same order + early-outs, plus the CBombDropper::CanFire
+// override (ignoreAngleGood/ignoreRequestedDir forced true). gs->frameNum is
+// rows.simFrame; the FPS-fire gate is the pre-extracted fpsNoFire bit.
+int LuaSnapshotServe::GetUnitWeaponCanFire(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// ParseAllyUnit mirror
+	if (!rows.Valid(unitID) || !rows.PovAlliedUnit(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	const size_t weaponNum = luaL_checkint(L, 2) - LUA_WEAPON_BASE_INDEX;
+
+	if (weaponNum >= static_cast<size_t>(rows.weaponCount[unitID]))
+		return 0;
+
+	bool ignoreAngleGood = luaL_optboolean(L, 3, false);
+	const bool ignoreTargetType = luaL_optboolean(L, 4, false);
+	bool ignoreRequestedDir = luaL_optboolean(L, 5, false);
+
+	const int wi = rows.weaponOffset[unitID] + static_cast<int>(weaponNum);
+
+	// CBombDropper::CanFire override -> CWeapon::CanFire(true, ignoreTargetType, true)
+	if (rows.wIsBombDropper[wi] != 0) {
+		ignoreAngleGood = true;
+		ignoreRequestedDir = true;
+	}
+
+	// CWeapon::CanFire mirror (Weapon.cpp), from the snapshot scalars
+	bool canFire = true;
+	do {
+		if (!ignoreAngleGood && rows.wAngleGood[wi] == 0) { canFire = false; break; }
+		if ((rows.wSalvoLeft[wi] > 0) || (rows.wNextSalvo[wi] > rows.simFrame)) { canFire = false; break; }
+		if (!ignoreTargetType && rows.wTargetType[wi] == Target_None) { canFire = false; break; } // !HaveTarget()
+		if (rows.wReloadStatus[wi] > rows.simFrame) { canFire = false; break; }
+		if (rows.wDefStockpile[wi] != 0 && rows.wNumStockpiled[wi] == 0) { canFire = false; break; }
+		// muzzle is underwater but we cannot fire underwater
+		if (rows.wDefFireSubmersed[wi] == 0 && rows.wAimFromPosY[wi] <= 0.0f) { canFire = false; break; }
+		// sanity check to force new aim
+		if (rows.wDefMaxFireAngle[wi] > -1.0f) {
+			if (!ignoreRequestedDir && rows.wWantedDir[wi].dot(rows.wLastRequestedDir[wi]) <= rows.wDefMaxFireAngle[wi]) { canFire = false; break; }
+		}
+		// FPS mode: player must be pressing at least one button to fire
+		if (rows.fpsNoFire[unitID] != 0) { canFire = false; break; }
+	} while (false);
+
+	lua_pushboolean(L, canFire);
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetUnitWeaponTarget (ParseAllyUnit gate)
+int LuaSnapshotServe::GetUnitWeaponTarget(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// ParseAllyUnit mirror
+	if (!rows.Valid(unitID) || !rows.PovAlliedUnit(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	const size_t weaponNum = luaL_checkint(L, 2) - LUA_WEAPON_BASE_INDEX;
+
+	if (weaponNum >= static_cast<size_t>(rows.weaponCount[unitID]))
+		return 0;
+
+	const int wi = rows.weaponOffset[unitID] + static_cast<int>(weaponNum);
+	const int targetType = rows.wTargetType[wi];
+
+	lua_pushnumber(L, targetType);
+
+	switch (targetType) {
+		case Target_None:
+			return 1;
+			break;
+		case Target_Unit: {
+			lua_pushboolean(L, rows.wTargetIsUser[wi]);
+			lua_pushnumber(L, rows.wTargetUnitID[wi]);
+			break;
+		}
+		case Target_Pos: {
+			lua_pushboolean(L, rows.wTargetIsUser[wi]);
+			lua_createtable(L, 3, 0);
+			lua_pushnumber(L, rows.wTargetGroundPos[wi].x); lua_rawseti(L, -2, 1);
+			lua_pushnumber(L, rows.wTargetGroundPos[wi].y); lua_rawseti(L, -2, 2);
+			lua_pushnumber(L, rows.wTargetGroundPos[wi].z); lua_rawseti(L, -2, 3);
+			break;
+		}
+		case Target_Intercept: {
+			lua_pushboolean(L, rows.wTargetIsUser[wi]);
+			lua_pushnumber(L, rows.wTargetInterceptID[wi]);
+			break;
+		}
+	}
+
 	return 3;
 }

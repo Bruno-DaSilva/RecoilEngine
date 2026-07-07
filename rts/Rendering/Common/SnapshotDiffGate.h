@@ -210,6 +210,15 @@ private:
 		// every prior field index stable; verified whole-map against the live
 		// groundBlockingObjectMap cell[0] set in CheckMapMirrors
 		MM_BLOCKING,    // per-square cell[0] id + kind
+		// PR 31 (weapon/shield scalar family): appended at the enum tail; grouped
+		// counters over the UnitRows weapon block (per the group comments)
+		W_UNIT,         // weaponOffset/weaponCount/reloadSpeed/fpsNoFire/flanking/stockpile/shield-default
+		W_UNITDAMAGES,  // deathExpDamages / selfdExpDamages (flattened)
+		W_STATE,        // GetUnitWeaponState per-weapon scalars
+		W_VECTORS,      // GetUnitWeaponVectors + GetUnitWeaponCanFire inputs
+		W_TARGET,       // GetUnitWeaponTarget per-weapon
+		W_SHIELD,       // GetUnitShieldState per-weapon isShield/enabled/power
+		W_DAMAGES,      // GetUnitWeaponDamages per-weapon (flattened)
 		F_COUNT
 	};
 
@@ -225,6 +234,7 @@ private:
 	void CheckGlobalRows();
 	void CheckMapMirrors(); // PR 28: DrawMapMirrors vs live sim (memcmp-grade)
 	void CheckCmdQueueRows(); // sim|draw PR 30: command-queue serving-cache mirror verification
+	void CheckWeaponRows(); // PR 31: weapon/shield UnitRows weapon block vs live weapons
 
 	void Report(const char* reason) const;
 	void ResetCounters();

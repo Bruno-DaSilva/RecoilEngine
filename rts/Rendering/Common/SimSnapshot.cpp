@@ -30,6 +30,12 @@
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Units/UnitHandler.h"
 #include "Sim/Weapons/WeaponDef.h"
+// PR 31 (weapon/shield scalar family): live weapon/shield/damages reads
+#include "Sim/Weapons/Weapon.h"
+#include "Sim/Weapons/PlasmaRepulser.h"
+#include "Sim/Weapons/BombDropper.h"
+#include "Sim/Weapons/WeaponTarget.h"
+#include "Sim/Misc/DamageArray.h"
 #include "System/Log/ILog.h"
 #include "System/Misc/SpringTime.h"
 #include "System/TimeProfiler.h"
@@ -82,6 +88,39 @@ static inline uint8_t PackBlockingBits(const CSolidObject* o)
 		(o->crushable          << 4) |
 		(o->blockEnemyPushing  << 5) |
 		(o->blockHeightChanges << 6));
+}
+
+// PR 31: flatten a live DynDamageArray into the POD DamagesSnap (see the
+// DamagesSnap rationale in SimSnapshot.h). The float vector is assigned in
+// place so it reuses capacity across boundaries (numArmorTypes is game-fixed).
+// A null source reproduces the live "damages == nullptr" nil shape (valid=0).
+static inline void CopyDamages(SimSnapshot::UnitRows::DamagesSnap& dst, const DynDamageArray* src)
+{
+	if (src == nullptr) {
+		dst.valid = 0;
+		dst.damages.clear();
+		return;
+	}
+
+	dst.valid = 1;
+	dst.paralyzeDamageTime = src->paralyzeDamageTime;
+	dst.impulseFactor = src->impulseFactor;
+	dst.impulseBoost = src->impulseBoost;
+	dst.craterMult = src->craterMult;
+	dst.craterBoost = src->craterBoost;
+	dst.dynDamageExp = src->dynDamageExp;
+	dst.dynDamageMin = src->dynDamageMin;
+	dst.dynDamageRange = src->dynDamageRange;
+	dst.dynDamageInverted = src->dynDamageInverted;
+	dst.craterAreaOfEffect = src->craterAreaOfEffect;
+	dst.damageAreaOfEffect = src->damageAreaOfEffect;
+	dst.edgeEffectiveness = src->edgeEffectiveness;
+	dst.explosionSpeed = src->explosionSpeed;
+
+	const int n = src->GetNumTypes();
+	dst.damages.resize(n);
+	for (int i = 0; i < n; ++i)
+		dst.damages[i] = src->Get(i);
 }
 
 bool SimSnapshot::UnitRows::PovUnitVisible(int unitID, int readAllyTeam, bool fullRead) const
@@ -346,6 +385,28 @@ void SimSnapshot::Resize(UnitRows& rows, size_t maxUnits, int numAllyTeams)
 	rows.losStatusAll.resize(size_t(numAllyTeams) * maxUnits);
 	rows.posErrorBits.resize(size_t(numAllyTeams) * maxUnits);
 	rows.inRadarAll.resize(size_t(numAllyTeams) * maxUnits);
+
+	// PR 31 (weapon/shield family): per-unit rows (flat per-weapon arrays are
+	// sized in Extract, where the total live weapon count is known)
+	rows.weaponOffset.resize(maxUnits);
+	rows.weaponCount.resize(maxUnits);
+	rows.reloadSpeed.resize(maxUnits);
+	rows.fpsNoFire.resize(maxUnits);
+	rows.flankingMode.resize(maxUnits);
+	rows.flankingDir.resize(maxUnits);
+	rows.flankingMoveFactor.resize(maxUnits);
+	rows.flankingAvgDamage.resize(maxUnits);
+	rows.flankingDifDamage.resize(maxUnits);
+	rows.flankingMobility.resize(maxUnits);
+	rows.hasStockpile.resize(maxUnits);
+	rows.stockpileNumStockpiled.resize(maxUnits);
+	rows.stockpileNumQueued.resize(maxUnits);
+	rows.stockpileBuildPercent.resize(maxUnits);
+	rows.hasShieldWeapon.resize(maxUnits);
+	rows.shieldWeaponEnabled.resize(maxUnits);
+	rows.shieldWeaponPower.resize(maxUnits);
+	rows.deathExpDamages.resize(maxUnits);
+	rows.selfdExpDamages.resize(maxUnits);
 }
 
 void SimSnapshot::Extract(UnitRows& rows)
@@ -431,6 +492,165 @@ void SimSnapshot::Extract(UnitRows& rows)
 			rows.losStatusAll[at * maxUnits + id] = u->losStatus[at];
 			rows.posErrorBits[at * maxUnits + id] = u->GetPosErrorBit(at);
 			rows.inRadarAll[at * maxUnits + id] = losHandler->InRadar(u, at);
+		}
+	}
+
+	// ================= PR 31: weapon/shield scalar family =================
+	// Pass 1: per-unit weapon rows + weaponOffset/weaponCount, accumulating the
+	// total live weapon count so the flat per-weapon arrays are sized once.
+	int32_t totalWeapons = 0;
+	for (const CUnit* u : activeUnits) {
+		const int id = u->id;
+		const int nw = static_cast<int>(u->weapons.size());
+
+		rows.weaponOffset[id] = totalWeapons;
+		rows.weaponCount[id] = nw;
+		totalWeapons += nw;
+
+		rows.reloadSpeed[id] = u->reloadSpeed;
+
+		// CanFire's FPS-fire gate captured as one bool (CWeapon::CanFire)
+		const CPlayer* fpsPlayer = u->fpsControlPlayer;
+		rows.fpsNoFire[id] = (fpsPlayer != nullptr && !fpsPlayer->fpsController.mouse1 && !fpsPlayer->fpsController.mouse2);
+
+		// GetUnitFlanking
+		rows.flankingMode[id] = u->flankingBonusMode;
+		rows.flankingDir[id] = u->flankingBonusDir;
+		rows.flankingMoveFactor[id] = u->flankingBonusMobilityAdd;
+		rows.flankingAvgDamage[id] = u->flankingBonusAvgDamage;
+		rows.flankingDifDamage[id] = u->flankingBonusDifDamage;
+		rows.flankingMobility[id] = u->flankingBonusMobility;
+
+		// GetUnitStockpile (unit->stockpileWeapon; nil shape when null)
+		const CWeapon* stockpile = u->stockpileWeapon;
+		rows.hasStockpile[id] = (stockpile != nullptr);
+		rows.stockpileNumStockpiled[id] = (stockpile != nullptr) ? stockpile->numStockpiled : 0;
+		rows.stockpileNumQueued[id] = (stockpile != nullptr) ? stockpile->numStockpileQued : 0;
+		rows.stockpileBuildPercent[id] = (stockpile != nullptr) ? stockpile->buildPercent : 0.0f;
+
+		// GetUnitShieldState default case (static_cast in the live path, so a
+		// non-null shieldWeapon is a CPlasmaRepulser by construction)
+		const CPlasmaRepulser* shield = static_cast<const CPlasmaRepulser*>(u->shieldWeapon);
+		rows.hasShieldWeapon[id] = (shield != nullptr);
+		rows.shieldWeaponEnabled[id] = (shield != nullptr) ? uint8_t(shield->IsEnabled()) : uint8_t(0);
+		rows.shieldWeaponPower[id] = (shield != nullptr) ? shield->GetCurPower() : 0.0f;
+
+		// GetUnitWeaponDamages explosion arrays (unit-level; flattened POD)
+		CopyDamages(rows.deathExpDamages[id], u->deathExpDamages);
+		CopyDamages(rows.selfdExpDamages[id], u->selfdExpDamages);
+	}
+
+	// size the flat per-weapon arrays to the live weapon count (the DamagesSnap
+	// float vectors keep their capacity across boundaries)
+	{
+		const size_t nw = static_cast<size_t>(totalWeapons);
+		rows.wAngleGood.resize(nw);
+		rows.wReloadStatus.resize(nw);
+		rows.wSalvoLeft.resize(nw);
+		rows.wNumStockpiled.resize(nw);
+		rows.wNextSalvo.resize(nw);
+		rows.wReloadTime.resize(nw);
+		rows.wReaimTime.resize(nw);
+		rows.wAccuracyExp.resize(nw);
+		rows.wSprayAngleExp.resize(nw);
+		rows.wSalvoError.resize(nw);
+		rows.wMoveErrorExp.resize(nw);
+		rows.wRange.resize(nw);
+		rows.wProjectileSpeed.resize(nw);
+		rows.wAutoTargetRangeBoost.resize(nw);
+		rows.wSalvoSize.resize(nw);
+		rows.wSalvoDelay.resize(nw);
+		rows.wSalvoWindup.resize(nw);
+		rows.wProjectilesPerShot.resize(nw);
+		rows.wAvoidFlags.resize(nw);
+		rows.wCollisionFlags.resize(nw);
+		rows.wTtl.resize(nw);
+		rows.wMuzzlePos.resize(nw);
+		rows.wWantedDir.resize(nw);
+		rows.wWeaponDir.resize(nw);
+		rows.wProjectileType.resize(nw);
+		rows.wDefStockpile.resize(nw);
+		rows.wDefFireSubmersed.resize(nw);
+		rows.wDefMaxFireAngle.resize(nw);
+		rows.wIsBombDropper.resize(nw);
+		rows.wAimFromPosY.resize(nw);
+		rows.wLastRequestedDir.resize(nw);
+		rows.wTargetType.resize(nw);
+		rows.wTargetIsUser.resize(nw);
+		rows.wTargetUnitID.resize(nw);
+		rows.wTargetGroundPos.resize(nw);
+		rows.wTargetInterceptID.resize(nw);
+		rows.wIsShield.resize(nw);
+		rows.wShieldEnabled.resize(nw);
+		rows.wShieldPower.resize(nw);
+		rows.wDamages.resize(nw);
+	}
+
+	// Pass 2: flat per-weapon state (computed values -- AccuracyExperience/
+	// SprayAngleExperience/SalvoErrorExperience/MoveErrorExperience are stored
+	// resolved so the twins push scalars, never reproduce the experience math)
+	for (const CUnit* u : activeUnits) {
+		const int base = rows.weaponOffset[u->id];
+		const auto& weapons = u->weapons;
+
+		for (size_t w = 0; w < weapons.size(); ++w) {
+			const CWeapon* weapon = weapons[w];
+			const WeaponDef* wdef = weapon->weaponDef;
+			const int wi = base + static_cast<int>(w);
+
+			// GetUnitWeaponState
+			rows.wAngleGood[wi] = weapon->angleGood;
+			rows.wReloadStatus[wi] = weapon->reloadStatus;
+			rows.wSalvoLeft[wi] = weapon->salvoLeft;
+			rows.wNumStockpiled[wi] = weapon->numStockpiled;
+			rows.wNextSalvo[wi] = weapon->nextSalvo;
+			rows.wReloadTime[wi] = weapon->reloadTime;
+			rows.wReaimTime[wi] = weapon->reaimTime;
+			rows.wAccuracyExp[wi] = weapon->AccuracyExperience();
+			rows.wSprayAngleExp[wi] = weapon->SprayAngleExperience();
+			rows.wSalvoError[wi] = weapon->SalvoErrorExperience();
+			rows.wMoveErrorExp[wi] = weapon->MoveErrorExperience();
+			rows.wRange[wi] = weapon->range;
+			rows.wProjectileSpeed[wi] = weapon->projectileSpeed;
+			rows.wAutoTargetRangeBoost[wi] = weapon->autoTargetRangeBoost;
+			rows.wSalvoSize[wi] = weapon->salvoSize;
+			rows.wSalvoDelay[wi] = weapon->salvoDelay;
+			rows.wSalvoWindup[wi] = weapon->salvoWindup;
+			rows.wProjectilesPerShot[wi] = weapon->projectilesPerShot;
+			rows.wAvoidFlags[wi] = weapon->avoidFlags;
+			rows.wCollisionFlags[wi] = weapon->collisionFlags;
+			rows.wTtl[wi] = weapon->ttl;
+
+			// GetUnitWeaponVectors (dir switch resolved by the twin from projectileType)
+			rows.wMuzzlePos[wi] = weapon->weaponMuzzlePos;
+			rows.wWantedDir[wi] = weapon->wantedDir;
+			rows.wWeaponDir[wi] = weapon->weaponDir;
+			rows.wProjectileType[wi] = static_cast<int32_t>(wdef->projectileType);
+
+			// GetUnitWeaponCanFire inputs (def scalars + runtime state)
+			rows.wDefStockpile[wi] = wdef->stockpile;
+			rows.wDefFireSubmersed[wi] = wdef->fireSubmersed;
+			rows.wDefMaxFireAngle[wi] = wdef->maxFireAngle;
+			rows.wIsBombDropper[wi] = (dynamic_cast<const CBombDropper*>(weapon) != nullptr);
+			rows.wAimFromPosY[wi] = weapon->aimFromPos.y;
+			rows.wLastRequestedDir[wi] = weapon->lastRequestedDir;
+
+			// GetUnitWeaponTarget (SWeaponTarget)
+			const SWeaponTarget& tgt = weapon->GetCurrentTarget();
+			rows.wTargetType[wi] = static_cast<uint8_t>(tgt.type);
+			rows.wTargetIsUser[wi] = tgt.isUserTarget;
+			rows.wTargetUnitID[wi] = (tgt.type == Target_Unit && tgt.unit != nullptr) ? tgt.unit->id : 0;
+			rows.wTargetGroundPos[wi] = (tgt.type == Target_Pos) ? tgt.groundPos : ZeroVector;
+			rows.wTargetInterceptID[wi] = (tgt.type == Target_Intercept && tgt.intercept != nullptr) ? tgt.intercept->id : 0;
+
+			// GetUnitShieldState explicit-weapon case (dynamic_cast in the live path)
+			const CPlasmaRepulser* repulser = dynamic_cast<const CPlasmaRepulser*>(weapon);
+			rows.wIsShield[wi] = (repulser != nullptr);
+			rows.wShieldEnabled[wi] = (repulser != nullptr) ? uint8_t(repulser->IsEnabled()) : uint8_t(0);
+			rows.wShieldPower[wi] = (repulser != nullptr) ? repulser->GetCurPower() : 0.0f;
+
+			// GetUnitWeaponDamages per-weapon (flattened POD)
+			CopyDamages(rows.wDamages[wi], weapon->damages);
 		}
 	}
 

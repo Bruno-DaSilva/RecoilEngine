@@ -355,6 +355,123 @@ public:
 		float3 ObjectSpaceVec(int unitID, const float3& v) const {
 			return ((frontdir[unitID] * v.z) + (rightdir[unitID] * v.x) + (updir[unitID] * v.y));
 		}
+
+		// ================= PR 31: weapon/shield scalar family =================
+		// Per-unit weapon-family scalars + a flat per-weapon SoA (bounded:
+		// numWeapons is def-fixed). Keyed off the same unitID space and the same
+		// UnitRows::Valid()/simFrame/POV as the rest of the struct -- the weapon
+		// twins gate on the unit's ParseAllyUnit/ParseInLosUnit visibility, so no
+		// separate namespace or validity row is needed. The flat arrays are
+		// indexed weaponOffset[unitID] + weaponNum and sized (in Extract, not
+		// Resize -- the total depends on the live weapon count) to the sum of
+		// weaponCount over live units. Serves GetUnitWeaponState/Damages/Vectors/
+		// Target/CanFire, GetUnitShieldState, GetUnitStockpile, GetUnitFlanking.
+		// Trace tests (TryTarget/TestTarget/TestRange/HaveFreeLineOfFire) are NOT
+		// here -- they recompute against the published collision world in PR 35.
+		//
+		// DynDamageArray is Lua-mutable (Spring.SetUnitWeaponDamages ->
+		// DynDamageArray::GetMutable clones a per-weapon heap array), so a raw
+		// shared pointer is neither immutable nor lifetime-stable across the
+		// boundary under the split. Rather than refcount-share a delicate
+		// member/heap-hybrid type across the double buffer + hash scratch, the
+		// damage arrays are FLATTENED into POD (numTypes floats + the scalar
+		// fields) -- the command-queue-flatten discipline (don't hold sim-owned
+		// mutable storage across the boundary). The float vector reuses capacity
+		// across boundaries (numArmorTypes is game-fixed), so steady state is a
+		// memcpy. valid==0 reproduces the live "damages == nullptr" nil shape.
+		struct DamagesSnap {
+			uint8_t valid = 0;              // 1 iff the source DynDamageArray* was non-null
+			int32_t paralyzeDamageTime = 0;
+			float impulseFactor = 0.0f;
+			float impulseBoost = 0.0f;
+			float craterMult = 0.0f;
+			float craterBoost = 0.0f;
+			float dynDamageExp = 0.0f;
+			float dynDamageMin = 0.0f;
+			float dynDamageRange = 0.0f;
+			uint8_t dynDamageInverted = 0;
+			float craterAreaOfEffect = 0.0f;
+			float damageAreaOfEffect = 0.0f;
+			float edgeEffectiveness = 0.0f;
+			float explosionSpeed = 0.0f;
+			std::vector<float> damages;    // per armor type (Get(i) / GetNumTypes())
+		};
+
+		// per-unit weapon-family rows (sized MaxUnits in Resize; only set for
+		// live units, read only behind a Valid()+POV gate like every other field)
+		std::vector<int32_t> weaponOffset;   // start index into the flat arrays
+		std::vector<int32_t> weaponCount;    // unit->weapons.size()
+		std::vector<float> reloadSpeed;      // unit->reloadSpeed (WeaponState reloadTimeXP)
+		std::vector<uint8_t> fpsNoFire;      // CanFire fps gate: fpsControlPlayer && !mouse1 && !mouse2
+		// GetUnitFlanking (all per-unit)
+		std::vector<int32_t> flankingMode;
+		std::vector<float3> flankingDir;
+		std::vector<float> flankingMoveFactor;  // flankingBonusMobilityAdd
+		std::vector<float> flankingAvgDamage;
+		std::vector<float> flankingDifDamage;
+		std::vector<float> flankingMobility;    // flankingBonusMobility
+		// GetUnitStockpile (unit->stockpileWeapon; hasStockpile==0 => nil shape)
+		std::vector<uint8_t> hasStockpile;
+		std::vector<int32_t> stockpileNumStockpiled;
+		std::vector<int32_t> stockpileNumQueued;
+		std::vector<float> stockpileBuildPercent;
+		// GetUnitShieldState default case (unit->shieldWeapon; static_cast in the
+		// live path, so a non-null shieldWeapon is always a CPlasmaRepulser)
+		std::vector<uint8_t> hasShieldWeapon;
+		std::vector<uint8_t> shieldWeaponEnabled;
+		std::vector<float> shieldWeaponPower;
+		// GetUnitWeaponDamages explosion arrays (unit-level; flattened POD)
+		std::vector<DamagesSnap> deathExpDamages;
+		std::vector<DamagesSnap> selfdExpDamages;
+
+		// flat per-weapon arrays (index = weaponOffset[unitID] + weaponNum; sized
+		// to the total live weapon count in Extract). GetUnitWeaponState:
+		std::vector<uint8_t> wAngleGood;
+		std::vector<int32_t> wReloadStatus;
+		std::vector<int32_t> wSalvoLeft;
+		std::vector<int32_t> wNumStockpiled;
+		std::vector<int32_t> wNextSalvo;
+		std::vector<int32_t> wReloadTime;
+		std::vector<int32_t> wReaimTime;
+		std::vector<float> wAccuracyExp;      // AccuracyExperience()
+		std::vector<float> wSprayAngleExp;    // SprayAngleExperience()
+		std::vector<float3> wSalvoError;      // SalvoErrorExperience()
+		std::vector<float> wMoveErrorExp;     // MoveErrorExperience()
+		std::vector<float> wRange;
+		std::vector<float> wProjectileSpeed;
+		std::vector<float> wAutoTargetRangeBoost;
+		std::vector<int32_t> wSalvoSize;
+		std::vector<int32_t> wSalvoDelay;
+		std::vector<int32_t> wSalvoWindup;
+		std::vector<int32_t> wProjectilesPerShot;
+		std::vector<uint32_t> wAvoidFlags;
+		std::vector<uint32_t> wCollisionFlags;
+		std::vector<int32_t> wTtl;
+		// GetUnitWeaponVectors:
+		std::vector<float3> wMuzzlePos;       // weaponMuzzlePos
+		std::vector<float3> wWantedDir;
+		std::vector<float3> wWeaponDir;
+		std::vector<int32_t> wProjectileType; // weaponDef->projectileType (Vectors dir switch)
+		// GetUnitWeaponCanFire inputs (immutable def scalars copied by value +
+		// the per-weapon runtime state; the frame comparisons use rows.simFrame):
+		std::vector<uint8_t> wDefStockpile;
+		std::vector<uint8_t> wDefFireSubmersed;
+		std::vector<float> wDefMaxFireAngle;
+		std::vector<uint8_t> wIsBombDropper;  // CBombDropper::CanFire override (ignoreAngleGood/RequestedDir)
+		std::vector<float> wAimFromPosY;
+		std::vector<float3> wLastRequestedDir;
+		// GetUnitWeaponTarget (SWeaponTarget):
+		std::vector<uint8_t> wTargetType;     // TargetType 0 none / 1 unit / 2 pos / 3 intercept
+		std::vector<uint8_t> wTargetIsUser;
+		std::vector<int32_t> wTargetUnitID;
+		std::vector<float3> wTargetGroundPos;
+		std::vector<int32_t> wTargetInterceptID;
+		// GetUnitShieldState explicit-weapon case (dynamic_cast in the live path):
+		std::vector<uint8_t> wIsShield;
+		std::vector<uint8_t> wShieldEnabled;
+		std::vector<float> wShieldPower;
+		// GetUnitWeaponDamages per-weapon (flattened POD):
+		std::vector<DamagesSnap> wDamages;
 	};
 
 	/**

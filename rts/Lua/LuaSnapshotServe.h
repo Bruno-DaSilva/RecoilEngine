@@ -354,4 +354,19 @@ namespace LuaSnapshotServe {
 
 	int GetPieceProjectileParams(lua_State* L, const char* caller);
 	int GetPieceProjectileName(lua_State* L, const char* caller);
+
+	// ---- PR 31 (weapon/shield scalar family) ----
+	// Served from the SimSnapshot::UnitRows weapon block (per-unit scalars + a
+	// flat per-weapon SoA). All gate on the unit's ParseAllyUnit visibility
+	// (PovAlliedUnit) except GetUnitShieldState (ParseInLosUnit -> PovUnitInLos).
+	// Trace tests (TryTarget/TestTarget/TestRange/HaveFreeLineOfFire) are NOT
+	// here -- PR 35 recomputes them against the published collision world.
+	int GetUnitStockpile(lua_State* L, const char* caller);
+	int GetUnitShieldState(lua_State* L, const char* caller);
+	int GetUnitFlanking(lua_State* L, const char* caller);
+	int GetUnitWeaponState(lua_State* L, const char* caller);
+	int GetUnitWeaponDamages(lua_State* L, const char* caller);
+	int GetUnitWeaponVectors(lua_State* L, const char* caller);
+	int GetUnitWeaponCanFire(lua_State* L, const char* caller);
+	int GetUnitWeaponTarget(lua_State* L, const char* caller);
 }

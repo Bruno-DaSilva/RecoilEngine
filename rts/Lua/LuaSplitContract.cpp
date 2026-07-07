@@ -133,12 +133,14 @@ namespace {
 		// decoded at extraction) landed in sim|draw PR 30 -- see
 		// LuaSnapshotServe::RefreshCommandQueues. Nothing from this family remains
 		// on sanctionedLive.
-		// weapon/shield state family (decision-4 copies pending)
-		"GetUnitShieldState", "GetUnitFlanking", "GetUnitWeaponState",
-		"GetUnitWeaponDamages", "GetUnitWeaponVectors", "GetUnitWeaponTryTarget",
-		"GetUnitWeaponTestTarget", "GetUnitWeaponTestRange",
-		"GetUnitWeaponHaveFreeLineOfFire", "GetUnitWeaponCanFire",
-		"GetUnitWeaponTarget", "GetUnitStockpile",
+		// weapon/shield state family: the SCALAR family is SERVED (sim|draw
+		// PR 31) via the SimSnapshot::UnitRows weapon block + LuaSnapshotServe
+		// twins -- GetUnitWeaponState/Damages/Vectors/Target/CanFire,
+		// GetUnitShieldState, GetUnitStockpile, GetUnitFlanking. Only the trace
+		// tests remain here: they recompute against the published collision world
+		// (pick grid + blocking + LOS mirrors) in PR 35, not scalar rows.
+		"GetUnitWeaponTryTarget", "GetUnitWeaponTestTarget",
+		"GetUnitWeaponTestRange", "GetUnitWeaponHaveFreeLineOfFire",
 		// deep per-unit state (moveType/CAI/second-object derefs)
 		"GetUnitStates", "GetUnitMoveTypeData", "GetUnitIsBuilding",
 		"GetUnitBuildParams", "GetUnitInBuildStance", "GetUnitNanoPieces",
