@@ -360,6 +360,23 @@ public:
 		std::vector<uint8_t> unitInJammerAll;
 		// ================== PR 32 (deep per-unit state) END ==================
 
+		// ===== PR 38c (zero-sanction flip): per-unit rules-params serving =====
+		// Per-unit LuaRulesParams::Params (CUnit::modParams, via CSolidObject)
+		// mirror, serving GetUnitRulesParam/GetUnitRulesParams from draw context.
+		// EXTENDS PR 38 part 1's game+team mechanism to the per-object namespace:
+		// a plain per-boundary FULL copy indexed by unitID, exactly like the
+		// team modParams copy (values only -- the Param variant is bool/float/
+		// std::string, no pointer or sim-owned container). A full copy has NO
+		// id-reuse ordering hazard (the deferral note only applied to an
+		// incremental RenderEventQueue-ordered DELTA scheme): each boundary the
+		// mirror is the current modParams of whatever unit holds the id, so a
+		// died-then-reused id just reflects the new unit next boundary. SYNCED
+		// state (Spring.SetUnitRulesParam is synced ctrl) but EXCLUDED from the
+		// SnapshotHash like sideName/customOpts/statHistory (an order-independent
+		// fold buys only marginal desync localization); correctness is covered by
+		// the SnapshotDiffGate unit:rules field pass + the serving dual-run.
+		std::vector<LuaRulesParams::Params> unitRulesParams; // [maxUnits]
+
 		// out-of-range ids (including any id before the first extraction ever
 		// ran, when the arrays are still unsized) are part of the stale/nil
 		// contract: a deterministic miss, not an error
@@ -720,6 +737,14 @@ public:
 		std::vector<int32_t> resurrectDefID; // udef ? udef->id : -1 (the name is immutable UnitDef data)
 		std::vector<uint8_t> inLosAll;   // [numAllyTeams * MaxSlots()], row-major by allyteam
 
+		// ===== PR 38c (zero-sanction flip): per-feature rules-params serving =====
+		// Per-feature LuaRulesParams::Params (CFeature::modParams, via
+		// CSolidObject) mirror, serving GetFeatureRulesParam/GetFeatureRulesParams
+		// from draw context. Same plain per-boundary FULL copy (indexed by feature
+		// id) as the per-unit mirror above -- see the UnitRows comment for the
+		// id-reuse-hazard and SnapshotHash-exclusion rationale.
+		std::vector<LuaRulesParams::Params> featureRulesParams; // [MaxSlots()]
+
 		bool Valid(int id) const {
 			return (static_cast<size_t>(id) < valid.size() && valid[id] != 0);
 		}
@@ -918,6 +943,15 @@ public:
 		std::vector<int32_t> controlleeID;
 		std::vector<int32_t> controlleeAllyTeam;
 		std::vector<PlayerStatistics> currentStats;
+
+		// ===== PR 38c (zero-sanction flip): per-player rules-params serving =====
+		// Per-player LuaRulesParams::Params (CPlayer::modParams) mirror, serving
+		// GetPlayerRulesParam/GetPlayerRulesParams from draw context. Plain
+		// per-boundary FULL copy indexed by playerID; the player roster is fixed
+		// at gamestart (no id reuse at all), so this is the simplest of the three.
+		// SNAPSHOT-hash-excluded like the rest of PlayerRows; correctness via the
+		// SnapshotDiffGate player:rules field pass + the serving dual-run.
+		std::vector<LuaRulesParams::Params> playerRulesParams; // [activePlayers]
 
 		// playerHandler.IsValidPlayer mirror
 		bool ValidPlayer(int playerID) const { return (playerID >= 0 && playerID < activePlayers); }

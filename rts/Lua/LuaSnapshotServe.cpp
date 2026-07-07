@@ -2952,6 +2952,191 @@ int LuaSnapshotServe::GetTeamRulesParam(lua_State* L, const char* caller)
 
 /******************************************************************************/
 //
+//  PR 38c (zero-sanction flip): player/unit/feature rules-params serving
+//
+//  Extends PR 38 part 1's game+team mechanism to the per-object namespaces.
+//  Served from SimSnapshot::PlayerRows::playerRulesParams / UnitRows::
+//  unitRulesParams / FeatureRows::featureRulesParams (plain per-boundary full
+//  copies of CPlayer/CUnit/CFeature::modParams). Each twin reproduces its live
+//  callout's exact POV/losMask decision AND its Parse* visibility gate over the
+//  snapshot rows; the shared Push/GetRulesParamMirror helpers (above) do the
+//  byte-equivalent table/value push. Keep in lockstep with LuaSyncedRead.cpp's
+//  GetPlayerRulesParam(s) / GetUnitRulesParam(s) / GetFeatureRulesParam(s).
+//
+
+namespace {
+	// mirror of LuaSyncedRead::GetPlayerRulesParam(s) losMask computation:
+	//   synced handle -> PRIVATE; else own-player / fullRead / gameOver ->
+	//   PRIVATE; else PUBLIC. (Player private params are readable only by that
+	//   player, so there is no ALLIED leg -- unlike team/unit/feature.)
+	int PlayerRulesLosMask(lua_State* L, int playerID)
+	{
+		if (CLuaHandle::GetHandleSynced(L))
+			return LuaRulesParams::RULESPARAMLOS_PRIVATE_MASK;
+		// gu->myPlayerNum is unsynced/draw-owned; gameOver read from the mirror
+		if (playerID == gu->myPlayerNum || CLuaHandle::GetHandleFullRead(L) ||
+		    simSnapshot.ReadTeams().gameOver != 0)
+			return LuaRulesParams::RULESPARAMLOS_PRIVATE_MASK;
+		return LuaRulesParams::RULESPARAMLOS_PUBLIC_MASK;
+	}
+
+	// mirror of LuaSyncedRead::GetUnitRulesParamLosMask:
+	//   IsAllyUnit || gameOver -> PRIVATE; AlliedTeams(unit->team, readTeam) ->
+	//   ALLIED; readAllyTeam < 0 -> PUBLIC; else the losStatus ladder
+	//   (INLOS -> INLOS, PREVLOS|CONTRADAR -> TYPED, INRADAR -> INRADAR, else
+	//   PUBLIC). IsAllyUnit is PovAlliedUnit; AlliedTeams(unit->team, readTeam)
+	//   == Allied(unit->allyteam, teams.allyTeam[readTeam]) over the snapshot
+	//   alliance matrix + per-team allyTeam rows. The ValidTeam(readTeam) guard's
+	//   false fallback is defensive (a degenerate/negative readTeam that master
+	//   would index out of the fixed teams[] array); enumerated as an equivalence
+	//   assumption. Caller has already gated Valid(unitID) + PovUnitVisible.
+	int UnitRulesLosMask(lua_State* L, const SimSnapshot::UnitRows& rows, int unitID, const Pov& pov)
+	{
+		const auto& trows = simSnapshot.ReadTeams();
+
+		if (rows.PovAlliedUnit(unitID, pov.readAllyTeam, pov.fullRead) || trows.gameOver != 0)
+			return LuaRulesParams::RULESPARAMLOS_PRIVATE_MASK;
+
+		const int readTeam = CLuaHandle::GetHandleReadTeam(L);
+		if (trows.ValidTeam(readTeam) &&
+		    rows.Allied(rows.AllyTeam(unitID), trows.allyTeam[readTeam]))
+			return LuaRulesParams::RULESPARAMLOS_ALLIED_MASK;
+
+		if (pov.readAllyTeam < 0)
+			return LuaRulesParams::RULESPARAMLOS_PUBLIC_MASK;
+
+		const uint8_t losStatus = rows.LosStatus(unitID, pov.readAllyTeam);
+		if (losStatus & LOS_INLOS)
+			return LuaRulesParams::RULESPARAMLOS_INLOS_MASK;
+		if (losStatus & (LOS_PREVLOS | LOS_CONTRADAR))
+			return LuaRulesParams::RULESPARAMLOS_TYPED_MASK;
+		if (losStatus & LOS_INRADAR)
+			return LuaRulesParams::RULESPARAMLOS_INRADAR_MASK;
+
+		return LuaRulesParams::RULESPARAMLOS_PUBLIC_MASK;
+	}
+
+	// mirror of LuaSyncedRead::GetFeatureRulesParam(s) losMask chain:
+	//   PUBLIC, then |= PRIVATE if IsAlliedAllyTeam(feature->allyteam) || gameOver;
+	//   else if AlliedTeams(feature->team, readTeam) |= ALLIED; else if
+	//   readAllyTeam < 0 no-access; else if IsFeatureVisible |= INLOS. The
+	//   AlliedTeams inputs (featTeam/readTeam) are pure reads, computed up-front;
+	//   the ValidTeam guards are the same defensive equivalence assumption as the
+	//   unit/team mask (a feature with team/allyteam outside the fixed range that
+	//   master would index out of teams[]). Caller has already gated Valid +
+	//   PovFeatureVisible.
+	int FeatureRulesLosMask(lua_State* L, const SimSnapshot::FeatureRows& rows, int featureID, const Pov& pov)
+	{
+		const auto& trows = simSnapshot.ReadTeams();
+		int losMask = LuaRulesParams::RULESPARAMLOS_PUBLIC_MASK;
+
+		const int featAllyTeam = rows.AllyTeam(featureID);
+		const int featTeam = rows.Team(featureID);
+		const int readTeam = CLuaHandle::GetHandleReadTeam(L);
+		// IsAlliedAllyTeam(L, feature->allyteam)
+		const bool alliedAlly = (pov.readAllyTeam < 0) ? pov.fullRead : (featAllyTeam == pov.readAllyTeam);
+
+		if (alliedAlly || trows.gameOver != 0) {
+			losMask |= LuaRulesParams::RULESPARAMLOS_PRIVATE_MASK;
+		} else if (trows.ValidTeam(featTeam) && trows.ValidTeam(readTeam) &&
+		           simSnapshot.Read().Allied(trows.allyTeam[featTeam], trows.allyTeam[readTeam])) {
+			losMask |= LuaRulesParams::RULESPARAMLOS_ALLIED_MASK;
+		} else if (pov.readAllyTeam < 0) {
+			//! NoAccessTeam
+		} else if (PovFeatureVisible(rows, featureID, pov)) {
+			losMask |= LuaRulesParams::RULESPARAMLOS_INLOS_MASK;
+		}
+
+		return losMask;
+	}
+}
+
+// mirror of LuaSyncedRead::GetPlayerRulesParams
+int LuaSnapshotServe::GetPlayerRulesParams(lua_State* L, const char* caller)
+{
+	const auto& prows = simSnapshot.ReadPlayers();
+
+	// live: luaL_checkint(1) -> IsValidPlayer -> Player(id) null-check ->
+	// IsPlayerUnsynced. Player(validID) is never null, so the null-check is inert.
+	const int playerID = luaL_checkint(L, 1);
+	if (!prows.ValidPlayer(playerID) || IsPlayerUnsyncedMirror(L, prows, playerID))
+		return 0;
+
+	return PushRulesParamsMirror(L, prows.playerRulesParams[playerID], PlayerRulesLosMask(L, playerID));
+}
+
+// mirror of LuaSyncedRead::GetPlayerRulesParam
+int LuaSnapshotServe::GetPlayerRulesParam(lua_State* L, const char* caller)
+{
+	const auto& prows = simSnapshot.ReadPlayers();
+
+	const int playerID = luaL_checkint(L, 1);
+	if (!prows.ValidPlayer(playerID) || IsPlayerUnsyncedMirror(L, prows, playerID))
+		return 0;
+
+	return GetRulesParamMirror(L, 2, prows.playerRulesParams[playerID], PlayerRulesLosMask(L, playerID));
+}
+
+// mirror of LuaSyncedRead::GetUnitRulesParams
+int LuaSnapshotServe::GetUnitRulesParams(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+
+	// live: ParseUnit(1) = ParseRawUnit (number check + id resolve) + the
+	// IsUnitVisible vistest; then a game==nullptr guard. The number check +
+	// error text is ParseUnitIDSynced; validity/vistest from the rows.
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+	if (!rows.Valid(unitID) || !rows.PovUnitVisible(unitID, pov.readAllyTeam, pov.fullRead) || game == nullptr)
+		return 0;
+
+	return PushRulesParamsMirror(L, rows.unitRulesParams[unitID], UnitRulesLosMask(L, rows, unitID, pov));
+}
+
+// mirror of LuaSyncedRead::GetUnitRulesParam
+int LuaSnapshotServe::GetUnitRulesParam(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+	if (!rows.Valid(unitID) || !rows.PovUnitVisible(unitID, pov.readAllyTeam, pov.fullRead) || game == nullptr)
+		return 0;
+
+	return GetRulesParamMirror(L, 2, rows.unitRulesParams[unitID], UnitRulesLosMask(L, rows, unitID, pov));
+}
+
+// mirror of LuaSyncedRead::GetFeatureRulesParams
+int LuaSnapshotServe::GetFeatureRulesParams(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.ReadFeatures();
+
+	// live: ParseFeature(1) = number check + id resolve + IsFeatureVisible
+	// vistest (no game null-check, unlike units/teams).
+	const int featureID = ParseFeatureIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+	if (!rows.Valid(featureID) || !PovFeatureVisible(rows, featureID, pov))
+		return 0;
+
+	return PushRulesParamsMirror(L, rows.featureRulesParams[featureID], FeatureRulesLosMask(L, rows, featureID, pov));
+}
+
+// mirror of LuaSyncedRead::GetFeatureRulesParam
+int LuaSnapshotServe::GetFeatureRulesParam(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.ReadFeatures();
+
+	const int featureID = ParseFeatureIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+	if (!rows.Valid(featureID) || !PovFeatureVisible(rows, featureID, pov))
+		return 0;
+
+	return GetRulesParamMirror(L, 2, rows.featureRulesParams[featureID], FeatureRulesLosMask(L, rows, featureID, pov));
+}
+
+
+/******************************************************************************/
+//
 //  global-scalar family (PR 27a; SimSnapshot::GlobalRows)
 //
 

@@ -119,17 +119,17 @@ namespace {
 		// Jammer}) are SERVED in PR 32 -- the computed losHandler->In*(unit, at)
 		// answers are extracted into the unitIn*All stride rows (the inRadarAll
 		// precedent), with the new cloak/stealth/water per-unit rows this PR adds.
-		// rules params: GAME + TEAM SERVED (sim|draw PR 38) from the SimSnapshot
-		// GlobalRows::gameRulesParams / TeamRows::teamRulesParams boundary mirrors
-		// (game singleton + fixed-count teams -> no id-reuse ordering hazard, a
-		// plain per-boundary copy like customOpts/statHistory). The PLAYER/UNIT/
-		// FEATURE namespaces stay sanctioned: unit/feature ids reuse, so their
-		// per-object param maps need the RenderEventQueue-ordered dirty-delta
-		// mechanism (creation-clears must order against set-deltas under id reuse)
-		// -- deferred/escalated as a distinct follow-up (see the PR 38 commit).
-		"GetPlayerRulesParam", "GetPlayerRulesParams",
-		"GetUnitRulesParam", "GetUnitRulesParams",
-		"GetFeatureRulesParam", "GetFeatureRulesParams",
+		// rules params: FULLY SERVED. Game + team landed in PR 38 part 1 (from the
+		// SimSnapshot GlobalRows::gameRulesParams / TeamRows::teamRulesParams
+		// mirrors); the PLAYER/UNIT/FEATURE namespaces landed in sim|draw PR 38c
+		// (PlayerRows::playerRulesParams / UnitRows::unitRulesParams / FeatureRows::
+		// featureRulesParams). A plain per-boundary FULL copy of each object's
+		// modParams -- like customOpts/statHistory -- has NO id-reuse ordering
+		// hazard (that concern only applied to an incremental RenderEventQueue-
+		// ordered DELTA scheme, not a full copy: each boundary the mirror is the
+		// current modParams of whatever object holds the id). See the PR 38c
+		// commit + LuaSnapshotServe::Get{Player,Unit,Feature}RulesParam(s).
+		// Nothing from the rules-params family remains on sanctionedLive.
 		// command-queue / cmd-desc / worker-task family: FULLY SERVED. The queue
 		// callouts landed in PR 27b serving batch 2; the cmd-desc surface
 		// (GetUnitCmdDescs/FindUnitCmdDesc, version-keyed on CCommandAI::

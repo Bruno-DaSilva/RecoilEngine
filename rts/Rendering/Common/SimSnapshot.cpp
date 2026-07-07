@@ -483,6 +483,8 @@ void SimSnapshot::Resize(UnitRows& rows, size_t maxUnits, int numAllyTeams)
 	rows.unitInLosAll.resize(size_t(numAllyTeams) * maxUnits);
 	rows.unitInAirLosAll.resize(size_t(numAllyTeams) * maxUnits);
 	rows.unitInJammerAll.resize(size_t(numAllyTeams) * maxUnits);
+	// ---- PR 38c: per-unit rules-params mirror (same maxUnits sizing) ----
+	rows.unitRulesParams.resize(maxUnits);
 }
 
 // ---- PR 32 (deep per-unit state) extraction helpers ----
@@ -690,6 +692,10 @@ void SimSnapshot::Extract(UnitRows& rows)
 			rows.transportees[id].push_back(tu.unit->id);
 		ExtractUnitBuildState(rows, id, u);
 		ExtractUnitMoveType(rows, id, u);
+
+		// ---- PR 38c: per-unit rules-params (values only; the Param variant is a
+		// bool/float/std::string, no pointer/sim-owned container) ----
+		rows.unitRulesParams[id] = u->modParams;
 
 		for (int at = 0; at < numAllyTeams; ++at) {
 			rows.losStatusAll[at * maxUnits + id] = u->losStatus[at];
@@ -1029,6 +1035,8 @@ void SimSnapshot::ExtractFeatures(FeatureRows& rows)
 		rows.blockingBits.resize(n);
 		rows.resurrectDefID.resize(n);
 		rows.inLosAll.resize(size_t(numAllyTeams) * n);
+		// ---- PR 38c: per-feature rules-params mirror (grow-only like the rest) ----
+		rows.featureRulesParams.resize(n);
 	}
 
 	std::fill(rows.valid.begin(), rows.valid.end(), 0);
@@ -1075,6 +1083,9 @@ void SimSnapshot::ExtractFeatures(FeatureRows& rows)
 		rows.reclaimTime[id] = f->reclaimTime;
 		rows.blockingBits[id] = PackBlockingBits(f);
 		rows.resurrectDefID[id] = (f->udef != nullptr) ? f->udef->id : -1;
+
+		// ---- PR 38c: per-feature rules-params (values only, like the unit copy) ----
+		rows.featureRulesParams[id] = f->modParams;
 
 		for (int at = 0; at < numAllyTeams; ++at)
 			rows.inLosAll[at * slots + id] = losHandler->InLos(f->pos, at);
@@ -1284,6 +1295,8 @@ void SimSnapshot::ExtractPlayers(PlayerRows& rows)
 		rows.controlleeID.resize(activePlayers);
 		rows.controlleeAllyTeam.resize(activePlayers);
 		rows.currentStats.resize(activePlayers);
+		// ---- PR 38c: per-player rules-params mirror (fixed-count roster) ----
+		rows.playerRulesParams.resize(activePlayers);
 	}
 
 	for (int p = 0; p < activePlayers; ++p) {
@@ -1308,6 +1321,9 @@ void SimSnapshot::ExtractPlayers(PlayerRows& rows)
 		rows.controlleeAllyTeam[p] = (controllee != nullptr) ? controllee->allyteam : -1;
 		// GetPlayerStatistics: the input/command stat block (POD copy)
 		rows.currentStats[p] = player->currentStats;
+
+		// ---- PR 38c: per-player rules-params (values only, like the unit copy) ----
+		rows.playerRulesParams[p] = player->modParams;
 	}
 }
 

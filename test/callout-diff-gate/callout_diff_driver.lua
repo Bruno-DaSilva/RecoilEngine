@@ -290,6 +290,15 @@ local function ExerciseFamily()
 		Spring.IsUnitIcon(uid)
 		Spring.GetUnitLosState(uid)
 		Spring.GetUnitLosState(uid, nil, true)
+		-- PR 38c: per-unit rules-params (POV/losMask-masked); whole table + miss lookup
+		Spring.GetUnitRulesParams(uid)
+		Spring.GetUnitRulesParam(uid, "__diffgate_probe_missing__")
+	end
+	-- PR 38c: per-feature rules-params (POV/losMask-masked); whole table + miss lookup
+	for i = 1, #feats do
+		local fid = feats[i]
+		Spring.GetFeatureRulesParams(fid)
+		Spring.GetFeatureRulesParam(fid, "__diffgate_probe_missing__")
 	end
 	for i = 1 + exerciseTick, #units, TAIL_STRIDE do
 		ExerciseUnitTail(units[i], units[i > 1 and (i - 1) or #units], feats[1])
@@ -355,6 +364,9 @@ local function ExerciseFamily()
 	for i = 1, #players do
 		Spring.GetPlayerInfo(players[i])
 		Spring.GetPlayerInfo(players[i], false)
+		-- PR 38c: per-player rules-params (synced/own-player/fullRead-masked)
+		Spring.GetPlayerRulesParams(players[i])
+		Spring.GetPlayerRulesParam(players[i], "__diffgate_probe_missing__")
 	end
 end
 

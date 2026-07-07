@@ -240,6 +240,12 @@ private:
 		// appended in lockstep). Structural map compare (RulesParamsEqual).
 		T_RULES,        // per-team modParams mirror vs live CTeam::modParams
 		G_GAMERULES,    // global gameRulesParams mirror vs CSplitLuaHandle::GetGameParams
+		// PR 38c (zero-sanction flip): player/unit/feature rules-params mirror;
+		// appended at the enum tail to keep every prior field index stable
+		// (FIELD_NAMES appended in lockstep). Structural map compare (RulesParamsEqual).
+		U_RULES,        // per-unit modParams mirror vs live CUnit::modParams
+		F_RULES,        // per-feature modParams mirror vs live CFeature::modParams
+		PL_RULES,       // per-player modParams mirror vs live CPlayer::modParams
 		F_COUNT
 	};
 

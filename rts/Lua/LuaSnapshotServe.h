@@ -425,6 +425,19 @@ namespace LuaSnapshotServe {
 	int GetTeamRulesParam(lua_State* L, const char* caller);   // LuaSyncedRead
 	int GetTeamRulesParams(lua_State* L, const char* caller);  // LuaSyncedRead
 
+	// ---- PR 38c (zero-sanction flip): player/unit/feature rules-params ----
+	// Extends PR 38 part 1's mechanism to the per-object namespaces (PlayerRows::
+	// playerRulesParams / UnitRows::unitRulesParams / FeatureRows::
+	// featureRulesParams boundary mirrors, plain per-boundary full copies). The
+	// twins reproduce each live callout's exact POV/losMask decision + ParseUnit/
+	// ParseFeature/IsValidPlayer visibility gate over the snapshot rows.
+	int GetPlayerRulesParam(lua_State* L, const char* caller);    // LuaSyncedRead
+	int GetPlayerRulesParams(lua_State* L, const char* caller);   // LuaSyncedRead
+	int GetUnitRulesParam(lua_State* L, const char* caller);      // LuaSyncedRead
+	int GetUnitRulesParams(lua_State* L, const char* caller);     // LuaSyncedRead
+	int GetFeatureRulesParam(lua_State* L, const char* caller);   // LuaSyncedRead
+	int GetFeatureRulesParams(lua_State* L, const char* caller);  // LuaSyncedRead
+
 	// ======================= PR 35: weapon trace tests =======================
 	// GetUnitWeaponTryTarget/TestTarget/TestRange/HaveFreeLineOfFire served by a
 	// SIM-SIDE QUERY/REPLY channel (Batch-3 amendment; NOT the draw-side

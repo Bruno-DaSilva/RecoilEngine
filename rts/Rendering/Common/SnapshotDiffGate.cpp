@@ -209,6 +209,10 @@ static constexpr const char* FIELD_NAMES[] = {
 	// enum tail T_RULES..G_GAMERULES
 	"team:rules",
 	"glob:gameRules",
+	// PR 38c: player/unit/feature rules-params mirror (enum tail U_RULES..PL_RULES)
+	"unit:rules",
+	"feature:rules",
+	"player:rules",
 };
 
 // structural compare for the copied customOpts maps (emilib::HashMap has no
@@ -768,6 +772,11 @@ void SnapshotDiffGate::CheckBoundary()
 				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=maskedErrorVec[ally %d] snap=(%.9g,%.9g,%.9g) live=(%.9g,%.9g,%.9g)",
 					gs->frameNum, id, at, snapErr.x, snapErr.y, snapErr.z, liveErr.x, liveErr.y, liveErr.z);
 		}
+
+		// ---- PR 38c: per-unit rules-params mirror vs live CUnit::modParams ----
+		if (Bump(fields[U_RULES], RulesParamsEqual(rows.unitRulesParams[i], u->modParams)))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=unit:rules mismatch (snap=%zu live=%zu)",
+				gs->frameNum, id, rows.unitRulesParams[i].size(), u->modParams.size());
 	}
 
 	CheckProjectileRows();
@@ -1066,6 +1075,11 @@ void SnapshotDiffGate::CheckFeatureRows()
 				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d feat=%d field=feat:inLosAll[ally %d] snap=%d live=%d",
 					gs->frameNum, id, at, int(snapLos), int(liveLos));
 		}
+
+		// ---- PR 38c: per-feature rules-params mirror vs live CFeature::modParams ----
+		if (Bump(fields[F_RULES], RulesParamsEqual(rows.featureRulesParams[id], f->modParams)))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d feat=%d field=feature:rules mismatch (snap=%zu live=%zu)",
+				gs->frameNum, id, rows.featureRulesParams[id].size(), f->modParams.size());
 	}
 
 	// reverse validity: valid rows with no live feature
@@ -1265,6 +1279,11 @@ void SnapshotDiffGate::CheckTeamPlayerRows()
 			(sps.unitCommands == lps.unitCommands);
 		if (Bump(fields[PL_MISC], miscEqual))
 			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d player=%d field=player:misc mismatch", gs->frameNum, p);
+
+		// ---- PR 38c: per-player rules-params mirror vs live CPlayer::modParams ----
+		if (Bump(fields[PL_RULES], RulesParamsEqual(prows.playerRulesParams[p], player->modParams)))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d player=%d field=player:rules mismatch (snap=%zu live=%zu)",
+				gs->frameNum, p, prows.playerRulesParams[p].size(), player->modParams.size());
 	}
 }
 

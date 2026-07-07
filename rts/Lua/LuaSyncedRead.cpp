@@ -1162,15 +1162,9 @@ int LuaSyncedRead::GetTeamRulesParams(lua_State* L)
  *
  * @return RulesParams rulesParams map with rules names as key and values as values
  */
-int LuaSyncedRead::GetPlayerRulesParams(lua_State* L)
+static int GetPlayerRulesParamsLive(lua_State* L, const char* caller)
 {
 	const int playerID = luaL_checkint(L, 1);
-
-	// split-contract gate (PR 27a): reads playerHandler and the player's sim-mutable modParams directly
-	if (LuaSplitContract::DenyLiveRead(L, __func__)) {
-		lua_createtable(L, 0, 0);
-		return 1;
-	}
 
 	if (!playerHandler.IsValidPlayer(playerID))
 		return 0;
@@ -1205,7 +1199,13 @@ int LuaSyncedRead::GetPlayerRulesParams(lua_State* L)
 		losMask = LuaRulesParams::RULESPARAMLOS_PUBLIC_MASK;
 	}
 
-	return PushRulesParams(L, __func__, player->modParams, losMask);
+	return PushRulesParams(L, caller, player->modParams, losMask);
+}
+
+int LuaSyncedRead::GetPlayerRulesParams(lua_State* L)
+{
+	// boundary-copy-served from draw context (sim|draw PR 38c, PlayerRows::playerRulesParams)
+	return LuaSnapshotServe::Route(L, __func__, &GetPlayerRulesParamsLive, &LuaSnapshotServe::GetPlayerRulesParams);
 }
 
 
@@ -1238,13 +1238,19 @@ static int GetUnitRulesParamLosMask(lua_State* L, const CUnit* unit)
  *
  * @return RulesParams rulesParams map with rules names as key and values as values
  */
-int LuaSyncedRead::GetUnitRulesParams(lua_State* L)
+static int GetUnitRulesParamsLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseUnit(L, __func__, 1);
+	const CUnit* unit = ParseUnit(L, caller, 1);
 	if (unit == nullptr || game == nullptr)
 		return 0;
 
-	return PushRulesParams(L, __func__, unit->modParams, GetUnitRulesParamLosMask(L, unit));
+	return PushRulesParams(L, caller, unit->modParams, GetUnitRulesParamLosMask(L, unit));
+}
+
+int LuaSyncedRead::GetUnitRulesParams(lua_State* L)
+{
+	// boundary-copy-served from draw context (sim|draw PR 38c, UnitRows::unitRulesParams)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitRulesParamsLive, &LuaSnapshotServe::GetUnitRulesParams);
 }
 
 
@@ -1256,9 +1262,9 @@ int LuaSyncedRead::GetUnitRulesParams(lua_State* L)
  *
  * @return RulesParams rulesParams map with rules names as key and values as values
  */
-int LuaSyncedRead::GetFeatureRulesParams(lua_State* L)
+static int GetFeatureRulesParamsLive(lua_State* L, const char* caller)
 {
-	const CFeature* feature = ParseFeature(L, __func__, 1);
+	const CFeature* feature = ParseFeature(L, caller, 1);
 
 	if (feature == nullptr)
 		return 0;
@@ -1280,7 +1286,13 @@ int LuaSyncedRead::GetFeatureRulesParams(lua_State* L)
 
 	const LuaRulesParams::Params&  params = feature->modParams;
 
-	return PushRulesParams(L, __func__, params, losMask);
+	return PushRulesParams(L, caller, params, losMask);
+}
+
+int LuaSyncedRead::GetFeatureRulesParams(lua_State* L)
+{
+	// boundary-copy-served from draw context (sim|draw PR 38c, FeatureRows::featureRulesParams)
+	return LuaSnapshotServe::Route(L, __func__, &GetFeatureRulesParamsLive, &LuaSnapshotServe::GetFeatureRulesParams);
 }
 
 
@@ -1348,12 +1360,8 @@ int LuaSyncedRead::GetTeamRulesParam(lua_State* L)
  *
  * @return number|string|nil value
  */
-int LuaSyncedRead::GetPlayerRulesParam(lua_State* L)
+static int GetPlayerRulesParamLive(lua_State* L, const char* caller)
 {
-	// split-contract gate (PR 27a): the playerHandler read precedes the ruleRef parse, so gate at top
-	if (LuaSplitContract::DenyLiveRead(L, __func__))
-		return 0;
-
 	const int playerID = luaL_checkint(L, 1);
 	if (!playerHandler.IsValidPlayer(playerID))
 		return 0;
@@ -1370,7 +1378,13 @@ int LuaSyncedRead::GetPlayerRulesParam(lua_State* L)
 	else
 		losMask = LuaRulesParams::RULESPARAMLOS_PUBLIC_MASK;
 
-	return GetRulesParam(L, __func__, 2, player->modParams, losMask);
+	return GetRulesParam(L, caller, 2, player->modParams, losMask);
+}
+
+int LuaSyncedRead::GetPlayerRulesParam(lua_State* L)
+{
+	// boundary-copy-served from draw context (sim|draw PR 38c, PlayerRows::playerRulesParams)
+	return LuaSnapshotServe::Route(L, __func__, &GetPlayerRulesParamLive, &LuaSnapshotServe::GetPlayerRulesParam);
 }
 
 
@@ -1383,13 +1397,19 @@ int LuaSyncedRead::GetPlayerRulesParam(lua_State* L)
  *
  * @return number|string|nil value
  */
-int LuaSyncedRead::GetUnitRulesParam(lua_State* L)
+static int GetUnitRulesParamLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseUnit(L, __func__, 1);
+	const CUnit* unit = ParseUnit(L, caller, 1);
 	if (unit == nullptr || game == nullptr)
 		return 0;
 
-	return GetRulesParam(L, __func__, 2, unit->modParams, GetUnitRulesParamLosMask(L, unit));
+	return GetRulesParam(L, caller, 2, unit->modParams, GetUnitRulesParamLosMask(L, unit));
+}
+
+int LuaSyncedRead::GetUnitRulesParam(lua_State* L)
+{
+	// boundary-copy-served from draw context (sim|draw PR 38c, UnitRows::unitRulesParams)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitRulesParamLive, &LuaSnapshotServe::GetUnitRulesParam);
 }
 
 
@@ -1402,9 +1422,9 @@ int LuaSyncedRead::GetUnitRulesParam(lua_State* L)
  *
  * @return number|string|nil value
  */
-int LuaSyncedRead::GetFeatureRulesParam(lua_State* L)
+static int GetFeatureRulesParamLive(lua_State* L, const char* caller)
 {
-	const CFeature* feature = ParseFeature(L, __func__, 1);
+	const CFeature* feature = ParseFeature(L, caller, 1);
 
 	if (feature == nullptr)
 		return 0;
@@ -1424,7 +1444,13 @@ int LuaSyncedRead::GetFeatureRulesParam(lua_State* L)
 		losMask |= LuaRulesParams::RULESPARAMLOS_INLOS_MASK;
 	}
 
-	return GetRulesParam(L, __func__, 2, feature->modParams, losMask);
+	return GetRulesParam(L, caller, 2, feature->modParams, losMask);
+}
+
+int LuaSyncedRead::GetFeatureRulesParam(lua_State* L)
+{
+	// boundary-copy-served from draw context (sim|draw PR 38c, FeatureRows::featureRulesParams)
+	return LuaSnapshotServe::Route(L, __func__, &GetFeatureRulesParamLive, &LuaSnapshotServe::GetFeatureRulesParam);
 }
 
 
