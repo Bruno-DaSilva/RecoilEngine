@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 #include <map>    // PR 34: PushUnitListSortedByDefSnap's ordered def buckets
+#include <unordered_map> // PR 35: trace-query reply map (main-thread-only channel)
 #include <vector>
 
 #include "LuaConfig.h" // PR 31: LUA_WEAPON_BASE_INDEX (weapon/shield family)
@@ -49,6 +50,7 @@
 #include "Sim/Projectiles/PieceProjectile.h" // PR 33 GetPieceProjectileParams/Name twins
 #include "Sim/Projectiles/WeaponProjectiles/WeaponProjectileTypes.h" // PR 31 WEAPON_*_PROJECTILE (GetUnitWeaponVectors)
 #include "Sim/Weapons/WeaponTarget.h" // PR 31 Target_* (GetUnitWeaponTarget/CanFire)
+#include "Sim/Weapons/Weapon.h" // PR 35 CWeapon trace predicates (barrier evaluation)
 #include "Sim/Units/BuildInfo.h" // sim|draw PR 29: Pos2BuildPos
 #include "Sim/Units/CommandAI/CommandAI.h" // command-queue family boundary copies
 #include "Sim/Units/CommandAI/FactoryCAI.h"
@@ -6414,6 +6416,13 @@ void LuaSnapshotServe::ClearCaches()
 	featurePieceCache.shrink_to_fit();
 	modelMetaCache.clear();
 	pieceCacheGeneration = 0;
+
+	// PR 35 weapon trace-query channel state is self-pruning (the reply map is
+	// rebuilt from the pending set every barrier, and is keyed by the full query
+	// -- not by generation -- so it cannot alias a fresh generation the way the
+	// caches above can); ClearTraceQueryChannel() resets it explicitly all the
+	// same, called next to this from CGame teardown.
+	LuaSnapshotServe::ClearTraceQueryChannel();
 }
 
 
@@ -7841,4 +7850,366 @@ int LuaSnapshotServe::IsUnitInJammer(lua_State* L, const char* caller)
 
 	lua_pushboolean(L, rows.UnitInJammer(unitID, allyTeamID));
 	return 1;
+}
+
+
+/******************************************************************************
+ * PR 35 -- weapon trace tests via a SIM-SIDE QUERY/REPLY channel
+ *
+ * Batch-3 amendment (supersedes the plan doc's PR-35 "recompute draw-side" row
+ * and decision-3(A)): the four trace tests are NOT approximated draw-side --
+ * Route() serves a callout's value even flag-off, so an approximation would
+ * break the mandatory flag-off bit-identity, and a faithful draw-side recompute
+ * would need the entire ballistics+collision subsystem mirrored (~30 fields, the
+ * 4 GetPredictedImpactTime overrides, gravity iteration, target-border raytrace,
+ * per-unit AND per-feature collision volumes). Instead:
+ *
+ *   flag-OFF: RouteTraceQuery runs the LIVE predicate inline -> bit-identical.
+ *   flag-ON : the callout enqueues a query and returns the last boundary's reply;
+ *             EvaluateTraceQueries() (a SimDrawBarrier step, sim parked -- the
+ *             RefreshCommandQueues precedent) evaluates the EXACT live predicate
+ *             against live sim state. Boundary-deferred (<=1 stale) but sim-exact.
+ *
+ * The query queue + reply map are MAIN-THREAD-ONLY (written by draw-context Lua
+ * during CGame::Draw, drained at the barrier that opens the same CGame::Draw --
+ * both on the main thread; the sim thread never touches them). No locks, no
+ * atomics; flag-off the twin never enqueues, so the channel is inert.
+ * DISTINCT from the snapshot ring -> flag for PR 43's epoch refresh.
+ *
+ * Sync audit: CWeapon::TryTarget/TestTarget/TestRange/HaveFreeLineOfFire and the
+ * helpers they call (GetUnitLeadTargetPos/GetAimFromPos/AccuracyExperience/...)
+ * are const reads over owner/weaponDef/teamHandler/CGround/TraceRay -- they
+ * consume no gsRNG and mutate no synced state (master already calls them from
+ * unsynced widget draw context without desync; TraceRay's tempNum stamps are
+ * unsynced quadfield scratch). Evaluating at the barrier is the same sanctioned
+ * class as RefreshCommandQueues' live queue walk (sim parked).
+ ******************************************************************************/
+
+namespace {
+	// Packed POD trace query -- the reply-map key. All fields are 4 bytes (no
+	// padding) so the whole struct hashes/compares byte-wise. Unused fields are
+	// zeroed at build time so two identical widget calls produce an identical key.
+	struct WeaponTraceQuery {
+		int32_t kind;       // LuaSnapshotServe::TraceKind
+		int32_t ownerID;
+		int32_t weaponNum;  // already range-validated against weaponCount at build
+		int32_t enemyID;    // -1 == no enemy (pos form / ground form)
+		int32_t variant;    // TryTarget/TestTarget/TestRange: 0 enemy-form, 1 pos-form
+		                    // HaveFreeLineOfFire: the raw lua_gettop (3/5/6/8)
+		int32_t srcMask;    // HFLOF: bit i set => srcPos[i] came from an arg (else GetAimFromPos)
+		float px, py, pz;   // TT/TeT/TeR pos-form pos; HFLOF srcPos arg values
+		float qx, qy, qz;   // HFLOF tgtPos (case 8; else 0)
+	};
+	static_assert(sizeof(WeaponTraceQuery) == 12 * sizeof(int32_t), "WeaponTraceQuery must be padding-free for byte-wise hash/eq");
+
+	struct WeaponTraceQueryEq {
+		bool operator()(const WeaponTraceQuery& a, const WeaponTraceQuery& b) const {
+			return std::memcmp(&a, &b, sizeof(WeaponTraceQuery)) == 0;
+		}
+	};
+	struct WeaponTraceQueryHash {
+		size_t operator()(const WeaponTraceQuery& q) const {
+			// FNV-1a over the raw bytes
+			const unsigned char* p = reinterpret_cast<const unsigned char*>(&q);
+			size_t h = 1469598103934665603ULL;
+			for (size_t i = 0; i < sizeof(WeaponTraceQuery); ++i) {
+				h ^= p[i];
+				h *= 1099511628211ULL;
+			}
+			return h;
+		}
+	};
+
+	// requested since the last barrier (draw-context callouts push here; the
+	// barrier drains + clears). Main-thread-only.
+	std::vector<WeaponTraceQuery> traceQueryPending;
+	// last boundary's sim-exact replies, keyed by query. Rebuilt each barrier from
+	// the pending set (a query the widgets stop requesting drops out -- no growth).
+	std::unordered_map<WeaponTraceQuery, uint8_t, WeaponTraceQueryHash, WeaponTraceQueryEq> traceQueryReplies;
+	std::unordered_map<WeaponTraceQuery, uint8_t, WeaponTraceQueryHash, WeaponTraceQueryEq> traceQueryRepliesScratch;
+
+	// Build a trace query from the Lua args, applying the SAME POV gates and
+	// return-shape as the live body but sourced from the snapshot (owner
+	// ParseAllyUnit -> PovAlliedUnit, enemy ParseUnit -> PovUnitVisible, weaponNum
+	// range from weaponCount). Returns 1 with `q` filled, or 0 to reject (the
+	// caller then returns 0, exactly master's "no such object" shape). Raises the
+	// same Lua errors as the live body's ParseRawUnit / luaL_checkint on bad args.
+	int BuildTraceQuery(lua_State* L, const char* caller, LuaSnapshotServe::TraceKind kind, WeaponTraceQuery& q)
+	{
+		using TK = LuaSnapshotServe::TraceKind;
+		const auto& rows = simSnapshot.Read();
+		const Pov pov = HandlePov(L);
+
+		q = WeaponTraceQuery{};
+		q.kind = static_cast<int32_t>(kind);
+		q.enemyID = -1;
+
+		// ParseAllyUnit(arg1) mirror: number check (may raise) + PovAlliedUnit gate
+		const int unitID = ParseUnitIDSynced(L, caller, 1);
+		if (!rows.Valid(unitID) || !rows.PovAlliedUnit(unitID, pov.readAllyTeam, pov.fullRead))
+			return 0;
+		q.ownerID = unitID;
+
+		// weaponNum: luaL_checkint may raise; range-check against weaponCount
+		const size_t weaponNum = luaL_checkint(L, 2) - LUA_WEAPON_BASE_INDEX;
+		if (weaponNum >= static_cast<size_t>(rows.weaponCount[unitID]))
+			return 0;
+		q.weaponNum = static_cast<int32_t>(weaponNum);
+
+		// enemy ParseUnit(argN) mirror: number check (may raise) + PovUnitVisible gate
+		const auto parseVisibleEnemy = [&](int idx) -> bool {
+			const int enemyID = ParseUnitIDSynced(L, caller, idx);
+			if (!rows.Valid(enemyID) || !rows.PovUnitVisible(enemyID, pov.readAllyTeam, pov.fullRead))
+				return false;
+			q.enemyID = enemyID;
+			return true;
+		};
+
+		if (kind == TK::HaveFreeLineOfFire) {
+			const int top = lua_gettop(L);
+			q.variant = top;
+			switch (top) {
+				case 3: { // [3] := targetID
+					if (!parseVisibleEnemy(3))
+						return 0;
+				} break;
+				case 5: { // [3,4,5] := srcPos
+					// ParsePos over srcPos (default = GetAimFromPos, resolved sim-side)
+					if (!lua_isnoneornil(L, 3)) { q.srcMask |= 1; q.px = luaL_optnumber(L, 3, 0.0f); }
+					if (!lua_isnoneornil(L, 4)) { q.srcMask |= 2; q.py = luaL_optnumber(L, 4, 0.0f); }
+					if (!lua_isnoneornil(L, 5)) { q.srcMask |= 4; q.pz = luaL_optnumber(L, 5, 0.0f); }
+				} break;
+				case 6: { // [3,4,5] := srcPos, [6] := targetID
+					if (!lua_isnoneornil(L, 3)) { q.srcMask |= 1; q.px = luaL_optnumber(L, 3, 0.0f); }
+					if (!lua_isnoneornil(L, 4)) { q.srcMask |= 2; q.py = luaL_optnumber(L, 4, 0.0f); }
+					if (!lua_isnoneornil(L, 5)) { q.srcMask |= 4; q.pz = luaL_optnumber(L, 5, 0.0f); }
+					if (!parseVisibleEnemy(6))
+						return 0;
+				} break;
+				case 8: { // [3,4,5] := srcPos, [6,7,8] := tgtPos
+					if (!lua_isnoneornil(L, 3)) { q.srcMask |= 1; q.px = luaL_optnumber(L, 3, 0.0f); }
+					if (!lua_isnoneornil(L, 4)) { q.srcMask |= 2; q.py = luaL_optnumber(L, 4, 0.0f); }
+					if (!lua_isnoneornil(L, 5)) { q.srcMask |= 4; q.pz = luaL_optnumber(L, 5, 0.0f); }
+					// tgtPos default is the float3() zero, so no sim-side default needed
+					q.qx = luaL_optnumber(L, 6, 0.0f);
+					q.qy = luaL_optnumber(L, 7, 0.0f);
+					q.qz = luaL_optnumber(L, 8, 0.0f);
+				} break;
+				default: return 0; // matches the live switch's default { return 0; }
+			}
+			return 1;
+		}
+
+		// TryTarget / TestTarget / TestRange: pos form iff top >= 5, else enemy@arg3
+		if (lua_gettop(L) >= 5) {
+			q.variant = 1; // pos form
+			q.px = luaL_optnumber(L, 3, 0.0f);
+			q.py = luaL_optnumber(L, 4, 0.0f);
+			q.pz = luaL_optnumber(L, 5, 0.0f);
+		} else {
+			q.variant = 0; // enemy form
+			if (!parseVisibleEnemy(3))
+				return 0;
+		}
+		return 1;
+	}
+
+	// Evaluate a trace query against LIVE sim state -- the EXACT live predicate,
+	// with the derived positions (GetUnitLeadTargetPos / GetAimFromPos) recomputed
+	// sim-side exactly as the live body does. Called at the barrier (sim parked)
+	// and by the armed flag-off dual-run (single-threaded). Returns the boolean.
+	bool EvaluateTraceQueryLive(const WeaponTraceQuery& q)
+	{
+		using TK = LuaSnapshotServe::TraceKind;
+
+		const CUnit* unit = unitHandler.GetUnit(q.ownerID);
+		if (unit == nullptr)
+			return false;
+		if (q.weaponNum < 0 || static_cast<size_t>(q.weaponNum) >= unit->weapons.size())
+			return false;
+
+		const CWeapon* weapon = unit->weapons[q.weaponNum];
+		const CUnit* enemy = (q.enemyID >= 0) ? unitHandler.GetUnit(q.enemyID) : nullptr;
+
+		// an enemy-form query whose target vanished since enqueue -> "no target"
+		// (master's ParseUnit would have returned 0; here the boundary is <=1 stale)
+		const bool enemyForm = (q.enemyID >= 0);
+
+		switch (static_cast<TK>(q.kind)) {
+			case TK::TryTarget: {
+				if (enemyForm && enemy == nullptr)
+					return false;
+				// pos is (0,0,0) in enemy form (GetLeadTargetPos ignores it), args in pos form
+				const float3 pos = (q.variant == 1) ? float3(q.px, q.py, q.pz) : ZeroVector;
+				return weapon->TryTarget(SWeaponTarget(enemy, pos, true));
+			}
+			case TK::TestTarget:
+			case TK::TestRange: {
+				if (enemyForm && enemy == nullptr)
+					return false;
+				const float3 pos = (q.variant == 1) ? float3(q.px, q.py, q.pz)
+				                                    : weapon->GetUnitLeadTargetPos(enemy);
+				return (static_cast<TK>(q.kind) == TK::TestTarget)
+					? weapon->TestTarget(pos, SWeaponTarget(enemy, pos, true))
+					: weapon->TestRange (pos, SWeaponTarget(enemy, pos, true));
+			}
+			case TK::HaveFreeLineOfFire: {
+				if ((q.variant == 3 || q.variant == 6) && enemy == nullptr)
+					return false;
+				float3 srcPos = weapon->GetAimFromPos();
+				float3 tgtPos;
+				if (q.srcMask & 1) srcPos.x = q.px;
+				if (q.srcMask & 2) srcPos.y = q.py;
+				if (q.srcMask & 4) srcPos.z = q.pz;
+				switch (q.variant) {
+					case 3: tgtPos = weapon->GetUnitLeadTargetPos(enemy); break;
+					case 5: /* tgtPos stays zero */ break;
+					case 6: tgtPos = weapon->GetUnitLeadTargetPos(enemy); break;
+					case 8: tgtPos = float3(q.qx, q.qy, q.qz); break;
+					default: return false;
+				}
+				return weapon->HaveFreeLineOfFire(srcPos, tgtPos, SWeaponTarget(enemy, tgtPos, true));
+			}
+		}
+		return false;
+	}
+
+	// flag-ON serving twin: build the query (POV-gated), enqueue it for the next
+	// boundary, and return this frame's reply (the previous boundary's evaluation,
+	// or false on first-call/miss -- the documented first-frame default).
+	int ServeTraceQuery(lua_State* L, const char* caller, LuaSnapshotServe::TraceKind kind)
+	{
+		WeaponTraceQuery q;
+		if (BuildTraceQuery(L, caller, kind, q) == 0)
+			return 0;
+
+		traceQueryPending.push_back(q);
+
+		const auto it = traceQueryReplies.find(q);
+		lua_pushboolean(L, (it != traceQueryReplies.end()) ? (it->second != 0) : 0);
+		return 1;
+	}
+}
+
+
+int LuaSnapshotServe::RouteTraceQuery(lua_State* L, const char* caller, ServeFn liveFn, TraceKind kind)
+{
+	// non-draw context (synced gadget on the sim thread, sim-phase call): the
+	// live state is owned here, run the predicate directly -- identical to master
+	if (!ShouldServe(L))
+		return liveFn(L, caller);
+
+	// pregame: no sim thread yet, live tables exist, snapshot does not -- serve
+	// live under the sanctioned live-exception bracket (the Route() precedent)
+	if (simSnapshot.Generation() == 0) {
+		LuaSplitContract::ScopedLiveException prePublishFallback;
+		return liveFn(L, caller);
+	}
+
+	const bool splitRunning =
+		SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() && !SimDrawSplit::IsSimParked();
+
+	if (splitRunning) {
+		// flag-ON: the sim thread owns live state -- NEVER touch it from draw
+		// context. Enqueue + return the last boundary's sim-exact reply.
+		return ServeTraceQuery(L, caller, kind);
+	}
+
+	// flag-OFF from draw context: single-threaded, the sim is parked relative to
+	// draw, so the live predicate IS the sim-side evaluation (sim==draw thread).
+	// It must be the served value (flag-off bit-identity). Under a live-exception
+	// bracket so the dress-rehearsal contract gates don't nil the live read.
+	if (!snapshotDiffGate.Armed()) {
+		LuaSplitContract::ScopedLiveException simParkedInline;
+		return liveFn(L, caller);
+	}
+
+	// armed flag-OFF gate: dual-run for coverage of the query-record construction
+	// + barrier evaluation. Live leg = master predicate; snap leg = the SAME
+	// query built and evaluated synchronously inline (live-exact by construction,
+	// so it passes trivially -- and any reconstruction bug is caught here). Serve
+	// the LIVE result: flag-off must be bit-identical, the query path is verified,
+	// not served.
+	const int base = lua_gettop(L);
+
+	int liveN = 0;
+	{
+		LuaSplitContract::ScopedLiveException liveLeg;
+		liveN = liveFn(L, caller);
+	}
+
+	// stash the live returns, reset the stack to the original args
+	lua_createtable(L, liveN, 0);
+	for (int i = 1; i <= liveN; ++i) {
+		lua_pushvalue(L, base + i);
+		lua_rawseti(L, -2, i);
+	}
+	const int liveRef = luaL_ref(L, LUA_REGISTRYINDEX);
+	lua_settop(L, base);
+
+	// snap leg: build + evaluate the query inline (single-threaded, live objects).
+	// Its returns sit at base+1 .. base+snapN.
+	WeaponTraceQuery q;
+	int snapN = 0;
+	if (BuildTraceQuery(L, caller, kind, q) != 0) {
+		lua_pushboolean(L, EvaluateTraceQueryLive(q));
+		snapN = 1;
+	}
+
+	// compare return counts + the boolean slot (live values from the stashed table)
+	bool equal = (liveN == snapN);
+	char detail[160] = "";
+	if (!equal) {
+		snprintf(detail, sizeof(detail), "return counts differ: live=%d snap=%d", liveN, snapN);
+	} else if (liveN == 1) {
+		lua_rawgeti(L, LUA_REGISTRYINDEX, liveRef); // live-returns table on top
+		lua_rawgeti(L, -1, 1);                       // live return 1
+		const bool le = (lua_toboolean(L, -1) != 0);
+		const bool se = (lua_toboolean(L, base + 1) != 0);
+		if (le != se) {
+			equal = false;
+			snprintf(detail, sizeof(detail), "return 1 differs: live=%s snap=%s", le ? "true" : "false", se ? "true" : "false");
+		}
+		lua_pop(L, 2); // live return 1 + the table
+	}
+
+	snapshotDiffGate.CountCallout(caller, equal, detail);
+
+	// serve the LIVE returns (flag-off bit-identity): drop the snap returns, push
+	// the stashed live values, then release the stash.
+	lua_settop(L, base);
+	lua_rawgeti(L, LUA_REGISTRYINDEX, liveRef); // live-returns table on top
+	for (int i = 1; i <= liveN; ++i)
+		lua_rawgeti(L, base + 1, i);            // push live value i above the table
+	lua_remove(L, base + 1);                    // drop the table, leaving the liveN values
+	luaL_unref(L, LUA_REGISTRYINDEX, liveRef);
+	return liveN;
+}
+
+
+void LuaSnapshotServe::EvaluateTraceQueries()
+{
+	// flag-off / nothing enqueued -> inert (the twin only enqueues under the
+	// running split). Called at the SimDrawBarrier with the sim parked, so the
+	// live predicate evaluation is the sanctioned RefreshCommandQueues class.
+	if (traceQueryPending.empty())
+		return;
+
+	// rebuild the reply map from this boundary's pending set: a query the widgets
+	// stopped requesting drops out, so the map cannot grow unbounded across a game.
+	traceQueryRepliesScratch.clear();
+	for (const WeaponTraceQuery& q: traceQueryPending)
+		traceQueryRepliesScratch[q] = EvaluateTraceQueryLive(q) ? 1 : 0;
+
+	std::swap(traceQueryReplies, traceQueryRepliesScratch);
+	traceQueryPending.clear();
+}
+
+
+void LuaSnapshotServe::ClearTraceQueryChannel()
+{
+	traceQueryPending.clear();
+	traceQueryPending.shrink_to_fit();
+	traceQueryReplies.clear();
+	traceQueryRepliesScratch.clear();
 }

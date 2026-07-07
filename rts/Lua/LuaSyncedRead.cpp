@@ -6073,9 +6073,9 @@ int LuaSyncedRead::GetUnitWeaponVectors(lua_State* L)
  * @function Spring.GetUnitWeaponTryTarget
  * @param unitID integer
  */
-int LuaSyncedRead::GetUnitWeaponTryTarget(lua_State* L)
+static int GetUnitWeaponTryTargetLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseAllyUnit(L, __func__, 1);
+	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 
 	if (unit == nullptr)
 		return 0;
@@ -6102,7 +6102,7 @@ int LuaSyncedRead::GetUnitWeaponTryTarget(lua_State* L)
 		pos.z = luaL_optnumber(L, 5, 0.0f);
 
 	} else {
-		enemy = ParseUnit(L, __func__, 3);
+		enemy = ParseUnit(L, caller, 3);
 
 		if (enemy == nullptr)
 			return 0;
@@ -6112,15 +6112,22 @@ int LuaSyncedRead::GetUnitWeaponTryTarget(lua_State* L)
 	return 1;
 }
 
+int LuaSyncedRead::GetUnitWeaponTryTarget(lua_State* L)
+{
+	// sim|draw PR 35: served by the sim-side trace-query channel (Batch-3
+	// amendment). Flag-off runs the live predicate inline (bit-identical).
+	return LuaSnapshotServe::RouteTraceQuery(L, __func__, &GetUnitWeaponTryTargetLive, LuaSnapshotServe::TraceKind::TryTarget);
+}
+
 
 /***
  *
  * @function Spring.GetUnitWeaponTestTarget
  * @param unitID integer
  */
-int LuaSyncedRead::GetUnitWeaponTestTarget(lua_State* L)
+static int GetUnitWeaponTestTargetLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseAllyUnit(L, __func__, 1);
+	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 
 	if (unit == nullptr)
 		return 0;
@@ -6140,7 +6147,7 @@ int LuaSyncedRead::GetUnitWeaponTestTarget(lua_State* L)
 		pos.y = luaL_optnumber(L, 4, 0.0f);
 		pos.z = luaL_optnumber(L, 5, 0.0f);
 	} else {
-		if ((enemy = ParseUnit(L, __func__, 3)) == nullptr)
+		if ((enemy = ParseUnit(L, caller, 3)) == nullptr)
 			return 0;
 
 		pos = weapon->GetUnitLeadTargetPos(enemy);
@@ -6150,15 +6157,21 @@ int LuaSyncedRead::GetUnitWeaponTestTarget(lua_State* L)
 	return 1;
 }
 
+int LuaSyncedRead::GetUnitWeaponTestTarget(lua_State* L)
+{
+	// sim|draw PR 35: served by the sim-side trace-query channel (Batch-3 amendment)
+	return LuaSnapshotServe::RouteTraceQuery(L, __func__, &GetUnitWeaponTestTargetLive, LuaSnapshotServe::TraceKind::TestTarget);
+}
+
 
 /***
  *
  * @function Spring.GetUnitWeaponTestRange
  * @param unitID integer
  */
-int LuaSyncedRead::GetUnitWeaponTestRange(lua_State* L)
+static int GetUnitWeaponTestRangeLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseAllyUnit(L, __func__, 1);
+	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 
 	if (unit == nullptr)
 		return 0;
@@ -6178,7 +6191,7 @@ int LuaSyncedRead::GetUnitWeaponTestRange(lua_State* L)
 		pos.y = luaL_optnumber(L, 4, 0.0f);
 		pos.z = luaL_optnumber(L, 5, 0.0f);
 	} else {
-		if ((enemy = ParseUnit(L, __func__, 3)) == nullptr)
+		if ((enemy = ParseUnit(L, caller, 3)) == nullptr)
 			return 0;
 
 		pos = weapon->GetUnitLeadTargetPos(enemy);
@@ -6188,15 +6201,21 @@ int LuaSyncedRead::GetUnitWeaponTestRange(lua_State* L)
 	return 1;
 }
 
+int LuaSyncedRead::GetUnitWeaponTestRange(lua_State* L)
+{
+	// sim|draw PR 35: served by the sim-side trace-query channel (Batch-3 amendment)
+	return LuaSnapshotServe::RouteTraceQuery(L, __func__, &GetUnitWeaponTestRangeLive, LuaSnapshotServe::TraceKind::TestRange);
+}
+
 
 /***
  *
  * @function Spring.GetUnitWeaponHaveFreeLineOfFire
  * @param unitID integer
  */
-int LuaSyncedRead::GetUnitWeaponHaveFreeLineOfFire(lua_State* L)
+static int GetUnitWeaponHaveFreeLineOfFireLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseAllyUnit(L, __func__, 1);
+	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 
 	if (unit == nullptr)
 		return 0;
@@ -6221,7 +6240,7 @@ int LuaSyncedRead::GetUnitWeaponHaveFreeLineOfFire(lua_State* L)
 	switch (lua_gettop(L)) {
 		case 3: {
 			// [3] := targetID
-			if ((enemy = ParseUnit(L, __func__, 3)) == nullptr)
+			if ((enemy = ParseUnit(L, caller, 3)) == nullptr)
 				return 0;
 
 			tgtPos = weapon->GetUnitLeadTargetPos(enemy);
@@ -6235,7 +6254,7 @@ int LuaSyncedRead::GetUnitWeaponHaveFreeLineOfFire(lua_State* L)
 			// [3,4,5] := srcPos, [6] := targetID
 			ParsePos(3, 3, &srcPos.x);
 
-			if ((enemy = ParseUnit(L, __func__, 6)) == nullptr)
+			if ((enemy = ParseUnit(L, caller, 6)) == nullptr)
 				return 0;
 
 			tgtPos = weapon->GetUnitLeadTargetPos(enemy);
@@ -6253,6 +6272,12 @@ int LuaSyncedRead::GetUnitWeaponHaveFreeLineOfFire(lua_State* L)
 
 	lua_pushboolean(L, weapon->HaveFreeLineOfFire(srcPos, tgtPos, SWeaponTarget(enemy, tgtPos, true)));
 	return 1;
+}
+
+int LuaSyncedRead::GetUnitWeaponHaveFreeLineOfFire(lua_State* L)
+{
+	// sim|draw PR 35: served by the sim-side trace-query channel (Batch-3 amendment)
+	return LuaSnapshotServe::RouteTraceQuery(L, __func__, &GetUnitWeaponHaveFreeLineOfFireLive, LuaSnapshotServe::TraceKind::HaveFreeLineOfFire);
 }
 
 /***

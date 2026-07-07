@@ -132,14 +132,16 @@ namespace {
 		// decoded at extraction) landed in sim|draw PR 30 -- see
 		// LuaSnapshotServe::RefreshCommandQueues. Nothing from this family remains
 		// on sanctionedLive.
-		// weapon/shield state family: the SCALAR family is SERVED (sim|draw
-		// PR 31) via the SimSnapshot::UnitRows weapon block + LuaSnapshotServe
+		// weapon/shield state family: FULLY SERVED. The SCALAR family landed in
+		// sim|draw PR 31 (SimSnapshot::UnitRows weapon block + LuaSnapshotServe
 		// twins -- GetUnitWeaponState/Damages/Vectors/Target/CanFire,
-		// GetUnitShieldState, GetUnitStockpile, GetUnitFlanking. Only the trace
-		// tests remain here: they recompute against the published collision world
-		// (pick grid + blocking + LOS mirrors) in PR 35, not scalar rows.
-		"GetUnitWeaponTryTarget", "GetUnitWeaponTestTarget",
-		"GetUnitWeaponTestRange", "GetUnitWeaponHaveFreeLineOfFire",
+		// GetUnitShieldState, GetUnitStockpile, GetUnitFlanking). The four trace
+		// tests (GetUnitWeaponTryTarget/TestTarget/TestRange/HaveFreeLineOfFire)
+		// landed in sim|draw PR 35 via the SIM-SIDE QUERY/REPLY channel (Batch-3
+		// amendment; LuaSnapshotServe::RouteTraceQuery + EvaluateTraceQueries):
+		// flag-off runs the live predicate inline, flag-on defers a query the sim
+		// evaluates sim-exact at the barrier -- so they take no draw-context live
+		// read and are no longer sanctioned. Nothing from this family remains here.
 		// deep per-unit state (moveType/CAI/second-object derefs): FULLY SERVED
 		// in sim|draw PR 32. GetUnitStates/PosErrorParams/Storage/MetalExtraction/
 		// BuildeeRadius/LastAttacker + the build-state family (IsBuilding/

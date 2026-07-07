@@ -1682,6 +1682,14 @@ void CGame::SimDrawBarrier()
 	// served values are bit-identical to the live callouts.
 	LuaSnapshotServe::RefreshPieces();
 
+	// (3c) evaluate the draw side's pending weapon trace-test queries (sim|draw
+	// PR 35, Batch-3 sim-side query/reply channel). The sim is parked here, so
+	// the exact live CWeapon predicates run against valid boundary-N sim state --
+	// the same sanctioned live-read class as RefreshCommandQueues above; the
+	// replies publish for the next draw frame. No-op (empty check) flag-off or
+	// when the draw side enqueued nothing since the last barrier.
+	LuaSnapshotServe::EvaluateTraceQueries();
+
 	// (4) TEST-ONLY (PR 17): when armed via /snapshotdiffgate, verify every
 	// value the snapshot would serve bit-matches the live sim read at this
 	// boundary. A single branch when unarmed.

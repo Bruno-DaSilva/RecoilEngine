@@ -411,4 +411,44 @@ namespace LuaSnapshotServe {
 	int GetPlayerControlledUnit(lua_State* L, const char* caller);
 	int GetTeamStatsHistory(lua_State* L, const char* caller);
 	int GetPlayerStatistics(lua_State* L, const char* caller); // LuaUnsyncedRead
+
+	// ======================= PR 35: weapon trace tests =======================
+	// GetUnitWeaponTryTarget/TestTarget/TestRange/HaveFreeLineOfFire served by a
+	// SIM-SIDE QUERY/REPLY channel (Batch-3 amendment; NOT the draw-side
+	// recompute the plan doc's PR-35 row and decision-3(A) originally named --
+	// that would break flag-off bit-identity, since Route() serves the callout's
+	// value even flag-off, so any approximation replaces master's live answer).
+	//
+	//  - Flag-OFF (no running split): RouteTraceQuery runs the LIVE predicate
+	//    inline (bit-identical to master; sim==draw single-threaded, the sim is
+	//    parked relative to draw). No queue, no defer.
+	//  - Flag-ON (running split): the callout enqueues a trace query {owner+weapon,
+	//    target form, arg variant} and returns the LAST boundary's sim-exact reply
+	//    (false on first-call/miss). EvaluateTraceQueries() drains the pending
+	//    queue at the SimDrawBarrier (sim parked) and evaluates the EXACT live
+	//    CWeapon predicate against live sim state -- boundary-deferred (<=1 stale)
+	//    but sim-exact, no approximation. Reply state is UNSYNCED (draw-only): no
+	//    synced write, no gsRNG, no streflop (the predicates are const reads,
+	//    already called from unsynced widgets on master without desync).
+	//
+	// This request/reply channel is DISTINCT from the published snapshot ring --
+	// PR 43's epoch mechanism must carry the query queue + reply map alongside the
+	// ring (flagged for the epoch-infra refresh).
+	enum class TraceKind { TryTarget = 0, TestTarget = 1, TestRange = 2, HaveFreeLineOfFire = 3 };
+
+	/// entry-point glue for the four trace tests (called from LuaSyncedRead):
+	/// dispatches to `liveFn` when the split is off (bit-identical), to the
+	/// query/reply channel under the running split, and dual-runs live-vs-query
+	/// for coverage when the diff gate is armed flag-off.
+	int RouteTraceQuery(lua_State* L, const char* caller, ServeFn liveFn, TraceKind kind);
+
+	/// SimDrawBarrier hook (sim parked): drain the pending trace queries and
+	/// evaluate each against live sim state, publishing the replies for the next
+	/// draw frame. No-op (empty check) flag-off / when nothing was enqueued.
+	void EvaluateTraceQueries();
+
+	/// game teardown: reset the trace-query pending queue + reply map (called from
+	/// ClearCaches()). Self-pruning already prevents growth/aliasing; this is the
+	/// explicit belt-and-suspenders reset.
+	void ClearTraceQueryChannel();
 }
