@@ -1933,6 +1933,10 @@ void CMiniMap::DrawUnitRanges() const
 
 	for (const int unitID: selUnits) {
 		const CUnit* unit = unitHandler.GetUnit(unitID);
+		// PR 27b: draw pass with the sim thread live -- skip a selected unit
+		// killed mid-frame (null handler slot)
+		if (unit == nullptr)
+			continue;
 
 		// LOS Ranges
 		if (unit->radarRadius && !unit->beingBuilt && unit->activated) {

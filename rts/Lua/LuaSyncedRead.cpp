@@ -6723,10 +6723,13 @@ static int GetUnitCurrentCommandLive(lua_State* L, const char* caller)
 {
 	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 
-	if (unit == nullptr)
+	// PR 27b: normally never null, but a died-in-burst unit resolved to its
+	// deferred shell during the boundary drain (live leg) has a destructed,
+	// nulled commandAI -- treat as no current command
+	if (unit == nullptr || unit->commandAI == nullptr)
 		return 0;
 
-	const CCommandAI* commandAI = unit->commandAI; // never null
+	const CCommandAI* commandAI = unit->commandAI;
 	const CFactoryCAI* factoryCAI = dynamic_cast<const CFactoryCAI*>(commandAI);
 	const CCommandQueue* queue = (factoryCAI == nullptr)? &commandAI->commandQue : &factoryCAI->newUnitCommands;
 
@@ -6786,7 +6789,10 @@ static int GetUnitCommandsLive(lua_State* L, const char* caller)
 {
 	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 
-	if (unit == nullptr)
+	// PR 27b: under the split a died-in-burst unit resolves to its deferred
+	// shell during the boundary drain (live leg); CUnit::PreDestruct destructs
+	// and nulls its commandAI, so treat it as no commands
+	if (unit == nullptr || unit->commandAI == nullptr)
 		return 0;
 
 	const CCommandAI* commandAI = unit->commandAI;
@@ -6843,7 +6849,10 @@ static int GetFactoryCommandsLive(lua_State* L, const char* caller)
 {
 	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 
-	if (unit == nullptr)
+	// PR 27b: under the split a died-in-burst unit resolves to its deferred
+	// shell during the boundary drain (live leg); CUnit::PreDestruct destructs
+	// and nulls its commandAI, so treat it as no commands
+	if (unit == nullptr || unit->commandAI == nullptr)
 		return 0;
 
 	const CCommandAI* commandAI = unit->commandAI;
@@ -6884,7 +6893,10 @@ static int GetUnitCommandCountLive(lua_State* L, const char* caller)
 {
 	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 
-	if (unit == nullptr)
+	// PR 27b: under the split a died-in-burst unit resolves to its deferred
+	// shell during the boundary drain (live leg); CUnit::PreDestruct destructs
+	// and nulls its commandAI, so treat it as no commands
+	if (unit == nullptr || unit->commandAI == nullptr)
 		return 0;
 
 	const CCommandAI* commandAI = unit->commandAI;
@@ -6916,7 +6928,10 @@ static int GetFactoryCommandCountLive(lua_State* L, const char* caller)
 {
 	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 
-	if (unit == nullptr)
+	// PR 27b: under the split a died-in-burst unit resolves to its deferred
+	// shell during the boundary drain (live leg); CUnit::PreDestruct destructs
+	// and nulls its commandAI, so treat it as no commands
+	if (unit == nullptr || unit->commandAI == nullptr)
 		return 0;
 
 	const CCommandAI* commandAI = unit->commandAI;
@@ -7037,7 +7052,10 @@ static void PackFactoryCounts(lua_State* L,
 static int GetFactoryCountsLive(lua_State* L, const char* caller)
 {
 	const CUnit* unit = ParseAllyUnit(L, caller, 1);
-	if (unit == nullptr)
+	// PR 27b: under the split a died-in-burst unit resolves to its deferred
+	// shell during the boundary drain (live leg); CUnit::PreDestruct destructs
+	// and nulls its commandAI, so treat it as no commands
+	if (unit == nullptr || unit->commandAI == nullptr)
 		return 0;
 
 	const CCommandAI* commandAI = unit->commandAI;
@@ -7105,7 +7123,10 @@ int LuaSyncedRead::GetCommandQueue(lua_State* L)
 static int PackBuildQueue(lua_State* L, bool canBuild, const char* caller)
 {
 	const CUnit* unit = ParseAllyUnit(L, caller, 1);
-	if (unit == nullptr)
+	// PR 27b: under the split a died-in-burst unit resolves to its deferred
+	// shell during the boundary drain (live leg); CUnit::PreDestruct destructs
+	// and nulls its commandAI, so treat it as no commands
+	if (unit == nullptr || unit->commandAI == nullptr)
 		return 0;
 
 	const CCommandAI* commandAI = unit->commandAI;

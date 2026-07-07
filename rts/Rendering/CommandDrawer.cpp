@@ -23,6 +23,7 @@
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitHandler.h"
 #include "Sim/Units/UnitDefHandler.h"
+#include "System/SimDrawSplit.h"
 #include "System/SpringMath.h"
 #include "System/Log/ILog.h"
 
@@ -45,6 +46,17 @@ CommandDrawer* CommandDrawer::GetInstance() {
 
 
 void CommandDrawer::Draw(const CCommandAI* cai, int queueDrawDepth) const {
+	// PR 27b: cai and the commandQue it walks are live sim state. CUnit::
+	// PreDestruct() destructs the commandAI object at unit-death on the sim
+	// thread, so from the draw pass with the sim thread live and unparked a
+	// unit that died mid-burst leaves a dangling commandAI -- the dynamic_casts
+	// below fault on its vtable -- and the deque mutates under iteration.
+	// Suppress until this drawer is converted to the boundary-copied command
+	// queues (LuaSnapshotServe already serves the Lua callout family). Flag-off
+	// and sim-parked are byte-identical.
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() && !SimDrawSplit::IsSimParked())
+		return;
+
 	// note: {Air,Builder}CAI inherit from MobileCAI, so test that last
 	if ((dynamic_cast<const     CAirCAI*>(cai)) != nullptr) {     DrawAirCAICommands(static_cast<const     CAirCAI*>(cai), queueDrawDepth); return; }
 	if ((dynamic_cast<const CBuilderCAI*>(cai)) != nullptr) { DrawBuilderCAICommands(static_cast<const CBuilderCAI*>(cai), queueDrawDepth); return; }

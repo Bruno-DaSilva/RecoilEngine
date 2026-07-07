@@ -1174,6 +1174,9 @@ bool CGuiHandler::TryTarget(const SCommandDescription& cmdDesc) const
 
 	for (const int unitID: selectedUnitsHandler.selectedUnits) {
 		const CUnit* u = unitHandler.GetUnit(unitID);
+		// PR 27b: skip a selected unit killed mid-frame under the split (null slot)
+		if (u == nullptr)
+			continue;
 
 		// mobile kamikaze can always move into range
 		//FIXME do a range check in case of immobile kamikaze (-> mines)
@@ -2149,6 +2152,10 @@ inline Command CheckCommand(Command c) {
 
 	for (const int unitID: selectedUnitsHandler.selectedUnits) {
 		const CUnit* u = unitHandler.GetUnit(unitID);
+		// PR 27b: skip a selected unit killed mid-frame under the split (null
+		// slot; commandAI destructed on death)
+		if (u == nullptr)
+			continue;
 		CCommandAI* cai = u->commandAI;
 
 		if (cai->AllowedCommand(c, false))
@@ -2480,6 +2487,9 @@ static bool WouldCancelAnyQueued(const BuildInfo& b)
 
 	for (const int unitID: selectedUnitsHandler.selectedUnits) {
 		const CUnit* u = unitHandler.GetUnit(unitID);
+		// PR 27b: skip a selected unit killed mid-frame under the split (null slot)
+		if (u == nullptr)
+			continue;
 
 		if (u->commandAI->WillCancelQueued(c))
 			return true;
@@ -3876,6 +3886,11 @@ void CGuiHandler::DrawMapStuff(bool onMiniMap)
 
 						for (const int unitID: selectedUnitsHandler.selectedUnits) {
 							const CUnit* su = unitHandler.GetUnit(unitID);
+							// PR 27b: draw pass with the sim thread live -- a selected
+							// unit may have died mid-frame (null slot, destructed
+							// commandAI); skip it instead of dereferencing
+							if (su == nullptr)
+								continue;
 							const CCommandAI* cai = su->commandAI;
 
 							for (const Command& cmd: cai->GetOverlapQueued(c)) {
@@ -3919,6 +3934,11 @@ void CGuiHandler::DrawMapStuff(bool onMiniMap)
 		if (playerAttackCmd || defaultAttackCmd) {
 			for (const int unitID: selectedUnitsHandler.selectedUnits) {
 				const CUnit* unit = unitHandler.GetUnit(unitID);
+
+				// PR 27b: draw pass with the sim thread live -- skip a selected
+				// unit the sim killed mid-frame (null handler slot)
+				if (unit == nullptr)
+					continue;
 
 				// handled above
 				if (unit == pointeeUnit)

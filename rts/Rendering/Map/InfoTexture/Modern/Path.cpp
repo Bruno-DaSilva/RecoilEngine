@@ -101,8 +101,10 @@ const MoveDef* CPathTexture::GetSelectedMoveDef()
 		return nullptr;
 
 	const auto iter = unitSet.begin();
+	// PR 27b: draw pass with the sim thread live -- the lead selected unit may
+	// have died mid-frame (null handler slot)
 	const CUnit* unit = unitHandler.GetUnit(*iter);
-	return unit->moveDef;
+	return (unit != nullptr) ? unit->moveDef : nullptr;
 }
 
 
