@@ -68,6 +68,17 @@ namespace BoundaryStats {
 		Counter cmdErase{0};      // erased elements (ranges count their size)
 		Counter cmdClearCmds{0};  // elements dropped via clear()
 
+		// sim|draw PR 30: command-queue/cmd-desc serving-cache copy cost (the
+		// decision-4 acceptance number -- "one boundary copy tracks the order
+		// rate"). Incremented in LuaSnapshotServe::RefreshCommandQueues each time
+		// a dirty unit forces a fresh flattened copy of its queue / cmd-desc
+		// surface; unchanged units keep their cached copy and add nothing. Bytes
+		// are the flattened record + param/string sizes.
+		Counter cmdBlocksCopied{0};      // fresh queue copies (commandQue + newUnitCommands)
+		Counter cmdBlockBytes{0};        // their SnapCommand + param bytes
+		Counter cmdDescBlocksCopied{0};  // fresh cmd-desc copies
+		Counter cmdDescBlockBytes{0};    // their CmdDescRecord + string/param bytes
+
 		// projectile churn by re-derivability class (spawn-params re-derivation
 		// works for ballistic; guided/piece need per-frame updates)
 		Counter projSpawnPiece{0};

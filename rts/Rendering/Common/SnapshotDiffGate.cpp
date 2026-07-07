@@ -32,6 +32,7 @@
 #include "Sim/Units/UnitDefHandler.h"
 #include "Sim/Units/UnitHandler.h"
 #include "Sim/Weapons/WeaponDef.h"
+#include "Lua/LuaSnapshotServe.h" // sim|draw PR 30: command-queue serving-cache compare
 #include "System/Log/ILog.h"
 
 SnapshotDiffGate snapshotDiffGate;
@@ -137,6 +138,12 @@ static constexpr const char* FIELD_NAMES[] = {
 	"map:smoothMesh",
 	"map:origHeight",
 	"map:radarError",
+	// command-queue serving cache (sim|draw PR 30)
+	"cq:presence",
+	"cq:queue",
+	"cq:descs",
+	"cq:worker",
+	"cq:factory",
 };
 
 // structural compare for the copied customOpts maps (emilib::HashMap has no
@@ -486,6 +493,7 @@ void SnapshotDiffGate::CheckBoundary()
 	CheckTeamPlayerRows();
 	CheckGlobalRows();
 	CheckMapMirrors();
+	CheckCmdQueueRows();
 }
 
 void SnapshotDiffGate::CheckProjectileRows()
@@ -998,5 +1006,44 @@ void SnapshotDiffGate::CheckMapMirrors()
 			eq = BitEqual(drawMapMirrors.AllyTeamRadarErrorSize(at), losHandler->GetAllyTeamRadarErrorSize(at));
 		if (Bump(fields[MM_RADARERR], eq))
 			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=map:radarError mismatch", gs->frameNum);
+	}
+}
+
+// sim|draw PR 30 mirror-verification: the command-queue/cmd-desc serving cache is
+// rebuilt (LuaSnapshotServe::RefreshCommandQueues) right before this check at the
+// same boundary, so every compare must trivially pass -- a missed dirty-mark
+// (queue version / cmdDescVersion / worker re-decode) becomes a deterministic
+// gate failure. The per-slot compare lives in LuaSnapshotServe (where the cache
+// is a file-static and the sim includes are already present, and where it binds
+// live queues through const refs so the version-bumping accessors are never
+// invoked); this pass just drives it over every unit id and tallies the fields.
+void SnapshotDiffGate::CheckCmdQueueRows()
+{
+	const size_t maxUnits = unitHandler.MaxUnits();
+
+	for (size_t id = 0; id < maxUnits; ++id) {
+		const CUnit* u = unitHandler.GetUnitUnsafe(id); // id < maxUnits
+		const bool liveValid = (u != nullptr);
+
+		const LuaSnapshotServe::CmdQueueCompareResult r = LuaSnapshotServe::CompareCmdQueueSlot(int(id), u);
+
+		if (Bump(fields[CQ_PRESENCE], r.present == liveValid))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=cq:presence snap=%d live=%d",
+				gs->frameNum, int(id), int(r.present), int(liveValid));
+
+		if (!r.present || !liveValid)
+			continue;
+
+		if (Bump(fields[CQ_QUEUE], r.queueOk))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=cq:queue mismatch", gs->frameNum, int(id));
+
+		if (Bump(fields[CQ_DESCS], r.descsOk))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=cq:descs mismatch", gs->frameNum, int(id));
+
+		if (Bump(fields[CQ_WORKER], r.workerOk))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=cq:worker mismatch", gs->frameNum, int(id));
+
+		if (Bump(fields[CQ_FACTORY], r.factoryOk))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=cq:factory mismatch", gs->frameNum, int(id));
 	}
 }

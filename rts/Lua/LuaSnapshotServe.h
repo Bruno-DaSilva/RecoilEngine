@@ -3,6 +3,7 @@
 #pragma once
 
 struct lua_State;
+class CUnit; // sim|draw PR 30: CompareCmdQueueSlot's live-unit argument
 
 /**
  * @brief LuaSnapshotServe -- snapshot-backed serving twins for draw-context Lua callouts
@@ -197,6 +198,12 @@ namespace LuaSnapshotServe {
 	int GetFactoryBuggerOff(lua_State* L, const char* caller);
 	int GetFullBuildQueue(lua_State* L, const char* caller);
 	int GetRealBuildQueue(lua_State* L, const char* caller);
+	// sim|draw PR 30: cmd-desc surface + builder worker-task twins (served from
+	// the same per-unit boundary cache; descs are version-keyed on CCommandAI::
+	// GetCmdDescVersion(), the worker-task answer is decoded at extraction)
+	int GetUnitCmdDescs(lua_State* L, const char* caller);   // ParseTypedUnit gate
+	int FindUnitCmdDesc(lua_State* L, const char* caller);   // ParseTypedUnit gate
+	int GetUnitWorkerTask(lua_State* L, const char* caller); // ParseInLosUnit gate
 
 	/// barrier hook (CGame::SimDrawBarrier, right after the snapshot publish --
 	/// generation-gated, so queue copies and snapshot rows always describe the
@@ -204,6 +211,21 @@ namespace LuaSnapshotServe {
 	/// version changed, drops entries of dead units. Sim must be parked (or
 	/// single-threaded): walks unitHandler and reads live queues.
 	void RefreshCommandQueues();
+
+	// sim|draw PR 30 mirror-verification hook (SnapshotDiffGate::CheckCmdQueueRows):
+	// bit-compare the cached command-queue/cmd-desc/worker/factory slot for a unit
+	// against live sim state at the armed boundary. Test-only (armed runs). Lives
+	// here so the file-static serving cache stays encapsulated. `present` reports
+	// whether a cached slot exists (compare with the live unit's validity for the
+	// presence field); the *Ok bools are meaningful only when present && liveUnit.
+	struct CmdQueueCompareResult {
+		bool present  = false;
+		bool queueOk  = false;
+		bool descsOk  = false;
+		bool workerOk = false;
+		bool factoryOk = false;
+	};
+	CmdQueueCompareResult CompareCmdQueueSlot(int unitID, const CUnit* liveUnit);
 
 	/// game teardown: drop the per-generation serving caches (the team-unit
 	/// index, the command-queue copies); SimSnapshot's generation counter

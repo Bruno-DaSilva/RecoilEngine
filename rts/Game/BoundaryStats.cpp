@@ -23,6 +23,7 @@ struct CounterSnap {
 	uint64_t traChecked, traChanged, traForced;
 	uint64_t pieceSampled, pieceChanged, objSampled, objPieceChanged, objMoved;
 	uint64_t cmdPushBack, cmdPushFront, cmdInsert, cmdPopBack, cmdPopFront, cmdErase, cmdClearCmds;
+	uint64_t cmdBlocksCopied, cmdBlockBytes, cmdDescBlocksCopied, cmdDescBlockBytes; // sim|draw PR 30
 	uint64_t projSpawnPiece, projSpawnHitscan, projSpawnGuided, projSpawnBallistic, projSpawnSyncedOther, projSpawnUnsynced;
 	uint64_t projDespawnSynced, projDespawnUnsynced;
 	uint64_t unitCreated, unitDestroyed, featCreated, featDestroyed;
@@ -39,6 +40,8 @@ static CounterSnap Snap()
 	s.cmdPushBack = rd(ctr.cmdPushBack); s.cmdPushFront = rd(ctr.cmdPushFront); s.cmdInsert = rd(ctr.cmdInsert);
 	s.cmdPopBack = rd(ctr.cmdPopBack); s.cmdPopFront = rd(ctr.cmdPopFront); s.cmdErase = rd(ctr.cmdErase);
 	s.cmdClearCmds = rd(ctr.cmdClearCmds);
+	s.cmdBlocksCopied = rd(ctr.cmdBlocksCopied); s.cmdBlockBytes = rd(ctr.cmdBlockBytes);
+	s.cmdDescBlocksCopied = rd(ctr.cmdDescBlocksCopied); s.cmdDescBlockBytes = rd(ctr.cmdDescBlockBytes);
 	s.projSpawnPiece = rd(ctr.projSpawnPiece); s.projSpawnHitscan = rd(ctr.projSpawnHitscan);
 	s.projSpawnGuided = rd(ctr.projSpawnGuided); s.projSpawnBallistic = rd(ctr.projSpawnBallistic);
 	s.projSpawnSyncedOther = rd(ctr.projSpawnSyncedOther); s.projSpawnUnsynced = rd(ctr.projSpawnUnsynced);
@@ -77,6 +80,7 @@ static constexpr const char* CSV_HEADER =
 	"d_tra_checked,d_tra_changed,d_tra_forced,"
 	"d_piece_sampled,d_piece_changed,d_obj_sampled,d_obj_piecechanged,d_obj_moved,"
 	"d_cmd_pushback,d_cmd_pushfront,d_cmd_insert,d_cmd_popback,d_cmd_popfront,d_cmd_erase,d_cmd_clear,"
+	"d_cmd_blocks_copied,d_cmd_block_bytes,d_cmd_desc_blocks_copied,d_cmd_desc_block_bytes,"
 	"cmdq_cmds_total,cmdq_nonempty,cmdq_max,cmdq_len_0,cmdq_len_1,cmdq_len_2_4,cmdq_len_5_16,cmdq_len_17_64,cmdq_len_65p,"
 	"d_proj_spawn_piece,d_proj_spawn_hitscan,d_proj_spawn_guided,d_proj_spawn_ballistic,d_proj_spawn_syncother,d_proj_spawn_unsynced,"
 	"d_proj_despawn_synced,d_proj_despawn_unsynced,"
@@ -249,6 +253,12 @@ void SampleFrame(int frameNum)
 	put(cur.cmdPopFront - prevSnap.cmdPopFront);
 	put(cur.cmdErase - prevSnap.cmdErase);
 	put(cur.cmdClearCmds - prevSnap.cmdClearCmds);
+
+	// sim|draw PR 30: serving-cache copy cost per frame (dirty-versioned bound)
+	put(cur.cmdBlocksCopied - prevSnap.cmdBlocksCopied);
+	put(cur.cmdBlockBytes - prevSnap.cmdBlockBytes);
+	put(cur.cmdDescBlocksCopied - prevSnap.cmdDescBlocksCopied);
+	put(cur.cmdDescBlockBytes - prevSnap.cmdDescBlockBytes);
 
 	put(cmdqTotal); put(cmdqNonEmpty); put(cmdqMax);
 	put(cmdqHist[0]); put(cmdqHist[1]); put(cmdqHist[2]); put(cmdqHist[3]); put(cmdqHist[4]); put(cmdqHist[5]);

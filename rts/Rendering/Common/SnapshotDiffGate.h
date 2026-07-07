@@ -193,6 +193,12 @@ private:
 		MM_SMOOTHMESH,  // smoothGround mesh copy
 		MM_ORIGHEIGHT,  // readMap original heightmap copy
 		MM_RADARERR,    // base/per-allyteam radar-error scalars
+		// command-queue / cmd-desc / worker-task serving cache (sim|draw PR 30)
+		CQ_PRESENCE,    // cached slot present iff live unit exists
+		CQ_QUEUE,       // commandQue + newUnitCommands copies vs live deques
+		CQ_DESCS,       // cmd-desc copy vs live possibleCommands
+		CQ_WORKER,      // resolved GetUnitWorkerTask answer
+		CQ_FACTORY,     // classification flags + bugger-off scalars
 		F_COUNT
 	};
 
@@ -207,6 +213,7 @@ private:
 	void CheckTeamPlayerRows();
 	void CheckGlobalRows();
 	void CheckMapMirrors(); // PR 28: DrawMapMirrors vs live sim (memcmp-grade)
+	void CheckCmdQueueRows(); // sim|draw PR 30: command-queue serving-cache mirror verification
 
 	void Report(const char* reason) const;
 	void ResetCounters();

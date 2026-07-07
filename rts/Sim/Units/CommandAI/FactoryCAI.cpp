@@ -474,6 +474,7 @@ void CFactoryCAI::UpdateIconName(int cmdID, const int& numQueued)
 
 		commandDescriptionCache.DecRef(*cd);
 		cd = commandDescriptionCache.GetPtr(std::move(ucd));
+		BumpCmdDescVersion(); // sim|draw PR 30 desc-surface choke point (factory build-count badge)
 		break;
 	}
 

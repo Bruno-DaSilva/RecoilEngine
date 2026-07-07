@@ -85,6 +85,25 @@ public:
 	const std::vector<const SCommandDescription*>& GetPossibleCommands() const { return possibleCommands; }
 
 	/**
+	 * Desc-surface version (sim|draw PR 30). The command-queue serving cache
+	 * (LuaSnapshotServe::RefreshCommandQueues) re-copies a unit's possibleCommands
+	 * into its boundary slot only when this value changed since the last boundary
+	 * -- the mutation-rate-copy pattern the command-queue version (CCommandQueue::
+	 * GetVersion) already applies to the queue itself. Values come from a
+	 * process-global counter so they are unique across ALL CommandAI instances
+	 * and lifetimes: a respawned unit reusing an id can never alias whatever the
+	 * serving cache stored for the previous owner. The single choke point is
+	 * BumpCmdDescVersion(), called from every possibleCommands mutator (the four
+	 * description-update methods below + AddStockpileWeapon); the ctor draws a
+	 * fresh value so a never-mutated CommandAI still differs from any cached
+	 * copy. Construction-time possibleCommands.push_back's in the subclass ctors
+	 * need no bump: a freshly created unit is always copied from scratch at its
+	 * first extraction (no prior slot to share). CR_IGNORED (runtime-only serving
+	 * state, not synced), exactly like CCommandQueue::version.
+	 */
+	uint64_t GetCmdDescVersion() const { return cmdDescVersion; }
+
+	/**
 	 * @brief Causes this CommandAI to execute the attack order c
 	 */
 	virtual void ExecuteAttack(Command& c);
@@ -153,6 +172,11 @@ protected:
 	int UpdateTargetLostTimer(int unitID);
 	void DrawDefaultCommand(const Command& c) const;
 
+	// sim|draw PR 30 desc-surface choke point (see GetCmdDescVersion): the sole
+	// writer of cmdDescVersion; write only happens from sim context so a plain
+	// pre-incremented global read suffices
+	void BumpCmdDescVersion() { cmdDescVersion = ++nextGlobalCmdDescVersion; }
+
 private:
 	// FIXME make synced?
 	spring::unsynced_set<CObject*> commandDeathDependences;
@@ -162,6 +186,10 @@ private:
 	 * timer reaches 0
 	 */
 	int targetLostTimer;
+
+	// sim|draw PR 30: see GetCmdDescVersion(). CR_IGNORED in the creg block.
+	uint64_t cmdDescVersion;
+	static inline uint64_t nextGlobalCmdDescVersion = 0;
 };
 
 inline void CCommandAI::SetOrderTarget(CUnit* o) {

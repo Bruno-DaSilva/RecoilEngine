@@ -5177,9 +5177,9 @@ static int GetFactoryWorkerTask(lua_State* L, const CFactory *factory)
  * @return integer cmdID of the relevant command
  * @return integer targetID if applicable (all except RESTORE)
  */
-int LuaSyncedRead::GetUnitWorkerTask(lua_State* L)
+static int GetUnitWorkerTaskLive(lua_State* L, const char* caller)
 {
-	const auto unit = ParseInLosUnit(L, __func__, 1);
+	const auto unit = ParseInLosUnit(L, caller, 1);
 	if (unit == nullptr)
 		return 0;
 
@@ -5190,6 +5190,12 @@ int LuaSyncedRead::GetUnitWorkerTask(lua_State* L)
 		return GetFactoryWorkerTask(L, factory);
 
 	return 0;
+}
+
+int LuaSyncedRead::GetUnitWorkerTask(lua_State* L)
+{
+	// sim|draw PR 30: served from the boundary-decoded worker-task answer
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitWorkerTaskLive, &LuaSnapshotServe::GetUnitWorkerTask);
 }
 
 /***
@@ -7239,9 +7245,9 @@ int LuaSyncedRead::GetRealBuildQueue(lua_State* L)
  * @function Spring.GetUnitCmdDescs
  * @param unitID integer
  */
-int LuaSyncedRead::GetUnitCmdDescs(lua_State* L)
+static int GetUnitCmdDescsLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseTypedUnit(L, __func__, 1);
+	const CUnit* unit = ParseTypedUnit(L, caller, 1);
 	if (unit == nullptr)
 		return 0;
 
@@ -7272,6 +7278,12 @@ int LuaSyncedRead::GetUnitCmdDescs(lua_State* L)
 	return 1;
 }
 
+int LuaSyncedRead::GetUnitCmdDescs(lua_State* L)
+{
+	// sim|draw PR 30: served from the boundary-copied cmd-desc surface
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitCmdDescsLive, &LuaSnapshotServe::GetUnitCmdDescs);
+}
+
 
 /***
  *
@@ -7280,9 +7292,9 @@ int LuaSyncedRead::GetUnitCmdDescs(lua_State* L)
  * @param cmdID integer
  * @return integer?
  */
-int LuaSyncedRead::FindUnitCmdDesc(lua_State* L)
+static int FindUnitCmdDescLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseTypedUnit(L, __func__, 1);
+	const CUnit* unit = ParseTypedUnit(L, caller, 1);
 	if (unit == nullptr)
 		return 0;
 
@@ -7296,6 +7308,12 @@ int LuaSyncedRead::FindUnitCmdDesc(lua_State* L)
 		}
 	}
 	return 0;
+}
+
+int LuaSyncedRead::FindUnitCmdDesc(lua_State* L)
+{
+	// sim|draw PR 30: served from the boundary-copied cmd-desc surface
+	return LuaSnapshotServe::Route(L, __func__, &FindUnitCmdDescLive, &LuaSnapshotServe::FindUnitCmdDesc);
 }
 
 

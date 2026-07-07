@@ -79,6 +79,7 @@ CR_REG_METADATA(CCommandAI, (
 	CR_MEMBER(inCommand),
 	CR_MEMBER(commandDeathDependences),
 	CR_MEMBER(targetLostTimer),
+	CR_IGNORED(cmdDescVersion), // sim|draw PR 30: ctor-unique on load; serving cache must not match a pre-load copy (CCommandQueue::version precedent)
 
 	CR_PREALLOC(GetPreallocContainer)
 ))
@@ -94,7 +95,8 @@ CCommandAI::CCommandAI():
 	inCommand(CMD_STOP),
 	repeatOrders(false),
 	lastSelectedCommandPage(0),
-	targetLostTimer(TARGET_LOST_TIMER)
+	targetLostTimer(TARGET_LOST_TIMER),
+	cmdDescVersion(++nextGlobalCmdDescVersion) // sim|draw PR 30, see GetCmdDescVersion
 {}
 
 CCommandAI::CCommandAI(CUnit* owner):
@@ -108,7 +110,8 @@ CCommandAI::CCommandAI(CUnit* owner):
 	inCommand(CMD_STOP),
 	repeatOrders(false),
 	lastSelectedCommandPage(0),
-	targetLostTimer(TARGET_LOST_TIMER)
+	targetLostTimer(TARGET_LOST_TIMER),
+	cmdDescVersion(++nextGlobalCmdDescVersion) // sim|draw PR 30, see GetCmdDescVersion
 {
 	{
 		SCommandDescription c;
@@ -385,6 +388,7 @@ void CCommandAI::UpdateCommandDescription(unsigned int cmdDescIdx, const Command
 	cd.params[0] = IntToString(int(cmd.GetParam(0)), "%d");
 	commandDescriptionCache.DecRef(*possibleCommands[cmdDescIdx]);
 	possibleCommands[cmdDescIdx] = commandDescriptionCache.GetPtr(std::move(cd));
+	BumpCmdDescVersion(); // sim|draw PR 30 desc-surface choke point
 }
 
 void CCommandAI::UpdateCommandDescription(unsigned int cmdDescIdx, SCommandDescription&& modCmdDesc) {
@@ -415,6 +419,7 @@ void CCommandAI::UpdateCommandDescription(unsigned int cmdDescIdx, SCommandDescr
 	if (boUpdate)
 		HandleBuildOptionInsertion(possibleCommands[cmdDescIdx]->id);
 
+	BumpCmdDescVersion(); // sim|draw PR 30 desc-surface choke point
 	selectedUnitsHandler.PossibleCommandChange(owner);
 }
 
@@ -436,6 +441,7 @@ void CCommandAI::InsertCommandDescription(unsigned int cmdDescIdx, SCommandDescr
 	if (!cmdDesc.queueing)
 		nonQueingCommands.insert(cmdDesc.id);
 
+	BumpCmdDescVersion(); // sim|draw PR 30 desc-surface choke point
 	selectedUnitsHandler.PossibleCommandChange(owner);
 }
 
@@ -455,6 +461,7 @@ bool CCommandAI::RemoveCommandDescription(unsigned int cmdDescIdx)
 	commandDescriptionCache.DecRef(*cmdDescPtr);
 	// preserve order
 	possibleCommands.erase(possibleCommands.begin() + cmdDescIdx);
+	BumpCmdDescVersion(); // sim|draw PR 30 desc-surface choke point
 	selectedUnitsHandler.PossibleCommandChange(owner);
 	return true;
 }
@@ -1716,6 +1723,7 @@ void CCommandAI::AddStockpileWeapon(CWeapon* weapon)
 	c.iconname = "bitmaps/armsilo1.bmp";
 
 	possibleCommands.push_back(commandDescriptionCache.GetPtr(std::move(c)));
+	BumpCmdDescVersion(); // sim|draw PR 30 desc-surface choke point (runtime add: stockpile weapon)
 }
 
 void CCommandAI::StockpileChanged(CWeapon* weapon)

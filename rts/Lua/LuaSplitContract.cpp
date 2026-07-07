@@ -116,11 +116,13 @@ namespace {
 		"GetPlayerRulesParam", "GetPlayerRulesParams",
 		"GetUnitRulesParam", "GetUnitRulesParams",
 		"GetFeatureRulesParam", "GetFeatureRulesParams",
-		// command-queue family: SERVED (PR 27b serving batch 2) -- only the
-		// cmd-desc surface remains (possibleCommands, not the queue; the
-		// worker-task read derefs the builder's current job object)
-		"GetUnitCmdDescs", "FindUnitCmdDesc",
-		"GetUnitWorkerTask",
+		// command-queue / cmd-desc / worker-task family: FULLY SERVED. The queue
+		// callouts landed in PR 27b serving batch 2; the cmd-desc surface
+		// (GetUnitCmdDescs/FindUnitCmdDesc, version-keyed on CCommandAI::
+		// GetCmdDescVersion) and the builder worker-task read (GetUnitWorkerTask,
+		// decoded at extraction) landed in sim|draw PR 30 -- see
+		// LuaSnapshotServe::RefreshCommandQueues. Nothing from this family remains
+		// on sanctionedLive.
 		// weapon/shield state family (decision-4 copies pending)
 		"GetUnitShieldState", "GetUnitFlanking", "GetUnitWeaponState",
 		"GetUnitWeaponDamages", "GetUnitWeaponVectors", "GetUnitWeaponTryTarget",

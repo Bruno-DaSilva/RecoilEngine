@@ -41,7 +41,9 @@
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Units/UnitDefHandler.h"
 #include "Sim/Units/UnitHandler.h" // RefreshCommandQueues' barrier walk
+#include "Sim/Units/UnitTypes/Builder.h" // sim|draw PR 30: GetUnitWorkerTask builder decode
 #include "Sim/Units/UnitTypes/Factory.h" // CFactory bugger-off scalars
+#include "Game/BoundaryStats.h" // sim|draw PR 30: block-copy telemetry
 #include "System/AABB.hpp" // GetUnitsInBox's boxCheck
 #include "System/ContainerUtil.h" // spring::VectorSortUnique (GetTeamUnitsByDefs)
 #include "System/MainDefines.h" // STRCASECMP (PackBuildQueueSnap)
@@ -4229,6 +4231,25 @@ namespace {
 		unsigned int numParams;
 	};
 
+	// sim|draw PR 30: the SCommandDescription fields the cmd-desc twins serve
+	// (LuaUtils::PushCommandDesc surface, 12 keys + params); refCount excluded
+	// (unsynced cache bookkeeping, not part of the Lua shape)
+	struct CmdDescRecord {
+		int id;
+		int type;
+		unsigned char queueing;
+		unsigned char hidden;
+		unsigned char disabled;
+		unsigned char showUnique;
+		unsigned char onlyTexture;
+		std::string name;
+		std::string action;
+		std::string iconname;
+		std::string mouseicon;
+		std::string tooltip;
+		std::vector<std::string> params;
+	};
+
 	struct UnitCmdQueueSlot {
 		// 0 = never copied (real versions are a pre-incremented global counter)
 		uint64_t cmdQueVersion = 0;
@@ -4251,6 +4272,19 @@ namespace {
 		std::vector<float> commandQueParams;
 		std::vector<SnapCommand> newUnitCommands;
 		std::vector<float> newUnitCommandsParams;
+
+		// sim|draw PR 30: cmd-desc surface (possibleCommands), version-keyed on
+		// CCommandAI::GetCmdDescVersion() -- a separate version so a queue pop
+		// does not force a desc recopy (descs change far less often)
+		uint64_t cmdDescVersion = 0;
+		std::vector<CmdDescRecord> descs;
+
+		// sim|draw PR 30: GetUnitWorkerTask's resolved (numRet, cmd, target)
+		// answer, decoded at extraction (ResolveWorkerTask) since curBuild/
+		// curCapture/curResurrect/curReclaim/terraforming are not in the queue
+		unsigned char workerTaskNumRet = 0;
+		int workerTaskCmd = 0;
+		int workerTaskTarget = 0;
 	};
 
 	// indexed by unitID, sized unitHandler.MaxUnits() at first refresh
@@ -4268,6 +4302,11 @@ namespace {
 		slot.commandQueParams.clear();
 		slot.newUnitCommands.clear();
 		slot.newUnitCommandsParams.clear();
+		slot.cmdDescVersion = 0;
+		slot.descs.clear();
+		slot.workerTaskNumRet = 0;
+		slot.workerTaskCmd = 0;
+		slot.workerTaskTarget = 0;
 	}
 
 	void CopyQueueSnap(const CCommandQueue& q, std::vector<SnapCommand>& cmds, std::vector<float>& params)
@@ -4284,6 +4323,130 @@ namespace {
 			for (unsigned int i = 0; i < numParams; ++i)
 				params.push_back(c.GetParam(i));
 		}
+
+		// sim|draw PR 30: dirty-versioned copy-cost telemetry (decision-4 "one
+		// boundary copy tracks the order rate")
+		BoundaryStats::Add(BoundaryStats::ctr.cmdBlocksCopied);
+		BoundaryStats::Add(BoundaryStats::ctr.cmdBlockBytes,
+			cmds.size() * sizeof(SnapCommand) + params.size() * sizeof(float));
+	}
+
+	// sim|draw PR 30: flatten possibleCommands into the slot's desc records
+	// (mirror of BuildDescBlock; the fields LuaUtils::PushCommandDesc serves)
+	void CopyDescsSnap(const std::vector<const SCommandDescription*>& live, std::vector<CmdDescRecord>& out)
+	{
+		out.clear();
+		out.reserve(live.size());
+
+		uint64_t bytes = 0;
+		for (const SCommandDescription* cd: live) {
+			CmdDescRecord r;
+			r.id          = cd->id;
+			r.type        = cd->type;
+			r.queueing    = cd->queueing;
+			r.hidden      = cd->hidden;
+			r.disabled    = cd->disabled;
+			r.showUnique  = cd->showUnique;
+			r.onlyTexture = cd->onlyTexture;
+			r.name        = cd->name;
+			r.action      = cd->action;
+			r.iconname    = cd->iconname;
+			r.mouseicon   = cd->mouseicon;
+			r.tooltip     = cd->tooltip;
+			r.params      = cd->params;
+
+			bytes += sizeof(CmdDescRecord) + r.name.size() + r.action.size() +
+				r.iconname.size() + r.mouseicon.size() + r.tooltip.size();
+			for (const std::string& p: r.params)
+				bytes += p.size();
+
+			out.push_back(std::move(r));
+		}
+
+		BoundaryStats::Add(BoundaryStats::ctr.cmdDescBlocksCopied);
+		BoundaryStats::Add(BoundaryStats::ctr.cmdDescBlockBytes, bytes);
+	}
+
+	// sim|draw PR 30: mirror of GetBuilderWorkerTask / GetFactoryWorkerTask,
+	// decoded at extraction into the slot (the fields it reads -- curBuild/
+	// curCapture/curResurrect/curReclaim/terraforming -- are not derivable from
+	// the queue copy, so the resolved answer is stored instead of deep rows)
+	void ResolveWorkerTask(const CUnit* unit, UnitCmdQueueSlot& slot)
+	{
+		slot.workerTaskNumRet = 0;
+		slot.workerTaskCmd = 0;
+		slot.workerTaskTarget = 0;
+
+		if (const CBuilder* builder = dynamic_cast<const CBuilder*>(unit)) {
+			if (builder->curBuild) {
+				slot.workerTaskCmd = builder->curBuild->beingBuilt ? -builder->curBuild->unitDef->id : CMD_REPAIR;
+				slot.workerTaskTarget = builder->curBuild->id;
+				slot.workerTaskNumRet = 2;
+			} else if (builder->curCapture) {
+				slot.workerTaskCmd = CMD_CAPTURE;
+				slot.workerTaskTarget = builder->curCapture->id;
+				slot.workerTaskNumRet = 2;
+			} else if (builder->curResurrect) {
+				slot.workerTaskCmd = CMD_RESURRECT;
+				slot.workerTaskTarget = builder->curResurrect->id + unitHandler.MaxUnits();
+				slot.workerTaskNumRet = 2;
+			} else if (builder->curReclaim) {
+				slot.workerTaskCmd = CMD_RECLAIM;
+				if (builder->reclaimingUnit) {
+					const CUnit* reclaimee = dynamic_cast<const CUnit*>(builder->curReclaim);
+					slot.workerTaskTarget = (reclaimee != nullptr) ? reclaimee->id : 0;
+				} else {
+					const CFeature* reclaimee = dynamic_cast<const CFeature*>(builder->curReclaim);
+					slot.workerTaskTarget = (reclaimee != nullptr) ? (reclaimee->id + unitHandler.MaxUnits()) : 0;
+				}
+				slot.workerTaskNumRet = 2;
+			} else if (builder->helpTerraform || builder->terraforming) {
+				slot.workerTaskCmd = CMD_RESTORE;
+				slot.workerTaskNumRet = 1;
+			}
+			return;
+		}
+
+		if (const CFactory* factory = dynamic_cast<const CFactory*>(unit)) {
+			if (factory->curBuild) {
+				slot.workerTaskCmd = factory->curBuild->beingBuilt ? -factory->curBuild->unitDef->id : CMD_REPAIR;
+				slot.workerTaskTarget = factory->curBuild->id;
+				slot.workerTaskNumRet = 2;
+			}
+			return;
+		}
+	}
+
+	// sim|draw PR 30: LuaUtils::PushCommandDesc mirror over a CmdDescRecord
+	// (same 12 keys, same order, same params sub-table)
+	void PushCommandDescSnap(lua_State* L, const CmdDescRecord& cd)
+	{
+		const int numParams = cd.params.size();
+		const int numTblKeys = 12;
+
+		lua_checkstack(L, 1 + 1 + 1 + 1);
+		lua_createtable(L, 0, numTblKeys);
+
+		HSTR_PUSH_NUMBER(L, "id",          cd.id);
+		HSTR_PUSH_NUMBER(L, "type",        cd.type);
+		HSTR_PUSH_STRING(L, "name",        cd.name);
+		HSTR_PUSH_STRING(L, "action",      cd.action);
+		HSTR_PUSH_STRING(L, "tooltip",     cd.tooltip);
+		HSTR_PUSH_STRING(L, "texture",     cd.iconname);
+		HSTR_PUSH_STRING(L, "cursor",      cd.mouseicon);
+		HSTR_PUSH_BOOL(L,   "queueing",    cd.queueing);
+		HSTR_PUSH_BOOL(L,   "hidden",      cd.hidden);
+		HSTR_PUSH_BOOL(L,   "disabled",    cd.disabled);
+		HSTR_PUSH_BOOL(L,   "showUnique",  cd.showUnique);
+		HSTR_PUSH_BOOL(L,   "onlyTexture", cd.onlyTexture);
+
+		HSTR_PUSH(L, "params");
+		lua_createtable(L, 0, numParams);
+		for (int p = 0; p < numParams; p++) {
+			lua_pushsstring(L, cd.params[p]);
+			lua_rawseti(L, -2, p + 1);
+		}
+		lua_settable(L, -3);
 	}
 
 	const UnitCmdQueueSlot* GetCmdQueueSlot(int unitID)
@@ -4563,6 +4726,16 @@ void LuaSnapshotServe::RefreshCommandQueues()
 			}
 		}
 
+		// sim|draw PR 30: cmd-desc surface, keyed on its OWN version (a queue pop
+		// does not recopy descs). A fresh/respawned slot has cmdDescVersion 0 and
+		// GetCmdDescVersion() is a globally-unique >=1 value, so it rebuilds; a
+		// reused id can never alias a prior owner's descs (see GetCmdDescVersion).
+		const uint64_t descVersion = cai->GetCmdDescVersion();
+		if (slot.cmdDescVersion != descVersion) {
+			CopyDescsSnap(cai->GetPossibleCommands(), slot.descs);
+			slot.cmdDescVersion = descVersion;
+		}
+
 		if (slot.isFactoryCAI) {
 			const CFactoryCAI* fcai = static_cast<const CFactoryCAI*>(cai);
 			const uint64_t newUnitCmdsVersion = fcai->newUnitCommands.GetVersion();
@@ -4583,6 +4756,10 @@ void LuaSnapshotServe::RefreshCommandQueues()
 			slot.boSherical   = fac->boSherical;
 			slot.boForced     = fac->boForced;
 		}
+
+		// sim|draw PR 30: decode GetUnitWorkerTask's answer here (not queue-
+		// derivable); re-resolved every refresh (few builders/factories)
+		ResolveWorkerTask(unit, slot);
 	}
 }
 
@@ -4769,6 +4946,188 @@ int LuaSnapshotServe::GetFullBuildQueue(lua_State* L, const char* caller)
 int LuaSnapshotServe::GetRealBuildQueue(lua_State* L, const char* caller)
 {
 	return PackBuildQueueSnap(L, true, caller);
+}
+
+// mirror of LuaSyncedRead::GetUnitCmdDescs (ParseTypedUnit gate, 1-based slicing)
+int LuaSnapshotServe::GetUnitCmdDescs(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// ParseTypedUnit mirror
+	if (!rows.Valid(unitID) || !rows.PovUnitTyped(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	const UnitCmdQueueSlot* slot = GetCmdQueueSlot(unitID);
+	if (slot == nullptr)
+		return 0;
+
+	const std::vector<CmdDescRecord>& cmdDescs = slot->descs;
+	const int lastDesc = (int)cmdDescs.size() - 1;
+
+	const int args = lua_gettop(L); // number of arguments
+	int startIndex = 0;
+	int endIndex = lastDesc;
+	if ((args >= 2) && lua_isnumber(L, 2)) {
+		startIndex = lua_toint(L, 2) - 1;
+		if ((args >= 3) && lua_isnumber(L, 3)) {
+			endIndex = lua_toint(L, 3) - 1;
+		} else {
+			endIndex = startIndex;
+		}
+	}
+	startIndex = std::clamp(startIndex, 0, lastDesc);
+	endIndex   = std::clamp(endIndex  , 0, lastDesc);
+
+	lua_createtable(L, endIndex - startIndex, 0);
+	int count = 1;
+	for (int i = startIndex; i <= endIndex; i++) {
+		PushCommandDescSnap(L, cmdDescs[i]);
+		lua_rawseti(L, -2, count++);
+	}
+
+	return 1;
+}
+
+// mirror of LuaSyncedRead::FindUnitCmdDesc (ParseTypedUnit gate)
+int LuaSnapshotServe::FindUnitCmdDesc(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// ParseTypedUnit mirror
+	if (!rows.Valid(unitID) || !rows.PovUnitTyped(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	const UnitCmdQueueSlot* slot = GetCmdQueueSlot(unitID);
+	if (slot == nullptr)
+		return 0;
+
+	const int cmdID = luaL_checkint(L, 2);
+
+	const std::vector<CmdDescRecord>& cmdDescs = slot->descs;
+	for (int i = 0; i < (int)cmdDescs.size(); i++) {
+		if (cmdDescs[i].id == cmdID) {
+			lua_pushnumber(L, i + 1);
+			return 1;
+		}
+	}
+	return 0;
+}
+
+// mirror of LuaSyncedRead::GetUnitWorkerTask (ParseInLosUnit gate; the resolved
+// build/repair/reclaim/... answer was decoded at extraction, see ResolveWorkerTask)
+int LuaSnapshotServe::GetUnitWorkerTask(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// ParseInLosUnit mirror
+	if (!rows.Valid(unitID) || !rows.PovUnitInLos(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	const UnitCmdQueueSlot* slot = GetCmdQueueSlot(unitID);
+	if (slot == nullptr || slot->workerTaskNumRet == 0)
+		return 0;
+
+	lua_pushnumber(L, slot->workerTaskCmd);
+	if (slot->workerTaskNumRet == 2)
+		lua_pushnumber(L, slot->workerTaskTarget);
+
+	return slot->workerTaskNumRet;
+}
+
+// sim|draw PR 30 mirror-verification hook for SnapshotDiffGate::CheckCmdQueueRows.
+// Compares the cached slot for unitID against the live sim state at the armed
+// boundary (the cache was just rebuilt by RefreshCommandQueues, so every field
+// must trivially match -- a missed dirty-mark becomes a deterministic failure).
+// Binds live queues through const refs so the mutable (version-bumping) queue
+// accessors are never invoked. Lives here (not in SnapshotDiffGate) so the file-
+// static cache stays encapsulated and the sim includes are already present.
+LuaSnapshotServe::CmdQueueCompareResult LuaSnapshotServe::CompareCmdQueueSlot(int unitID, const CUnit* liveUnit)
+{
+	CmdQueueCompareResult res{};
+
+	const UnitCmdQueueSlot* slot =
+		(unitID >= 0 && static_cast<size_t>(unitID) < cmdQueueCache.size() && cmdQueueCache[unitID].present)
+			? &cmdQueueCache[unitID] : nullptr;
+
+	res.present = (slot != nullptr);
+	if (slot == nullptr || liveUnit == nullptr)
+		return res;
+
+	// bitwise float compare (mirror of SnapshotDiffGate::BitEqual)
+	const auto bitEq = [](float a, float b) {
+		return std::memcmp(&a, &b, sizeof(float)) == 0;
+	};
+	const auto queueEqual = [&](const std::vector<SnapCommand>& cmds, const std::vector<float>& params, const CCommandQueue& live) -> bool {
+		if (cmds.size() != live.size())
+			return false;
+		size_t i = 0;
+		for (const Command& c: live) {
+			const SnapCommand& r = cmds[i++];
+			if (r.id != c.GetID() || r.tag != c.GetTag() || r.options != c.GetOpts() || r.numParams != c.GetNumParams())
+				return false;
+			for (unsigned int p = 0; p < r.numParams; ++p) {
+				if (!bitEq(params[r.paramOffset + p], c.GetParam(p)))
+					return false;
+			}
+		}
+		return true;
+	};
+
+	const CCommandAI* cai = liveUnit->commandAI;
+	const bool isFactoryCAI = (dynamic_cast<const CFactoryCAI*>(cai) != nullptr);
+
+	// queue block(s): commandQue always, newUnitCommands for factory CAIs
+	bool queueOk = queueEqual(slot->commandQue, slot->commandQueParams, cai->commandQue);
+	if (isFactoryCAI) {
+		const CFactoryCAI* fcai = static_cast<const CFactoryCAI*>(cai);
+		queueOk = queueOk && queueEqual(slot->newUnitCommands, slot->newUnitCommandsParams, fcai->newUnitCommands);
+	}
+	res.queueOk = queueOk;
+
+	// cmd-desc block vs live possibleCommands
+	const std::vector<const SCommandDescription*>& liveDescs = cai->GetPossibleCommands();
+	bool descsOk = (slot->descs.size() == liveDescs.size());
+	for (size_t i = 0; descsOk && i < liveDescs.size(); ++i) {
+		const CmdDescRecord& r = slot->descs[i];
+		const SCommandDescription& d = *liveDescs[i];
+		descsOk = (r.id == d.id && r.type == d.type &&
+			bool(r.queueing) == d.queueing && bool(r.hidden) == d.hidden && bool(r.disabled) == d.disabled &&
+			bool(r.showUnique) == d.showUnique && bool(r.onlyTexture) == d.onlyTexture &&
+			r.name == d.name && r.action == d.action && r.iconname == d.iconname &&
+			r.mouseicon == d.mouseicon && r.tooltip == d.tooltip && r.params == d.params);
+	}
+	res.descsOk = descsOk;
+
+	// worker-task decode: re-resolve into a scratch slot and compare
+	UnitCmdQueueSlot scratch;
+	ResolveWorkerTask(liveUnit, scratch);
+	res.workerOk = (slot->workerTaskNumRet == scratch.workerTaskNumRet) &&
+		(scratch.workerTaskNumRet < 1 || slot->workerTaskCmd == scratch.workerTaskCmd) &&
+		(scratch.workerTaskNumRet != 2 || slot->workerTaskTarget == scratch.workerTaskTarget);
+
+	// classification flags + factory bugger-off scalars
+	const CFactory* fac = dynamic_cast<const CFactory*>(liveUnit);
+	bool factoryOk =
+		(bool(slot->isFactoryCAI) == isFactoryCAI) &&
+		(bool(slot->isFactoryUnit) == (fac != nullptr));
+	if (fac != nullptr) {
+		factoryOk = factoryOk &&
+			(bool(slot->boPerform) == fac->boPerform) &&
+			(bool(slot->boSherical) == fac->boSherical) &&
+			(bool(slot->boForced) == fac->boForced) &&
+			bitEq(slot->boOffset, fac->boOffset) &&
+			bitEq(slot->boRadius, fac->boRadius) &&
+			(slot->boRelHeading == fac->boRelHeading);
+	}
+	res.factoryOk = factoryOk;
+
+	return res;
 }
 
 
