@@ -538,11 +538,15 @@ int LuaUnsyncedCtrl::SendCommands(lua_State* L)
 		luaL_error(L, "Incorrect arguments to SendCommands()");
 	}
 
-	// split contract (PR 27a): stays synchronous, classified 27b work
-	// (synchronous console-action dispatch, arbitrary executors)
-	LuaSplitContract::CountSanctionedPoke(L, __func__);
-
 	lua_settop(L, 0); // pop the input arguments
+
+	// PR 37: console actions dispatch arbitrary executors, some of which poke
+	// sim state -- park the sim for the batch (the same bracket CGuiHandler wraps
+	// its own action dispatch in; nest-safe, no-op flag-off). This is the
+	// conservative, order-preserving default; per-action net/UI/sim
+	// classification (net-send synchronous, draw-owned UI immediate, sim pokes
+	// boundary-applied) is the documented optimization deferred past the flip.
+	CGame::ScopedExternalSimPause simPause;
 
 	configHandler->EnableWriting(globalConfig.luaWritableConfigFile);
 	guihandler->RunCustomCommands(cmds, false);
@@ -1513,10 +1517,11 @@ int LuaUnsyncedCtrl::SetDollyCameraLookUnit(lua_State* L)
  */
 int LuaUnsyncedCtrl::SelectUnit(lua_State* L)
 {
-	// split contract (PR 27a): stays synchronous, classified 27b work
-	// (selection handler becomes draw-owned with boundary death-pruning)
-	LuaSplitContract::CountSanctionedPoke(L, __func__);
-
+	// PR 37: selection is draw-owned -- selectedUnits holds ids, isSelected and
+	// group membership are draw-only fields, and deaths arrive at the boundary
+	// (DeliverBoundaryDeaths -> DependentDied). Runs synchronously on the draw
+	// side; the residual live unit reads in AddUnit (transporter/noSelect) are
+	// the tolerated section-C class already accepted for the read-side twins.
 	if (!luaL_optboolean(L, 2, false))
 		selectedUnitsHandler.ClearSelected();
 
@@ -1544,10 +1549,8 @@ int LuaUnsyncedCtrl::DeselectUnit(lua_State* L)
 	if (unit == nullptr)
 		return 0;
 
-	// split contract (PR 27a): stays synchronous, classified 27b work
-	// (selection handler becomes draw-owned with boundary death-pruning)
-	LuaSplitContract::CountSanctionedPoke(L, __func__);
-
+	// PR 37: selection is draw-owned (see SelectUnit); RemoveUnit only needs the
+	// id and clears the draw-only isSelected flag, so it runs synchronously.
 	selectedUnitsHandler.RemoveUnit(unit);
 
 	return 0;
@@ -1558,11 +1561,8 @@ static int TableSelectionCommonFunc(lua_State* L, int unitIndexInTable, bool isS
 	if (!lua_istable(L, 1))
 		luaL_error(L, "[%s] 1st argument must be a table", caller);
 
-	// split contract (PR 27a): stays synchronous, classified 27b work
-	// (selection handler becomes draw-owned with boundary death-pruning);
-	// counts under each wrapper entry's name
-	LuaSplitContract::CountSanctionedPoke(L, caller);
-
+	// PR 37: selection is draw-owned (see SelectUnit) -- the Add/RemoveUnit calls
+	// below run synchronously on the draw side.
 	if (isSelect && !luaL_optboolean(L, 2, false))
 		selectedUnitsHandler.ClearSelected();
 
@@ -2351,10 +2351,9 @@ int LuaUnsyncedCtrl::SetUnitNoGroup(lua_State* L)
 
 	const bool noGroup = luaL_checkboolean(L, 2);
 
-	// split contract (PR 27a): stays synchronous, classified 27b work
-	// (group membership is an ordered RMW shared with the sim death path)
-	LuaSplitContract::CountSanctionedPoke(L, __func__);
-
+	// PR 37: group state is draw-owned -- noGroup is a draw-only field (read only
+	// by the draw-owned CGroupHandler) and CUnit::SetGroup mutates uiGroupHandlers
+	// + the draw-owned selection. Runs synchronously on the draw side.
 	unit->noGroup = noGroup;
 
 	if (unit->noGroup) {
@@ -2380,9 +2379,27 @@ int LuaUnsyncedCtrl::SetUnitNoSelect(lua_State* L)
 
 	const bool noSelect = luaL_checkboolean(L, 2);
 
-	// split contract (PR 27a): stays synchronous, classified 27b work
-	// (two-writer field: sim's UpdateVoidState also writes noSelect)
-	LuaSplitContract::CountSanctionedPoke(L, __func__);
+	// PR 37: noSelect is a two-writer field -- the sim's SolidObject::
+	// UpdateVoidState also writes it (transport attach/detach). Boundary-apply
+	// the poke (capture the id; the unit can die before the drain) so the write
+	// and the draw-owned deselect run with the sim parked. Two-writer ordering:
+	// the queued poke lands at the barrier before the next sim frame, so a
+	// following UpdateVoidState simply overrides it next frame -- last-writer
+	// wins across the boundary, no special-casing.
+	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = unit->id, noSelect]() {
+		CUnit* u = unitHandler.GetUnit(id);
+		if (u == nullptr)
+			return;
+
+		u->noSelect = noSelect;
+
+		if (u->noSelect) {
+			const auto& selUnits = selectedUnitsHandler.selectedUnits;
+			if (selUnits.find(u->id) != selUnits.end())
+				selectedUnitsHandler.RemoveUnit(u);
+		}
+	}))
+		return 0;
 
 	unit->noSelect = noSelect;
 
@@ -3573,10 +3590,9 @@ int LuaUnsyncedCtrl::SetUnitGroup(lua_State* L)
 
 	const int groupID = luaL_checkint(L, 2);
 
-	// split contract (PR 27a): stays synchronous, classified 27b work
-	// (group membership is an ordered RMW shared with the sim death path)
-	LuaSplitContract::CountSanctionedPoke(L, __func__);
-
+	// PR 37: group state is draw-owned (see SetUnitNoGroup) -- SetGroup mutates
+	// the draw-owned CGroupHandler and selection. Runs synchronously on the draw
+	// side.
 	if (groupID == -1) {
 		unit->SetGroup(nullptr);
 		return 0;
@@ -3671,9 +3687,14 @@ int LuaUnsyncedCtrl::GiveOrder(lua_State* L)
 		return 1;
 	}
 
-	// split contract (PR 27a): stays synchronous, classified 27b work (reads
-	// current selection + pokes player stats/wait commands; needs op capture)
-	LuaSplitContract::CountSanctionedPoke(L, __func__);
+	// PR 37: GiveOrder captures the current selection at call time and rides the
+	// net-send path (SendCommand -> SendSelect -> clientNet; class B, thread-safe
+	// channel) -- synchronous is correct and the id set is never read later than
+	// the callout. Park the sim for the local side effects GiveCommand still runs
+	// off the draw thread (waitCommandsAI wait-command inserts, the ok-sound's
+	// live unit read); nest-safe, no-op flag-off, the same bracket CGuiHandler
+	// wraps its own user-order dispatch in.
+	CGame::ScopedExternalSimPause simPause;
 
 	selectedUnitsHandler.GiveCommand(LuaUtils::ParseCommand(L, __func__, 1));
 
@@ -4157,11 +4178,9 @@ int LuaUnsyncedCtrl::MarkerAddPoint(lua_State* L)
 	const bool onlyLocal = luaL_optboolean(L, 5, true);
 
 	if (onlyLocal) {
-		// split contract (PR 27a): stays synchronous, classified 27b work
-		// (localOnly path writes the map-drawer model shared with net-message
-		// processing); the net path is thread-safe and not counted
-		LuaSplitContract::CountSanctionedPoke(L, __func__);
-
+		// PR 37: the map-drawer model is draw-owned -- net mutations arrive via
+		// the a0 boundary queue (NETMSG_MAPDRAW deferral) and local mutations run
+		// in draw context, so localOnly writes never race the sim.
 		inMapDrawerModel->AddPoint(pos, text, luaL_optnumber(L, 6, gu->myPlayerNum));
 	} else {
 		inMapDrawer->SendPoint(pos, text, true);
@@ -4196,11 +4215,9 @@ int LuaUnsyncedCtrl::MarkerAddLine(lua_State* L)
 	const bool onlyLocal = luaL_optboolean(L, 7, false);
 
 	if (onlyLocal) {
-		// split contract (PR 27a): stays synchronous, classified 27b work
-		// (localOnly path writes the map-drawer model shared with net-message
-		// processing); the net path is thread-safe and not counted
-		LuaSplitContract::CountSanctionedPoke(L, __func__);
-
+		// PR 37: the map-drawer model is draw-owned -- net mutations arrive via
+		// the a0 boundary queue (NETMSG_MAPDRAW deferral) and local mutations run
+		// in draw context, so localOnly writes never race the sim.
 		inMapDrawerModel->AddLine(pos1, pos2, luaL_optnumber(L, 8, gu->myPlayerNum));
 	} else {
 		inMapDrawer->SendLine(pos1, pos2, true);
@@ -4237,11 +4254,9 @@ int LuaUnsyncedCtrl::MarkerErasePosition(lua_State* L)
 
 	const bool onlyLocal = luaL_optboolean(L, 5, false);
 	if (onlyLocal) {
-		// split contract (PR 27a): stays synchronous, classified 27b work
-		// (localOnly path writes the map-drawer model shared with net-message
-		// processing); the net path is thread-safe and not counted
-		LuaSplitContract::CountSanctionedPoke(L, __func__);
-
+		// PR 37: the map-drawer model is draw-owned -- net mutations arrive via
+		// the a0 boundary queue (NETMSG_MAPDRAW deferral) and local mutations run
+		// in draw context, so localOnly writes never race the sim.
 		// always erase if onlyLocal and current player is spectator
 		const bool alwaysErase = luaL_optboolean(L, 7, false) && gu->spectating;
 		inMapDrawerModel->EraseNear(pos, luaL_optnumber(L, 6, gu->myPlayerNum), alwaysErase);
@@ -4530,9 +4545,26 @@ int LuaUnsyncedCtrl::SendSkirmishAIMessage(lua_State* L) {
 	const int aiTeam = luaL_checkint(L, 1);
 	const char* inData = luaL_checkstring(L, 2);
 
-	// split contract (PR 27a): stays synchronous, classified 27b work
-	// (synchronous call into a sim-side AI)
-	LuaSplitContract::CountSanctionedPoke(L, __func__);
+	// PR 37 (decision 5): the last synchronous sim entry on the ctrl surface --
+	// a synchronous call into a sim-side AI. Under the split it boundary-applies
+	// with a deferred (nil-now) result: the message is delivered at the next
+	// barrier (sim parked) and the callout returns nil immediately, since the
+	// AI's synchronous reply is not observable under the split. Copy the message
+	// (the Lua string dies with this call). Once-per-name dev warning; demand is
+	// trace-level.
+	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [aiTeam, msg = std::string(inData)]() {
+		std::vector<const char*> deferredOut;
+		eoh->SendLuaMessages(aiTeam, msg.c_str(), deferredOut);
+	})) {
+		static bool warnedOnce = false;
+		if (!warnedOnce) {
+			warnedOnce = true;
+			LOG_L(L_WARNING, "[%s] boundary-applied under the split; the AI reply is nil (decision 5)", __func__);
+		}
+
+		lua_pushnil(L);
+		return 1;
+	}
 
 	std::vector<const char*> outData;
 
@@ -5568,9 +5600,10 @@ int LuaUnsyncedCtrl::Reload(lua_State* L)
 {
 	const std::string scriptText = luaL_checkstring(L, 1);
 
-	// split contract (PR 27a): stays synchronous, classified 27b work
-	// (engine lifecycle; must run at a safe point)
-	LuaSplitContract::CountSanctionedPoke(L, __func__);
+	// PR 37: engine lifecycle -- run with the sim quiesced via the retained
+	// lifecycle pause (nest-safe, no-op flag-off). ReloadOrRestart only flags
+	// the reload for SpringApp here, so the bracket releases cleanly.
+	CGame::ScopedExternalSimPause simPause;
 
 	return (ReloadOrRestart("", scriptText, false));
 }
@@ -5589,9 +5622,9 @@ int LuaUnsyncedCtrl::Restart(lua_State* L)
 	const std::string springArgs = luaL_checkstring(L, 1);
 	const std::string scriptText = luaL_checkstring(L, 2);
 
-	// split contract (PR 27a): stays synchronous, classified 27b work
-	// (engine lifecycle; must run at a safe point)
-	LuaSplitContract::CountSanctionedPoke(L, __func__);
+	// PR 37: engine lifecycle -- run with the sim quiesced via the retained
+	// lifecycle pause (nest-safe, no-op flag-off).
+	CGame::ScopedExternalSimPause simPause;
 
 	// same as Reload now, cl-args are always ignored
 	return (ReloadOrRestart(springArgs, scriptText, false));
@@ -5613,9 +5646,10 @@ int LuaUnsyncedCtrl::Start(lua_State* L)
 	const std::string springArgs = luaL_checkstring(L, 1);
 	const std::string scriptText = luaL_checkstring(L, 2);
 
-	// split contract (PR 27a): stays synchronous, classified 27b work
-	// (engine lifecycle; must run at a safe point)
-	LuaSplitContract::CountSanctionedPoke(L, __func__);
+	// PR 37: engine lifecycle -- run with the sim quiesced via the retained
+	// lifecycle pause (nest-safe, no-op flag-off). Start spawns a new process
+	// and leaves this one running, so the bracket releases cleanly.
+	CGame::ScopedExternalSimPause simPause;
 
 	if (ReloadOrRestart(springArgs, scriptText, true) != 0) {
 		lua_pushboolean(L, false);
