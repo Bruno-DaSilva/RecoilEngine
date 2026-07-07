@@ -219,6 +219,17 @@ private:
 		W_TARGET,       // GetUnitWeaponTarget per-weapon
 		W_SHIELD,       // GetUnitShieldState per-weapon isShield/enabled/power
 		W_DAMAGES,      // GetUnitWeaponDamages per-weapon (flattened)
+		// ===== PR 32 (deep per-unit state): appended at the enum tail =====
+		D_STATES,       // GetUnitStates: fireState/moveState/repairBelowHealth/repeatOrders/wantCloak/useHighTrajectory
+		D_ECO2,         // storage / metalExtract / buildeeRadius
+		D_POSERR2,      // posErrorDelta / nextPosErrorUpdate
+		D_REFS,         // lastAttackerID / transporterID / curBuildID
+		D_BUILDSTATE,   // builderKind / buildDistance / range3D / inBuildStance / buildPower
+		D_MOVETYPE,     // moveType base rows + the full-table block
+		D_NANOPIECES,   // NanoPieceCache::GetNanoPieces() list
+		D_TRANSPORTEES, // transportedUnits id list
+		D_TOOLTIP,      // customTooltip (unitToolTipMap)
+		D_LOSVARIANTS,  // unitInLos/InAirLos/InJammer per-allyteam answers
 		F_COUNT
 	};
 

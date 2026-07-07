@@ -26,6 +26,20 @@
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Misc/Wind.h"
 #include "Sim/MoveTypes/MoveDefHandler.h"
+// PR 32 (deep per-unit state): live re-derivation for the field pass
+#include "Sim/MoveTypes/MoveType.h"
+#include "Sim/MoveTypes/GroundMoveType.h"
+#include "Sim/MoveTypes/HoverAirMoveType.h"
+#include "Sim/MoveTypes/StrafeAirMoveType.h"
+#include "Sim/MoveTypes/StaticMoveType.h"
+#include "Sim/MoveTypes/ScriptMoveType.h"
+#include "Sim/Misc/GlobalConstants.h" // GAME_SPEED
+#include "Sim/Misc/NanoPieceCache.h"
+#include "Sim/Units/CommandAI/CommandAI.h"
+#include "Sim/Units/CommandAI/MobileCAI.h"
+#include "Sim/Units/UnitToolTipMap.hpp"
+#include "Sim/Units/UnitTypes/Builder.h"
+#include "Sim/Units/UnitTypes/Factory.h"
 #include "Sim/Projectiles/ProjectileHandler.h"
 #include "Sim/Projectiles/PieceProjectile.h" // PR 33 GetPieceProjectileParams/Name
 #include "Rendering/Models/3DModelPiece.hpp" // PR 33 S3DModelPiece::name (ppro->omp)
@@ -169,6 +183,17 @@ static constexpr const char* FIELD_NAMES[] = {
 	"wpn:target",
 	"wpn:shield",
 	"wpn:damages",
+	// PR 32 (deep per-unit state): appended to match the enum tail (D_*)
+	"unit:states",
+	"unit:eco2",
+	"unit:posErr2",
+	"unit:refs",
+	"unit:buildState",
+	"unit:moveType",
+	"unit:nanoPieces",
+	"unit:transportees",
+	"unit:tooltip",
+	"unit:losVariants",
 };
 
 // structural compare for the copied customOpts maps (emilib::HashMap has no
@@ -216,6 +241,74 @@ static bool ColVolEqual(const CollisionVolume& a, const CollisionVolume& b)
 		&& a.UseContHitTest() == b.UseContHitTest()
 		&& a.DefaultToPieceTree() == b.DefaultToPieceTree()
 		&& a.DefaultToFootPrint() == b.DefaultToFootPrint();
+}
+
+// ---- PR 32 (deep per-unit state) live re-derivation for the field pass ----
+// A separate, independent copy of SimSnapshot's extraction chains (the
+// PackBlockingBits precedent): identical logic on both sides means the compare
+// catches torn/stale extraction, not a formula fork.
+static bool MoveTypeBlockEqual(const SimSnapshot::MoveTypeBlock& a, const SimSnapshot::MoveTypeBlock& b)
+{
+	return BitEqual(a.turnRate, b.turnRate) && BitEqual(a.accRate, b.accRate) && BitEqual(a.decRate, b.decRate)
+		&& BitEqual(a.maxReverseSpeed, b.maxReverseSpeed) && BitEqual(a.wantedSpeed, b.wantedSpeed)
+		&& BitEqual(a.currentSpeed, b.currentSpeed) && BitEqual(a.goalRadius, b.goalRadius)
+		&& BitEqual(a.currWayPoint, b.currWayPoint) && BitEqual(a.nextWayPoint, b.nextWayPoint)
+		&& BitEqual(a.wantedHeight, b.wantedHeight) && a.collide == b.collide && a.useSmoothMesh == b.useSmoothMesh
+		&& a.aircraftState == b.aircraftState && a.flyState == b.flyState
+		&& BitEqual(a.goalDistance, b.goalDistance) && a.bankingAllowed == b.bankingAllowed && a.dontLand == b.dontLand
+		&& BitEqual(a.currentBank, b.currentBank) && BitEqual(a.currentPitch, b.currentPitch)
+		&& BitEqual(a.altitudeRate, b.altitudeRate) && BitEqual(a.maxDrift, b.maxDrift)
+		&& BitEqual(a.myGravity, b.myGravity) && BitEqual(a.maxBank, b.maxBank) && BitEqual(a.turnRadius, b.turnRadius)
+		&& BitEqual(a.maxAileron, b.maxAileron) && BitEqual(a.maxElevator, b.maxElevator) && BitEqual(a.maxRudder, b.maxRudder);
+}
+
+static void LiveMoveType(const CUnit* u, uint8_t& kind, float& maxSpeed, float& maxWanted,
+                         float3& goalPos, uint8_t& progress, uint8_t& autoLand, uint8_t& loopback,
+                         SimSnapshot::MoveTypeBlock& b)
+{
+	const AMoveType* mt = u->moveType;
+	maxSpeed = mt->GetMaxSpeed() * GAME_SPEED;
+	maxWanted = mt->GetMaxWantedSpeed() * GAME_SPEED;
+	goalPos = mt->goalPos;
+	progress = static_cast<uint8_t>(mt->progressState);
+	autoLand = 0;
+	loopback = 0;
+	b = SimSnapshot::MoveTypeBlock{};
+
+	if (const auto* g = dynamic_cast<const CGroundMoveType*>(mt); g != nullptr) {
+		kind = 1;
+		b.turnRate = g->GetTurnRate(); b.accRate = g->GetAccRate(); b.decRate = g->GetDecRate();
+		b.maxReverseSpeed = g->GetMaxReverseSpeed() * GAME_SPEED;
+		b.wantedSpeed = g->GetWantedSpeed() * GAME_SPEED;
+		b.currentSpeed = g->GetCurrentSpeed() * GAME_SPEED;
+		b.goalRadius = g->GetGoalRadius();
+		b.currWayPoint = g->GetCurrWayPoint(); b.nextWayPoint = g->GetNextWayPoint();
+		return;
+	}
+	if (const auto* h = dynamic_cast<const CHoverAirMoveType*>(mt); h != nullptr) {
+		kind = 2;
+		autoLand = h->autoLand;
+		b.wantedHeight = h->wantedHeight; b.collide = h->collide; b.useSmoothMesh = h->useSmoothMesh;
+		b.aircraftState = h->aircraftState; b.flyState = h->flyState;
+		b.goalDistance = h->goalDistance; b.bankingAllowed = h->bankingAllowed;
+		b.currentBank = h->currentBank; b.currentPitch = h->currentPitch;
+		b.turnRate = h->turnRate; b.accRate = h->accRate; b.decRate = h->decRate;
+		b.altitudeRate = h->altitudeRate; b.dontLand = h->GetAllowLanding(); b.maxDrift = h->maxDrift;
+		return;
+	}
+	if (const auto* s = dynamic_cast<const CStrafeAirMoveType*>(mt); s != nullptr) {
+		kind = 3;
+		autoLand = s->autoLand;
+		loopback = s->loopbackAttack;
+		b.aircraftState = s->aircraftState; b.wantedHeight = s->wantedHeight;
+		b.collide = s->collide; b.useSmoothMesh = s->useSmoothMesh;
+		b.myGravity = s->myGravity; b.maxBank = s->maxBank; b.turnRadius = s->turnRadius;
+		b.accRate = s->accRate; b.maxAileron = s->maxAileron; b.maxElevator = s->maxElevator; b.maxRudder = s->maxRudder;
+		return;
+	}
+	if (dynamic_cast<const CStaticMoveType*>(mt) != nullptr) { kind = 4; return; }
+	if (dynamic_cast<const CScriptMoveType*>(mt) != nullptr) { kind = 5; return; }
+	kind = 0;
 }
 
 
@@ -484,6 +577,106 @@ void SnapshotDiffGate::CheckBoundary()
 					gs->frameNum, id, int(rows.blockingBits[i]), int(PackBlockingBits(u)));
 		}
 
+		// ---- PR 32 (deep per-unit state) field pass ----
+		{
+			const CMobileCAI* mcai = dynamic_cast<const CMobileCAI*>(u->commandAI);
+			const float liveRepair = (mcai != nullptr) ? mcai->repairBelowHealth : -1.0f;
+			const bool statesEqual =
+				(rows.fireState[i] == u->fireState) &&
+				(rows.moveState[i] == u->moveState) &&
+				BitEqual(rows.repairBelowHealth[i], liveRepair) &&
+				(rows.repeatOrders[i] == uint8_t(u->commandAI->repeatOrders)) &&
+				(rows.wantCloak[i] == uint8_t(u->wantCloak)) &&
+				(rows.useHighTrajectory[i] == uint8_t(u->useHighTrajectory));
+			if (Bump(fields[D_STATES], statesEqual))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=unit:states mismatch", gs->frameNum, id);
+
+			const bool eco2Equal =
+				BitEqual(rows.storage[i].metal, u->storage.metal) &&
+				BitEqual(rows.storage[i].energy, u->storage.energy) &&
+				BitEqual(rows.metalExtract[i], u->metalExtract) &&
+				BitEqual(rows.buildeeRadius[i], u->buildeeRadius);
+			if (Bump(fields[D_ECO2], eco2Equal))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=unit:eco2 mismatch", gs->frameNum, id);
+
+			const bool posErr2Equal =
+				BitEqual(rows.posErrorDelta[i], u->posErrorDelta) &&
+				(rows.nextPosErrorUpdate[i] == u->nextPosErrorUpdate);
+			if (Bump(fields[D_POSERR2], posErr2Equal))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=unit:posErr2 mismatch", gs->frameNum, id);
+
+			const int32_t liveLastAtk = (u->lastAttacker != nullptr) ? u->lastAttacker->id : -1;
+			const int32_t liveTransp = (u->GetTransporter() != nullptr) ? u->GetTransporter()->id : -1;
+			// live curBuild (mirror the extraction's builder-then-factory order)
+			uint8_t liveBuilderKind = 0;
+			int32_t liveCurBuild = -1;
+			float liveBuildDist = 0.0f, liveBuildPower = 0.0f;
+			uint8_t liveRange3D = 0;
+			std::vector<int32_t> liveNano;
+			if (const CBuilder* b = dynamic_cast<const CBuilder*>(u); b != nullptr) {
+				liveBuilderKind = 1;
+				liveCurBuild = (b->curBuild != nullptr) ? b->curBuild->id : -1;
+				liveBuildDist = b->buildDistance;
+				liveRange3D = b->range3D;
+				liveBuildPower = b->GetNanoPieceCache().GetBuildPower();
+				const auto& np = b->GetNanoPieceCache().GetNanoPieces();
+				liveNano.assign(np.begin(), np.end());
+			} else if (const CFactory* f = dynamic_cast<const CFactory*>(u); f != nullptr) {
+				liveBuilderKind = 2;
+				liveCurBuild = (f->curBuild != nullptr) ? f->curBuild->id : -1;
+				liveBuildPower = f->GetNanoPieceCache().GetBuildPower();
+				const auto& np = f->GetNanoPieceCache().GetNanoPieces();
+				liveNano.assign(np.begin(), np.end());
+			}
+
+			const bool refsEqual =
+				(rows.lastAttackerID[i] == liveLastAtk) &&
+				(rows.transporterID[i] == liveTransp) &&
+				(rows.curBuildID[i] == liveCurBuild);
+			if (Bump(fields[D_REFS], refsEqual))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=unit:refs mismatch", gs->frameNum, id);
+
+			const bool buildStateEqual =
+				(rows.builderKind[i] == liveBuilderKind) &&
+				BitEqual(rows.buildDistance[i], liveBuildDist) &&
+				(rows.range3D[i] == liveRange3D) &&
+				(rows.inBuildStance[i] == uint8_t(u->inBuildStance)) &&
+				BitEqual(rows.buildPower[i], liveBuildPower);
+			if (Bump(fields[D_BUILDSTATE], buildStateEqual))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=unit:buildState mismatch", gs->frameNum, id);
+
+			if (Bump(fields[D_NANOPIECES], rows.nanoPieces[i] == liveNano))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=unit:nanoPieces mismatch", gs->frameNum, id);
+
+			std::vector<int32_t> liveTransportees;
+			liveTransportees.reserve(u->transportedUnits.size());
+			for (const CUnit::TransportedUnit& tu : u->transportedUnits)
+				liveTransportees.push_back(tu.unit->id);
+			if (Bump(fields[D_TRANSPORTEES], rows.transportees[i] == liveTransportees))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=unit:transportees mismatch", gs->frameNum, id);
+
+			if (Bump(fields[D_TOOLTIP], rows.customTooltip[i] == unitToolTipMap.GetConst(id)))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=unit:tooltip mismatch", gs->frameNum, id);
+
+			uint8_t mtKind, mtProgress, mtAutoLand, mtLoopback;
+			float mtMaxSpeed, mtMaxWanted;
+			float3 mtGoal;
+			SimSnapshot::MoveTypeBlock liveBlock;
+			LiveMoveType(u, mtKind, mtMaxSpeed, mtMaxWanted, mtGoal, mtProgress, mtAutoLand, mtLoopback, liveBlock);
+			const bool moveTypeEqual =
+				(rows.moveTypeKind[i] == mtKind) &&
+				BitEqual(rows.mtMaxSpeed[i], mtMaxSpeed) &&
+				BitEqual(rows.mtMaxWantedSpeed[i], mtMaxWanted) &&
+				BitEqual(rows.mtGoalPos[i], mtGoal) &&
+				(rows.mtProgressState[i] == mtProgress) &&
+				(rows.mtAutoLand[i] == mtAutoLand) &&
+				(rows.mtLoopbackAttack[i] == mtLoopback) &&
+				MoveTypeBlockEqual(rows.moveTypeBlock[i], liveBlock);
+			if (Bump(fields[D_MOVETYPE], moveTypeEqual))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=unit:moveType mismatch (kind snap=%d live=%d)",
+					gs->frameNum, id, int(rows.moveTypeKind[i]), int(mtKind));
+		}
+
 		// per-allyteam stride rows + the masked-value sweep: for every POV,
 		// UnitRows::ErrorVector is the exact masking function the Lua serving
 		// twins apply (SimSnapshot.h masking policy) -- diff it against the
@@ -502,6 +695,14 @@ void SnapshotDiffGate::CheckBoundary()
 				if (Bump(fields[F_INRADAR], (rows.inRadarAll[at * maxUnits + i] != 0) == losHandler->InRadar(u, at)))
 					LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=inRadarAll[ally %d] snap=%d live=%d",
 						gs->frameNum, id, at, int(rows.inRadarAll[at * maxUnits + i]), int(losHandler->InRadar(u, at)));
+
+				// PR 32 LOS unit variants (IsUnitInLos/InAirLos/InJammer answers)
+				const bool losVarEqual =
+					((rows.unitInLosAll[at * maxUnits + i] != 0) == losHandler->InLos(u, at)) &&
+					((rows.unitInAirLosAll[at * maxUnits + i] != 0) == losHandler->InAirLos(u, at)) &&
+					((rows.unitInJammerAll[at * maxUnits + i] != 0) == losHandler->InJammer(u, at));
+				if (Bump(fields[D_LOSVARIANTS], losVarEqual))
+					LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=unit:losVariants[ally %d] mismatch", gs->frameNum, id, at);
 			}
 
 			const float3 snapErr = rows.ErrorVector(id, at);

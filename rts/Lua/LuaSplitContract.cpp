@@ -115,11 +115,10 @@ namespace {
 		// positional LOS-map queries (fog/attack-preview widgets): the
 		// POSITION family (GetPositionLosState/IsPosIn{Los,Radar,AirLos}) and
 		// GetRadarErrorParams are SERVED from the DrawMapMirrors LOS maps +
-		// radar-error scalars (PR 28). The UNIT variants below read cloak/
-		// stealth/water unit fields not yet mirrored, so they stay live.
-		"IsUnitInLos",    // CLosHandler::InLos(unit, at): cloak/airLos positional math, not losStatus
-		"IsUnitInAirLos",
-		"IsUnitInJammer",
+		// radar-error scalars (PR 28). The UNIT variants (IsUnitIn{Los,AirLos,
+		// Jammer}) are SERVED in PR 32 -- the computed losHandler->In*(unit, at)
+		// answers are extracted into the unitIn*All stride rows (the inRadarAll
+		// precedent), with the new cloak/stealth/water per-unit rows this PR adds.
 		// rules params (dirty-delta copy pending)
 		"GetGameRulesParam", "GetGameRulesParams",
 		"GetTeamRulesParam", "GetTeamRulesParams",
@@ -141,16 +140,17 @@ namespace {
 		// (pick grid + blocking + LOS mirrors) in PR 35, not scalar rows.
 		"GetUnitWeaponTryTarget", "GetUnitWeaponTestTarget",
 		"GetUnitWeaponTestRange", "GetUnitWeaponHaveFreeLineOfFire",
-		// deep per-unit state (moveType/CAI/second-object derefs)
-		"GetUnitStates", "GetUnitMoveTypeData", "GetUnitIsBuilding",
-		"GetUnitBuildParams", "GetUnitInBuildStance", "GetUnitNanoPieces",
-		"GetUnitEffectiveBuildRange", "GetUnitCurrentBuildPower",
-		"GetUnitTransporter", "GetUnitIsTransporting", "GetUnitLastAttacker",
-		// GetUnitLastAttackedPiece stays live here: reassigned to PR 32 (per
-		// the SPECS amendments), not part of PR 33's served piece/script set.
-		"GetUnitLastAttackedPiece", "GetUnitTooltip", "GetUnitMetalExtraction",
-		"GetUnitPosErrorParams", "GetUnitBuildeeRadius", "GetUnitStorage",
-		"GetUnitCollisionVolumeData", "GetUnitPieceCollisionVolumeData",
+		// deep per-unit state (moveType/CAI/second-object derefs): FULLY SERVED
+		// in sim|draw PR 32. GetUnitStates/PosErrorParams/Storage/MetalExtraction/
+		// BuildeeRadius/LastAttacker + the build-state family (IsBuilding/
+		// BuildParams/InBuildStance/NanoPieces/EffectiveBuildRange/CurrentBuildPower)
+		// + the transport pair (Transporter/IsTransporting) + Tooltip + the full
+		// moveType table (GetUnitMoveTypeData, decision-2 full-copy block) route
+		// through their LuaSnapshotServe twins over the new PR-32 SimSnapshot rows.
+		// GetUnitCollisionVolumeData/PieceCollisionVolumeData/LastAttackedPiece
+		// (the last reassigned to PR 32 by the SPECS amendments) are served from
+		// PR 33's unit piece cache (now colVol+lastHit-capturing). Nothing from
+		// this family remains sanctioned.
 		// piece/script reads: SERVED (PR 33 pieces/scripts) via the
 		// barrier-refreshed piece cache (LuaSnapshotServe::RefreshPieces --
 		// static model metadata + captured piece transforms) plus the

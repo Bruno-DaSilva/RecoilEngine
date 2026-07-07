@@ -21,6 +21,20 @@
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Misc/Wind.h"
 #include "Sim/MoveTypes/MoveDefHandler.h"
+// PR 32 (deep per-unit state): moveType subtypes + CAI/builder/factory derefs
+#include "Sim/MoveTypes/MoveType.h"
+#include "Sim/MoveTypes/GroundMoveType.h"
+#include "Sim/MoveTypes/HoverAirMoveType.h"
+#include "Sim/MoveTypes/StrafeAirMoveType.h"
+#include "Sim/MoveTypes/StaticMoveType.h"
+#include "Sim/MoveTypes/ScriptMoveType.h"
+#include "Sim/Misc/GlobalConstants.h" // GAME_SPEED
+#include "Sim/Misc/NanoPieceCache.h"
+#include "Sim/Units/CommandAI/CommandAI.h"   // repeatOrders
+#include "Sim/Units/CommandAI/MobileCAI.h"   // repairBelowHealth
+#include "Sim/Units/UnitToolTipMap.hpp"      // GetUnitTooltip custom string
+#include "Sim/Units/UnitTypes/Builder.h"     // build-state family
+#include "Sim/Units/UnitTypes/Factory.h"
 #include "Sim/Units/UnitDefHandler.h"
 #include "Sim/Projectiles/ProjectileHandler.h"
 #include "Sim/Projectiles/PieceProjectile.h" // PR 33 GetPieceProjectileParams/Name
@@ -294,7 +308,19 @@ void SimSnapshot::Clear()
 			 r.radarRadius.size() + r.sonarRadius.size() + r.seismicRadius.size() +
 			 r.jammerRadius.size() + r.sonarJamRadius.size() + r.moveDefID.size()) * sizeof(int32_t) +
 			(r.resourcesMake.size() + r.resourcesUse.size() + r.harvested.size() +
-			 r.harvestStorage.size() + r.cost.size()) * sizeof(SResourcePack);
+			 r.harvestStorage.size() + r.cost.size()) * sizeof(SResourcePack) +
+			// PR 32 (deep per-unit state): flat rows + the moveType full-table
+			// block + the three LOS-variant strides (variable-size blocks and
+			// strings are omitted -- they are near-empty for most units)
+			r.storage.size() * sizeof(SResourcePack) +
+			r.moveTypeBlock.size() * sizeof(SimSnapshot::MoveTypeBlock) +
+			(r.fireState.size() + r.moveState.size() + r.nextPosErrorUpdate.size() +
+			 r.lastAttackerID.size() + r.transporterID.size() + r.curBuildID.size()) * sizeof(int32_t) +
+			(r.repairBelowHealth.size() + r.metalExtract.size() + r.buildeeRadius.size() +
+			 r.buildDistance.size() + r.buildPower.size() + r.mtMaxSpeed.size() +
+			 r.mtMaxWantedSpeed.size()) * sizeof(float) +
+			(r.posErrorDelta.size() + r.mtGoalPos.size()) * sizeof(float3) +
+			r.unitInLosAll.size() + r.unitInAirLosAll.size() + r.unitInJammerAll.size();
 		LOG("[SimSnapshot] extractions=%u avgMs=%.4f maxMs=%.4f peakUnits=%d memKB=%.1f projSlots=%d featSlots=%d",
 			numExtractions, sumExtractMs / numExtractions, maxExtractMs, peakAliveCount,
 			(2.0f * bufBytes) / 1024.0f, int(projFront->MaxSlots()), int(featFront->MaxSlots()));
@@ -407,6 +433,142 @@ void SimSnapshot::Resize(UnitRows& rows, size_t maxUnits, int numAllyTeams)
 	rows.shieldWeaponPower.resize(maxUnits);
 	rows.deathExpDamages.resize(maxUnits);
 	rows.selfdExpDamages.resize(maxUnits);
+	// ---- PR 32 (deep per-unit state) ----
+	rows.fireState.resize(maxUnits);
+	rows.moveState.resize(maxUnits);
+	rows.repairBelowHealth.resize(maxUnits);
+	rows.repeatOrders.resize(maxUnits);
+	rows.wantCloak.resize(maxUnits);
+	rows.useHighTrajectory.resize(maxUnits);
+	rows.storage.resize(maxUnits);
+	rows.metalExtract.resize(maxUnits);
+	rows.buildeeRadius.resize(maxUnits);
+	rows.posErrorDelta.resize(maxUnits);
+	rows.nextPosErrorUpdate.resize(maxUnits);
+	rows.lastAttackerID.resize(maxUnits);
+	rows.transporterID.resize(maxUnits);
+	rows.builderKind.resize(maxUnits);
+	rows.curBuildID.resize(maxUnits);
+	rows.buildDistance.resize(maxUnits);
+	rows.range3D.resize(maxUnits);
+	rows.inBuildStance.resize(maxUnits);
+	rows.buildPower.resize(maxUnits);
+	rows.customTooltip.resize(maxUnits);
+	rows.moveTypeKind.resize(maxUnits);
+	rows.mtMaxSpeed.resize(maxUnits);
+	rows.mtMaxWantedSpeed.resize(maxUnits);
+	rows.mtGoalPos.resize(maxUnits);
+	rows.mtProgressState.resize(maxUnits);
+	rows.mtAutoLand.resize(maxUnits);
+	rows.mtLoopbackAttack.resize(maxUnits);
+	rows.moveTypeBlock.resize(maxUnits);
+	rows.nanoPieces.resize(maxUnits);
+	rows.transportees.resize(maxUnits);
+	rows.unitInLosAll.resize(size_t(numAllyTeams) * maxUnits);
+	rows.unitInAirLosAll.resize(size_t(numAllyTeams) * maxUnits);
+	rows.unitInJammerAll.resize(size_t(numAllyTeams) * maxUnits);
+}
+
+// ---- PR 32 (deep per-unit state) extraction helpers ----
+// mirror the live dynamic_cast chains; values only, exact accessors so the
+// served table/scalars are bit-identical to the live callouts.
+static void ExtractUnitBuildState(SimSnapshot::UnitRows& rows, int id, const CUnit* u)
+{
+	rows.builderKind[id] = 0;
+	rows.curBuildID[id] = -1;
+	rows.buildDistance[id] = 0.0f;
+	rows.range3D[id] = 0;
+	rows.inBuildStance[id] = u->inBuildStance;
+	rows.buildPower[id] = 0.0f;
+	rows.nanoPieces[id].clear();
+
+	if (const CBuilder* builder = dynamic_cast<const CBuilder*>(u); builder != nullptr) {
+		rows.builderKind[id] = 1;
+		rows.curBuildID[id] = (builder->curBuild != nullptr) ? builder->curBuild->id : -1;
+		rows.buildDistance[id] = builder->buildDistance;
+		rows.range3D[id] = builder->range3D;
+		const NanoPieceCache& npc = builder->GetNanoPieceCache();
+		rows.buildPower[id] = npc.GetBuildPower();
+		rows.nanoPieces[id] = npc.GetNanoPieces();
+		return;
+	}
+	if (const CFactory* factory = dynamic_cast<const CFactory*>(u); factory != nullptr) {
+		rows.builderKind[id] = 2;
+		rows.curBuildID[id] = (factory->curBuild != nullptr) ? factory->curBuild->id : -1;
+		const NanoPieceCache& npc = factory->GetNanoPieceCache();
+		rows.buildPower[id] = npc.GetBuildPower();
+		rows.nanoPieces[id] = npc.GetNanoPieces();
+		return;
+	}
+}
+
+static void ExtractUnitMoveType(SimSnapshot::UnitRows& rows, int id, const CUnit* u)
+{
+	const AMoveType* mt = u->moveType; // never null
+
+	rows.mtMaxSpeed[id] = mt->GetMaxSpeed() * GAME_SPEED;
+	rows.mtMaxWantedSpeed[id] = mt->GetMaxWantedSpeed() * GAME_SPEED;
+	rows.mtGoalPos[id] = mt->goalPos;
+	rows.mtProgressState[id] = static_cast<uint8_t>(mt->progressState); // Done=0/Active=1/Failed=2
+	rows.mtAutoLand[id] = 0;
+	rows.mtLoopbackAttack[id] = 0;
+
+	SimSnapshot::MoveTypeBlock& b = rows.moveTypeBlock[id];
+	b = SimSnapshot::MoveTypeBlock{}; // ids are reused; default-zero for non-dynamic subtypes
+
+	if (const CGroundMoveType* g = dynamic_cast<const CGroundMoveType*>(mt); g != nullptr) {
+		rows.moveTypeKind[id] = 1;
+		b.turnRate = g->GetTurnRate();
+		b.accRate = g->GetAccRate();
+		b.decRate = g->GetDecRate();
+		b.maxReverseSpeed = g->GetMaxReverseSpeed() * GAME_SPEED;
+		b.wantedSpeed = g->GetWantedSpeed() * GAME_SPEED;
+		b.currentSpeed = g->GetCurrentSpeed() * GAME_SPEED;
+		b.goalRadius = g->GetGoalRadius();
+		b.currWayPoint = g->GetCurrWayPoint();
+		b.nextWayPoint = g->GetNextWayPoint();
+		return;
+	}
+	if (const CHoverAirMoveType* h = dynamic_cast<const CHoverAirMoveType*>(mt); h != nullptr) {
+		rows.moveTypeKind[id] = 2;
+		rows.mtAutoLand[id] = h->autoLand;
+		b.wantedHeight = h->wantedHeight;
+		b.collide = h->collide;
+		b.useSmoothMesh = h->useSmoothMesh;
+		b.aircraftState = h->aircraftState;
+		b.flyState = h->flyState;
+		b.goalDistance = h->goalDistance;
+		b.bankingAllowed = h->bankingAllowed;
+		b.currentBank = h->currentBank;
+		b.currentPitch = h->currentPitch;
+		b.turnRate = h->turnRate;
+		b.accRate = h->accRate;
+		b.decRate = h->decRate;
+		b.altitudeRate = h->altitudeRate;
+		b.dontLand = h->GetAllowLanding(); // pushed under key "dontLand" (== GetAllowLanding())
+		b.maxDrift = h->maxDrift;
+		return;
+	}
+	if (const CStrafeAirMoveType* s = dynamic_cast<const CStrafeAirMoveType*>(mt); s != nullptr) {
+		rows.moveTypeKind[id] = 3;
+		rows.mtAutoLand[id] = s->autoLand;
+		rows.mtLoopbackAttack[id] = s->loopbackAttack;
+		b.aircraftState = s->aircraftState;
+		b.wantedHeight = s->wantedHeight;
+		b.collide = s->collide;
+		b.useSmoothMesh = s->useSmoothMesh;
+		b.myGravity = s->myGravity;
+		b.maxBank = s->maxBank;
+		b.turnRadius = s->turnRadius;
+		b.accRate = s->accRate;
+		b.maxAileron = s->maxAileron;
+		b.maxElevator = s->maxElevator;
+		b.maxRudder = s->maxRudder;
+		return;
+	}
+	if (dynamic_cast<const CStaticMoveType*>(mt) != nullptr) { rows.moveTypeKind[id] = 4; return; }
+	if (dynamic_cast<const CScriptMoveType*>(mt) != nullptr) { rows.moveTypeKind[id] = 5; return; }
+	rows.moveTypeKind[id] = 0;
 }
 
 void SimSnapshot::Extract(UnitRows& rows)
@@ -488,10 +650,40 @@ void SimSnapshot::Extract(UnitRows& rows)
 		rows.posErrorVector[id] = u->posErrorVector;
 		rows.leavesGhost[id] = u->leavesGhost;
 
+		// ---- PR 32 (deep per-unit state) ----
+		rows.fireState[id] = u->fireState;
+		rows.moveState[id] = u->moveState;
+		{
+			const CMobileCAI* mcai = dynamic_cast<const CMobileCAI*>(u->commandAI);
+			rows.repairBelowHealth[id] = (mcai != nullptr) ? mcai->repairBelowHealth : -1.0f;
+		}
+		rows.repeatOrders[id] = u->commandAI->repeatOrders;
+		rows.wantCloak[id] = u->wantCloak;
+		rows.useHighTrajectory[id] = u->useHighTrajectory;
+		rows.storage[id] = u->storage;
+		rows.metalExtract[id] = u->metalExtract;
+		rows.buildeeRadius[id] = u->buildeeRadius;
+		rows.posErrorDelta[id] = u->posErrorDelta;
+		rows.nextPosErrorUpdate[id] = u->nextPosErrorUpdate;
+		rows.lastAttackerID[id] = (u->lastAttacker != nullptr) ? u->lastAttacker->id : -1;
+		rows.transporterID[id] = (u->GetTransporter() != nullptr) ? u->GetTransporter()->id : -1;
+		rows.customTooltip[id] = unitToolTipMap.GetConst(id);
+		rows.transportees[id].clear();
+		rows.transportees[id].reserve(u->transportedUnits.size());
+		for (const CUnit::TransportedUnit& tu : u->transportedUnits)
+			rows.transportees[id].push_back(tu.unit->id);
+		ExtractUnitBuildState(rows, id, u);
+		ExtractUnitMoveType(rows, id, u);
+
 		for (int at = 0; at < numAllyTeams; ++at) {
 			rows.losStatusAll[at * maxUnits + id] = u->losStatus[at];
 			rows.posErrorBits[at * maxUnits + id] = u->GetPosErrorBit(at);
 			rows.inRadarAll[at * maxUnits + id] = losHandler->InRadar(u, at);
+			// PR 32 LOS unit variants: store the computed answer (the gates fold
+			// cloak/stealth/water/globalLOS logic, like inRadarAll)
+			rows.unitInLosAll[at * maxUnits + id] = losHandler->InLos(u, at);
+			rows.unitInAirLosAll[at * maxUnits + id] = losHandler->InAirLos(u, at);
+			rows.unitInJammerAll[at * maxUnits + id] = losHandler->InJammer(u, at);
 		}
 	}
 

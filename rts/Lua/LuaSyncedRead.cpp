@@ -3998,9 +3998,9 @@ int LuaSyncedRead::ValidUnitID(lua_State* L)
  * @param unitID integer
  * @return UnitState
  */
-int LuaSyncedRead::GetUnitStates(lua_State* L)
+static int GetUnitStatesLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseAllyUnit(L, __func__, 1);
+	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 
 	if (unit == nullptr)
 		return 0;
@@ -4082,6 +4082,12 @@ int LuaSyncedRead::GetUnitStates(lua_State* L)
 
 		return 1;
 	}
+}
+
+int LuaSyncedRead::GetUnitStates(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 32, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitStatesLive, &LuaSnapshotServe::GetUnitStates);
 }
 
 
@@ -4316,9 +4322,9 @@ int LuaSyncedRead::GetUnitSensorRadius(lua_State* L)
  * @return number nextPosErrorUpdatebaseErrorMult
  * @return boolean posErrorBit
  */
-int LuaSyncedRead::GetUnitPosErrorParams(lua_State* L)
+static int GetUnitPosErrorParamsLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseAllyUnit(L, __func__, 1);
+	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 
 	if (unit == nullptr)
 		return 0;
@@ -4338,6 +4344,12 @@ int LuaSyncedRead::GetUnitPosErrorParams(lua_State* L)
 	return (3 + 3 + 1 + 1);
 }
 
+int LuaSyncedRead::GetUnitPosErrorParams(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 32, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitPosErrorParamsLive, &LuaSnapshotServe::GetUnitPosErrorParams);
+}
+
 
 /***
  *
@@ -4345,9 +4357,9 @@ int LuaSyncedRead::GetUnitPosErrorParams(lua_State* L)
  * @param unitID integer
  * @return string?
  */
-int LuaSyncedRead::GetUnitTooltip(lua_State* L)
+static int GetUnitTooltipLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseTypedUnit(L, __func__, 1);
+	const CUnit* unit = ParseTypedUnit(L, caller, 1);
 	if (unit == nullptr)
 		return 0;
 
@@ -4376,6 +4388,12 @@ int LuaSyncedRead::GetUnitTooltip(lua_State* L)
 
 	lua_pushsstring(L, tooltip);
 	return 1;
+}
+
+int LuaSyncedRead::GetUnitTooltip(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 32, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitTooltipLive, &LuaSnapshotServe::GetUnitTooltip);
 }
 
 
@@ -4681,9 +4699,9 @@ int LuaSyncedRead::GetUnitResources(lua_State* L)
  * @return number Unit's metal storage
  * @return number Unit's energy storage
  */
-int LuaSyncedRead::GetUnitStorage(lua_State* L)
+static int GetUnitStorageLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseAllyUnit(L, __func__, 1);
+	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 
 	if (unit == nullptr)
 		return 0;
@@ -4691,6 +4709,12 @@ int LuaSyncedRead::GetUnitStorage(lua_State* L)
 	lua_pushnumber(L, unit->storage.metal);
 	lua_pushnumber(L, unit->storage.energy);
 	return 2;
+}
+
+int LuaSyncedRead::GetUnitStorage(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 32, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitStorageLive, &LuaSnapshotServe::GetUnitStorage);
 }
 
 /***
@@ -4760,9 +4784,9 @@ int LuaSyncedRead::GetUnitCostTable(lua_State* L)
  * @param unitID integer
  * @return number? metalExtraction
  */
-int LuaSyncedRead::GetUnitMetalExtraction(lua_State* L)
+static int GetUnitMetalExtractionLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseAllyUnit(L, __func__, 1);
+	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 	if (unit == nullptr)
 		return 0;
 
@@ -4771,6 +4795,12 @@ int LuaSyncedRead::GetUnitMetalExtraction(lua_State* L)
 
 	lua_pushnumber(L, unit->metalExtract);
 	return 1;
+}
+
+int LuaSyncedRead::GetUnitMetalExtraction(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 32, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitMetalExtractionLive, &LuaSnapshotServe::GetUnitMetalExtraction);
 }
 
 
@@ -4851,14 +4881,20 @@ int LuaSyncedRead::GetUnitRadius(lua_State* L)
  * @param unitID integer
  * @return number?
  */
-int LuaSyncedRead::GetUnitBuildeeRadius(lua_State* L)
+static int GetUnitBuildeeRadiusLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseTypedUnit(L, __func__, 1);
+	const CUnit* unit = ParseTypedUnit(L, caller, 1);
 	if (unit == nullptr)
 		return 0;
 
 	lua_pushnumber(L, unit->buildeeRadius);
 	return 1;
+}
+
+int LuaSyncedRead::GetUnitBuildeeRadius(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 32, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitBuildeeRadiusLive, &LuaSnapshotServe::GetUnitBuildeeRadius);
 }
 
 /***
@@ -5097,9 +5133,9 @@ int LuaSyncedRead::GetUnitBuildFacing(lua_State* L)
  * @param unitID integer
  * @return integer buildeeUnitID or nil
  */
-int LuaSyncedRead::GetUnitIsBuilding(lua_State* L)
+static int GetUnitIsBuildingLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseAllyUnit(L, __func__, 1);
+	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 
 	if (unit == nullptr)
 		return 0;
@@ -5119,6 +5155,12 @@ int LuaSyncedRead::GetUnitIsBuilding(lua_State* L)
 	}
 
 	return 0;
+}
+
+int LuaSyncedRead::GetUnitIsBuilding(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 32, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitIsBuildingLive, &LuaSnapshotServe::GetUnitIsBuilding);
 }
 
 static int GetBuilderWorkerTask(lua_State* L, const CBuilder *builder)
@@ -5224,9 +5266,9 @@ int LuaSyncedRead::GetUnitWorkerTask(lua_State* L)
  * @param buildeeDefID integer or nil
  * @return number effectiveBuildRange counted to the center of prospective buildee; buildRange if buildee nil
  */
-int LuaSyncedRead::GetUnitEffectiveBuildRange(lua_State* L)
+static int GetUnitEffectiveBuildRangeLive(lua_State* L, const char* caller)
 {
-	const auto unit = ParseInLosUnit(L, __func__, 1);
+	const auto unit = ParseInLosUnit(L, caller, 1);
 	if (unit == nullptr)
 		return 0;
 
@@ -5272,14 +5314,20 @@ int LuaSyncedRead::GetUnitEffectiveBuildRange(lua_State* L)
 	return 1;
 }
 
+int LuaSyncedRead::GetUnitEffectiveBuildRange(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 32, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitEffectiveBuildRangeLive, &LuaSnapshotServe::GetUnitEffectiveBuildRange);
+}
+
 /***
  *
  * @function Spring.GetUnitCurrentBuildPower
  * @param unitID integer
  */
-int LuaSyncedRead::GetUnitCurrentBuildPower(lua_State* L)
+static int GetUnitCurrentBuildPowerLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseAllyUnit(L, __func__, 1);
+	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 	if (unit == nullptr)
 		return 0;
 
@@ -5302,6 +5350,12 @@ int LuaSyncedRead::GetUnitCurrentBuildPower(lua_State* L)
 
 	lua_pushnumber(L, pieceCache->GetBuildPower());
 	return 1;
+}
+
+int LuaSyncedRead::GetUnitCurrentBuildPower(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 32, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitCurrentBuildPowerLive, &LuaSnapshotServe::GetUnitCurrentBuildPower);
 }
 
 
@@ -5341,9 +5395,9 @@ int LuaSyncedRead::GetUnitHarvestStorage(lua_State* L)
  * @function Spring.GetUnitBuildParams
  * @param unitID integer
  */
-int LuaSyncedRead::GetUnitBuildParams(lua_State* L)
+static int GetUnitBuildParamsLive(lua_State* L, const char* caller)
 {
-	const CUnit * unit = ParseAllyUnit(L, __func__, 1);
+	const CUnit * unit = ParseAllyUnit(L, caller, 1);
 
 	if (unit == nullptr)
 		return 0;
@@ -5369,6 +5423,12 @@ int LuaSyncedRead::GetUnitBuildParams(lua_State* L)
 	return 0;
 }
 
+int LuaSyncedRead::GetUnitBuildParams(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 32, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitBuildParamsLive, &LuaSnapshotServe::GetUnitBuildParams);
+}
+
 /*** Is builder in build stance
  *
  * @function Spring.GetUnitInBuildStance
@@ -5379,9 +5439,9 @@ int LuaSyncedRead::GetUnitBuildParams(lua_State* L)
  * @param unitID integer
  * @return boolean inBuildStance
  */
-int LuaSyncedRead::GetUnitInBuildStance(lua_State* L)
+static int GetUnitInBuildStanceLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseAllyUnit(L, __func__, 1);
+	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 
 	if (unit == nullptr)
 		return 0;
@@ -5393,6 +5453,12 @@ int LuaSyncedRead::GetUnitInBuildStance(lua_State* L)
 
 	lua_pushboolean(L, builder->inBuildStance);
 	return 1;
+}
+
+int LuaSyncedRead::GetUnitInBuildStance(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 32, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitInBuildStanceLive, &LuaSnapshotServe::GetUnitInBuildStance);
 }
 
 /*** Get construction FX attachment points
@@ -5409,9 +5475,9 @@ int LuaSyncedRead::GetUnitInBuildStance(lua_State* L)
  * @param unitID integer
  * @return integer[] pieceArray
  */
-int LuaSyncedRead::GetUnitNanoPieces(lua_State* L)
+static int GetUnitNanoPiecesLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseAllyUnit(L, __func__, 1);
+	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 	if (unit == nullptr)
 		return 0;
 
@@ -5449,6 +5515,12 @@ int LuaSyncedRead::GetUnitNanoPieces(lua_State* L)
 	return 1;
 }
 
+int LuaSyncedRead::GetUnitNanoPieces(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 32, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitNanoPiecesLive, &LuaSnapshotServe::GetUnitNanoPieces);
+}
+
 
 /*** Get the transport carrying the unit
  *
@@ -5460,9 +5532,9 @@ int LuaSyncedRead::GetUnitNanoPieces(lua_State* L)
  * @param unitID integer
  * @return integer? transportUnitID
  */
-int LuaSyncedRead::GetUnitTransporter(lua_State* L)
+static int GetUnitTransporterLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseInLosUnit(L, __func__, 1);
+	const CUnit* unit = ParseInLosUnit(L, caller, 1);
 	if (unit == nullptr)
 		return 0;
 
@@ -5471,6 +5543,12 @@ int LuaSyncedRead::GetUnitTransporter(lua_State* L)
 
 	lua_pushnumber(L, unit->transporter->id);
 	return 1;
+}
+
+int LuaSyncedRead::GetUnitTransporter(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 32, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitTransporterLive, &LuaSnapshotServe::GetUnitTransporter);
 }
 
 
@@ -5482,9 +5560,9 @@ int LuaSyncedRead::GetUnitTransporter(lua_State* L)
  * @return integer[]? transporteeArray
  * An array of unitIDs being transported by this unit, or `nil` if not a transport.
  */
-int LuaSyncedRead::GetUnitIsTransporting(lua_State* L)
+static int GetUnitIsTransportingLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseAllyUnit(L, __func__, 1);
+	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 	if (unit == nullptr || !unit->unitDef->IsTransportUnit())
 		return 0;
 
@@ -5500,6 +5578,12 @@ int LuaSyncedRead::GetUnitIsTransporting(lua_State* L)
 	}
 
 	return 1;
+}
+
+int LuaSyncedRead::GetUnitIsTransporting(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 32, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitIsTransportingLive, &LuaSnapshotServe::GetUnitIsTransporting);
 }
 
 
@@ -6312,9 +6396,9 @@ int LuaSyncedRead::GetUnitEstimatedPath(lua_State* L)
  * @function Spring.GetUnitLastAttacker
  * @param unitID integer
  */
-int LuaSyncedRead::GetUnitLastAttacker(lua_State* L)
+static int GetUnitLastAttackerLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseUnit(L, __func__, 1);
+	const CUnit* unit = ParseUnit(L, caller, 1);
 	if (unit == nullptr)
 		return 0;
 
@@ -6326,15 +6410,27 @@ int LuaSyncedRead::GetUnitLastAttacker(lua_State* L)
 	return 1;
 }
 
+int LuaSyncedRead::GetUnitLastAttacker(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 32, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitLastAttackerLive, &LuaSnapshotServe::GetUnitLastAttacker);
+}
+
 
 /***
  *
  * @function Spring.GetUnitLastAttackedPiece
  * @param unitID integer
  */
+static int GetUnitLastAttackedPieceLive(lua_State* L, const char* caller)
+{
+	return (GetSolidObjectLastHitPiece(L, ParseAllyUnit(L, caller, 1)));
+}
+
 int LuaSyncedRead::GetUnitLastAttackedPiece(lua_State* L)
 {
-	return (GetSolidObjectLastHitPiece(L, ParseAllyUnit(L, __func__, 1)));
+	// snapshot-served from draw context (sim|draw PR 32, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitLastAttackedPieceLive, &LuaSnapshotServe::GetUnitLastAttackedPiece);
 }
 
 /***
@@ -6342,9 +6438,9 @@ int LuaSyncedRead::GetUnitLastAttackedPiece(lua_State* L)
  * @function Spring.GetUnitCollisionVolumeData
  * @param unitID integer
  */
-int LuaSyncedRead::GetUnitCollisionVolumeData(lua_State* L)
+static int GetUnitCollisionVolumeDataLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseInLosUnit(L, __func__, 1);
+	const CUnit* unit = ParseInLosUnit(L, caller, 1);
 
 	if (unit == nullptr)
 		return 0;
@@ -6352,9 +6448,21 @@ int LuaSyncedRead::GetUnitCollisionVolumeData(lua_State* L)
 	return LuaUtils::PushColVolData(L, &unit->collisionVolume);
 }
 
+int LuaSyncedRead::GetUnitCollisionVolumeData(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 32, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitCollisionVolumeDataLive, &LuaSnapshotServe::GetUnitCollisionVolumeData);
+}
+
+static int GetUnitPieceCollisionVolumeDataLive(lua_State* L, const char* caller)
+{
+	return (PushPieceCollisionVolumeData(L, ParseInLosUnit(L, caller, 1)));
+}
+
 int LuaSyncedRead::GetUnitPieceCollisionVolumeData(lua_State* L)
 {
-	return (PushPieceCollisionVolumeData(L, ParseInLosUnit(L, __func__, 1)));
+	// snapshot-served from draw context (sim|draw PR 32, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitPieceCollisionVolumeDataLive, &LuaSnapshotServe::GetUnitPieceCollisionVolumeData);
 }
 
 
@@ -6541,9 +6649,9 @@ int LuaSyncedRead::GetUnitBlocking(lua_State* L)
  * @function Spring.GetUnitMoveTypeData
  * @param unitID integer
  */
-int LuaSyncedRead::GetUnitMoveTypeData(lua_State* L)
+static int GetUnitMoveTypeDataLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseAllyUnit(L, __func__, 1);
+	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 	if (unit == nullptr)
 		return 0;
 
@@ -6719,6 +6827,12 @@ int LuaSyncedRead::GetUnitMoveTypeData(lua_State* L)
 
 	HSTR_PUSH_CSTRING(L, "name", "unknown");
 	return 1;
+}
+
+int LuaSyncedRead::GetUnitMoveTypeData(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 32, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitMoveTypeDataLive, &LuaSnapshotServe::GetUnitMoveTypeData);
 }
 
 
@@ -9295,9 +9409,9 @@ int LuaSyncedRead::GetUnitLosState(lua_State* L)
  * @param allyTeamID integer
  * @return boolean inLos
  */
-int LuaSyncedRead::IsUnitInLos(lua_State* L)
+static int IsUnitInLosLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseTypedUnit(L, __func__, 1);
+	const CUnit* unit = ParseTypedUnit(L, caller, 1);
 	if (unit == nullptr)
 		return 0;
 
@@ -9311,6 +9425,12 @@ int LuaSyncedRead::IsUnitInLos(lua_State* L)
 	return 1;
 }
 
+int LuaSyncedRead::IsUnitInLos(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 32, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &IsUnitInLosLive, &LuaSnapshotServe::IsUnitInLos);
+}
+
 
 /***
  *
@@ -9319,9 +9439,9 @@ int LuaSyncedRead::IsUnitInLos(lua_State* L)
  * @param allyTeamID integer
  * @return boolean inAirLos
  */
-int LuaSyncedRead::IsUnitInAirLos(lua_State* L)
+static int IsUnitInAirLosLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseTypedUnit(L, __func__, 1);
+	const CUnit* unit = ParseTypedUnit(L, caller, 1);
 	if (unit == nullptr)
 		return 0;
 
@@ -9333,6 +9453,12 @@ int LuaSyncedRead::IsUnitInAirLos(lua_State* L)
 
 	lua_pushboolean(L, losHandler->InAirLos(unit, allyTeamID));
 	return 1;
+}
+
+int LuaSyncedRead::IsUnitInAirLos(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 32, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &IsUnitInAirLosLive, &LuaSnapshotServe::IsUnitInAirLos);
 }
 
 
@@ -9374,9 +9500,9 @@ int LuaSyncedRead::IsUnitInRadar(lua_State* L)
  * @param allyTeamID integer
  * @return boolean inJammer
  */
-int LuaSyncedRead::IsUnitInJammer(lua_State* L)
+static int IsUnitInJammerLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseTypedUnit(L, __func__, 1);
+	const CUnit* unit = ParseTypedUnit(L, caller, 1);
 	if (unit == nullptr)
 		return 0;
 
@@ -9388,6 +9514,12 @@ int LuaSyncedRead::IsUnitInJammer(lua_State* L)
 
 	lua_pushboolean(L, losHandler->InJammer(unit, allyTeamID)); //FIXME
 	return 1;
+}
+
+int LuaSyncedRead::IsUnitInJammer(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 32, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &IsUnitInJammerLive, &LuaSnapshotServe::IsUnitInJammer);
 }
 
 

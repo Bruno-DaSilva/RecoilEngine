@@ -49,7 +49,9 @@ static inline uint64_t HashUnitRow(const SimSnapshot::UnitRows& r, int id)
 		w[1] = std::bit_cast<uint32_t>(p.energy);
 	};
 
-	uint32_t w[72];
+	// PR 27a tail ends at w[70]; PR 31 weapon fold occupies w[71];
+	// PR 32 deep-state words occupy w[72]..w[97].
+	uint32_t w[98];
 	w[0]  = static_cast<uint32_t>(id);
 	f3(&w[1], r.pos[id]);
 	w[4]  = std::bit_cast<uint32_t>(r.speed[id].x);
@@ -169,6 +171,75 @@ static inline uint64_t HashUnitRow(const SimSnapshot::UnitRows& r, int id)
 		}
 	}
 	w[71] = wpnAcc;
+
+	// ---- PR 32 (deep per-unit state) words, appended in fixed order after the
+	// PR 31 weapon fold (w[71]). All synced sim state. EXCLUDED (not independent
+	// synced state): nanoPieces (model-derived, defID-deterministic), transportees
+	// (the inverse relation is captured by each transportee's transporterID word),
+	// and the customTooltip string (SetUnitTooltip content, string; covered by the
+	// diff gate's serving dual-run, like sideName). The moveType full-table block
+	// and the three LOS-variant strides are each folded into one word.
+	w[72] = static_cast<uint32_t>(r.fireState[id]);
+	w[73] = static_cast<uint32_t>(r.moveState[id]);
+	w[74] = std::bit_cast<uint32_t>(r.repairBelowHealth[id]);
+	w[75] = static_cast<uint32_t>(r.repeatOrders[id])
+	      | (static_cast<uint32_t>(r.wantCloak[id])         << 8)
+	      | (static_cast<uint32_t>(r.useHighTrajectory[id]) << 16)
+	      | (static_cast<uint32_t>(r.inBuildStance[id])     << 24);
+	pack(&w[76], r.storage[id]);
+	w[78] = std::bit_cast<uint32_t>(r.metalExtract[id]);
+	w[79] = std::bit_cast<uint32_t>(r.buildeeRadius[id]);
+	f3(&w[80], r.posErrorDelta[id]);
+	w[83] = static_cast<uint32_t>(r.nextPosErrorUpdate[id]);
+	w[84] = static_cast<uint32_t>(r.lastAttackerID[id]);
+	w[85] = static_cast<uint32_t>(r.transporterID[id]);
+	w[86] = static_cast<uint32_t>(r.curBuildID[id]);
+	w[87] = static_cast<uint32_t>(r.builderKind[id])
+	      | (static_cast<uint32_t>(r.range3D[id])         << 8)
+	      | (static_cast<uint32_t>(r.moveTypeKind[id])    << 16)
+	      | (static_cast<uint32_t>(r.mtProgressState[id]) << 24);
+	w[88] = std::bit_cast<uint32_t>(r.buildDistance[id]);
+	w[89] = std::bit_cast<uint32_t>(r.buildPower[id]);
+	w[90] = std::bit_cast<uint32_t>(r.mtMaxSpeed[id]);
+	w[91] = std::bit_cast<uint32_t>(r.mtMaxWantedSpeed[id]);
+	f3(&w[92], r.mtGoalPos[id]);
+	w[95] = static_cast<uint32_t>(r.mtAutoLand[id])
+	      | (static_cast<uint32_t>(r.mtLoopbackAttack[id]) << 8);
+
+	// moveType full-table block folded into one word (padding-free field fold)
+	{
+		const SimSnapshot::MoveTypeBlock& b = r.moveTypeBlock[id];
+		const uint32_t bw[] = {
+			std::bit_cast<uint32_t>(b.turnRate), std::bit_cast<uint32_t>(b.accRate), std::bit_cast<uint32_t>(b.decRate),
+			std::bit_cast<uint32_t>(b.maxReverseSpeed), std::bit_cast<uint32_t>(b.wantedSpeed), std::bit_cast<uint32_t>(b.currentSpeed),
+			std::bit_cast<uint32_t>(b.goalRadius),
+			std::bit_cast<uint32_t>(b.currWayPoint.x), std::bit_cast<uint32_t>(b.currWayPoint.y), std::bit_cast<uint32_t>(b.currWayPoint.z),
+			std::bit_cast<uint32_t>(b.nextWayPoint.x), std::bit_cast<uint32_t>(b.nextWayPoint.y), std::bit_cast<uint32_t>(b.nextWayPoint.z),
+			std::bit_cast<uint32_t>(b.wantedHeight),
+			static_cast<uint32_t>(b.collide) | (static_cast<uint32_t>(b.useSmoothMesh) << 8)
+				| (static_cast<uint32_t>(b.bankingAllowed) << 16) | (static_cast<uint32_t>(b.dontLand) << 24),
+			static_cast<uint32_t>(b.aircraftState), static_cast<uint32_t>(b.flyState),
+			std::bit_cast<uint32_t>(b.goalDistance), std::bit_cast<uint32_t>(b.currentBank), std::bit_cast<uint32_t>(b.currentPitch),
+			std::bit_cast<uint32_t>(b.altitudeRate), std::bit_cast<uint32_t>(b.maxDrift),
+			std::bit_cast<uint32_t>(b.myGravity), std::bit_cast<uint32_t>(b.maxBank), std::bit_cast<uint32_t>(b.turnRadius),
+			std::bit_cast<uint32_t>(b.maxAileron), std::bit_cast<uint32_t>(b.maxElevator), std::bit_cast<uint32_t>(b.maxRudder),
+		};
+		uint32_t mtAcc = 2166136261u;
+		for (const uint32_t x : bw)
+			mtAcc = (mtAcc ^ x) * 16777619u;
+		w[96] = mtAcc;
+	}
+
+	// LOS-variant strides (unit InLos/InAirLos/InJammer answers) folded like inRadarAll
+	{
+		uint32_t losVarAcc = 2166136261u;
+		for (int at = 0; at < r.numAllyTeams; ++at) {
+			losVarAcc = (losVarAcc ^ r.unitInLosAll[at * r.MaxUnits() + id]) * 16777619u;
+			losVarAcc = (losVarAcc ^ (r.unitInAirLosAll[at * r.MaxUnits() + id] << 1)) * 16777619u;
+			losVarAcc = (losVarAcc ^ (r.unitInJammerAll[at * r.MaxUnits() + id] << 2)) * 16777619u;
+		}
+		w[97] = losVarAcc;
+	}
 
 	return Mix(w, sizeof(w), UNIT_SEED);
 }

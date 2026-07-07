@@ -15,6 +15,16 @@ public:
 	void Set(int id, std::string&& tip) { tooltips[id] = std::move(tip); }
 	const std::string& Get(int id) { return tooltips[id]; }
 
+	// non-inserting const lookup (SimSnapshot PR 32 extraction: reads the custom
+	// tooltip for every unit at the parked boundary, must not mutate the map --
+	// Get()'s operator[] would insert empty entries). Returns "" for a missing
+	// id, exactly what Get() yields for one (Get inserts then returns the empty).
+	const std::string& GetConst(int id) const {
+		static const std::string empty;
+		const auto it = tooltips.find(id);
+		return (it != tooltips.end()) ? it->second : empty;
+	}
+
 private:
 	spring::unordered_map<int, std::string> tooltips;
 };

@@ -369,4 +369,31 @@ namespace LuaSnapshotServe {
 	int GetUnitWeaponVectors(lua_State* L, const char* caller);
 	int GetUnitWeaponCanFire(lua_State* L, const char* caller);
 	int GetUnitWeaponTarget(lua_State* L, const char* caller);
+
+	// ---- PR 32 (deep per-unit state) ----
+	// Served from the PR-32 SimSnapshot::UnitRows deep rows + the full-table
+	// moveType block; the collision-volume / last-hit-piece three reuse PR 33's
+	// unit piece cache (RefreshPieces now captures colVol + lastHit for units).
+	int GetUnitStates(lua_State* L, const char* caller);            // ParseAllyUnit
+	int GetUnitStorage(lua_State* L, const char* caller);           // ParseAllyUnit
+	int GetUnitMetalExtraction(lua_State* L, const char* caller);   // ParseAllyUnit
+	int GetUnitBuildeeRadius(lua_State* L, const char* caller);     // ParseTypedUnit
+	int GetUnitPosErrorParams(lua_State* L, const char* caller);    // ParseAllyUnit
+	int GetUnitLastAttacker(lua_State* L, const char* caller);      // ParseUnit (attacker visibility gate)
+	int GetUnitIsBuilding(lua_State* L, const char* caller);        // ParseAllyUnit
+	int GetUnitBuildParams(lua_State* L, const char* caller);       // ParseAllyUnit
+	int GetUnitInBuildStance(lua_State* L, const char* caller);     // ParseAllyUnit
+	int GetUnitCurrentBuildPower(lua_State* L, const char* caller); // ParseAllyUnit
+	int GetUnitEffectiveBuildRange(lua_State* L, const char* caller);// ParseInLosUnit
+	int GetUnitNanoPieces(lua_State* L, const char* caller);        // ParseAllyUnit
+	int GetUnitTransporter(lua_State* L, const char* caller);       // ParseInLosUnit
+	int GetUnitIsTransporting(lua_State* L, const char* caller);    // ParseAllyUnit
+	int GetUnitTooltip(lua_State* L, const char* caller);           // ParseTypedUnit
+	int GetUnitMoveTypeData(lua_State* L, const char* caller);      // ParseAllyUnit
+	int GetUnitCollisionVolumeData(lua_State* L, const char* caller);      // ParseInLosUnit (piece cache)
+	int GetUnitPieceCollisionVolumeData(lua_State* L, const char* caller); // ParseInLosUnit (piece cache)
+	int GetUnitLastAttackedPiece(lua_State* L, const char* caller);        // ParseAllyUnit (piece cache)
+	int IsUnitInLos(lua_State* L, const char* caller);              // ParseTypedUnit
+	int IsUnitInAirLos(lua_State* L, const char* caller);           // ParseTypedUnit
+	int IsUnitInJammer(lua_State* L, const char* caller);           // ParseTypedUnit
 }

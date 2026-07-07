@@ -159,6 +159,60 @@
 class SimSnapshot
 {
 public:
+	// ---- PR 32 (deep per-unit state): GetUnitMoveTypeData full-table block ----
+	// The deep, subtype-specific AMoveType fields GetUnitMoveTypeData reads
+	// beyond the flat base rows (mtMaxSpeed/mtMaxWantedSpeed/mtGoalPos/
+	// mtProgressState/moveTypeKind). One fixed-shape struct per unit: the table
+	// is bounded per unit (every field is a scalar, the shape is fixed by
+	// moveTypeKind), so this is a flat AoS row -- extracted for ALL units in the
+	// per-unit loop like every other row, NOT dirty-versioned or interest-copied.
+	// DECISION 2 (PR 32) DEVIATION: the plan recommended interest-flagged copy;
+	// full-copy-for-all is decision 2's explicit "full copy for all" alternative
+	// and is used here because (a) the block is bounded-per-unit (not truly
+	// unbounded) so the cost is bounded/measurable, and (b) interest-flagging's
+	// one-boundary first-query latency is incompatible with the armed dual-run's
+	// exact-equality pass criterion (a partial first-query table would flag a
+	// mismatch every unit's first query, so the gate could never reach 0). The
+	// full copy is bit-exact with the live table every boundary. Default-zero for
+	// units whose moveType is not one of the four dynamic subtypes (the twin then
+	// serves only the base rows + name, matching the live "static"/"script"/
+	// "unknown" branches which push name only). Values only, via the live
+	// accessors, so the served table is bit-identical.
+	struct MoveTypeBlock {
+		// ground + hover shared (GetTurnRate/GetAccRate/GetDecRate)
+		float turnRate = 0.0f;
+		float accRate = 0.0f;
+		float decRate = 0.0f;
+		// ground (CGroundMoveType)
+		float maxReverseSpeed = 0.0f; // * GAME_SPEED at extraction
+		float wantedSpeed = 0.0f;     // * GAME_SPEED at extraction
+		float currentSpeed = 0.0f;    // * GAME_SPEED at extraction
+		float goalRadius = 0.0f;
+		float3 currWayPoint;
+		float3 nextWayPoint;
+		// hover/strafe air shared
+		float wantedHeight = 0.0f;
+		uint8_t collide = 0;
+		uint8_t useSmoothMesh = 0;
+		int32_t aircraftState = 0;    // AAirMoveType::AircraftState enum value
+		// hover air (CHoverAirMoveType)
+		int32_t flyState = 0;         // CHoverAirMoveType::FlyState enum value
+		float goalDistance = 0.0f;
+		uint8_t bankingAllowed = 0;
+		uint8_t dontLand = 0;         // GetAllowLanding()
+		float currentBank = 0.0f;
+		float currentPitch = 0.0f;
+		float altitudeRate = 0.0f;
+		float maxDrift = 0.0f;
+		// strafe air (CStrafeAirMoveType)
+		float myGravity = 0.0f;
+		float maxBank = 0.0f;
+		float turnRadius = 0.0f;
+		float maxAileron = 0.0f;
+		float maxElevator = 0.0f;
+		float maxRudder = 0.0f;
+	};
+
 	struct UnitRows {
 		int32_t simFrame = -1;      // sim frame this buffer was extracted at
 		int32_t aliveCount = 0;
@@ -245,6 +299,65 @@ public:
 		// the inputs. Same [numAllyTeams * maxUnits] stride layout.
 		std::vector<uint8_t> inRadarAll;
 
+		// ================= PR 32 (deep per-unit state) BEGIN =================
+		// Deep per-unit reads: GetUnitStates, GetUnitStorage, GetUnitMetalExtraction,
+		// GetUnitBuildeeRadius, GetUnitPosErrorParams, GetUnitLastAttacker, the
+		// build-state family (GetUnitIsBuilding/BuildParams/InBuildStance/
+		// CurrentBuildPower/EffectiveBuildRange/NanoPieces), the transport pair
+		// (GetUnitTransporter/IsTransporting), GetUnitTooltip, GetUnitMoveTypeData.
+		// All synced sim state (moveType/CAI/second-object derefs) captured by
+		// value at extraction; the twins never touch a CUnit*.
+		// -- GetUnitStates (ParseAllyUnit) --
+		std::vector<int32_t> fireState;
+		std::vector<int32_t> moveState;
+		std::vector<float> repairBelowHealth;   // CMobileCAI::repairBelowHealth, -1 if not a CMobileCAI
+		std::vector<uint8_t> repeatOrders;       // commandAI->repeatOrders
+		std::vector<uint8_t> wantCloak;
+		std::vector<uint8_t> useHighTrajectory;
+		// -- GetUnitStorage / MetalExtraction / BuildeeRadius (ParseAlly/Typed) --
+		std::vector<SResourcePack> storage;
+		std::vector<float> metalExtract;
+		std::vector<float> buildeeRadius;
+		// -- GetUnitPosErrorParams (posErrorVector + posErrorBits already exist) --
+		std::vector<float3> posErrorDelta;
+		std::vector<int32_t> nextPosErrorUpdate;
+		// -- GetUnitLastAttacker (visibility of the attacker gated in the twin) --
+		std::vector<int32_t> lastAttackerID;     // -1 = none
+		// -- GetUnitTransporter --
+		std::vector<int32_t> transporterID;      // -1 = none
+		// -- build-state family --
+		// 0 = neither builder nor factory, 1 = CBuilder, 2 = CFactory
+		std::vector<uint8_t> builderKind;
+		std::vector<int32_t> curBuildID;         // builder/factory curBuild->id, -1 = none
+		std::vector<float> buildDistance;        // CBuilder::buildDistance (0 if !builder)
+		std::vector<uint8_t> range3D;            // CBuilder::range3D
+		std::vector<uint8_t> inBuildStance;      // CUnit::inBuildStance (returned only for builders)
+		std::vector<float> buildPower;           // NanoPieceCache::GetBuildPower() (builder|factory)
+		// -- GetUnitTooltip custom string (unitToolTipMap.Get(id)) --
+		std::vector<std::string> customTooltip;
+		// -- GetUnitMoveTypeData base fields (flat; deep fields in moveTypeBlock) --
+		// 0 = other/unknown, 1 = ground, 2 = hover-air, 3 = strafe-air, 4 = static, 5 = script
+		std::vector<uint8_t> moveTypeKind;
+		std::vector<float> mtMaxSpeed;           // GetMaxSpeed() * GAME_SPEED
+		std::vector<float> mtMaxWantedSpeed;     // GetMaxWantedSpeed() * GAME_SPEED
+		std::vector<float3> mtGoalPos;
+		std::vector<uint8_t> mtProgressState;    // 0 done, 1 active, 2 failed
+		std::vector<uint8_t> mtAutoLand;         // hover/strafe autoLand (GetUnitStates AMT branch)
+		std::vector<uint8_t> mtLoopbackAttack;   // strafe loopbackAttack (0 for hover)
+		std::vector<MoveTypeBlock> moveTypeBlock;
+		// -- variable-size per-unit blocks (bounded: model/capacity-fixed) --
+		std::vector<std::vector<int32_t>> nanoPieces;   // NanoPieceCache::GetNanoPieces() (model-fixed)
+		std::vector<std::vector<int32_t>> transportees; // transportedUnits ids (capacity-bounded)
+		// -- IsUnitInLos/InAirLos/InJammer unit variants (batch-1 reassignment):
+		// the computed per-(unit,allyteam) answer, exactly like inRadarAll (the
+		// gates fold cloak/stealth/water/globalLOS logic, so we store the answer
+		// losHandler->InLos/InAirLos/InJammer(unit, at), not the inputs). Same
+		// [numAllyTeams * maxUnits] stride layout.
+		std::vector<uint8_t> unitInLosAll;
+		std::vector<uint8_t> unitInAirLosAll;
+		std::vector<uint8_t> unitInJammerAll;
+		// ================== PR 32 (deep per-unit state) END ==================
+
 		// out-of-range ids (including any id before the first extraction ever
 		// ran, when the arrays are still unsized) are part of the stale/nil
 		// contract: a deterministic miss, not an error
@@ -319,6 +432,22 @@ public:
 		SResourcePack Cost(int unitID) const { return Valid(unitID) ? cost[unitID] : SResourcePack{}; }
 		float BuildTime(int unitID) const { return Valid(unitID) ? buildTime[unitID] : 0.0f; }
 		uint8_t BlockingBits(int unitID) const { return Valid(unitID) ? blockingBits[unitID] : uint8_t(0); }
+
+		// PR 32 LOS-variant accessors: the computed per-(unit,allyteam) answer
+		// (stale/nil contract: invalid ids / out-of-range allyteams read false).
+		// Callers mirror the live IsUnitInLos/InAirLos/InJammer bodies exactly.
+		bool UnitInLos(int unitID, int argAllyTeam) const {
+			return (Valid(unitID) && argAllyTeam >= 0 && argAllyTeam < numAllyTeams) &&
+				unitInLosAll[argAllyTeam * MaxUnits() + unitID] != 0;
+		}
+		bool UnitInAirLos(int unitID, int argAllyTeam) const {
+			return (Valid(unitID) && argAllyTeam >= 0 && argAllyTeam < numAllyTeams) &&
+				unitInAirLosAll[argAllyTeam * MaxUnits() + unitID] != 0;
+		}
+		bool UnitInJammer(int unitID, int argAllyTeam) const {
+			return (Valid(unitID) && argAllyTeam >= 0 && argAllyTeam < numAllyTeams) &&
+				unitInJammerAll[argAllyTeam * MaxUnits() + unitID] != 0;
+		}
 
 		// ---- serving-layer masking helpers (PR 18) ----
 		// Bit-for-bit mirrors of the live formulas, computed from extracted

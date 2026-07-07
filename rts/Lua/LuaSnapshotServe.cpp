@@ -31,6 +31,7 @@
 #include "Rendering/Features/FeatureDrawer.h" // CFeatureDrawer::GetDrawFlag / GetUnsyncedTransformMatrix
 #include "Rendering/GlobalRendering.h" // timeOffset (draw-owned)
 #include "Rendering/IconHandler.h" // icon data pushes (GetUnitIcon/GetUnitIconData)
+#include "Rendering/Models/3DModel.hpp" // PR 32 GetUnitEffectiveBuildRange: S3DModel::radius
 #include "Rendering/Models/3DModelPiece.hpp" // PR 33 S3DModel / S3DModelPiece (piece metadata)
 #include "Rendering/Models/LocalModel.hpp" // PR 33 barrier piece capture
 #include "Rendering/Models/LocalModelPiece.hpp" // PR 33 barrier piece capture
@@ -43,6 +44,8 @@
 #include "Sim/Misc/GlobalConstants.h" // GAME_SPEED
 #include "Sim/Misc/GlobalSynced.h" // GODMODE_*_BIT
 #include "Sim/MoveTypes/MoveDefHandler.h" // immutable MoveDef name (GetUnitMoveDefID)
+#include "Sim/MoveTypes/AAirMoveType.h" // PR 32 GetUnitMoveTypeData aircraftState enum
+#include "Sim/MoveTypes/HoverAirMoveType.h" // PR 32 GetUnitMoveTypeData flyState enum
 #include "Sim/Projectiles/PieceProjectile.h" // PR 33 GetPieceProjectileParams/Name twins
 #include "Sim/Projectiles/WeaponProjectiles/WeaponProjectileTypes.h" // PR 31 WEAPON_*_PROJECTILE (GetUnitWeaponVectors)
 #include "Sim/Weapons/WeaponTarget.h" // PR 31 Target_* (GetUnitWeaponTarget/CanFire)
@@ -5593,6 +5596,34 @@ namespace {
 		return GetUnitPieceSlot(unitID);
 	}
 
+	// PR 32: ParseInLosUnit mirror (rows.Valid + PovUnitInLos) + unit piece-slot
+	// lookup -- GetUnitCollisionVolumeData / GetUnitPieceCollisionVolumeData gate
+	const ObjectPieceSlot* ParseInLosUnitPieceSlot(lua_State* L, const char* caller)
+	{
+		const auto& rows = simSnapshot.Read();
+		const int unitID = ParseUnitIDSynced(L, caller, 1);
+		const Pov pov = HandlePov(L);
+
+		if (!rows.Valid(unitID) || !rows.PovUnitInLos(unitID, pov.readAllyTeam, pov.fullRead))
+			return nullptr;
+
+		return GetUnitPieceSlot(unitID);
+	}
+
+	// PR 32: ParseAllyUnit mirror (rows.Valid + PovAlliedUnit) + unit piece-slot
+	// lookup -- GetUnitLastAttackedPiece gate (batch-1 amendment: PovAlliedUnit)
+	const ObjectPieceSlot* ParseAllyUnitPieceSlot(lua_State* L, const char* caller)
+	{
+		const auto& rows = simSnapshot.Read();
+		const int unitID = ParseUnitIDSynced(L, caller, 1);
+		const Pov pov = HandlePov(L);
+
+		if (!rows.Valid(unitID) || !rows.PovAlliedUnit(unitID, pov.readAllyTeam, pov.fullRead))
+			return nullptr;
+
+		return GetUnitPieceSlot(unitID);
+	}
+
 	// ParseFeature mirror (featRows.Valid + PovFeatureVisible) + piece-slot lookup
 	const ObjectPieceSlot* ParseFeaturePieceSlot(lua_State* L, const char* caller)
 	{
@@ -5828,8 +5859,10 @@ void LuaSnapshotServe::RefreshPieces()
 	for (ObjectPieceSlot& s: unitPieceCache)
 		s.present = false;
 
+	// PR 32: units now also capture colVol + lastHit (GetUnitCollisionVolumeData /
+	// GetUnitPieceCollisionVolumeData / GetUnitLastAttackedPiece), like features
 	for (const CUnit* u: unitHandler.GetActiveUnits())
-		RefreshObjectPieceSlot(unitPieceCache[u->id], u, /*script*/true, /*colVol*/false, /*lastHit*/false);
+		RefreshObjectPieceSlot(unitPieceCache[u->id], u, /*script*/true, /*colVol*/true, /*lastHit*/true);
 
 	const auto& activeFeatureIDs = featureHandler.GetActiveFeatureIDs();
 	int maxFeatureID = -1;
@@ -6833,4 +6866,665 @@ int LuaSnapshotServe::GetUnitWeaponTarget(lua_State* L, const char* caller)
 	}
 
 	return 3;
+}
+
+// ===========================================================================
+// PR 32 (deep per-unit state): serving twins over the PR-32 SimSnapshot rows +
+// the moveType full-table block. Each is a line-by-line mirror of its live
+// LuaSyncedRead body with sim-object reads replaced by row reads; UnitDef
+// derefs (immutable game data) stay direct via unitDefHandler. POV gates mirror
+// the owning parse helper. The three collision-volume/last-hit twins reuse
+// PR 33's unit piece cache (now colVol+lastHit-capturing).
+// ===========================================================================
+
+// mirror of LuaSyncedRead::GetUnitStates (ParseAllyUnit)
+int LuaSnapshotServe::GetUnitStates(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	if (!rows.Valid(unitID) || !rows.PovAlliedUnit(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	const bool retTable = luaL_optboolean(L, 2,     true);
+	const bool binState = luaL_optboolean(L, 3, retTable);
+	const bool amtState = luaL_optboolean(L, 4, retTable);
+
+	const uint8_t kind = rows.moveTypeKind[unitID];
+
+	if (!retTable) {
+		{
+			lua_pushnumber(L, rows.fireState[unitID]);
+			lua_pushnumber(L, rows.moveState[unitID]);
+			lua_pushnumber(L, rows.repairBelowHealth[unitID]);
+		}
+
+		if (binState) {
+			lua_pushboolean(L, rows.repeatOrders[unitID]);
+			lua_pushboolean(L, rows.wantCloak[unitID]);
+			lua_pushboolean(L, rows.activated[unitID]);
+			lua_pushboolean(L, rows.useHighTrajectory[unitID]);
+		}
+
+		if (amtState) {
+			if (kind == 2) { // hover air
+				lua_pushboolean(L, rows.mtAutoLand[unitID]);
+				lua_pushboolean(L, false);
+				return (3 + (binState * 4) + 2);
+			}
+			if (kind == 3) { // strafe air
+				lua_pushboolean(L, rows.mtAutoLand[unitID]);
+				lua_pushboolean(L, rows.mtLoopbackAttack[unitID]);
+				return (3 + (binState * 4) + 2);
+			}
+		}
+
+		return (3 + (binState * 4));
+	}
+
+	{
+		lua_createtable(L, 0, 9);
+
+		{
+			HSTR_PUSH_NUMBER(L, "firestate",  rows.fireState[unitID]);
+			HSTR_PUSH_NUMBER(L, "movestate",  rows.moveState[unitID]);
+			HSTR_PUSH_NUMBER(L, "autorepairlevel", rows.repairBelowHealth[unitID]);
+		}
+
+		if (binState) {
+			HSTR_PUSH_BOOL(L, "repeat",     rows.repeatOrders[unitID]);
+			HSTR_PUSH_BOOL(L, "cloak",      rows.wantCloak[unitID]);
+			HSTR_PUSH_BOOL(L, "active",     rows.activated[unitID]);
+			HSTR_PUSH_BOOL(L, "trajectory", rows.useHighTrajectory[unitID]);
+		}
+
+		if (amtState) {
+			if (kind == 2) {
+				HSTR_PUSH_BOOL(L, "autoland",       rows.mtAutoLand[unitID]);
+				HSTR_PUSH_BOOL(L, "loopbackattack", false);
+				return 1;
+			}
+			if (kind == 3) {
+				HSTR_PUSH_BOOL(L, "autoland",       rows.mtAutoLand[unitID]);
+				HSTR_PUSH_BOOL(L, "loopbackattack", rows.mtLoopbackAttack[unitID]);
+				return 1;
+			}
+		}
+
+		return 1;
+	}
+}
+
+// mirror of LuaSyncedRead::GetUnitStorage (ParseAllyUnit)
+int LuaSnapshotServe::GetUnitStorage(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	if (!rows.Valid(unitID) || !rows.PovAlliedUnit(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	lua_pushnumber(L, rows.storage[unitID].metal);
+	lua_pushnumber(L, rows.storage[unitID].energy);
+	return 2;
+}
+
+// mirror of LuaSyncedRead::GetUnitMetalExtraction (ParseAllyUnit)
+int LuaSnapshotServe::GetUnitMetalExtraction(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	if (!rows.Valid(unitID) || !rows.PovAlliedUnit(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	if (!unitDefHandler->GetUnitDefByID(rows.defID[unitID])->extractsMetal)
+		return 0;
+
+	lua_pushnumber(L, rows.metalExtract[unitID]);
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetUnitBuildeeRadius (ParseTypedUnit)
+int LuaSnapshotServe::GetUnitBuildeeRadius(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	if (!rows.Valid(unitID) || !rows.PovUnitTyped(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	lua_pushnumber(L, rows.buildeeRadius[unitID]);
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetUnitPosErrorParams (ParseAllyUnit). posErrorVector /
+// GetPosErrorBit are already snapshotted (posErrorVector / posErrorBits stride);
+// the delta/nextUpdate rows are PR 32. NOTE: the live arg clamp is
+// std::clamp(opt, 0, ActiveAllyTeams()) -- inclusive upper bound, so argAllyTeam
+// can equal numAllyTeams (one past the posErrorBits stride). GetPosErrorBit(at)
+// returns false for out-of-range at (it masks (1<<at) against posErrorMask, and
+// posErrorMask has no such bit set), so PosErrorBit reproduces that: a >= stride
+// argAllyTeam reads false, matching live.
+int LuaSnapshotServe::GetUnitPosErrorParams(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	if (!rows.Valid(unitID) || !rows.PovAlliedUnit(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	const int optAllyTeam = luaL_optinteger(L, 2, 0);
+	const int argAllyTeam = std::clamp(optAllyTeam, 0, rows.numAllyTeams);
+
+	const bool posErrorBit = (argAllyTeam >= 0 && argAllyTeam < rows.numAllyTeams) &&
+		rows.posErrorBits[argAllyTeam * rows.MaxUnits() + unitID] != 0;
+
+	lua_pushnumber(L, rows.posErrorVector[unitID].x);
+	lua_pushnumber(L, rows.posErrorVector[unitID].y);
+	lua_pushnumber(L, rows.posErrorVector[unitID].z);
+	lua_pushnumber(L, rows.posErrorDelta[unitID].x);
+	lua_pushnumber(L, rows.posErrorDelta[unitID].y);
+	lua_pushnumber(L, rows.posErrorDelta[unitID].z);
+	lua_pushnumber(L, rows.nextPosErrorUpdate[unitID]);
+	lua_pushboolean(L, posErrorBit);
+
+	return (3 + 3 + 1 + 1);
+}
+
+// mirror of LuaSyncedRead::GetUnitLastAttacker (ParseUnit; the attacker's own
+// visibility gates the answer -- IsUnitVisible(lastAttacker) -> PovUnitVisible)
+int LuaSnapshotServe::GetUnitLastAttacker(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// ParseUnit mirror
+	if (!rows.Valid(unitID) || !rows.PovUnitVisible(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	const int atkID = rows.lastAttackerID[unitID];
+	if (atkID < 0 || !rows.Valid(atkID) || !rows.PovUnitVisible(atkID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	lua_pushnumber(L, atkID);
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetUnitIsBuilding (ParseAllyUnit; builder OR factory
+// curBuild)
+int LuaSnapshotServe::GetUnitIsBuilding(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	if (!rows.Valid(unitID) || !rows.PovAlliedUnit(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	// builderKind: 1 = CBuilder, 2 = CFactory (both push curBuild->id when set)
+	if (rows.builderKind[unitID] != 0 && rows.curBuildID[unitID] >= 0) {
+		lua_pushnumber(L, rows.curBuildID[unitID]);
+		return 1;
+	}
+
+	return 0;
+}
+
+// mirror of LuaSyncedRead::GetUnitBuildParams (ParseAllyUnit; CBuilder only)
+int LuaSnapshotServe::GetUnitBuildParams(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	if (!rows.Valid(unitID) || !rows.PovAlliedUnit(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	if (rows.builderKind[unitID] != 1) // not a CBuilder
+		return 0;
+
+	switch (hashString(luaL_checkstring(L, 2))) {
+	case hashString("buildRange"):
+	case hashString("buildDistance"): {
+		lua_pushnumber(L, rows.buildDistance[unitID]);
+		return 1;
+	} break;
+	case hashString("buildRange3D"): {
+		lua_pushboolean(L, rows.range3D[unitID]);
+		return 1;
+	} break;
+	default: {} break;
+	};
+
+	return 0;
+}
+
+// mirror of LuaSyncedRead::GetUnitInBuildStance (ParseAllyUnit; CBuilder only)
+int LuaSnapshotServe::GetUnitInBuildStance(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	if (!rows.Valid(unitID) || !rows.PovAlliedUnit(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	if (rows.builderKind[unitID] != 1) // not a CBuilder
+		return 0;
+
+	lua_pushboolean(L, rows.inBuildStance[unitID]);
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetUnitCurrentBuildPower (ParseAllyUnit; builder|factory)
+int LuaSnapshotServe::GetUnitCurrentBuildPower(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	if (!rows.Valid(unitID) || !rows.PovAlliedUnit(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	if (rows.builderKind[unitID] == 0) // no NanoPieceCache (not builder/factory)
+		return 0;
+
+	lua_pushnumber(L, rows.buildPower[unitID]);
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetUnitEffectiveBuildRange (ParseInLosUnit; CBuilderCAI
+// only -- equivalent to CBuilder here, since a CBuilderCAI's ownerBuilder is a
+// CBuilder). GetBuildRange(r) == buildDistance + r; the buildee model is
+// immutable game data loaded exactly as the live path (main-thread GL is fine).
+int LuaSnapshotServe::GetUnitEffectiveBuildRange(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	if (!rows.Valid(unitID) || !rows.PovUnitInLos(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	if (rows.builderKind[unitID] != 1) // no CBuilderCAI
+		return 0;
+
+	const float buildDistance = rows.buildDistance[unitID];
+
+	if (lua_isnoneornil(L, 2)) {
+		lua_pushnumber(L, buildDistance + 0.0f);
+		return 1;
+	}
+
+	const int buildeeDefID = luaL_checkint(L, 2);
+	const UnitDef* unitDef = unitDefHandler->GetUnitDefByID(buildeeDefID);
+	if (unitDef == nullptr)
+		luaL_error(L, "Nonexistent buildeeDefID %d passed to Spring.GetUnitEffectiveBuildRange", (int) buildeeDefID);
+
+	const auto model = unitDef->LoadModel();
+	if (model == nullptr)
+		return 0;
+
+	const auto radius = std::max(0.f, model->radius);
+
+	lua_pushnumber(L, buildDistance + radius);
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetUnitNanoPieces (ParseAllyUnit; builder|factory)
+int LuaSnapshotServe::GetUnitNanoPieces(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	if (!rows.Valid(unitID) || !rows.PovAlliedUnit(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	if (rows.builderKind[unitID] == 0) // no NanoPieceCache
+		return 0;
+
+	const std::vector<int32_t>& nanoPieces = rows.nanoPieces[unitID];
+
+	if (nanoPieces.empty())
+		return 0;
+
+	lua_createtable(L, nanoPieces.size(), 0);
+
+	for (size_t p = 0; p < nanoPieces.size(); p++) {
+		lua_pushnumber(L, nanoPieces[p] + 1); // lua 1-indexed, c++ 0-indexed
+		lua_rawseti(L, -2, p + 1);
+	}
+
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetUnitTransporter (ParseInLosUnit)
+int LuaSnapshotServe::GetUnitTransporter(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	if (!rows.Valid(unitID) || !rows.PovUnitInLos(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	if (rows.transporterID[unitID] < 0)
+		return 0;
+
+	lua_pushnumber(L, rows.transporterID[unitID]);
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetUnitIsTransporting (ParseAllyUnit; transport units)
+int LuaSnapshotServe::GetUnitIsTransporting(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	if (!rows.Valid(unitID) || !rows.PovAlliedUnit(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	if (!unitDefHandler->GetUnitDefByID(rows.defID[unitID])->IsTransportUnit())
+		return 0;
+
+	const std::vector<int32_t>& transportees = rows.transportees[unitID];
+
+	lua_createtable(L, transportees.size(), 0);
+
+	unsigned int unitCount = 1;
+	for (const int32_t carriedID : transportees) {
+		lua_pushnumber(L, carriedID);
+		lua_rawseti(L, -2, unitCount++);
+	}
+
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetUnitTooltip (ParseTypedUnit). Composes the leader-
+// name path from the team/player boundary copies (TeamRows/PlayerRows) and the
+// decoy/custom path from immutable UnitDef + the customTooltip row; effectiveDef/
+// decoyDef mirror LuaUtils::EffectiveUnitDef / IsAllyUnit over the snapshot POV.
+int LuaSnapshotServe::GetUnitTooltip(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	if (!rows.Valid(unitID) || !rows.PovUnitTyped(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	const UnitDef* unitDef = unitDefHandler->GetUnitDefByID(rows.defID[unitID]);
+	const bool allied = rows.PovAlliedUnit(unitID, pov.readAllyTeam, pov.fullRead);
+	const UnitDef* decoyDef = allied ? nullptr : unitDef->decoyDef;
+	// EffectiveUnitDef mirror
+	const UnitDef* effectiveDef = allied ? unitDef : (unitDef->decoyDef ? unitDef->decoyDef : unitDef);
+
+	std::string tooltip;
+
+	if (effectiveDef->showPlayerName) {
+		const auto& teams = simSnapshot.ReadTeams();
+		const auto& players = simSnapshot.ReadPlayers();
+		const int team = rows.team[unitID];
+
+		if (teams.ValidTeam(team) && teams.leader[team] != -1) {
+			const int leader = teams.leader[team];
+			if (players.ValidPlayer(leader))
+				tooltip = players.name[leader];
+			tooltip = (teams.hasAIs[team] ? "AI@" : "") + tooltip;
+		}
+	} else {
+		if (decoyDef == nullptr) {
+			tooltip = rows.customTooltip[unitID];
+		} else {
+			tooltip = decoyDef->humanName + " - " + decoyDef->tooltip;
+		}
+	}
+
+	lua_pushsstring(L, tooltip);
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetUnitMoveTypeData (ParseAllyUnit). Full table from
+// the flat base rows + the moveType full-table block (decision-2 full-copy).
+int LuaSnapshotServe::GetUnitMoveTypeData(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	if (!rows.Valid(unitID) || !rows.PovAlliedUnit(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	const SimSnapshot::MoveTypeBlock& b = rows.moveTypeBlock[unitID];
+
+	lua_createtable(L, 0, 26);
+	HSTR_PUSH_NUMBER(L, "maxSpeed", rows.mtMaxSpeed[unitID]);
+	HSTR_PUSH_NUMBER(L, "maxWantedSpeed", rows.mtMaxWantedSpeed[unitID]);
+	HSTR_PUSH_NUMBER(L, "goalx", rows.mtGoalPos[unitID].x);
+	HSTR_PUSH_NUMBER(L, "goaly", rows.mtGoalPos[unitID].y);
+	HSTR_PUSH_NUMBER(L, "goalz", rows.mtGoalPos[unitID].z);
+
+	switch (rows.mtProgressState[unitID]) {
+		case 0: HSTR_PUSH_CSTRING(L, "progressState", "done");   break;
+		case 1: HSTR_PUSH_CSTRING(L, "progressState", "active"); break;
+		case 2: HSTR_PUSH_CSTRING(L, "progressState", "failed"); break;
+	}
+
+	const auto pushAircraftState = [&](int32_t st) {
+		switch (st) {
+			case AAirMoveType::AIRCRAFT_LANDED:   HSTR_PUSH_CSTRING(L, "aircraftState", "landed");   break;
+			case AAirMoveType::AIRCRAFT_FLYING:   HSTR_PUSH_CSTRING(L, "aircraftState", "flying");   break;
+			case AAirMoveType::AIRCRAFT_LANDING:  HSTR_PUSH_CSTRING(L, "aircraftState", "landing");  break;
+			case AAirMoveType::AIRCRAFT_CRASHING: HSTR_PUSH_CSTRING(L, "aircraftState", "crashing"); break;
+			case AAirMoveType::AIRCRAFT_TAKEOFF:  HSTR_PUSH_CSTRING(L, "aircraftState", "takeoff");  break;
+			case AAirMoveType::AIRCRAFT_HOVERING: HSTR_PUSH_CSTRING(L, "aircraftState", "hovering"); break;
+		}
+	};
+
+	switch (rows.moveTypeKind[unitID]) {
+		case 1: { // ground
+			HSTR_PUSH_CSTRING(L, "name", "ground");
+			HSTR_PUSH_NUMBER(L, "turnRate", b.turnRate);
+			HSTR_PUSH_NUMBER(L, "accRate", b.accRate);
+			HSTR_PUSH_NUMBER(L, "decRate", b.decRate);
+			HSTR_PUSH_NUMBER(L, "maxReverseSpeed", b.maxReverseSpeed);
+			HSTR_PUSH_NUMBER(L, "wantedSpeed", b.wantedSpeed);
+			HSTR_PUSH_NUMBER(L, "currentSpeed", b.currentSpeed);
+			HSTR_PUSH_NUMBER(L, "goalRadius", b.goalRadius);
+			HSTR_PUSH_NUMBER(L, "currwaypointx", b.currWayPoint.x);
+			HSTR_PUSH_NUMBER(L, "currwaypointy", b.currWayPoint.y);
+			HSTR_PUSH_NUMBER(L, "currwaypointz", b.currWayPoint.z);
+			HSTR_PUSH_NUMBER(L, "nextwaypointx", b.nextWayPoint.x);
+			HSTR_PUSH_NUMBER(L, "nextwaypointy", b.nextWayPoint.y);
+			HSTR_PUSH_NUMBER(L, "nextwaypointz", b.nextWayPoint.z);
+			HSTR_PUSH_NUMBER(L, "requestedSpeed", 0.0f);
+			HSTR_PUSH_NUMBER(L, "pathFailures", 0);
+			return 1;
+		}
+		case 2: { // hover air (gunship)
+			HSTR_PUSH_CSTRING(L, "name", "gunship");
+			HSTR_PUSH_NUMBER(L, "wantedHeight", b.wantedHeight);
+			HSTR_PUSH_BOOL(L, "collide", b.collide);
+			HSTR_PUSH_BOOL(L, "useSmoothMesh", b.useSmoothMesh);
+			pushAircraftState(b.aircraftState);
+			switch (b.flyState) {
+				case CHoverAirMoveType::FLY_CRUISING:  HSTR_PUSH_CSTRING(L, "flyState", "cruising");  break;
+				case CHoverAirMoveType::FLY_CIRCLING:  HSTR_PUSH_CSTRING(L, "flyState", "circling");  break;
+				case CHoverAirMoveType::FLY_ATTACKING: HSTR_PUSH_CSTRING(L, "flyState", "attacking"); break;
+				case CHoverAirMoveType::FLY_LANDING:   HSTR_PUSH_CSTRING(L, "flyState", "landing");   break;
+			}
+			HSTR_PUSH_NUMBER(L, "goalDistance", b.goalDistance);
+			HSTR_PUSH_BOOL(L, "bankingAllowed", b.bankingAllowed);
+			HSTR_PUSH_NUMBER(L, "currentBank", b.currentBank);
+			HSTR_PUSH_NUMBER(L, "currentPitch", b.currentPitch);
+			HSTR_PUSH_NUMBER(L, "turnRate", b.turnRate);
+			HSTR_PUSH_NUMBER(L, "accRate", b.accRate);
+			HSTR_PUSH_NUMBER(L, "decRate", b.decRate);
+			HSTR_PUSH_NUMBER(L, "altitudeRate", b.altitudeRate);
+			HSTR_PUSH_NUMBER(L, "brakeDistance", -1.0f); // DEPRECATED
+			HSTR_PUSH_BOOL(L, "dontLand", b.dontLand);   // == GetAllowLanding()
+			HSTR_PUSH_NUMBER(L, "maxDrift", b.maxDrift);
+			return 1;
+		}
+		case 3: { // strafe air (airplane)
+			HSTR_PUSH_CSTRING(L, "name", "airplane");
+			pushAircraftState(b.aircraftState);
+			HSTR_PUSH_NUMBER(L, "wantedHeight", b.wantedHeight);
+			HSTR_PUSH_BOOL(L, "collide", b.collide);
+			HSTR_PUSH_BOOL(L, "useSmoothMesh", b.useSmoothMesh);
+			HSTR_PUSH_NUMBER(L, "myGravity", b.myGravity);
+			HSTR_PUSH_NUMBER(L, "maxBank", b.maxBank);
+			HSTR_PUSH_NUMBER(L, "maxPitch", b.maxBank);
+			HSTR_PUSH_NUMBER(L, "turnRadius", b.turnRadius);
+			HSTR_PUSH_NUMBER(L, "maxAcc", b.accRate);
+			HSTR_PUSH_NUMBER(L, "maxAileron", b.maxAileron);
+			HSTR_PUSH_NUMBER(L, "maxElevator", b.maxElevator);
+			HSTR_PUSH_NUMBER(L, "maxRudder", b.maxRudder);
+			return 1;
+		}
+		case 4: { // static
+			HSTR_PUSH_CSTRING(L, "name", "static");
+			return 1;
+		}
+		case 5: { // script
+			HSTR_PUSH_CSTRING(L, "name", "script");
+			return 1;
+		}
+		default: break;
+	}
+
+	HSTR_PUSH_CSTRING(L, "name", "unknown");
+	return 1;
+}
+
+// ---- unit collision-volume / last-hit-piece twins (PR 33 unit piece cache) ----
+// mirror of LuaSyncedRead::GetUnitCollisionVolumeData (ParseInLosUnit)
+int LuaSnapshotServe::GetUnitCollisionVolumeData(lua_State* L, const char* caller)
+{
+	const ObjectPieceSlot* slot = ParseInLosUnitPieceSlot(L, caller);
+	if (slot == nullptr)
+		return 0;
+	return LuaUtils::PushColVolData(L, &slot->colVol);
+}
+
+// mirror of LuaSyncedRead::GetUnitPieceCollisionVolumeData (ParseInLosUnit +
+// PushPieceCollisionVolumeData)
+int LuaSnapshotServe::GetUnitPieceCollisionVolumeData(lua_State* L, const char* caller)
+{
+	const ObjectPieceSlot* slot = ParseInLosUnitPieceSlot(L, caller);
+	if (slot == nullptr)
+		return 0;
+	const int pieceIdx = ParsePieceIndex(L, slot);
+	if (pieceIdx < 0)
+		return 0;
+	return LuaUtils::PushColVolData(L, &slot->pieces[pieceIdx].pieceColVol);
+}
+
+// mirror of LuaSyncedRead::GetUnitLastAttackedPiece (ParseAllyUnit gate, batch-1
+// amendment) over GetSolidObjectLastHitPiece
+int LuaSnapshotServe::GetUnitLastAttackedPiece(lua_State* L, const char* caller)
+{
+	return ServeLastHitPiece(L, ParseAllyUnitPieceSlot(L, caller));
+}
+
+// ---- IsUnitInLos / InAirLos / InJammer unit variants (batch-1 reassignment) ----
+// The stride rows hold the computed losHandler->InLos/InAirLos/InJammer(unit, at)
+// answers; the twins mirror the live bodies incl. their GetEffectiveLosAllyTeam
+// helper (which can raise "Invalid allyTeam" exactly like live).
+
+// GetEffectiveLosAllyTeam mirror shared by the three; returns the resolved
+// allyTeam or raises argerror. Mirrors ServeEffectiveLosAllyTeam but inlined
+// against the numAllyTeams the rows carry.
+namespace {
+	int UnitLosEffectiveAllyTeam(lua_State* L, const Pov& pov, int numAllyTeams, int arg)
+	{
+		if (lua_isnoneornil(L, arg))
+			return pov.readAllyTeam;
+
+		const int aat = luaL_optint(L, arg, CEventClient::MinSpecialTeam - 1);
+
+		if (aat == CEventClient::NoAccessTeam)
+			return aat;
+
+		if (pov.fullRead) {
+			if (aat >= 0 && aat < numAllyTeams)
+				return aat;
+			if (aat == CEventClient::AllAccessTeam)
+				return aat;
+		} else {
+			if (aat == pov.readAllyTeam)
+				return aat;
+		}
+
+		return luaL_argerror(L, arg, "Invalid allyTeam");
+	}
+}
+
+int LuaSnapshotServe::IsUnitInLos(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// ParseTypedUnit mirror
+	if (!rows.Valid(unitID) || !rows.PovUnitTyped(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	const int allyTeamID = UnitLosEffectiveAllyTeam(L, pov, rows.numAllyTeams, 2);
+	if (allyTeamID < 0) {
+		lua_pushboolean(L, (allyTeamID == CEventClient::AllAccessTeam));
+		return 1;
+	}
+
+	lua_pushboolean(L, rows.UnitInLos(unitID, allyTeamID));
+	return 1;
+}
+
+int LuaSnapshotServe::IsUnitInAirLos(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// ParseTypedUnit mirror
+	if (!rows.Valid(unitID) || !rows.PovUnitTyped(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	const int allyTeamID = UnitLosEffectiveAllyTeam(L, pov, rows.numAllyTeams, 2);
+	if (allyTeamID < 0) {
+		lua_pushboolean(L, (allyTeamID == CEventClient::AllAccessTeam));
+		return 1;
+	}
+
+	lua_pushboolean(L, rows.UnitInAirLos(unitID, allyTeamID));
+	return 1;
+}
+
+int LuaSnapshotServe::IsUnitInJammer(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// ParseTypedUnit mirror
+	if (!rows.Valid(unitID) || !rows.PovUnitTyped(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	const int allyTeamID = UnitLosEffectiveAllyTeam(L, pov, rows.numAllyTeams, 2);
+	if (allyTeamID < 0) {
+		luaL_argerror(L, 2, "Invalid allyTeam");
+		return 0;
+	}
+
+	lua_pushboolean(L, rows.UnitInJammer(unitID, allyTeamID));
+	return 1;
 }
