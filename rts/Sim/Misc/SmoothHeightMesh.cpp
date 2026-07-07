@@ -140,6 +140,12 @@ float SmoothHeightMesh::SetHeight(int index, float h)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(index < maxx*maxy);
+	// PR 28 choke-point funnel: every mesh-height write goes through these three
+	// setters (the six Spring.*SmoothMesh Lua callouts call them directly), so
+	// marking here covers all of them. The updater (UpdateSmoothMesh /
+	// MakeSmoothMesh) writes the mesh via the Blur/CopyMeshPart helpers, NOT
+	// through these setters, so it keeps its own marks.
+	drawMapMirrors.MarkSmoothMeshDirty();
 	return (mesh[index] = h);
 }
 
@@ -147,6 +153,7 @@ float SmoothHeightMesh::AddHeight(int index, float h)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(index < maxx*maxy);
+	drawMapMirrors.MarkSmoothMeshDirty();
 	return (mesh[index] += h);
 }
 
@@ -154,6 +161,7 @@ float SmoothHeightMesh::SetMaxHeight(int index, float h)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(index < maxx*maxy);
+	drawMapMirrors.MarkSmoothMeshDirty();
 	return (mesh[index] = std::max(h, mesh[index]));
 }
 

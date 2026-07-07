@@ -320,10 +320,12 @@ inline float CReadMap::SetHeight(const int idx, const float h, const int add) {
 	return SetHeightValue((*heightMapSyncedPtr)[idx], idx, h, add);
 }
 
-inline float CReadMap::AddOriginalHeight(const int idx, const float a) { return SetOriginalHeight(idx, a, 1); }
-inline float CReadMap::SetOriginalHeight(const int idx, const float h, const int add) {
-	return SetHeightValue((*originalHeightMapPtr)[idx], idx, h, add);
-}
+// SetOriginalHeight / AddOriginalHeight are defined out-of-line in ReadMap.cpp:
+// they funnel the DrawMapMirrors orig-heightmap dirty mark (PR 28 choke point)
+// and are only called from the Spring.*OriginalHeightMap Lua callouts + load
+// time (not a per-frame hot path), so the extra call is free of concern and
+// keeps the Rendering/DrawMapMirrors dependency out of this widely-included
+// header.
 
 inline float CReadMap::SetHeightValue(float& heightRef, const int idx, const float h, const int add) {
 	// add=0 <--> x = x*0 + h =   h

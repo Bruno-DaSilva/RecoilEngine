@@ -6571,8 +6571,7 @@ int LuaSyncedCtrl::LevelOriginalHeightMap(lua_State* L)
 		}
 	}
 
-	// PR 28 choke point: orig-heightmap writer -> mark the DrawMapMirrors copy
-	drawMapMirrors.MarkOrigHeightDirty();
+	// PR 28: orig-heightmap dirty mark is funneled into CReadMap::SetOriginalHeight
 	return 0;
 }
 
@@ -6667,8 +6666,7 @@ int LuaSyncedCtrl::RevertOriginalHeightMap(lua_State* L)
 		}
 	}
 
-	// PR 28 choke point: orig-heightmap writer -> mark the DrawMapMirrors copy
-	drawMapMirrors.MarkOrigHeightDirty();
+	// PR 28: orig-heightmap dirty mark is funneled into CReadMap::SetOriginalHeight
 	return 0;
 }
 
@@ -6803,11 +6801,8 @@ int LuaSyncedCtrl::SetOriginalHeightMapFunc(lua_State* L)
 		lua_error(L);
 	}
 
-	// PR 28 choke point: the callback ran Spring.{Set,Add}OriginalHeightMap
-	// (the only paths that reach those, guarded by inOriginalHeightMap) ->
-	// mark the DrawMapMirrors orig-heightmap copy for the barrier drain
-	drawMapMirrors.MarkOrigHeightDirty();
-
+	// PR 28: the callback's Spring.{Set,Add}OriginalHeightMap writes funnel their
+	// orig-heightmap dirty mark into CReadMap::SetOriginalHeight
 	lua_pushnumber(L, originalHeightMapAmountChanged);
 	return 1;
 }

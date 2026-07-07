@@ -9,6 +9,7 @@
 #include "MapDamage.h"
 #include "MapInfo.h"
 #include "MetalMap.h"
+#include "Rendering/Common/DrawMapMirrors.h" // PR 28: orig-heightmap mirror dirty marking
 #include "Rendering/Env/MapRendering.h"
 #include "SMF/SMFReadMap.h"
 #include "Game/LoadScreen.h"
@@ -454,6 +455,22 @@ void CReadMap::LoadOriginalHeightMapAndChecksum()
 
 	currHeightBounds.x = initHeightBounds.x;
 	currHeightBounds.y = initHeightBounds.y;
+}
+
+
+// PR 28 choke-point funnel: every runtime write of the SYNCED original
+// heightmap goes through SetOriginalHeight (AddOriginalHeight delegates to it),
+// and the four Spring.*OriginalHeightMap Lua callouts
+// (Level/Adjust/Revert/{Set,Add}OriginalHeightMapFunc) are the only callers, so
+// marking here covers all of them uniformly. The load-time full fill in
+// LoadOriginalHeightMapAndChecksum writes originalHeightMap[] directly and is
+// captured by the mirror's first-drain full copy, so it needs no mark. Defined
+// out-of-line (was a header inline) to keep DrawMapMirrors out of ReadMap.h;
+// not a per-frame hot path.
+float CReadMap::AddOriginalHeight(const int idx, const float a) { return SetOriginalHeight(idx, a, 1); }
+float CReadMap::SetOriginalHeight(const int idx, const float h, const int add) {
+	drawMapMirrors.MarkOrigHeightDirty();
+	return SetHeightValue((*originalHeightMapPtr)[idx], idx, h, add);
 }
 
 
