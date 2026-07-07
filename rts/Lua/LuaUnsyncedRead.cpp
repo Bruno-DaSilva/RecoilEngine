@@ -2146,6 +2146,10 @@ int LuaUnsyncedRead::IsSphereInView(lua_State* L)
 	                 luaL_checkfloat(L, 3));
 	const float radius = lua_israwnumber(L, 4) ? lua_tofloat(L, 4) : 0.0f;
 
+	// split-safe under the split (Batch-4 P1): a pure camera-frustum test with NO
+	// sim object -- `camera` is draw-owned (updated by the draw/main thread, not the
+	// sim), so it answers draw-side directly and takes no live sim read (no
+	// DenyLiveRead gate, not sanctioned)
 	lua_pushboolean(L, camera->InView(pos, radius));
 	return 1;
 }

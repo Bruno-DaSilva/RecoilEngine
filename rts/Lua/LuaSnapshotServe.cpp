@@ -8516,6 +8516,116 @@ namespace {
 }
 
 
+/******************************************************************************
+ * PR 38g (Batch-4 P1): sanctioned-tail serving twins. GetUnitEstimatedPath
+ * (UnitRows est-path block), GetFeatureFireTime/SmokeTime (FeatureRows fire/
+ * smoke timers), GetProjectileDamages (ProjectileRows DamagesSnap). Each mirrors
+ * its live body's parse-gate POV + return shape over the snapshot rows.
+ ******************************************************************************/
+
+// mirror of LuaPathFinder::PushPathNodes over the extracted waypoint vectors:
+// same two-table shape (points as 1-indexed {x,y,z} sub-tables, starts as
+// 1-indexed starts[i]+1) and same 2-return arity
+static int PushPathNodesFromSnap(lua_State* L, const std::vector<float3>& points, const std::vector<int32_t>& starts)
+{
+	const int pointCount = static_cast<int>(points.size());
+	const int startCount = static_cast<int>(starts.size());
+
+	lua_createtable(L, pointCount, 0);
+	for (int i = 0; i < pointCount; i++) {
+		lua_createtable(L, 3, 0);
+		lua_pushnumber(L, points[i].x); lua_rawseti(L, -2, 1);
+		lua_pushnumber(L, points[i].y); lua_rawseti(L, -2, 2);
+		lua_pushnumber(L, points[i].z); lua_rawseti(L, -2, 3);
+		lua_rawseti(L, -2, i + 1);
+	}
+
+	lua_createtable(L, startCount, 0);
+	for (int i = 0; i < startCount; i++) {
+		lua_pushnumber(L, starts[i] + 1);
+		lua_rawseti(L, -2, i + 1);
+	}
+
+	return 2;
+}
+
+// mirror of LuaSyncedRead::GetUnitEstimatedPath (ParseAllyUnit gate; a
+// dynamic_cast<CGroundMoveType> gate; PushPathNodes' pathID==0 early return)
+int LuaSnapshotServe::GetUnitEstimatedPath(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// ParseAllyUnit mirror
+	if (!rows.Valid(unitID) || !rows.PovAlliedUnit(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	// dynamic_cast<CGroundMoveType> == nullptr mirror (moveTypeKind==1 iff ground)
+	if (rows.moveTypeKind[unitID] != 1)
+		return 0;
+
+	// PushPathNodes' pathID==0 early return mirror (no tables)
+	if (rows.estPathHasPath[unitID] == 0)
+		return 0;
+
+	return PushPathNodesFromSnap(L, rows.estPathPoints[unitID], rows.estPathStarts[unitID]);
+}
+
+// mirror of LuaSyncedRead::GetFeatureFireTime (ParseFeature POV; fireTime * INV_GAME_SPEED)
+int LuaSnapshotServe::GetFeatureFireTime(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.ReadFeatures();
+	const int featureID = ParseFeatureIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// ParseFeature mirror
+	if (!rows.Valid(featureID) || !PovFeatureVisible(rows, featureID, pov))
+		return 0;
+
+	lua_pushnumber(L, rows.fireTime[featureID] * INV_GAME_SPEED);
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetFeatureSmokeTime (ParseFeature POV; smokeTime * INV_GAME_SPEED)
+int LuaSnapshotServe::GetFeatureSmokeTime(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.ReadFeatures();
+	const int featureID = ParseFeatureIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// ParseFeature mirror
+	if (!rows.Valid(featureID) || !PovFeatureVisible(rows, featureID, pov))
+		return 0;
+
+	lua_pushnumber(L, rows.smokeTime[featureID] * INV_GAME_SPEED);
+	return 1;
+}
+
+// mirror of LuaSyncedRead::GetProjectileDamages (ParseProjectile POV + isWeapon
+// gate; the live body forces arg 2 to a string via luaL_checkstring before
+// PushDamagesKey(*wpro->damages, 2), and a weapon projectile's damages is never null)
+int LuaSnapshotServe::GetProjectileDamages(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.ReadProjectiles();
+	const int projID = luaL_checkint(L, 1);
+	const Pov pov = HandlePov(L);
+
+	if (!rows.Valid(projID) || !rows.PovVisible(projID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+	if (!rows.isWeapon[projID])
+		return 0;
+
+	// valid==0 would be the live "damages == nullptr" nil shape; a weapon
+	// projectile always has non-null damages, so this never fires in practice
+	if (rows.damages[projID].valid == 0)
+		return 0;
+
+	luaL_checkstring(L, 2); // mirror the live body's arg-2 enforcement (converts a numeric key slot in place)
+	return PushDamagesKeySnap(L, rows.damages[projID], 2);
+}
+
+
 int LuaSnapshotServe::RouteTraceQuery(lua_State* L, const char* caller, ServeFn liveFn, TraceKind kind)
 {
 	// non-draw context (synced gadget on the sim thread, sim-phase call): the

@@ -32,6 +32,7 @@
 #include "Sim/MoveTypes/StrafeAirMoveType.h"
 #include "Sim/MoveTypes/StaticMoveType.h"
 #include "Sim/MoveTypes/ScriptMoveType.h"
+#include "Sim/Path/IPathManager.h" // PR 38g GetUnitEstimatedPath (GetPathWayPoints)
 #include "Sim/Misc/GlobalConstants.h" // GAME_SPEED
 #include "Sim/Misc/NanoPieceCache.h"
 #include "Sim/Units/CommandAI/CommandAI.h"   // repeatOrders
@@ -563,6 +564,10 @@ void SimSnapshot::Resize(UnitRows& rows, size_t maxUnits, int numAllyTeams)
 	rows.unitInJammerAll.resize(size_t(numAllyTeams) * maxUnits);
 	// ---- PR 38c: per-unit rules-params mirror (same maxUnits sizing) ----
 	rows.unitRulesParams.resize(maxUnits);
+	// ---- PR 38g: GetUnitEstimatedPath est-path block (same maxUnits sizing) ----
+	rows.estPathHasPath.resize(maxUnits);
+	rows.estPathPoints.resize(maxUnits);
+	rows.estPathStarts.resize(maxUnits);
 }
 
 // ---- PR 32 (deep per-unit state) extraction helpers ----
@@ -612,6 +617,12 @@ static void ExtractUnitMoveType(SimSnapshot::UnitRows& rows, int id, const CUnit
 	SimSnapshot::MoveTypeBlock& b = rows.moveTypeBlock[id];
 	b = SimSnapshot::MoveTypeBlock{}; // ids are reused; default-zero for non-dynamic subtypes
 
+	// PR 38g GetUnitEstimatedPath: default empty (non-ground / no path); populated
+	// in the ground branch below. ids are reused, so clear every boundary.
+	rows.estPathHasPath[id] = 0;
+	rows.estPathPoints[id].clear();
+	rows.estPathStarts[id].clear();
+
 	if (const CGroundMoveType* g = dynamic_cast<const CGroundMoveType*>(mt); g != nullptr) {
 		rows.moveTypeKind[id] = 1;
 		b.turnRate = g->GetTurnRate();
@@ -623,6 +634,19 @@ static void ExtractUnitMoveType(SimSnapshot::UnitRows& rows, int id, const CUnit
 		b.goalRadius = g->GetGoalRadius();
 		b.currWayPoint = g->GetCurrWayPoint();
 		b.nextWayPoint = g->GetNextWayPoint();
+
+		// PR 38g: capture the estimated path waypoints exactly as
+		// LuaPathFinder::PushPathNodes reads them. GetPathWayPoints is a pure const
+		// read (does NOT advance the path). pathID==0 => hasPath stays 0 and the
+		// twin returns no tables, matching PushPathNodes' pathID==0 early return.
+		if (const unsigned int pathID = g->GetPathID(); pathID != 0) {
+			rows.estPathHasPath[id] = 1;
+			// GetPathWayPoints takes vector<int>&; estPathStarts is vector<int32_t>
+			// (int32_t == int on every supported target), copied verbatim below.
+			std::vector<int> starts;
+			pathManager->GetPathWayPoints(pathID, rows.estPathPoints[id], starts);
+			rows.estPathStarts[id].assign(starts.begin(), starts.end());
+		}
 		return;
 	}
 	if (const CHoverAirMoveType* h = dynamic_cast<const CHoverAirMoveType*>(mt); h != nullptr) {
@@ -989,6 +1013,7 @@ void SimSnapshot::ExtractProjectiles(ProjectileRows& rows)
 		rows.pieceSpinVec.resize(n);
 		rows.pieceName.resize(n);
 		rows.radius.resize(n); // PR 34 (spatial/list remainder)
+		rows.damages.resize(n); // PR 38g (GetProjectileDamages)
 		rows.inLosAll.resize(size_t(numAllyTeams) * n);
 	}
 
@@ -1023,6 +1048,7 @@ void SimSnapshot::ExtractProjectiles(ProjectileRows& rows)
 		rows.pieceSpinSpeed[id] = 0.0f;
 		rows.pieceSpinVec[id] = ZeroVector;
 		rows.pieceName[id].clear();
+		rows.damages[id].valid = 0; // PR 38g: default nil-shape; filled for weapon projectiles
 
 		if (p->piece) {
 			// GetPieceProjectileParams/Name serving (all synced state; the
@@ -1045,6 +1071,11 @@ void SimSnapshot::ExtractProjectiles(ProjectileRows& rows)
 			rows.weaponDefID[id] = (wdef != nullptr) ? wdef->id : -1;
 			rows.ttl[id] = wpro->GetTimeToLive();
 			rows.intercepted[id] = wpro->IsBeingIntercepted();
+			// PR 38g GetProjectileDamages: flatten *wpro->damages into the POD
+			// DamagesSnap (the PR-31 CopyDamages helper; sets valid=1). The live
+			// body dereferences *wpro->damages unconditionally, so a weapon
+			// projectile always has non-null damages (valid==1).
+			CopyDamages(rows.damages[id], wpro->damages);
 
 			// same type resolution as LuaSyncedRead::GetProjectileTarget
 			if (wtgt == nullptr) {
@@ -1112,6 +1143,8 @@ void SimSnapshot::ExtractFeatures(FeatureRows& rows)
 		rows.reclaimTime.resize(n);
 		rows.blockingBits.resize(n);
 		rows.resurrectDefID.resize(n);
+		rows.fireTime.resize(n);  // PR 38g (GetFeatureFireTime)
+		rows.smokeTime.resize(n); // PR 38g (GetFeatureSmokeTime)
 		rows.inLosAll.resize(size_t(numAllyTeams) * n);
 		// ---- PR 38c: per-feature rules-params mirror (grow-only like the rest) ----
 		rows.featureRulesParams.resize(n);
@@ -1161,6 +1194,8 @@ void SimSnapshot::ExtractFeatures(FeatureRows& rows)
 		rows.reclaimTime[id] = f->reclaimTime;
 		rows.blockingBits[id] = PackBlockingBits(f);
 		rows.resurrectDefID[id] = (f->udef != nullptr) ? f->udef->id : -1;
+		rows.fireTime[id] = f->fireTime;   // PR 38g (GetFeatureFireTime)
+		rows.smokeTime[id] = f->smokeTime; // PR 38g (GetFeatureSmokeTime)
 
 		// ---- PR 38c: per-feature rules-params (values only, like the unit copy) ----
 		rows.featureRulesParams[id] = f->modParams;

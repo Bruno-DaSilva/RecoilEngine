@@ -228,7 +228,13 @@ static void CreatePathMetatable(lua_State* L)
 
 int LuaPathFinder::RequestPath(lua_State* L)
 {
-	// split-contract gate (PR 27a): RequestPath mutates the sim-owned pathManager, gate at top
+	// split-contract gate (PR 27a; the whole PathFinder object API DENIES under the
+	// split, Batch-4 P1 ruling): sim-owned pathManager; RequestPath/Next/DeletePath/
+	// Set* mutate it and the reads (GetPathWayPoints / GetPathNodeCost(s)) are
+	// coupled to a Lua-requested path handle or cost overlay YOU installed via those
+	// denied writes, so a draw-context caller cannot drive a stateful sim path search
+	// -- the family denies rather than boundary-defers (a read-only draw caller has
+	// no safe use for it). RequestPath mutates the sim-owned pathManager, gate at top
 	if (LuaSplitContract::DenyLiveRead(L, __func__))
 		return 0;
 

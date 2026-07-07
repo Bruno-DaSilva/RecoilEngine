@@ -40,6 +40,7 @@
 #include "Sim/MoveTypes/StrafeAirMoveType.h"
 #include "Sim/MoveTypes/StaticMoveType.h"
 #include "Sim/MoveTypes/ScriptMoveType.h"
+#include "Sim/Path/IPathManager.h" // PR 38g GetUnitEstimatedPath live compare
 #include "Sim/Misc/GlobalConstants.h" // GAME_SPEED
 #include "Sim/Misc/NanoPieceCache.h"
 #include "Sim/Units/CommandAI/CommandAI.h"
@@ -76,6 +77,11 @@ SnapshotDiffGate snapshotDiffGate;
 static bool BitEqual(float a, float b) { return std::memcmp(&a, &b, sizeof(float)) == 0; }
 static bool BitEqual(const float3& a, const float3& b) { return std::memcmp(&a, &b, sizeof(float3)) == 0; }
 static bool BitEqual(const float4& a, const float4& b) { return std::memcmp(&a, &b, sizeof(float4)) == 0; }
+
+// PR 31 weapon-damages comparator (defined below with the weapon-row helpers);
+// forward-declared so the PR 38g projectile-damages field pass in
+// CheckProjectileRows (earlier in the file) can reuse the same field-wise compare
+static bool WpnDamagesEqual(const SimSnapshot::UnitRows::DamagesSnap& s, const DynDamageArray* live);
 
 static constexpr const char* FIELD_NAMES[] = {
 	"validity",
@@ -218,6 +224,11 @@ static constexpr const char* FIELD_NAMES[] = {
 	// MM_TYPEMAP..MM_METALMAP
 	"map:typeMap",
 	"map:metalMap",
+	// PR 38g (Batch-4 P1): sanctioned-tail serving; appended in lockstep with the
+	// enum tail FT_FIRESMOKE..D_ESTPATH
+	"feat:fireSmoke",
+	"proj:damages",
+	"unit:estPath",
 };
 
 // structural compare for the copied customOpts maps (emilib::HashMap has no
@@ -740,6 +751,32 @@ void SnapshotDiffGate::CheckBoundary()
 			if (Bump(fields[D_MOVETYPE], moveTypeEqual))
 				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=unit:moveType mismatch (kind snap=%d live=%d)",
 					gs->frameNum, id, int(rows.moveTypeKind[i]), int(mtKind));
+
+			// PR 38g (GetUnitEstimatedPath): the estimated-path waypoint block vs a
+			// live GetPathWayPoints read. hasPath==1 iff a ground move type with an
+			// active pathID; points bit-compared (float3), starts exact. Pure const
+			// read, matches ExtractUnitMoveType's ground branch.
+			{
+				uint8_t liveHasPath = 0;
+				std::vector<float3> livePoints;
+				std::vector<int> liveStarts;
+				if (const CGroundMoveType* g = dynamic_cast<const CGroundMoveType*>(u->moveType); g != nullptr) {
+					if (const unsigned int pathID = g->GetPathID(); pathID != 0) {
+						liveHasPath = 1;
+						pathManager->GetPathWayPoints(pathID, livePoints, liveStarts);
+					}
+				}
+				bool estPathEqual = (rows.estPathHasPath[i] == liveHasPath)
+					&& (rows.estPathPoints[i].size() == livePoints.size())
+					&& (rows.estPathStarts[i].size() == liveStarts.size());
+				for (size_t k = 0; estPathEqual && k < livePoints.size(); ++k)
+					estPathEqual = BitEqual(rows.estPathPoints[i][k], livePoints[k]);
+				for (size_t k = 0; estPathEqual && k < liveStarts.size(); ++k)
+					estPathEqual = (rows.estPathStarts[i][k] == liveStarts[k]);
+				if (Bump(fields[D_ESTPATH], estPathEqual))
+					LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=unit:estPath mismatch (hasPath snap=%d live=%d, points snap=%zu live=%zu)",
+						gs->frameNum, id, int(rows.estPathHasPath[i]), int(liveHasPath), rows.estPathPoints[i].size(), livePoints.size());
+			}
 		}
 
 		// per-allyteam stride rows + the masked-value sweep: for every POV,
@@ -872,6 +909,16 @@ void SnapshotDiffGate::CheckProjectileRows()
 			if (Bump(fields[P_TTLFLAGS], ttlFlagsEqual))
 				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d proj=%d field=proj:ttlFlags mismatch (ttl snap=%d live=%d)",
 					gs->frameNum, id, rows.ttl[id], liveTtl);
+		}
+
+		// PR 38g (GetProjectileDamages): the flattened DamagesSnap vs the live
+		// *wpro->damages (null for non-weapon projectiles => valid==0), field-wise
+		// via WpnDamagesEqual (the unit weapon-damages comparator)
+		{
+			const DynDamageArray* liveDamages =
+				p->weapon ? static_cast<const CWeaponProjectile*>(p)->damages : nullptr;
+			if (Bump(fields[P_DAMAGES], WpnDamagesEqual(rows.damages[id], liveDamages)))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d proj=%d field=proj:damages mismatch", gs->frameNum, id);
 		}
 
 		// PR 33 piece-projectile params (GetPieceProjectileParams/Name serving)
@@ -1072,6 +1119,11 @@ void SnapshotDiffGate::CheckFeatureRows()
 		if (Bump(fields[FT_RESURRECT], rows.resurrectDefID[id] == ((f->udef != nullptr) ? f->udef->id : -1)))
 			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d feat=%d field=feat:resurrect snap=%d live=%d",
 				gs->frameNum, id, rows.resurrectDefID[id], (f->udef != nullptr) ? f->udef->id : -1);
+
+		// PR 38g GetFeatureFireTime/GetFeatureSmokeTime (int frame counts)
+		if (Bump(fields[FT_FIRESMOKE], rows.fireTime[id] == f->fireTime && rows.smokeTime[id] == f->smokeTime))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d feat=%d field=feat:fireSmoke fire(snap=%d live=%d) smoke(snap=%d live=%d)",
+				gs->frameNum, id, rows.fireTime[id], f->fireTime, rows.smokeTime[id], f->smokeTime);
 
 		for (int at = 0; at < numAllyTeams; ++at) {
 			const bool snapLos = (rows.inLosAll[at * slots + id] != 0);

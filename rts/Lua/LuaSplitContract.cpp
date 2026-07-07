@@ -180,31 +180,61 @@ namespace {
 		                    // storage (a draw-side artifact not yet present)
 		"GetUnitsInScreenRectangle", "GetFeaturesInScreenRectangle", // PR 34
 		                    // deferred: camera screen-projection re-host
-		// pathing (sim-owned pathManager)
-		"GetUnitEstimatedPath", "RequestPath", "PathFinder::Next",
-		"PathFinder::GetPathWayPoints", "PathFinder::DeletePath",
-		"InitPathNodeCostsArray", "FreePathNodeCostsArray",
-		"SetPathNodeCosts", "GetPathNodeCosts", "SetPathNodeCost",
-		"GetPathNodeCost",
-		// team/player misc: SERVED (sim|draw PR 36) via the TeamRows/PlayerRows
-		// extensions + the SimSnapshot map-start cache; only GetPlayerTraffic
-		// remains (its CGame per-player net-traffic map is not a snapshot row)
-		"GetPlayerTraffic",
-		// (b)-class torn-tolerant / wall-clock-dependent
-		"GetGameState", // IsSimLagging reads the wall clock; serving it would false-flag the armed dual-run
-		// unsynced-owned object flags + drawer-backed reads (LuaUnsyncedRead):
-		// family SERVED (PR 27b serving batch 2, family 2) -- the ParseUnit/
-		// ParseFeature gates answer from the snapshot Pov mirrors, payloads
-		// stay unsynced/drawer-owned (LuaSnapshotServe parse-gate twins);
-		// only the no-object camera test below remains sanctioned
-		"IsSphereInView",
-		// drawer-matrix-backed rotations: SERVED (PR 27b serving batch 2,
-		// family 2; GetUnitRotation/GetFeatureRotation compose from the
-		// drawer transform + snapshot basis rows)
-		// misc
-		"GetCEGID", // can LOAD a generator (explGenHandler mutation)
-		"GetFeatureFireTime", "GetFeatureSmokeTime",
-		"GetProjectileDamages",
+		// -------------------------------------------------------------------
+		// Batch-4 P1 (sim|draw PR 38g) cleared the pathing / misc / camera /
+		// wall-clock survivors; only the 8 Wave-6-dependent spatial entries above
+		// remain (they need PR 39's drawflag-by-id artifact + camera
+		// screen-projection re-host + a nearest-search tie-break sign-off).
+		// Dispositions of the removed entries:
+		//  - The Lua PathFinder object API DENIES under the split via its own
+		//    LuaSplitContract::DenyLiveRead gates (LuaPathFinder.cpp): RequestPath /
+		//    PathFinder::Next / DeletePath mutate the sim-owned pathManager, the
+		//    {Init,Free}PathNodeCostsArray + {Set,Get}PathNodeCost(s) alloc/write/
+		//    read a cost overlay the pathManager reads live, and GetPathWayPoints
+		//    reads a path handle YOU requested via the denied RequestPath -- the
+		//    reads are coupled to the denied writes, so a draw-context caller cannot
+		//    drive a stateful sim path search. GetCEGID likewise DENIES (its
+		//    LoadCustomGeneratorID can lazy-LOAD a generator = explGenHandler sim
+		//    mutation from draw context). None are sanctioned anymore.
+		//  - GetUnitEstimatedPath is SERVED (UnitRows est-path block;
+		//    LuaSnapshotServe::GetUnitEstimatedPath): a pure const read of the
+		//    unit's own path waypoints (pathManager->GetPathWayPoints does NOT
+		//    advance/mutate), captured per boundary -- so it serves, not denies.
+		//  - GetFeatureFireTime / GetFeatureSmokeTime SERVED (FeatureRows fire/smoke
+		//    timers); GetProjectileDamages SERVED (ProjectileRows DamagesSnap, the
+		//    wDamages flatten precedent).
+		//  - GetGameState and GetPlayerTraffic moved to the value-safe-live subset
+		//    in DenyLiveRead below: both read the WALL CLOCK / net-layer per-client
+		//    traffic map (game->, written only from Net/NetCommands on the main
+		//    thread, never the sim thread), NOT sim state -- serving a stale
+		//    boundary value would be WRONG, so they read live under the split.
+		//  - IsSphereInView is a draw-owned camera-frustum test (camera->InView)
+		//    with no sim object; it never took a sanctioned live sim read (no
+		//    DenyLiveRead gate) and answers draw-side directly.
+	};
+
+	// value-safe live reads (a permanent, legitimate exemption -- NOT sanctioned,
+	// NOT nil): pure scalar/grid reads with no sim-owned pointer or container
+	// traversal (terrain-type/height grids, LOS bitmaps -- worst case a torn word,
+	// the tolerated section-C class; denying them broke core UI, gui_info's
+	// terrain hover), PLUS reads of state that is NOT sim state at all (the wall
+	// clock and the net-layer per-client traffic map). Consulted by DenyLiveRead
+	// in BOTH the strict dress-rehearsal deny (mode>=2) and the running-split deny,
+	// so a value-safe read is never denied and never served a stale boundary value.
+	const spring::unordered_set<std::string> splitRunningValueSafe = {
+		"GetGroundInfo",       // typemap + terrain-type arrays (floats; SetTerrainTypeData is the rare writer)
+		"GetTerrainTypeData",
+		"GetSmoothMeshHeight", // float grid, sim-updated in place
+		"GetGroundOrigHeight", // float grid
+		"GetPositionLosState", // LOS bitmaps: int arrays mutated in place
+		"IsPosInLos",
+		"IsPosInRadar",
+		"IsPosInAirLos",
+		"GetRadarErrorParams", // per-allyteam scalars
+		// Batch-4 P1 (PR 38g): NOT sim state -- reads the wall clock / net layer,
+		// so serving a stale boundary value would be WRONG; safe to read live.
+		"GetGameState",        // IsSimLagging reads the wall clock, not sim state
+		"GetPlayerTraffic",    // game->playerTraffic is net-layer per-client state, written only from Net/NetCommands on the main thread (never the sim thread)
 	};
 
 	inline void Init()
@@ -273,7 +303,11 @@ bool DenyLiveRead(lua_State* L, const char* caller)
 
 	TripStat& stat = tripStats[caller];
 
-	if (mode >= 2 && sanctionedLive.find(caller) == sanctionedLive.end()) {
+	// value-safe reads (wall clock / net layer / torn-tolerant grids) are a
+	// permanent exemption: never denied, in strict mode or under the running split
+	if (mode >= 2 &&
+	    sanctionedLive.find(caller) == sanctionedLive.end() &&
+	    splitRunningValueSafe.find(caller) == splitRunningValueSafe.end()) {
 		stat.denials++;
 		WarnOnce(stat, caller, "live sim read DENIED, serving the no-such-object nil shape (strict mode, not snapshot-served)");
 		return true;
@@ -295,18 +329,6 @@ bool DenyLiveRead(lua_State* L, const char* caller)
 	// dogfood round 5). Container-walking sanctioned entries (Test*Order,
 	// rules params, pathing) stay denied until served.
 	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() && !SimDrawSplit::IsSimParked()) {
-		static const spring::unordered_set<std::string> splitRunningValueSafe = {
-			"GetGroundInfo",       // typemap + terrain-type arrays (floats; SetTerrainTypeData is the rare writer)
-			"GetTerrainTypeData",
-			"GetSmoothMeshHeight", // float grid, sim-updated in place
-			"GetGroundOrigHeight", // float grid
-			"GetPositionLosState", // LOS bitmaps: int arrays mutated in place
-			"IsPosInLos",
-			"IsPosInRadar",
-			"IsPosInAirLos",
-			"GetRadarErrorParams", // per-allyteam scalars
-		};
-
 		if (splitRunningValueSafe.find(caller) != splitRunningValueSafe.end()) {
 			stat.liveReads++;
 			return false;

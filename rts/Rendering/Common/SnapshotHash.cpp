@@ -177,8 +177,13 @@ static inline uint64_t HashUnitRow(const SimSnapshot::UnitRows& r, int id)
 	// synced state): nanoPieces (model-derived, defID-deterministic), transportees
 	// (the inverse relation is captured by each transportee's transporterID word),
 	// and the customTooltip string (SetUnitTooltip content, string; covered by the
-	// diff gate's serving dual-run, like sideName). The moveType full-table block
-	// and the three LOS-variant strides are each folded into one word.
+	// diff gate's serving dual-run, like sideName). Also EXCLUDED (PR 38g): the
+	// estimated-path waypoint block (estPathHasPath/estPathPoints/estPathStarts) --
+	// variable-size synced state, like nanoPieces; any path divergence is preceded
+	// by a hashed goalPos/moveType divergence and caught by the demo-stream sync
+	// hash, so an order-dependent path fold buys only marginal localization; covered
+	// by the diff gate's unit:estPath field pass + the serving dual-run. The moveType
+	// full-table block and the three LOS-variant strides are each folded into one word.
 	w[72] = static_cast<uint32_t>(r.fireState[id]);
 	w[73] = static_cast<uint32_t>(r.moveState[id]);
 	w[74] = std::bit_cast<uint32_t>(r.repairBelowHealth[id]);
@@ -254,7 +259,7 @@ static inline uint64_t HashFeatureRow(const SimSnapshot::FeatureRows& r, int id)
 		w[2] = std::bit_cast<uint32_t>(v.z);
 	};
 
-	uint32_t w[46];
+	uint32_t w[48];
 	w[0]  = static_cast<uint32_t>(id);
 	w[1]  = std::bit_cast<uint32_t>(r.pos[id].x);
 	w[2]  = std::bit_cast<uint32_t>(r.pos[id].y);
@@ -302,6 +307,9 @@ static inline uint64_t HashFeatureRow(const SimSnapshot::FeatureRows& r, int id)
 	w[41] = static_cast<uint32_t>(r.blockingBits[id]);
 	w[42] = static_cast<uint32_t>(r.resurrectDefID[id]);
 	f3(&w[43], r.aimPos[id]);
+	// PR 38g feature fire/smoke timers, appended in fixed order; synced state
+	w[46] = static_cast<uint32_t>(r.fireTime[id]);
+	w[47] = static_cast<uint32_t>(r.smokeTime[id]);
 
 	return Mix(w, sizeof(w), UNIT_SEED);
 }
@@ -423,6 +431,9 @@ static inline uint64_t HashProjectileRow(const SimSnapshot::ProjectileRows& r, i
 	// PR 34 (spatial/list remainder), appended in fixed order after PR 33's
 	// piece params to keep every prior hash-word index stable
 	w[30] = std::bit_cast<uint32_t>(r.radius[id]);
+	// PR 38g GetProjectileDamages: the flattened DamagesSnap is NOT hashed -- same
+	// as the unit wDamages precedent (weaponDef-derived; weaponDefID is hashed at
+	// w[11]); covered by the diff gate's proj:damages field pass + serving dual-run.
 
 	return Mix(w, sizeof(w), UNIT_SEED);
 }

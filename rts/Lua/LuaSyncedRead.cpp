@@ -6489,9 +6489,9 @@ int LuaSyncedRead::GetUnitFuel(lua_State* L) { lua_pushnumber(L, 0.0f); return 1
  * @function Spring.GetUnitEstimatedPath
  * @param unitID integer
  */
-int LuaSyncedRead::GetUnitEstimatedPath(lua_State* L)
+static int GetUnitEstimatedPathLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseAllyUnit(L, __func__, 1);
+	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 	if (unit == nullptr)
 		return 0;
 
@@ -6501,6 +6501,14 @@ int LuaSyncedRead::GetUnitEstimatedPath(lua_State* L)
 		return 0;
 
 	return (LuaPathFinder::PushPathNodes(L, gmt->GetPathID()));
+}
+
+int LuaSyncedRead::GetUnitEstimatedPath(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 38g, see LuaSnapshotServe.h):
+	// the unit's own estimated path is a pure const read (GetPathWayPoints does not
+	// advance the path), captured per boundary into the UnitRows est-path block
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitEstimatedPathLive, &LuaSnapshotServe::GetUnitEstimatedPath);
 }
 
 
@@ -6724,7 +6732,9 @@ int LuaSyncedRead::GetUnitDefDimensions(lua_State* L)
  */
 int LuaSyncedRead::GetCEGID(lua_State* L)
 {
-	// split-contract gate (PR 27a): LoadCustomGeneratorID can mutate the sim-owned explGenHandler
+	// split-contract gate (PR 27a; DENIES under the split, Batch-4 P1 ruling):
+	// LoadCustomGeneratorID can lazy-LOAD a generator = explGenHandler sim mutation
+	// from draw context, so it is denied under the split rather than boundary-deferred
 	if (LuaSplitContract::DenyLiveRead(L, __func__))
 		return 0;
 
@@ -8202,15 +8212,21 @@ int LuaSyncedRead::GetFeaturePieceCollisionVolumeData(lua_State* L)
  * @param featureID integer
  * @return number? fireTime in seconds, nil when featureID is invalid.
  */
-int LuaSyncedRead::GetFeatureFireTime(lua_State* L)
+static int GetFeatureFireTimeLive(lua_State* L, const char* caller)
 {
-	const CFeature* feature = ParseFeature(L, __func__, 1);
+	const CFeature* feature = ParseFeature(L, caller, 1);
 
 	if (feature == nullptr)
 		return 0;
 
 	lua_pushnumber(L, feature->fireTime * INV_GAME_SPEED);
 	return 1;
+}
+
+int LuaSyncedRead::GetFeatureFireTime(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 38g, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetFeatureFireTimeLive, &LuaSnapshotServe::GetFeatureFireTime);
 }
 
 
@@ -8221,15 +8237,21 @@ int LuaSyncedRead::GetFeatureFireTime(lua_State* L)
  * @param featureID integer
  * @return number? smokeTime in seconds, nil when featureID is invalid.
  */
-int LuaSyncedRead::GetFeatureSmokeTime(lua_State* L)
+static int GetFeatureSmokeTimeLive(lua_State* L, const char* caller)
 {
-	const CFeature* feature = ParseFeature(L, __func__, 1);
+	const CFeature* feature = ParseFeature(L, caller, 1);
 
 	if (feature == nullptr)
 		return 0;
 
 	lua_pushnumber(L, feature->smokeTime * INV_GAME_SPEED);
 	return 1;
+}
+
+int LuaSyncedRead::GetFeatureSmokeTime(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 38g, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetFeatureSmokeTimeLive, &LuaSnapshotServe::GetFeatureSmokeTime);
 }
 
 
@@ -8675,9 +8697,9 @@ int LuaSyncedRead::GetPieceProjectileName(lua_State* L)
  *     an armor type index to get the damage against it.
  * @return number?
  */
-int LuaSyncedRead::GetProjectileDamages(lua_State* L)
+static int GetProjectileDamagesLive(lua_State* L, const char* caller)
 {
-	const CProjectile* pro = ParseProjectile(L, __func__, 1);
+	const CProjectile* pro = ParseProjectile(L, caller, 1);
 
 	if (pro == nullptr)
 		return 0;
@@ -8689,6 +8711,12 @@ int LuaSyncedRead::GetProjectileDamages(lua_State* L)
 	const std::string key = luaL_checkstring(L, 2);
 
 	return PushDamagesKey(L, *wpro->damages, 2);
+}
+
+int LuaSyncedRead::GetProjectileDamages(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 38g, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetProjectileDamagesLive, &LuaSnapshotServe::GetProjectileDamages);
 }
 
 

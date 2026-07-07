@@ -499,6 +499,21 @@ namespace LuaSnapshotServe {
 	int GetFeatureRulesParam(lua_State* L, const char* caller);   // LuaSyncedRead
 	int GetFeatureRulesParams(lua_State* L, const char* caller);  // LuaSyncedRead
 
+	// ---- PR 38g (Batch-4 P1): sanctioned-tail serving ----
+	// The last serve-able survivors past the 8 Wave-6 spatial callouts. Same §E.2
+	// Route()/twin recipe; each twin reproduces its live body's parse-gate POV +
+	// return shape EXACTLY over the snapshot rows:
+	//  - GetUnitEstimatedPath: UnitRows est-path block (per-boundary GetPathWayPoints
+	//    capture, a pure const read); ParseAllyUnit POV, ground-move + pathID gate,
+	//    PushPathNodes' two-table shape.
+	//  - GetFeatureFireTime/SmokeTime: FeatureRows fire/smoke timers; ParseFeature POV.
+	//  - GetProjectileDamages: ProjectileRows DamagesSnap (PushDamagesKeySnap, shared
+	//    with GetUnitWeaponDamages); ParseProjectile POV + isWeapon gate.
+	int GetUnitEstimatedPath(lua_State* L, const char* caller);  // LuaSyncedRead (ParseAllyUnit)
+	int GetFeatureFireTime(lua_State* L, const char* caller);    // LuaSyncedRead (ParseFeature)
+	int GetFeatureSmokeTime(lua_State* L, const char* caller);   // LuaSyncedRead (ParseFeature)
+	int GetProjectileDamages(lua_State* L, const char* caller);  // LuaSyncedRead (ParseProjectile)
+
 	// ======================= PR 35: weapon trace tests =======================
 	// GetUnitWeaponTryTarget/TestTarget/TestRange/HaveFreeLineOfFire served by a
 	// SIM-SIDE QUERY/REPLY channel (Batch-3 amendment; NOT the draw-side

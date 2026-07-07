@@ -251,6 +251,11 @@ private:
 		// passes against the live readMap typeMap / metalMap distribution map.
 		MM_TYPEMAP,     // readMap per-square terrain-type index array copy
 		MM_METALMAP,    // metalMap distribution map copy + sizeX/sizeZ/metalScale
+		// PR 38g (Batch-4 P1): sanctioned-tail serving; appended at the enum tail to
+		// keep every prior field index stable (FIELD_NAMES appended in lockstep)
+		FT_FIRESMOKE,   // feature fireTime / smokeTime (GetFeatureFireTime/SmokeTime)
+		P_DAMAGES,      // projectile *wpro->damages flattened (GetProjectileDamages)
+		D_ESTPATH,      // unit estimated-path waypoints (GetUnitEstimatedPath)
 		F_COUNT
 	};
 

@@ -377,6 +377,24 @@ public:
 		// the SnapshotDiffGate unit:rules field pass + the serving dual-run.
 		std::vector<LuaRulesParams::Params> unitRulesParams; // [maxUnits]
 
+		// ===== PR 38g (Batch-4 P1): GetUnitEstimatedPath serving =====
+		// The unit's own estimated path waypoints, exactly as
+		// LuaPathFinder::PushPathNodes reads them from pathManager->GetPathWayPoints
+		// (a pure CONST read -- unlike PathFinder::Next it does NOT advance/mutate
+		// the path). Captured per boundary for ground-move units with an active
+		// pathID (moveTypeKind==1 && pathID!=0). Variable-size synced state, so --
+		// like nanoPieces/transportees -- it is EXCLUDED from the SnapshotHash
+		// (an order-dependent path fold buys only marginal desync localization; any
+		// path divergence is preceded by a hashed goalPos/moveType divergence, and
+		// the demo-stream sync hash is the real detector) and covered instead by the
+		// SnapshotDiffGate unit:estPath field pass + the serving dual-run. points is
+		// the concatenated max/med/low-res waypoint list; starts holds the 3 segment
+		// offsets (mirrors the live vectors<float3>/vector<int>). hasPath==0 (pathID
+		// 0 or non-ground) reproduces PushPathNodes' 0-return (no tables).
+		std::vector<uint8_t> estPathHasPath;            // [maxUnits]; 1 iff ground move type with pathID!=0
+		std::vector<std::vector<float3>> estPathPoints; // [maxUnits]; GetPathWayPoints points
+		std::vector<std::vector<int32_t>> estPathStarts;// [maxUnits]; GetPathWayPoints segment starts
+
 		// out-of-range ids (including any id before the first extraction ever
 		// ran, when the arrays are still unsized) are part of the stale/nil
 		// contract: a deterministic miss, not an error
@@ -667,6 +685,18 @@ public:
 		std::vector<float> radius;
 		std::vector<uint8_t> inLosAll;    // [numAllyTeams * MaxSlots()], row-major by allyteam
 
+		// ===== PR 38g (Batch-4 P1): GetProjectileDamages serving =====
+		// The weapon projectile's *wpro->damages (DynDamageArray) flattened into the
+		// POD DamagesSnap -- the SAME flatten discipline (and CopyDamages helper) the
+		// PR-31 unit weapon damages use (DynDamageArray is a member/heap hybrid that
+		// is neither immutable nor lifetime-stable across the boundary, so it is
+		// flattened, not pointer-shared). valid==0 for non-weapon projectiles (the
+		// twin gates on isWeapon first, exactly like the live body). NOT hashed --
+		// same as the unit wDamages precedent (weaponDef-derived; weaponDefID IS
+		// hashed) -- covered by the SnapshotDiffGate proj:damages field pass + the
+		// serving dual-run.
+		std::vector<UnitRows::DamagesSnap> damages; // [MaxSlots()]
+
 		bool Valid(int projID) const {
 			return (static_cast<size_t>(projID) < valid.size() && valid[projID] != 0);
 		}
@@ -735,6 +765,11 @@ public:
 		std::vector<float> reclaimTime;
 		std::vector<uint8_t> blockingBits;   // same bit layout as UnitRows::blockingBits
 		std::vector<int32_t> resurrectDefID; // udef ? udef->id : -1 (the name is immutable UnitDef data)
+		// ===== PR 38g (Batch-4 P1): GetFeatureFireTime/GetFeatureSmokeTime =====
+		// CFeature::fireTime/smokeTime (int frame counts); the twins push
+		// value * INV_GAME_SPEED exactly like the live bodies. Synced state, hashed.
+		std::vector<int32_t> fireTime;   // CFeature::fireTime
+		std::vector<int32_t> smokeTime;  // CFeature::smokeTime
 		std::vector<uint8_t> inLosAll;   // [numAllyTeams * MaxSlots()], row-major by allyteam
 
 		// ===== PR 38c (zero-sanction flip): per-feature rules-params serving =====
@@ -781,6 +816,9 @@ public:
 		float ReclaimTime(int id) const { return Valid(id) ? reclaimTime[id] : 0.0f; }
 		uint8_t BlockingBits(int id) const { return Valid(id) ? blockingBits[id] : uint8_t(0); }
 		int ResurrectDefID(int id) const { return Valid(id) ? resurrectDefID[id] : -1; }
+		// PR 38g stale/nil contract defaults (invalid ids read 0)
+		int FireTime(int id) const { return Valid(id) ? fireTime[id] : 0; }
+		int SmokeTime(int id) const { return Valid(id) ? smokeTime[id] : 0; }
 
 		bool InLos(int id, int argAllyTeam) const {
 			return (argAllyTeam >= 0 && argAllyTeam < numAllyTeams &&
