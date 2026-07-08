@@ -54,6 +54,7 @@
 #include "Rendering/Env/MapRendering.h"
 #include "Rendering/Env/IGroundDecalDrawer.h"
 #include "Rendering/Env/Particles/Classes/NanoProjectile.h"
+#include "Rendering/Common/SimSnapshot.h"
 #include "Rendering/GL/myGL.h"
 #include "Rendering/CommandDrawer.h"
 #include "Rendering/IconHandler.h"
@@ -433,6 +434,59 @@ static inline CFeature* ParseCtrlFeature(lua_State* L, const char* caller, int i
 		return feature;
 
 	return nullptr;
+}
+
+
+// Ctrl-checked id resolution for the boundary-applied SetUnit*/SetFeature*
+// pokes (the QueueBoundaryApply family). Under the split contract (Enforced),
+// validity + team come from the published SimSnapshot boundary copy so the
+// draw-context permission/identity read never dereferences a live sim pointer
+// (a pool-freed/recycled slot can't UAF); the poke's write leg re-resolves the
+// id at drain time inside the barrier. Flag-off (not Enforced) it delegates to
+// ParseCtrlUnit/ParseCtrlFeature and returns ->id, so it is byte-identical to
+// the pre-split live path (same GetUnit/GetFeature deref + CanControlTeam gate,
+// same argument-error shape). Returns the object id, or -1 (no controllable
+// object).
+static inline int ParseCtrlUnitID(lua_State* L, const char* caller, int index)
+{
+	if (LuaSplitContract::Enforced(L)) {
+		if (!lua_isnumber(L, index)) {
+			luaL_error(L, "[%s] ID parameter in %s() not a number\n", __func__, caller);
+			return -1;
+		}
+
+		const int unitID = lua_toint(L, index);
+		const SimSnapshot::UnitRows& rows = simSnapshot.Read();
+
+		if (!rows.Valid(unitID) || !CanControlTeam(L, rows.Team(unitID)))
+			return -1;
+
+		return unitID;
+	}
+
+	const CUnit* unit = ParseCtrlUnit(L, caller, index);
+	return (unit != nullptr) ? unit->id : -1;
+}
+
+static inline int ParseCtrlFeatureID(lua_State* L, const char* caller, int index)
+{
+	if (LuaSplitContract::Enforced(L)) {
+		if (!lua_isnumber(L, index)) {
+			luaL_error(L, "[%s] ID parameter in %s() not a number\n", __func__, caller);
+			return -1;
+		}
+
+		const int featureID = lua_toint(L, index);
+		const SimSnapshot::FeatureRows& rows = simSnapshot.ReadFeatures();
+
+		if (!rows.Valid(featureID) || !CanControlTeam(L, rows.Team(featureID)))
+			return -1;
+
+		return featureID;
+	}
+
+	const CFeature* feature = ParseCtrlFeature(L, caller, index);
+	return (feature != nullptr) ? feature->id : -1;
 }
 
 
@@ -2200,22 +2254,24 @@ int LuaUnsyncedCtrl::SetSkyBoxTexture(lua_State* L)
  */
 int LuaUnsyncedCtrl::SetUnitNoDraw(lua_State* L)
 {
-	CUnit* unit = ParseCtrlUnit(L, __func__, 1);
+	// read leg: snapshot-routed identity/permission under the split (no live deref)
+	const int unitID = ParseCtrlUnitID(L, __func__, 1);
 
-	if (unit == nullptr)
+	if (unitID < 0)
 		return 0;
 
 	const bool noDraw = luaL_checkboolean(L, 2);
 
 	// split contract (PR 27a): direct sim-object write from draw context is
 	// boundary-applied; capture the id, the unit can die before the drain
-	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = unit->id, noDraw]() {
+	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = unitID, noDraw]() {
 		if (CUnit* u = unitHandler.GetUnit(id); u != nullptr)
 			u->noDraw = noDraw;
 	}))
 		return 0;
 
-	unit->noDraw = noDraw;
+	if (CUnit* u = unitHandler.GetUnit(unitID); u != nullptr)
+		u->noDraw = noDraw;
 	return 0;
 }
 
@@ -2229,22 +2285,24 @@ int LuaUnsyncedCtrl::SetUnitNoDraw(lua_State* L)
  */
 int LuaUnsyncedCtrl::SetUnitEngineDrawMask(lua_State* L)
 {
-	CUnit* unit = ParseCtrlUnit(L, __func__, 1);
+	// read leg: snapshot-routed identity/permission under the split (no live deref)
+	const int unitID = ParseCtrlUnitID(L, __func__, 1);
 
-	if (unit == nullptr)
+	if (unitID < 0)
 		return 0;
 
 	const uint8_t drawMask = static_cast<uint8_t>(luaL_checkint(L, 2));
 
 	// split contract (PR 27a): direct sim-object write from draw context is
 	// boundary-applied; capture the id, the unit can die before the drain
-	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = unit->id, drawMask]() {
+	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = unitID, drawMask]() {
 		if (CUnit* u = unitHandler.GetUnit(id); u != nullptr)
 			u->engineDrawMask = drawMask;
 	}))
 		return 0;
 
-	unit->engineDrawMask = drawMask;
+	if (CUnit* u = unitHandler.GetUnit(unitID); u != nullptr)
+		u->engineDrawMask = drawMask;
 	return 0;
 }
 
@@ -2258,22 +2316,24 @@ int LuaUnsyncedCtrl::SetUnitEngineDrawMask(lua_State* L)
  */
 int LuaUnsyncedCtrl::SetUnitAlwaysUpdateMatrix(lua_State* L)
 {
-	CUnit* unit = ParseCtrlUnit(L, __func__, 1);
+	// read leg: snapshot-routed identity/permission under the split (no live deref)
+	const int unitID = ParseCtrlUnitID(L, __func__, 1);
 
-	if (unit == nullptr)
+	if (unitID < 0)
 		return 0;
 
 	const bool alwaysUpdateMat = luaL_checkboolean(L, 2);
 
 	// split contract (PR 27a): direct sim-object write from draw context is
 	// boundary-applied; capture the id, the unit can die before the drain
-	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = unit->id, alwaysUpdateMat]() {
+	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = unitID, alwaysUpdateMat]() {
 		if (CUnit* u = unitHandler.GetUnit(id); u != nullptr)
 			u->alwaysUpdateMat = alwaysUpdateMat;
 	}))
 		return 0;
 
-	unit->alwaysUpdateMat = alwaysUpdateMat;
+	if (CUnit* u = unitHandler.GetUnit(unitID); u != nullptr)
+		u->alwaysUpdateMat = alwaysUpdateMat;
 	return 0;
 }
 
@@ -2287,22 +2347,24 @@ int LuaUnsyncedCtrl::SetUnitAlwaysUpdateMatrix(lua_State* L)
  */
 int LuaUnsyncedCtrl::SetUnitNoMinimap(lua_State* L)
 {
-	CUnit* unit = ParseCtrlUnit(L, __func__, 1);
+	// read leg: snapshot-routed identity/permission under the split (no live deref)
+	const int unitID = ParseCtrlUnitID(L, __func__, 1);
 
-	if (unit == nullptr)
+	if (unitID < 0)
 		return 0;
 
 	const bool noMinimap = luaL_checkboolean(L, 2);
 
 	// split contract (PR 27a): direct sim-object write from draw context is
 	// boundary-applied; capture the id, the unit can die before the drain
-	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = unit->id, noMinimap]() {
+	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = unitID, noMinimap]() {
 		if (CUnit* u = unitHandler.GetUnit(id); u != nullptr)
 			u->noMinimap = noMinimap;
 	}))
 		return 0;
 
-	unit->noMinimap = noMinimap;
+	if (CUnit* u = unitHandler.GetUnit(unitID); u != nullptr)
+		u->noMinimap = noMinimap;
 	return 0;
 }
 
@@ -2372,9 +2434,10 @@ int LuaUnsyncedCtrl::SetUnitNoGroup(lua_State* L)
  */
 int LuaUnsyncedCtrl::SetUnitNoSelect(lua_State* L)
 {
-	CUnit* unit = ParseCtrlUnit(L, __func__, 1);
+	// read leg: snapshot-routed identity/permission under the split (no live deref)
+	const int unitID = ParseCtrlUnitID(L, __func__, 1);
 
-	if (unit == nullptr)
+	if (unitID < 0)
 		return 0;
 
 	const bool noSelect = luaL_checkboolean(L, 2);
@@ -2386,7 +2449,7 @@ int LuaUnsyncedCtrl::SetUnitNoSelect(lua_State* L)
 	// the queued poke lands at the barrier before the next sim frame, so a
 	// following UpdateVoidState simply overrides it next frame -- last-writer
 	// wins across the boundary, no special-casing.
-	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = unit->id, noSelect]() {
+	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = unitID, noSelect]() {
 		CUnit* u = unitHandler.GetUnit(id);
 		if (u == nullptr)
 			return;
@@ -2399,6 +2462,10 @@ int LuaUnsyncedCtrl::SetUnitNoSelect(lua_State* L)
 				selectedUnitsHandler.RemoveUnit(u);
 		}
 	}))
+		return 0;
+
+	CUnit* unit = unitHandler.GetUnit(unitID);
+	if (unit == nullptr)
 		return 0;
 
 	unit->noSelect = noSelect;
@@ -2424,9 +2491,10 @@ int LuaUnsyncedCtrl::SetUnitNoSelect(lua_State* L)
  */
 int LuaUnsyncedCtrl::SetUnitLeaveTracks(lua_State* L)
 {
-	CUnit* unit = ParseCtrlUnit(L, __func__, 1);
+	// read leg: snapshot-routed identity/permission under the split (no live deref)
+	const int unitID = ParseCtrlUnitID(L, __func__, 1);
 
-	if (unit == nullptr)
+	if (unitID < 0)
 		return 0;
 
 	const bool leaveTracks = lua_toboolean(L, 2);
@@ -2434,13 +2502,14 @@ int LuaUnsyncedCtrl::SetUnitLeaveTracks(lua_State* L)
 	// split contract (PR 27a): SetUnitLeaveTracks writes unit->leaveTracks and
 	// pokes the decal-owner bookkeeping; queue the whole effect id-based, the
 	// unit can die before the drain
-	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = unit->id, leaveTracks]() {
+	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = unitID, leaveTracks]() {
 		if (CUnit* u = unitHandler.GetUnit(id); u != nullptr)
 			groundDecals->SetUnitLeaveTracks(u, leaveTracks);
 	}))
 		return 0;
 
-	groundDecals->SetUnitLeaveTracks(unit, leaveTracks);
+	if (CUnit* u = unitHandler.GetUnit(unitID); u != nullptr)
+		groundDecals->SetUnitLeaveTracks(u, leaveTracks);
 	return 0;
 }
 
@@ -2463,26 +2532,32 @@ int LuaUnsyncedCtrl::SetUnitLeaveTracks(lua_State* L)
  */
 int LuaUnsyncedCtrl::SetUnitSelectionVolumeData(lua_State* L)
 {
-	CUnit* unit = ParseCtrlUnit(L, __func__, 1);
+	// read leg: snapshot-routed identity/permission under the split (no live deref)
+	const int unitID = ParseCtrlUnitID(L, __func__, 1);
 
-	if (unit == nullptr)
+	if (unitID < 0)
 		return 0;
 
 	// parse args before the queue decision so bad args still error at call
 	// time (ParseColVolData luaL_check's every arg, then InitShape's the
-	// whole volume -- it reads no existing state)
-	CollisionVolume selVol = unit->selectionVolume;
+	// whole volume -- it reads no existing state). The base volume ParseColVolData
+	// mutates is the object's current selectionVolume; under the split it is read
+	// boundary-consistently from the snapshot's SelVol row (never a live deref).
+	CollisionVolume selVol = LuaSplitContract::Enforced(L)
+		? simSnapshot.Read().SelVol(unitID)
+		: unitHandler.GetUnit(unitID)->selectionVolume;
 	LuaUtils::ParseColVolData(L, 2, &selVol);
 
 	// split contract (PR 27a): direct sim-object write from draw context is
 	// boundary-applied; capture the id, the unit can die before the drain
-	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = unit->id, selVol]() {
+	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = unitID, selVol]() {
 		if (CUnit* u = unitHandler.GetUnit(id); u != nullptr)
 			u->selectionVolume = selVol;
 	}))
 		return 0;
 
-	unit->selectionVolume = selVol;
+	if (CUnit* u = unitHandler.GetUnit(unitID); u != nullptr)
+		u->selectionVolume = selVol;
 	return 0;
 }
 
@@ -2504,22 +2579,24 @@ int LuaUnsyncedCtrl::SetUnitSelectionVolumeData(lua_State* L)
  */
 int LuaUnsyncedCtrl::SetFeatureNoDraw(lua_State* L)
 {
-	CFeature* feature = ParseCtrlFeature(L, __func__, 1);
+	// read leg: snapshot-routed identity/permission under the split (no live deref)
+	const int featureID = ParseCtrlFeatureID(L, __func__, 1);
 
-	if (feature == nullptr)
+	if (featureID < 0)
 		return 0;
 
 	const bool noDraw = luaL_checkboolean(L, 2);
 
 	// split contract (PR 27a): direct sim-object write from draw context is
 	// boundary-applied; capture the id, the feature can die before the drain
-	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = feature->id, noDraw]() {
+	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = featureID, noDraw]() {
 		if (CFeature* f = featureHandler.GetFeature(id); f != nullptr)
 			f->noDraw = noDraw;
 	}))
 		return 0;
 
-	feature->noDraw = noDraw;
+	if (CFeature* f = featureHandler.GetFeature(featureID); f != nullptr)
+		f->noDraw = noDraw;
 	return 0;
 }
 
@@ -2533,22 +2610,24 @@ int LuaUnsyncedCtrl::SetFeatureNoDraw(lua_State* L)
  */
 int LuaUnsyncedCtrl::SetFeatureEngineDrawMask(lua_State* L)
 {
-	CFeature* feature = ParseCtrlFeature(L, __func__, 1);
+	// read leg: snapshot-routed identity/permission under the split (no live deref)
+	const int featureID = ParseCtrlFeatureID(L, __func__, 1);
 
-	if (feature == nullptr)
+	if (featureID < 0)
 		return 0;
 
 	const uint8_t drawMask = static_cast<uint8_t>(luaL_checkint(L, 2));
 
 	// split contract (PR 27a): direct sim-object write from draw context is
 	// boundary-applied; capture the id, the feature can die before the drain
-	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = feature->id, drawMask]() {
+	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = featureID, drawMask]() {
 		if (CFeature* f = featureHandler.GetFeature(id); f != nullptr)
 			f->engineDrawMask = drawMask;
 	}))
 		return 0;
 
-	feature->engineDrawMask = drawMask;
+	if (CFeature* f = featureHandler.GetFeature(featureID); f != nullptr)
+		f->engineDrawMask = drawMask;
 	return 0;
 }
 
@@ -2562,22 +2641,24 @@ int LuaUnsyncedCtrl::SetFeatureEngineDrawMask(lua_State* L)
  */
 int LuaUnsyncedCtrl::SetFeatureAlwaysUpdateMatrix(lua_State* L)
 {
-	CFeature* feature = ParseCtrlFeature(L, __func__, 1);
+	// read leg: snapshot-routed identity/permission under the split (no live deref)
+	const int featureID = ParseCtrlFeatureID(L, __func__, 1);
 
-	if (feature == nullptr)
+	if (featureID < 0)
 		return 0;
 
 	const bool alwaysUpdateMat = luaL_checkboolean(L, 2);
 
 	// split contract (PR 27a): direct sim-object write from draw context is
 	// boundary-applied; capture the id, the feature can die before the drain
-	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = feature->id, alwaysUpdateMat]() {
+	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = featureID, alwaysUpdateMat]() {
 		if (CFeature* f = featureHandler.GetFeature(id); f != nullptr)
 			f->alwaysUpdateMat = alwaysUpdateMat;
 	}))
 		return 0;
 
-	feature->alwaysUpdateMat = alwaysUpdateMat;
+	if (CFeature* f = featureHandler.GetFeature(featureID); f != nullptr)
+		f->alwaysUpdateMat = alwaysUpdateMat;
 	return 0;
 }
 
@@ -2593,22 +2674,24 @@ int LuaUnsyncedCtrl::SetFeatureAlwaysUpdateMatrix(lua_State* L)
  */
 int LuaUnsyncedCtrl::SetFeatureFade(lua_State* L)
 {
-	CFeature* feature = ParseCtrlFeature(L, __func__, 1);
+	// read leg: snapshot-routed identity/permission under the split (no live deref)
+	const int featureID = ParseCtrlFeatureID(L, __func__, 1);
 
-	if (feature == nullptr)
+	if (featureID < 0)
 		return 0;
 
 	const bool alphaFade = luaL_checkboolean(L, 2);
 
 	// split contract (PR 27a): direct sim-object write from draw context is
 	// boundary-applied; capture the id, the feature can die before the drain
-	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = feature->id, alphaFade]() {
+	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = featureID, alphaFade]() {
 		if (CFeature* f = featureHandler.GetFeature(id); f != nullptr)
 			f->alphaFade = alphaFade;
 	}))
 		return 0;
 
-	feature->alphaFade = alphaFade;
+	if (CFeature* f = featureHandler.GetFeature(featureID); f != nullptr)
+		f->alphaFade = alphaFade;
 	return 0;
 }
 
@@ -2631,26 +2714,32 @@ int LuaUnsyncedCtrl::SetFeatureFade(lua_State* L)
  */
 int LuaUnsyncedCtrl::SetFeatureSelectionVolumeData(lua_State* L)
 {
-	CFeature* feature = ParseCtrlFeature(L, __func__, 1);
+	// read leg: snapshot-routed identity/permission under the split (no live deref)
+	const int featureID = ParseCtrlFeatureID(L, __func__, 1);
 
-	if (feature == nullptr)
+	if (featureID < 0)
 		return 0;
 
 	// parse args before the queue decision so bad args still error at call
 	// time (ParseColVolData luaL_check's every arg, then InitShape's the
-	// whole volume -- it reads no existing state)
-	CollisionVolume selVol = feature->selectionVolume;
+	// whole volume -- it reads no existing state). The base volume ParseColVolData
+	// mutates is the object's current selectionVolume; under the split it is read
+	// boundary-consistently from the snapshot's SelVol row (never a live deref).
+	CollisionVolume selVol = LuaSplitContract::Enforced(L)
+		? simSnapshot.ReadFeatures().SelVol(featureID)
+		: featureHandler.GetFeature(featureID)->selectionVolume;
 	LuaUtils::ParseColVolData(L, 2, &selVol);
 
 	// split contract (PR 27a): direct sim-object write from draw context is
 	// boundary-applied; capture the id, the feature can die before the drain
-	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = feature->id, selVol]() {
+	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = featureID, selVol]() {
 		if (CFeature* f = featureHandler.GetFeature(id); f != nullptr)
 			f->selectionVolume = selVol;
 	}))
 		return 0;
 
-	feature->selectionVolume = selVol;
+	if (CFeature* f = featureHandler.GetFeature(featureID); f != nullptr)
+		f->selectionVolume = selVol;
 	return 0;
 }
 
@@ -4051,12 +4140,21 @@ int LuaUnsyncedCtrl::SetShareLevel(lua_State* L)
 	const char* shareType = lua_tostring(L, 1);
 	const float shareLevel = std::clamp(luaL_checkfloat(L, 2), 0.0f, 1.0f);
 
+	// the OTHER resource's untouched share level is echoed back into SendSetShare;
+	// resShare is synced CTeam state, so under the split its boundary-consistent
+	// value is served from the snapshot TeamRows::resShare row (hashed +
+	// diff-gated) instead of a live teamHandler.Team() deref. Read once up front
+	// (no side effect either way) so the branch is byte-identical flag-off.
+	const SResourcePack myShare = LuaSplitContract::Enforced(L)
+		? simSnapshot.ReadTeams().resShare[gu->myTeam]
+		: teamHandler.Team(gu->myTeam)->resShare;
+
 	if (shareType[0] == 'm') {
-		clientNet->Send(CBaseNetProtocol::Get().SendSetShare(gu->myPlayerNum, gu->myTeam, shareLevel, teamHandler.Team(gu->myTeam)->resShare.energy));
+		clientNet->Send(CBaseNetProtocol::Get().SendSetShare(gu->myPlayerNum, gu->myTeam, shareLevel, myShare.energy));
 		return 0;
 	}
 	if (shareType[0] == 'e') {
-		clientNet->Send(CBaseNetProtocol::Get().SendSetShare(gu->myPlayerNum, gu->myTeam, teamHandler.Team(gu->myTeam)->resShare.metal, shareLevel));
+		clientNet->Send(CBaseNetProtocol::Get().SendSetShare(gu->myPlayerNum, gu->myTeam, myShare.metal, shareLevel));
 		return 0;
 	}
 
