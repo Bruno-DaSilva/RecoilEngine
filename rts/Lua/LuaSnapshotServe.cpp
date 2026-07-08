@@ -5295,6 +5295,14 @@ namespace {
 		bool isFactoryCAI = false;  // CFactoryCAI: unit callouts serve newUnitCommands instead
 		bool isFactoryUnit = false; // CFactory: GetFactoryBuggerOff's dynamic_cast gate
 
+		// PR 38 (Batch-1 amendment a, cmd_guard_remove class): the unit's allyteam
+		// at capture. Used only when serving an event-time override for a unit that
+		// died in the same batch it got the command (its snapshot row is invalid, so
+		// the row's allyteam is gone) -- the ParseAllyUnitCmdSlot ally gate masks on
+		// this captured (fire-time) value instead, reproducing master's synchronous
+		// mid-sim dispatch. Unused by the normal (live-row) serving path.
+		int allyTeam = -1;
+
 		// GetFactoryBuggerOff payload (CFactory bo*): no version to key on, but
 		// factories are few -- re-copied unconditionally every refresh
 		bool boPerform = false;
@@ -5523,8 +5531,30 @@ namespace {
 		if (outUnitID != nullptr)
 			*outUnitID = unitID;
 
-		if (!rows.Valid(unitID) || !rows.PovAlliedUnit(unitID, pov.readAllyTeam, pov.fullRead))
+		if (!rows.Valid(unitID) || !rows.PovAlliedUnit(unitID, pov.readAllyTeam, pov.fullRead)) {
+			// PR 38 (Batch-1 amendment a, cmd_guard_remove class): a unit can
+			// receive a command in the SAME batch it dies. Master fired
+			// UnitCommand/UnitCmdDone synchronously mid-sim while the unit was still
+			// alive & ally, so its deferred handler must see the event-time queue.
+			// Under the split that handler runs at the barrier after the unit's row
+			// went invalid (Valid==0), so the row-based gate above fails. When the
+			// event-time override is installed for this unit, serve the captured
+			// slot instead of nil-ing -- masking on the CAPTURED (fire-time)
+			// allyteam since the dead row has none -- reproducing master's
+			// synchronous dispatch. The override is only ever installed during the
+			// deferred-dispatch drain (main thread); it is null flag-off and in the
+			// armed diff-gate dual-run (immediate dispatch, nothing captured), so
+			// this branch is inert there -> byte-identical.
+			if (cmdEvtOverrideSlot != nullptr && unitID == cmdEvtOverrideUnitID) {
+				// PovAlliedUnit mirror over the captured allyteam
+				const bool allied = (pov.readAllyTeam < 0)
+					? pov.fullRead
+					: (cmdEvtOverrideSlot->allyTeam == pov.readAllyTeam);
+				if (allied)
+					return cmdEvtOverrideSlot;
+			}
 			return nullptr;
+		}
 
 		return GetCmdQueueSlot(unitID);
 	}
@@ -9334,6 +9364,7 @@ namespace {
 		const CCommandAI* cai = unit->commandAI; // never null
 
 		slot.present = true;
+		slot.allyTeam = unit->allyteam;
 		slot.isFactoryCAI = (dynamic_cast<const CFactoryCAI*>(cai) != nullptr);
 		slot.isFactoryUnit = (dynamic_cast<const CFactory*>(unit) != nullptr);
 
