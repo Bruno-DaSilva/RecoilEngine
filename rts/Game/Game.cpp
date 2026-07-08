@@ -1826,6 +1826,10 @@ void CGame::DeliverBoundaryDeaths()
 	for (const CUnit* u: deadUnits) {
 		CUnit* unit = const_cast<CUnit*>(u);
 
+		// Gap A: the death-path group prune deferred out of CUnit::PreDestruct
+		// (draw-owned UI control-groups; team is unchanged on death).
+		unit->SetGroup(nullptr);
+
 		selectedUnitsHandler.DependentDied(unit);
 		waitCommandsAI.DeliverBoundaryDeath(unit);
 

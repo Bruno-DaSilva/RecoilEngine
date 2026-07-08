@@ -26,6 +26,7 @@
 #include "Sim/Weapons/Weapon.h"
 #include "Sim/Weapons/WeaponDef.h"
 #include "System/EventHandler.h"
+#include "System/SimDrawSplit.h"
 #include "System/SpringMath.h"
 #include "System/Log/ILog.h"
 #include "System/SafeUtil.h"
@@ -1111,8 +1112,17 @@ void CCommandAI::GiveWaitCommand(const Command& c)
 	}
 
 	if (commandQue.empty()) {
-		if (owner->GetGroup() == nullptr)
-			eoh->UnitIdle(*owner);
+		// GetGroup() reads uiGroupHandlers[team].unitGroups on the sim thread;
+		// under the split that map is mutated by the draw thread (rehash UB,
+		// not just staleness) so gate on the lock-free draw-owned mirror
+		// instead. See doc/sim-draw-pr44-prerequisites.md "Gap A".
+		if (!SimDrawSplit::Enabled()) {
+			if (owner->GetGroup() == nullptr)
+				eoh->UnitIdle(*owner);
+		} else {
+			if (!owner->inUiGroup.load(std::memory_order_relaxed))
+				eoh->UnitIdle(*owner);
+		}
 
 		eventHandler.UnitIdle(owner);
 	} else {
@@ -1689,8 +1699,14 @@ void CCommandAI::FinishCommand()
 	ClearTargetLock(cmd);
 
 	if (commandQue.empty()) {
-		if (owner->GetGroup() == nullptr)
-			eoh->UnitIdle(*owner);
+		// see the FinishCommand idle-gate note above (Gap A draw-owned mirror)
+		if (!SimDrawSplit::Enabled()) {
+			if (owner->GetGroup() == nullptr)
+				eoh->UnitIdle(*owner);
+		} else {
+			if (!owner->inUiGroup.load(std::memory_order_relaxed))
+				eoh->UnitIdle(*owner);
+		}
 
 		eventHandler.UnitIdle(owner);
 	}

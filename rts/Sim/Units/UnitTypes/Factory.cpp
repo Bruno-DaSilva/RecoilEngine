@@ -22,6 +22,8 @@
 #include "Sim/Units/UnitLoader.h"
 #include "System/EventHandler.h"
 #include "System/Matrix44f.h"
+#include "System/SimDrawSplit.h"
+#include "System/UnsyncedBoundaryQueue.h"
 #include "System/SpringMath.h"
 #include "System/creg/DefTypes.h"
 #include "System/Sound/ISoundChannels.h"
@@ -259,9 +261,30 @@ void CFactory::FinishBuild(CUnit* buildee) {
 	if (unitDef->fullHealthFactory && buildee->health < buildee->maxHealth)
 		return;
 
-	// assign buildee to same group as us
-	if (GetGroup() != nullptr && buildee->GetGroup() != nullptr)
-		buildee->SetGroup(GetGroup(), true);
+	// assign buildee to same group as us. SetGroup touches draw-owned UI
+	// control-groups, so under the split it defers to the boundary; both ids
+	// are re-resolved at drain and nullptr-guarded (either may have died in
+	// the same sim burst -- §3.8 epoch-safety). See
+	// doc/sim-draw-pr44-prerequisites.md "Gap A". Flag-off stays byte-identical.
+	if (!SimDrawSplit::Enabled()) {
+		if (GetGroup() != nullptr && buildee->GetGroup() != nullptr)
+			buildee->SetGroup(GetGroup(), true);
+	} else {
+		const int factoryID = id;
+		const int buildeeID = buildee->id;
+		UnsyncedBoundaryQueue::Defer([factoryID, buildeeID]() {
+			CUnit* factory = unitHandler.GetUnit(factoryID);
+			CUnit* be = unitHandler.GetUnit(buildeeID);
+
+			if (factory == nullptr || be == nullptr)
+				return;
+
+			CGroup* factoryGroup = factory->GetGroup();
+
+			if (factoryGroup != nullptr && be->GetGroup() != nullptr)
+				be->SetGroup(factoryGroup, true);
+		});
+	}
 
 	const CCommandAI* bcai = buildee->commandAI;
 	// if not idle, the buildee already has user orders

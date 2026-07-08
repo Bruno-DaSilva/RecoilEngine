@@ -3,6 +3,7 @@
 #ifndef UNIT_H
 #define UNIT_H
 
+#include <atomic>
 #include <vector>
 
 #include "Sim/Objects/SolidObject.h"
@@ -533,6 +534,14 @@ public:
 	bool isSelected = false;
 	// if true, unit can not be added to groups by a player (UNSYNCED)
 	bool noGroup = false;
+	// UNSYNCED draw-owned mirror of "this unit is in a UI control-group"
+	// (uiGroupHandlers[team] membership). Maintained by CGroup::AddUnit /
+	// RemoveUnit / CGroupHandler::SetUnitGroup / RemoveUnitFromGroups so the
+	// sim-thread CommandAI idle-gate can test group membership WITHOUT a
+	// concurrent unitGroups map read (rehash UB under the sim|draw split);
+	// see doc/sim-draw-pr44-prerequisites.md "Gap A". Relaxed: one-frame-stale
+	// AI-idle notification is cosmetic (already non-deterministic).
+	std::atomic<bool> inUiGroup = {false};
 private:
 	// if we are stunned by a weapon or for other reason, access via IsStunned/SetStunned(bool)
 	bool stunned = false;

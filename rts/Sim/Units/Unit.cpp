@@ -37,6 +37,8 @@
 
 #include "Game/UI/Groups/Group.h"
 #include "Game/UI/Groups/GroupHandler.h"
+#include "System/SimDrawSplit.h"
+#include "System/UnsyncedBoundaryQueue.h"
 #include "Sim/Features/Feature.h"
 #include "Sim/Features/FeatureDef.h"
 #include "Sim/Features/FeatureDefHandler.h"
@@ -146,8 +148,15 @@ void CUnit::PreDestruct()
 	// but we always want to call this for ourselves
 	UnBlock();
 
-	// Remove us from our group, if we were in one
-	SetGroup(nullptr);
+	// Remove us from our group, if we were in one.
+	// Under the sim|draw split this touches draw-owned UI control-groups from
+	// the sim thread, so it is deferred to the boundary in
+	// CGame::DeliverBoundaryDeaths (team is unchanged on death -> plain
+	// SetGroup(nullptr) resolves there). See doc/sim-draw-pr44-prerequisites.md
+	// "Gap A". Flag-off stays byte-identical.
+	if (!SimDrawSplit::Enabled()) {
+		SetGroup(nullptr);
+	}
 
 	// delete script first so any callouts still see valid ptrs
 	DeleteScript();
@@ -1576,8 +1585,24 @@ bool CUnit::ChangeTeam(int newteam, ChangeType type)
 
 	const int oldteam = team;
 
-	selectedUnitsHandler.RemoveUnit(this);
-	SetGroup(nullptr);
+	// Both the selection prune and the group prune are draw-owned/unsynced.
+	// Under the sim|draw split they defer to the boundary so the sim thread
+	// never touches uiGroupHandlers / selectedUnitsHandler. By drain time our
+	// team is newteam, so the group must be pruned by unit id on the OLDTEAM
+	// handler (team-guard-free RemoveUnitFromGroups); see
+	// doc/sim-draw-pr44-prerequisites.md "Gap A". Flag-off stays byte-identical.
+	if (!SimDrawSplit::Enabled()) {
+		selectedUnitsHandler.RemoveUnit(this);
+		SetGroup(nullptr);
+	} else {
+		CUnit* self = this;
+		const int unitID = id;
+		const int prevTeam = oldteam;
+		UnsyncedBoundaryQueue::Defer([self, unitID, prevTeam]() {
+			selectedUnitsHandler.RemoveUnit(self);
+			uiGroupHandlers[prevTeam].RemoveUnitFromGroups(unitID);
+		});
+	}
 
 	eventHandler.UnitTaken(this, oldteam, newteam);
 	eoh->UnitCaptured(*this, oldteam, newteam);
@@ -3100,6 +3125,7 @@ CR_REG_METADATA(CUnit, (
 
 	CR_MEMBER(stunned),
 	CR_MEMBER_UN(noGroup),
+	CR_IGNORED(inUiGroup), // runtime draw-owned mirror, rebuilt via group ops
 
 //	CR_MEMBER(expMultiplier),
 //	CR_MEMBER(expPowerScale),
