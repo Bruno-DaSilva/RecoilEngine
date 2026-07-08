@@ -2266,14 +2266,13 @@ public:
  * @param icons boolean? (Default: `true`)
  * @return number[]? unitIDs
  */
-int LuaUnsyncedRead::GetVisibleUnits(lua_State* L)
+// sim/draw PR 40: the live body, verbatim from master (the PR-27a DenyLiveRead
+// gate is gone -- Route redirects draw context to the snapshot twin, so the live
+// leg only runs synced/non-draw/flag-off/the armed dual-run's live leg/the
+// pre-publish fallback). This body uses no `__func__` (the caller arg is unused;
+// kept for the uniform Route ServeFn signature).
+static int GetVisibleUnitsLive(lua_State* L, const char* caller)
 {
-	// split-contract gate (PR 27a): walks live quadfield unit lists + losStatus directly
-	if (LuaSplitContract::DenyLiveRead(L, __func__)) {
-		lua_createtable(L, 0, 0);
-		return 1;
-	}
-
 	// arg 1 - teamID
 	int teamID = luaL_optint(L, 1, -1);
 	int allyTeamID = CLuaHandle::GetHandleReadAllyTeam(L);
@@ -2361,6 +2360,12 @@ int LuaUnsyncedRead::GetVisibleUnits(lua_State* L)
 	return 1;
 }
 
+int LuaUnsyncedRead::GetVisibleUnits(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 40, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetVisibleUnitsLive, &LuaSnapshotServe::GetVisibleUnits);
+}
+
 
 /***
  *
@@ -2371,14 +2376,10 @@ int LuaUnsyncedRead::GetVisibleUnits(lua_State* L)
  * @param geos boolean? (Default: `true`)
  * @return number[]? featureIDs
  */
-int LuaUnsyncedRead::GetVisibleFeatures(lua_State* L)
+// sim/draw PR 40: the live body, verbatim from master (DenyLiveRead gate
+// dropped; unused caller kept for the Route ServeFn signature).
+static int GetVisibleFeaturesLive(lua_State* L, const char* caller)
 {
-	// split-contract gate (PR 27a): walks live quadfield feature lists + LOS state directly
-	if (LuaSplitContract::DenyLiveRead(L, __func__)) {
-		lua_createtable(L, 0, 0);
-		return 1;
-	}
-
 	// arg 1 - allyTeamID
 	int allyTeamID = luaL_optint(L, 1, -1);
 
@@ -2446,6 +2447,12 @@ int LuaUnsyncedRead::GetVisibleFeatures(lua_State* L)
 
 
 	return 1;
+}
+
+int LuaUnsyncedRead::GetVisibleFeatures(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 40, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetVisibleFeaturesLive, &LuaSnapshotServe::GetVisibleFeatures);
 }
 
 
@@ -2751,7 +2758,10 @@ int LuaUnsyncedRead::ClearFeaturesPreviousDrawFlag(lua_State* L)
  * @param allegiance number? (Default: `-1`) teamID when > 0, when < 0 one of AllUnits = -1, MyUnits = -2, AllyUnits = -3, EnemyUnits = -4
  * @return number[]? unitIDs
  */
-int LuaUnsyncedRead::GetUnitsInScreenRectangle(lua_State* L)
+// sim/draw PR 40: the live body, verbatim from master (DenyLiveRead gate
+// dropped; `__func__` -> `caller` so ParseAllegiance's error text stays
+// "GetUnitsInScreenRectangle").
+static int GetUnitsInScreenRectangleLive(lua_State* L, const char* caller)
 {
 	float l = luaL_checkfloat(L, 1);
 	float t = luaL_checkfloat(L, 2);
@@ -2761,12 +2771,6 @@ int LuaUnsyncedRead::GetUnitsInScreenRectangle(lua_State* L)
 	if (l > r) std::swap(l, r);
 	if (t > b) std::swap(t, b);
 
-	// split-contract gate (PR 27a): walks live quadfield unit lists directly (no ParseUnit)
-	if (LuaSplitContract::DenyLiveRead(L, __func__)) {
-		lua_createtable(L, 0, 0);
-		return 1;
-	}
-
 	static CVisUnitQuadDrawer unitQuadIter;
 
 	unitQuadIter.ResetState();
@@ -2775,7 +2779,7 @@ int LuaUnsyncedRead::GetUnitsInScreenRectangle(lua_State* L)
 	const int readTeam = CLuaHandle::GetHandleReadTeam(L);
 	const int readATeam = CLuaHandle::GetHandleReadAllyTeam(L);
 
-	const int allegiance = LuaUtils::ParseAllegiance(L, __func__, 5);
+	const int allegiance = LuaUtils::ParseAllegiance(L, caller, 5);
 
 	// unsynced/draw context: use the unsynced dedup scratch (gu counter +
 	// CWorldObject::unsyncedTempNum) so this never touches synced scratch
@@ -2832,6 +2836,12 @@ int LuaUnsyncedRead::GetUnitsInScreenRectangle(lua_State* L)
 	return 1;
 }
 
+int LuaUnsyncedRead::GetUnitsInScreenRectangle(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 40, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitsInScreenRectangleLive, &LuaSnapshotServe::GetUnitsInScreenRectangle);
+}
+
 /*** Get features inside a rectangle area on the map
 	*
 	* @function Spring.GetFeaturesInScreenRectangle
@@ -2841,7 +2851,9 @@ int LuaUnsyncedRead::GetUnitsInScreenRectangle(lua_State* L)
 	* @param bottom number
 	* @return number[]? featureIDs
 	*/
-int LuaUnsyncedRead::GetFeaturesInScreenRectangle(lua_State* L)
+// sim/draw PR 40: the live body, verbatim from master (DenyLiveRead gate
+// dropped; unused caller kept for the Route ServeFn signature).
+static int GetFeaturesInScreenRectangleLive(lua_State* L, const char* caller)
 {
 	float l = luaL_checkfloat(L, 1);
 	float t = luaL_checkfloat(L, 2);
@@ -2850,12 +2862,6 @@ int LuaUnsyncedRead::GetFeaturesInScreenRectangle(lua_State* L)
 
 	if (l > r) std::swap(l, r);
 	if (t > b) std::swap(t, b);
-
-	// split-contract gate (PR 27a): walks live quadfield feature lists directly (no ParseFeature)
-	if (LuaSplitContract::DenyLiveRead(L, __func__)) {
-		lua_createtable(L, 0, 0);
-		return 1;
-	}
 
 	static CVisFeatureQuadDrawer featureQuadIter;
 
@@ -2891,6 +2897,12 @@ int LuaUnsyncedRead::GetFeaturesInScreenRectangle(lua_State* L)
 	}
 
 	return 1;
+}
+
+int LuaUnsyncedRead::GetFeaturesInScreenRectangle(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 40, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetFeaturesInScreenRectangleLive, &LuaSnapshotServe::GetFeaturesInScreenRectangle);
 }
 
 /******************************************************************************/

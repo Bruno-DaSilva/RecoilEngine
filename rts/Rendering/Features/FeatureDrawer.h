@@ -36,6 +36,10 @@ public:
 	// drawer-owned draw-time positions/transforms (sim/draw §A drawPos eviction)
 	static const float3& GetDrawPos(const CFeature* feature) { return modelDrawerData->GetDrawPos(feature); }
 	static const float3& GetDrawMidPos(const CFeature* feature) { return modelDrawerData->GetDrawMidPos(feature); }
+	// id-keyed forms for the sim|draw PR 40 frustum/screen-rect twins
+	static const float3& GetDrawPos(int featureID) { return modelDrawerData->GetDrawPos(featureID); }
+	static const float3& GetDrawMidPos(int featureID) { return modelDrawerData->GetDrawMidPos(featureID); }
+	static float GetDrawRadius(int featureID) { return modelDrawerData->GetDrawRadius(featureID); }
 	static float3 GetObjDrawMidPos(const CFeature* feature) { return modelDrawerData->GetObjDrawMidPos(feature); }
 	static const CMatrix44f& GetUnsyncedTransformMatrix(const CFeature* feature) { return modelDrawerData->GetUnsyncedTransformMatrix(feature); }
 	static const CMatrix44f& GetUnsyncedTransformMatrix(int featureID) { return modelDrawerData->GetUnsyncedTransformMatrix(featureID); }
@@ -45,6 +49,7 @@ public:
 
 	// drawer-owned draw-visibility flags (sim/draw §A drawFlag eviction, PR 4)
 	static uint8_t GetDrawFlag(const CFeature* feature) { return modelDrawerData->GetDrawFlag(feature); }
+	static uint8_t GetDrawFlag(int featureID) { return modelDrawerData->GetDrawFlag(featureID); } // sim|draw PR 40 (GetVisibleFeatures noIcons)
 	static uint8_t GetPreviousDrawFlag(const CFeature* feature) { return modelDrawerData->GetPreviousDrawFlag(feature); }
 	static bool HasDrawFlag(const CFeature* feature, DrawFlags f) { return modelDrawerData->HasDrawFlag(feature, f); }
 

@@ -3714,9 +3714,13 @@ int LuaSyncedRead::GetUnitMapCentroid(lua_State* L)
  * @param range number? (Default: `1.0e9`)
  * @return integer? unitID
  */
-int LuaSyncedRead::GetUnitNearestAlly(lua_State* L)
+// sim/draw PR 40: the live body, verbatim from master (this callout was
+// sanctioned-live, not DenyLiveRead-gated, so nothing to drop -- Route redirects
+// draw context to the snapshot twin). `__func__` becomes `caller` so
+// ParseAllyUnit's error text stays "GetUnitNearestAlly".
+static int GetUnitNearestAllyLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseAllyUnit(L, __func__, 1);
+	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 	if (unit == nullptr)
 		return 0;
 
@@ -3731,6 +3735,12 @@ int LuaSyncedRead::GetUnitNearestAlly(lua_State* L)
 	return 0;
 }
 
+int LuaSyncedRead::GetUnitNearestAlly(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 40, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitNearestAllyLive, &LuaSnapshotServe::GetUnitNearestAlly);
+}
+
 
 /***
  *
@@ -3740,9 +3750,11 @@ int LuaSyncedRead::GetUnitNearestAlly(lua_State* L)
  * @param useLOS boolean? (Default: `true`)
  * @return integer? unitID
  */
-int LuaSyncedRead::GetUnitNearestEnemy(lua_State* L)
+// sim/draw PR 40: the live body, verbatim from master (sanctioned-live, not
+// gated). `__func__` -> `caller` for ParseAllyUnit's error text.
+static int GetUnitNearestEnemyLive(lua_State* L, const char* caller)
 {
-	const CUnit* unit = ParseAllyUnit(L, __func__, 1);
+	const CUnit* unit = ParseAllyUnit(L, caller, 1);
 	if (unit == nullptr)
 		return 0;
 
@@ -3763,6 +3775,12 @@ int LuaSyncedRead::GetUnitNearestEnemy(lua_State* L)
 
 	lua_pushnumber(L, target->id);
 	return 1;
+}
+
+int LuaSyncedRead::GetUnitNearestEnemy(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 40, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitNearestEnemyLive, &LuaSnapshotServe::GetUnitNearestEnemy);
 }
 
 

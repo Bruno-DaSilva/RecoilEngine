@@ -173,19 +173,27 @@ namespace {
 		// per-team GetFilteredUnits counter-reset overwrite exactly. Deviation
 		// (ascending-id within team; multi-team overwrite tail) is the binding
 		// Batch-1 amendment ruling; set-compared in the armed dual-run.
-		"GetUnitNearestAlly", "GetUnitNearestEnemy", // PR 34 deferred: CGameHelper
-		                    // closest-search fidelity/tie-break; scalar return is
-		                    // not id-set-verifiable (needs a design sign-off)
-		"GetVisibleUnits", "GetVisibleFeatures", "GetVisibleProjectiles", // PR 34
-		                    // deferred: camera-frustum + drawer drawflag-by-id
-		                    // storage (a draw-side artifact not yet present)
-		"GetUnitsInScreenRectangle", "GetFeaturesInScreenRectangle", // PR 34
-		                    // deferred: camera screen-projection re-host
+		// SERVED PR 40 (Wave 6): GetVisibleUnits/GetVisibleFeatures/
+		// GetUnitsInScreenRectangle/GetFeaturesInScreenRectangle via the draw-side
+		// per-quad CQuadField-faithful object-membership mirror (GetQuads(pos,
+		// radius) disc membership rebuilt per boundary; walked by
+		// readMap->GridVisibility + a snapshot-backed IQuadDrawer + camera), and
+		// GetUnitNearestAlly/GetUnitNearestEnemy via the SnapshotPickGrid
+		// closest-search over the rows (blessed ascending-snapshot-id tie-break,
+		// Batch-4 ruling). See LuaSnapshotServe.cpp.
+		"GetVisibleProjectiles", // HELD PR 40 (Wave 6): the frustum mirror alone
+		                    // is not enough -- it additionally needs NEW projectile
+		                    // snapshot rows (drawRadius = draw-authored cull state
+		                    // for camera->InView(p->pos, p->GetDrawRadius()), plus a
+		                    // quad-membership radius so GetQuads matches the live
+		                    // AddProjectile membership), which touch SimSnapshot +
+		                    // SnapshotHash + SnapshotDiffGate; splits out until those
+		                    // rows land (see the PR 40 report escalation).
 		// -------------------------------------------------------------------
 		// Batch-4 P1 (sim|draw PR 38g) cleared the pathing / misc / camera /
-		// wall-clock survivors; only the 8 Wave-6-dependent spatial entries above
-		// remain (they need PR 39's drawflag-by-id artifact + camera
-		// screen-projection re-host + a nearest-search tie-break sign-off).
+		// wall-clock survivors; PR 39 served GetUnitsInPlanes and PR 40 served the
+		// frustum/screen-rect/nearest family, leaving only GetVisibleProjectiles of
+		// the Wave-6 spatial group (it needs the new projectile rows above).
 		// Dispositions of the removed entries:
 		//  - The Lua PathFinder object API DENIES under the split via its own
 		//    LuaSplitContract::DenyLiveRead gates (LuaPathFinder.cpp): RequestPath /

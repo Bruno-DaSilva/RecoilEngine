@@ -190,6 +190,13 @@ public:
 	// id-keyed variant for snapshot-serving consumers (PR 18 Lua callout twins)
 	// that hold no object pointer; same unregistered/stale-id semantics as above
 	const float3& GetDrawPos(int id) const { return GetDrawPosition(id).pos; }
+	// id-keyed stored draw-midpos / draw-radius (sim|draw PR 40 frustum twins:
+	// GetVisibleUnits/Features read the SAME stored DrawPosition the pointer
+	// forms return -- GetDrawMidPos(o) is drawPositions[o->id].midPos, and
+	// GetDrawRadius is the localModel bounding radius captured in UpdateDrawPos
+	// at extraction time; both carry the same stale-until-first-update semantics)
+	const float3& GetDrawMidPos(int id) const { return GetDrawPosition(id).midPos; }
+	float GetDrawRadius(int id) const { return GetDrawPosition(id).drawRadius; }
 
 	// these transform a point or vector to object-space, based at the draw position
 	float3 GetObjectSpaceDrawPos(const T* o, const float3& p) const { return (GetDrawPos(o) + o->GetObjectSpaceVec(p)); }
@@ -203,6 +210,11 @@ protected:
 	struct DrawPosition {
 		float3 pos;
 		float3 midPos;
+		// sim|draw PR 40: the object's GetDrawRadius() (localModel bounding
+		// radius) captured at UpdateDrawPos, so the frustum twins can InView-test
+		// by id without a live localModel read; zeroed with pos/midPos on
+		// AddObject, updated once per draw frame alongside them
+		float drawRadius = 0.0f;
 	};
 
 	const DrawPosition& GetDrawPosition(const T* o) const { return GetDrawPosition(o->id); }

@@ -57,6 +57,9 @@ public:
 	static const float3& GetDrawPos(const CUnit* unit) { return modelDrawerData->GetDrawPos(unit); }
 	static const float3& GetDrawPos(int unitID) { return modelDrawerData->GetDrawPos(unitID); }
 	static const float3& GetDrawMidPos(const CUnit* unit) { return modelDrawerData->GetDrawMidPos(unit); }
+	// id-keyed forms for the sim|draw PR 40 frustum twins (same stored values)
+	static const float3& GetDrawMidPos(int unitID) { return modelDrawerData->GetDrawMidPos(unitID); }
+	static float GetDrawRadius(int unitID) { return modelDrawerData->GetDrawRadius(unitID); }
 	static float3 GetObjectSpaceDrawPos(const CUnit* unit, const float3& p) { return modelDrawerData->GetObjectSpaceDrawPos(unit, p); }
 	static float3 GetObjDrawMidPos(const CUnit* unit) { return modelDrawerData->GetObjDrawMidPos(unit); }
 	static float3 GetObjDrawErrorPos(const CUnit* unit, int allyteam) { return modelDrawerData->GetObjDrawErrorPos(unit, allyteam); }

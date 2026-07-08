@@ -26,6 +26,7 @@
 #include "Game/UI/Groups/Group.h" // CGroup::id (GetUnitGroup); PR 34 CGroup::units (GetGroupUnits*)
 #include "Game/UI/Groups/GroupHandler.h" // uiGroupHandlers (GetUnitGroup / PR 34 GetGroupUnits*)
 #include "Map/MapDimensions.h" // sim|draw PR 29: GetGroundBlocked map-coord clamp
+#include "Map/ReadMap.h" // sim|draw PR 40: readMap->GridVisibility (frustum twins)
 #include "Rendering/Common/DrawMapMirrors.h" // PR 28: map-layer mirror serving
 #include "Rendering/Common/SimSnapshot.h"
 #include "Rendering/Common/SnapshotDiffGate.h"
@@ -46,6 +47,7 @@
 #include "Sim/Misc/GlobalConstants.h" // GAME_SPEED
 #include "Sim/Misc/GlobalSynced.h" // GODMODE_*_BIT
 #include "Sim/Misc/LosHandler.h" // sim|draw PR 38e: TestMoveOrder barrier los gate (losHandler->InLos)
+#include "Sim/Misc/QuadField.h" // sim|draw PR 40: quadField geometry + GetQuads (frustum membership mirror)
 #include "Sim/MoveTypes/MoveDefHandler.h" // immutable MoveDef name (GetUnitMoveDefID)
 #include "Sim/MoveTypes/MoveMath/MoveMath.h" // sim|draw PR 38e: TestMoveOrder barrier CheckCollisionQuery ctor
 #include "Sim/MoveTypes/AAirMoveType.h" // PR 32 GetUnitMoveTypeData aircraftState enum
@@ -415,6 +417,19 @@ namespace {
 			// binding Batch-1 ruling's documented deviation) -- set mode is the
 			// best comparator available from the two result tables alone.
 			"GetUnitsInPlanes",
+			// PR 40 (Wave 6): the frustum/screen-rect family served via the
+			// per-quad membership mirror. The visible set is identical; only the
+			// result table's within-quad order deviates (ascending id vs live
+			// quadfield insertion order), so set mode is the correct comparator.
+			"GetVisibleUnits", "GetVisibleFeatures",
+			"GetUnitsInScreenRectangle", "GetFeaturesInScreenRectangle",
+			// PR 40: the two nearest-unit scalars. These return a single id (or
+			// nil), not a table, so set mode is a no-op for them (the comparator
+			// only id-set-compares TABLE slots) -- listed for completeness/intent.
+			// Their BLESSED tie-break deviation (ascending-snapshot-id vs live
+			// quadfield-visitation order on exactly-equal distances, Batch-4
+			// ruling) may surface as an exact-compare mismatch on those ties.
+			"GetUnitNearestAlly", "GetUnitNearestEnemy",
 		};
 		return (idSetCallouts.find(caller) != idSetCallouts.end());
 	}
@@ -4513,6 +4528,584 @@ int LuaSnapshotServe::GetUnitsInPlanes(lua_State* L, const char* caller)
 	}
 
 	return 1;
+}
+
+
+/******************************************************************************
+ * Frustum / screen-rect / nearest spatial family (PR 40, Wave 6).
+ *
+ * The five frustum/screen-rect twins (GetVisibleUnits/Features, Get{Units,
+ * Features}InScreenRectangle) are served through a draw-side per-quad
+ * object-membership MIRROR keyed IDENTICALLY to CQuadField -- same
+ * numQuadsX/numQuadsZ geometry, same BASE_QUAD_SIZE cells, same
+ * GetQuads(pos,radius) DISC membership (NOT SnapshotPickGrid, which inserts by
+ * selVol extent -> a conservative superset, correct for cursor-picking but
+ * WRONG for exact visible-set membership). The mirror is rebuilt lazily per
+ * boundary (per snapshot generation) from the gate-verified pos/radius rows:
+ * unit/feature id -> quadField.GetQuads(pos,radius) == the object's live
+ * unit->quads / feature quad-set (MovedUnit / AddFeature use exactly those
+ * inputs), so the mirror reproduces the live quadfield membership bit-for-bit
+ * (faithful by construction). Each twin then walks the mirror with the SAME
+ * readMap->GridVisibility a snapshot-backed IQuadDrawer, re-applying the live
+ * body's exact filters over the snapshot rows + the id-keyed drawer draw-pos +
+ * the camera.
+ *
+ * The two nearest scalars (GetUnitNearestAlly/Enemy) reproduce CGameHelper's
+ * closest-unit search over the SnapshotPickGrid radius query + the snapshot
+ * rows (PR 25's GetClosestFriendlyUnit(synced=false) is the direct precedent
+ * for the ally variant; the enemy variant applies the Enemy / Enemy_InLos
+ * filters + the InLos/Cylinder distance tests over the same rows). RULED
+ * (Batch-4): the ascending-snapshot-id tie-break on exactly-equal distances is
+ * an accepted advisory-UI deviation.
+ *
+ * DOCUMENTED DEVIATION: within-quad result order is ascending id, not the live
+ * quadfield insertion order; the sets are identical (CompareTablesAsIdSet).
+ ******************************************************************************/
+
+namespace {
+	// per-quad object-membership mirror (see the section header). Rebuilt lazily
+	// on generation change from the front UnitRows/FeatureRows.
+	struct QuadMembership {
+		uint32_t generation = 0;
+		bool built = false;
+		int numQuadsX = 0;
+		int numQuadsZ = 0;
+		std::vector<std::vector<int>> unitCells;    // [z * numQuadsX + x], == CQuadField cell index
+		std::vector<std::vector<int>> featureCells; // same indexing
+	};
+	QuadMembership quadMembership;
+
+	const QuadMembership& GetQuadMembership()
+	{
+		QuadMembership& m = quadMembership;
+		const uint32_t gen = simSnapshot.Generation();
+		if (m.built && m.generation == gen)
+			return m;
+
+		// quadField geometry is immutable after map load (reads are const, no
+		// mutable-membership touch); numQuadsX/numQuadsZ match GetQuadAt(x, y)
+		m.numQuadsX = quadField.GetNumQuadsX();
+		m.numQuadsZ = quadField.GetNumQuadsZ();
+		const size_t numCells = static_cast<size_t>(m.numQuadsX) * m.numQuadsZ;
+
+		m.unitCells.resize(numCells);
+		m.featureCells.resize(numCells);
+		for (auto& c: m.unitCells) c.clear();
+		for (auto& c: m.featureCells) c.clear();
+
+		{
+			const auto& urows = simSnapshot.Read();
+			for (size_t id = 0; id < urows.MaxUnits(); ++id) {
+				if (urows.valid[id] == 0)
+					continue;
+				// membership == CQuadField::MovedUnit's GetQuads(unit->pos,
+				// unit->radius); the scratch slot is the main-split slot under the
+				// split (DefaultQuadFieldQueryOwner), so it cannot collide with the
+				// sim thread's slot-0 queries
+				QuadFieldQuery qfq;
+				quadField.GetQuads(qfq, urows.pos[id], urows.radius[id]);
+				for (const int qi: *qfq.quads)
+					m.unitCells[qi].push_back(static_cast<int>(id));
+			}
+		}
+		{
+			const auto& frows = simSnapshot.ReadFeatures();
+			for (size_t id = 0; id < frows.MaxSlots(); ++id) {
+				if (frows.valid[id] == 0)
+					continue;
+				// membership == CQuadField::AddFeature's GetQuads(feature->pos,
+				// feature->radius)
+				QuadFieldQuery qfq;
+				quadField.GetQuads(qfq, frows.pos[id], frows.radius[id]);
+				for (const int qi: *qfq.quads)
+					m.featureCells[qi].push_back(static_cast<int>(id));
+			}
+		}
+
+		m.built = true;
+		m.generation = gen;
+		return m;
+	}
+
+	// snapshot-backed IQuadDrawer: mirrors CVisUnitQuadDrawer/CVisFeatureQuadDrawer
+	// but collects the membership mirror's per-quad id lists instead of the live
+	// quadField's per-quad object lists (identical numQuadsX*y + x cell index).
+	struct SnapVisQuadDrawer: public CReadMap::IQuadDrawer {
+		const std::vector<std::vector<int>>* cells = nullptr;
+		int numQuadsX = 0;
+		std::vector<const std::vector<int>*> lists;
+
+		void ResetState() override { lists.clear(); lists.reserve(64); }
+		void DrawQuad(int x, int y) override {
+			const std::vector<int>& l = (*cells)[static_cast<size_t>(numQuadsX) * y + x];
+			if (!l.empty())
+				lists.push_back(&l);
+		}
+	};
+
+	// walk the GridVisibility-visited quads of `cells` and return the deduped set
+	// of reachable ids (each unique id once), mirroring the live GridVisibility +
+	// unsyncedTempNum dedup. Reused scratch (single-threaded draw context; the
+	// twins call no Lua between collecting and iterating, so no reentrancy).
+	const std::vector<int>& CollectVisibleMembership(
+		const std::vector<std::vector<int>>& cells, int numQuadsX, size_t maxIDs)
+	{
+		static SnapVisQuadDrawer drawer;
+		static std::vector<int> out;
+		static std::vector<uint32_t> seenStamp;
+		static uint32_t seenQuery = 0;
+
+		drawer.cells = &cells;
+		drawer.numQuadsX = numQuadsX;
+		drawer.ResetState();
+		readMap->GridVisibility(nullptr, &drawer, 1e9, CQuadField::BASE_QUAD_SIZE / SQUARE_SIZE);
+
+		if (seenStamp.size() < maxIDs)
+			seenStamp.resize(maxIDs, 0);
+		if (++seenQuery == 0) { // stamp wrap (astronomically rare)
+			std::fill(seenStamp.begin(), seenStamp.end(), 0);
+			seenQuery = 1;
+		}
+
+		out.clear();
+		for (const std::vector<int>* list: drawer.lists) {
+			for (const int id: *list) {
+				if (static_cast<size_t>(id) >= seenStamp.size())
+					continue;
+				if (seenStamp[id] == seenQuery)
+					continue;
+				seenStamp[id] = seenQuery;
+				out.push_back(id);
+			}
+		}
+		return out;
+	}
+}
+
+
+// mirror of LuaUnsyncedRead::GetVisibleUnits. Walks the per-quad membership
+// mirror; noDraw is read through the sanctioned draw-side resolver (unsynced
+// object flag, same as GetUnitNoDraw), losStatus/team/allyteam from the rows,
+// icon/draw-midpos/draw-radius from the id-keyed drawer accessors.
+int LuaSnapshotServe::GetVisibleUnits(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const auto& trows = simSnapshot.ReadTeams();
+
+	// arg 1 - teamID
+	int teamID = luaL_optint(L, 1, -1);
+	int allyTeamID = CLuaHandle::GetHandleReadAllyTeam(L);
+
+	if (teamID == LuaUtils::MyUnits) {
+		const int scriptTeamID = CLuaHandle::GetHandleReadTeam(L);
+
+		if (scriptTeamID >= 0) {
+			teamID = scriptTeamID;
+		} else {
+			teamID = LuaUtils::AllUnits;
+		}
+	}
+
+	if (teamID >= 0) {
+		if (!trows.ValidTeam(teamID)) // teamHandler.IsValidTeam mirror
+			return 0;
+
+		allyTeamID = trows.allyTeam[teamID]; // teamHandler.AllyTeam mirror
+	}
+	if (allyTeamID < 0) {
+		if (!CLuaHandle::GetHandleFullRead(L)) {
+			return 0;
+		}
+	}
+
+	// arg 3 - noIcons
+	const bool noIcons = !luaL_optboolean(L, 3, true);
+
+	float radiusMult = 1.0f;
+	float testRadius = 0.0f;
+
+	// arg 2 - use fixed test-value or add unit radii to it
+	if (lua_israwnumber(L, 2)) {
+		radiusMult = float((testRadius = lua_tofloat(L, 2)) >= 0.0f);
+		testRadius = std::max(testRadius, -testRadius);
+	}
+
+	const QuadMembership& mem = GetQuadMembership();
+	const std::vector<int>& ids = CollectVisibleMembership(mem.unitCells, mem.numQuadsX, rows.MaxUnits());
+
+	lua_createtable(L, ids.size(), 0);
+
+	unsigned int count = 0;
+	for (const int unitID: ids) {
+		// u->noDraw: unsynced draw-owned flag, resolved through the drawer
+		// boundary cache / died-in-burst shell (never the sim handler)
+		const CUnit* unit = ResolveDrawUnit(unitID);
+		if (unit == nullptr)
+			continue;
+
+		if (unit->noDraw)
+			continue;
+
+		if (allyTeamID >= 0 && !(rows.LosStatus(unitID, allyTeamID) & LOS_INLOS))
+			continue;
+
+		if (noIcons && CUnitDrawer::GetIsIcon(unitID))
+			continue;
+
+		if ((teamID == LuaUtils::AllyUnits)  && (allyTeamID != rows.allyTeam[unitID]))
+			continue;
+
+		if ((teamID == LuaUtils::EnemyUnits) && (allyTeamID == rows.allyTeam[unitID]))
+			continue;
+
+		if ((teamID >= 0) && (teamID != rows.team[unitID]))
+			continue;
+
+		if (!camera->InView(CUnitDrawer::GetDrawMidPos(unitID), testRadius + (CUnitDrawer::GetDrawRadius(unitID) * radiusMult)))
+			continue;
+
+		lua_pushnumber(L, unitID);
+		lua_rawseti(L, -2, ++count);
+	}
+
+	return 1;
+}
+
+
+// mirror of LuaUnsyncedRead::GetVisibleFeatures. noDraw + def->geoThermal from
+// the sanctioned feature resolver; draw-flag/draw-midpos/draw-radius id-keyed;
+// visibility from the FeatureRows IsInLosForAllyTeam mirror.
+int LuaSnapshotServe::GetVisibleFeatures(lua_State* L, const char* caller)
+{
+	const auto& trows = simSnapshot.ReadTeams();
+	const auto& frows = simSnapshot.ReadFeatures();
+
+	// arg 1 - allyTeamID
+	int allyTeamID = luaL_optint(L, 1, -1);
+
+	if (allyTeamID >= 0) {
+		if (!trows.ValidAllyTeam(allyTeamID)) { // teamHandler.ValidAllyTeam mirror
+			return 0;
+		}
+	} else {
+		allyTeamID = -1;
+
+		if (!CLuaHandle::GetHandleFullRead(L)) {
+			allyTeamID = CLuaHandle::GetHandleReadAllyTeam(L);
+		}
+	}
+
+	const bool noIcons = !luaL_optboolean(L, 3, true);
+	const bool noGeos = !luaL_optboolean(L, 4, true);
+
+	float radiusMult = 0.0f; // 0 or 1
+	float testRadius = 0.0f;
+
+	// arg 2 - use fixed test-value or add feature radii to it
+	if (lua_israwnumber(L, 2)) {
+		radiusMult = float((testRadius = lua_tofloat(L, 2)) >= 0.0f);
+		testRadius = std::max(testRadius, -testRadius);
+	}
+
+	const QuadMembership& mem = GetQuadMembership();
+	const std::vector<int>& ids = CollectVisibleMembership(mem.featureCells, mem.numQuadsX, frows.MaxSlots());
+
+	lua_createtable(L, ids.size(), 0);
+
+	unsigned int count = 0;
+	for (const int featureID: ids) {
+		// f->noDraw + f->def->geoThermal: unsynced flag + immutable def, read
+		// through the sanctioned feature resolver (drawer cache / shell)
+		const CFeature* feature = ResolveDrawFeature(featureID);
+		if (feature == nullptr)
+			continue;
+
+		if (feature->noDraw)
+			continue;
+
+		if (noIcons && CFeatureDrawer::GetDrawFlag(featureID) == DrawFlags::SO_DRICON_FLAG)
+			continue;
+
+		if (noGeos && feature->def->geoThermal)
+			continue;
+
+		if (!gu->spectatingFullView && !frows.IsInLosForAllyTeam(featureID, allyTeamID))
+			continue;
+
+		if (!camera->InView(CFeatureDrawer::GetDrawMidPos(featureID), testRadius + (CFeatureDrawer::GetDrawRadius(featureID) * radiusMult)))
+			continue;
+
+		lua_pushnumber(L, featureID);
+		lua_rawseti(L, -2, ++count);
+	}
+
+	return 1;
+}
+
+
+// mirror of LuaUnsyncedRead::GetUnitsInScreenRectangle. Same membership mirror +
+// camera screen-projection (CalcViewPortCoordinates over the id-keyed draw-pos);
+// the LuaUtils::IsUnitVisible filter maps to UnitRows::PovUnitVisible.
+int LuaSnapshotServe::GetUnitsInScreenRectangle(lua_State* L, const char* caller)
+{
+	float l = luaL_checkfloat(L, 1);
+	float t = luaL_checkfloat(L, 2);
+	float r = luaL_checkfloat(L, 3);
+	float b = luaL_checkfloat(L, 4);
+
+	if (l > r) std::swap(l, r);
+	if (t > b) std::swap(t, b);
+
+	const auto& rows = simSnapshot.Read();
+	const Pov pov = HandlePov(L);
+
+	const int readTeam = CLuaHandle::GetHandleReadTeam(L);
+	const int readATeam = CLuaHandle::GetHandleReadAllyTeam(L);
+
+	const int allegiance = ParseAllegianceMirror(L, caller, 5);
+
+	const QuadMembership& mem = GetQuadMembership();
+	const std::vector<int>& ids = CollectVisibleMembership(mem.unitCells, mem.numQuadsX, rows.MaxUnits());
+
+	lua_createtable(L, ids.size(), 0);
+
+	// LuaUtils::IsUnitVisible mirror (== UnitRows::PovUnitVisible); ids come from
+	// valid membership cells so Valid() holds
+	const auto unitVisible = [&](int unitID) {
+		return rows.PovUnitVisible(unitID, pov.readAllyTeam, pov.fullRead);
+	};
+
+	const auto runLoop = [&](auto disqualifier) {
+		uint32_t count = 0;
+		for (const int unitID: ids) {
+			if (disqualifier(unitID))
+				continue;
+
+			const float3 vpPos = camera->CalcViewPortCoordinates(CUnitDrawer::GetDrawPos(unitID));
+
+			if (vpPos.x > r || vpPos.x < l)
+				continue;
+
+			if (vpPos.y > b || vpPos.y < t)
+				continue;
+
+			if (vpPos.z > 1.0f || vpPos.z < 0.0f)
+				continue;
+
+			lua_pushnumber(L, unitID);
+			lua_rawseti(L, -2, ++count);
+		}
+	};
+
+	switch (allegiance) {
+		case LuaUtils::AllUnits:
+			runLoop([&](int uid) { return !unitVisible(uid); });
+			break;
+		case LuaUtils::MyUnits:
+			runLoop([&](int uid) { return rows.team[uid] != readTeam || !unitVisible(uid); });
+			break;
+		case LuaUtils::AllyUnits:
+			runLoop([&](int uid) { return rows.allyTeam[uid] != readATeam || !unitVisible(uid); });
+			break;
+		case LuaUtils::EnemyUnits:
+			runLoop([&](int uid) { return rows.allyTeam[uid] == readATeam || !unitVisible(uid); });
+			break;
+		default:
+			runLoop([&](int uid) { return rows.team[uid] != allegiance || !unitVisible(uid); });
+			break;
+	}
+
+	return 1;
+}
+
+
+// mirror of LuaUnsyncedRead::GetFeaturesInScreenRectangle (no visibility filter;
+// just the membership mirror + camera screen-projection over the id-keyed
+// feature draw-pos).
+int LuaSnapshotServe::GetFeaturesInScreenRectangle(lua_State* L, const char* caller)
+{
+	float l = luaL_checkfloat(L, 1);
+	float t = luaL_checkfloat(L, 2);
+	float r = luaL_checkfloat(L, 3);
+	float b = luaL_checkfloat(L, 4);
+
+	if (l > r) std::swap(l, r);
+	if (t > b) std::swap(t, b);
+
+	const auto& frows = simSnapshot.ReadFeatures();
+
+	const QuadMembership& mem = GetQuadMembership();
+	const std::vector<int>& ids = CollectVisibleMembership(mem.featureCells, mem.numQuadsX, frows.MaxSlots());
+
+	lua_createtable(L, ids.size(), 0);
+
+	uint32_t count = 0;
+	for (const int featureID: ids) {
+		const float3 vpPos = camera->CalcViewPortCoordinates(CFeatureDrawer::GetDrawPos(featureID));
+
+		if (vpPos.x > r || vpPos.x < l)
+			continue;
+
+		if (vpPos.y > b || vpPos.y < t)
+			continue;
+
+		if (vpPos.z > 1.0f || vpPos.z < 0.0f)
+			continue;
+
+		lua_pushnumber(L, featureID);
+		lua_rawseti(L, -2, ++count);
+	}
+
+	return 1;
+}
+
+
+// mirror of LuaSyncedRead::GetUnitNearestAlly. Reproduces
+// CGameHelper::GetClosestFriendlyUnit(synced=false) EXACTLY (PR 25's landed
+// snapshot search): the SnapshotPickGrid radius query + Filter::Friendly
+// (allied-to-searchAllyteam, excludeUnit==self) + Query::ClosestUnit (raw
+// midPos 2D distance). The ascending-snapshot-id tie-break is the blessed
+// Batch-4 advisory-UI deviation.
+int LuaSnapshotServe::GetUnitNearestAlly(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// ParseAllyUnit gate mirror (ParseRawUnit validity + LuaUtils::IsAllyUnit)
+	if (!rows.Valid(unitID))
+		return 0;
+	if (!rows.PovAlliedUnit(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	const float range = luaL_optnumber(L, 2, 1.0e9f);
+	const float3 pos = rows.pos[unitID];
+	const int searchAllyteam = rows.allyTeam[unitID];
+
+	static std::vector<int> cand;
+	snapshotPickGrid.QueryUnitsInRadius(pos, range, cand);
+
+	float closeSqDist = range * range;
+	int closeID = -1;
+
+	for (const int id: cand) {
+		if (id == unitID) // excludeUnit
+			continue;
+		if (!rows.Allied(searchAllyteam, rows.AllyTeam(id))) // Filter::Friendly::Team
+			continue;
+
+		const float sqDist = (pos - rows.MidPos(id)).SqLength2D();
+		if (sqDist <= closeSqDist) {
+			closeSqDist = sqDist;
+			closeID = id;
+		}
+	}
+
+	if (closeID >= 0) {
+		lua_pushnumber(L, closeID);
+		return 1;
+	}
+	return 0;
+}
+
+
+// mirror of LuaSyncedRead::GetUnitNearestEnemy. Reproduces
+// CGameHelper::GetClosestEnemyUnit (Filter::Enemy_InLos + Query::ClosestUnit)
+// and GetClosestEnemyUnitNoLosTest (Filter::Enemy + ClosestUnit_InLos /
+// ClosestUnit_InLos_Cylinder) over the SnapshotPickGrid radius query + rows.
+// The pick grid's selVol-extent insertion is a correct superset for both the
+// raw-midPos and the radius-touching accept tests; the exact accept test
+// narrows. Blessed ascending-id tie-break (Batch-4).
+int LuaSnapshotServe::GetUnitNearestEnemy(lua_State* L, const char* caller)
+{
+	const auto& rows = simSnapshot.Read();
+	const int unitID = ParseUnitIDSynced(L, caller, 1);
+	const Pov pov = HandlePov(L);
+
+	// ParseAllyUnit gate mirror
+	if (!rows.Valid(unitID))
+		return 0;
+	if (!rows.PovAlliedUnit(unitID, pov.readAllyTeam, pov.fullRead))
+		return 0;
+
+	const bool wantLOS = !lua_isboolean(L, 3) || lua_toboolean(L, 3);
+	const bool testLOS = !CLuaHandle::GetHandleFullRead(L) || wantLOS;
+
+	const bool sphereDistTest = luaL_optboolean(L, 4, false);
+	const bool checkSightDist = luaL_optboolean(L, 5, false);
+
+	const float range = luaL_optnumber(L, 2, 1.0e9f);
+	const float3 pos = rows.pos[unitID];
+	const int searchAllyteam = rows.allyTeam[unitID];
+
+	static std::vector<int> cand;
+	snapshotPickGrid.QueryUnitsInRadius(pos, range, cand);
+
+	int closeID = -1;
+
+	if (testLOS) {
+		// GetClosestEnemyUnit: Filter::Enemy_InLos + Query::ClosestUnit
+		float closeSqDist = range * range;
+		for (const int id: cand) {
+			if (id == unitID) // excludeUnit
+				continue;
+			if (rows.Neutral(id)) // Filter::Enemy::Unit (!IsNeutral)
+				continue;
+			if (rows.Allied(searchAllyteam, rows.AllyTeam(id))) // Filter::Enemy::Team (!Ally)
+				continue;
+			if ((rows.LosStatus(id, searchAllyteam) & (LOS_INLOS | LOS_INRADAR)) == 0) // Enemy_InLos
+				continue;
+
+			const float sqDist = (pos - rows.MidPos(id)).SqLength2D();
+			if (sqDist <= closeSqDist) {
+				closeSqDist = sqDist;
+				closeID = id;
+			}
+		}
+	} else if (sphereDistTest) {
+		// GetClosestEnemyUnitNoLosTest sphere: Filter::Enemy + ClosestUnit_InLos
+		// (3D distance minus target radius; closeDist init == range)
+		float closeDist = range;
+		for (const int id: cand) {
+			if (id == unitID)
+				continue;
+			if (rows.Neutral(id))
+				continue;
+			if (rows.Allied(searchAllyteam, rows.AllyTeam(id)))
+				continue;
+
+			const float dist = pos.distance(rows.MidPos(id)) - rows.radius[id];
+			if (dist <= closeDist && (!checkSightDist || dist <= rows.losRadius[id])) {
+				closeDist = dist;
+				closeID = id;
+			}
+		}
+	} else {
+		// GetClosestEnemyUnitNoLosTest cylinder: Filter::Enemy +
+		// ClosestUnit_InLos_Cylinder (2D distance; closeSqDist init == range^2)
+		float closeSqDist = range * range;
+		for (const int id: cand) {
+			if (id == unitID)
+				continue;
+			if (rows.Neutral(id))
+				continue;
+			if (rows.Allied(searchAllyteam, rows.AllyTeam(id)))
+				continue;
+
+			const int losR = rows.losRadius[id];
+			const float sqDist = (pos - rows.MidPos(id)).SqLength2D();
+			if (sqDist <= closeSqDist && (!checkSightDist || sqDist <= float(losR * losR))) {
+				closeSqDist = sqDist;
+				closeID = id;
+			}
+		}
+	}
+
+	if (closeID >= 0) {
+		lua_pushnumber(L, closeID);
+		return 1;
+	}
+	return 0;
 }
 
 

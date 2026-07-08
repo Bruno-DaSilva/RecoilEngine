@@ -313,4 +313,5 @@ void CFeatureDrawerData::UpdateDrawPos(const CFeature* f)
 	auto& dp = drawPositions[f->id];
 	dp.pos    = f->GetDrawPos(globalRendering->timeOffset);
 	dp.midPos = GetMdlDrawMidPos(f);
+	dp.drawRadius = f->GetDrawRadius(); // sim|draw PR 40: extract for the frustum twins
 }

@@ -410,6 +410,7 @@ void CUnitDrawerData::UpdateDrawPos(const CUnit* u)
 	}
 
 	dp.midPos = GetMdlDrawMidPos(u);
+	dp.drawRadius = u->GetDrawRadius(); // sim|draw PR 40: extract for the frustum twins
 }
 
 float3 CUnitDrawerData::GetObjDrawErrorPos(const CUnit* unit, int allyteam) const

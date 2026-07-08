@@ -191,6 +191,23 @@ namespace LuaSnapshotServe {
 	// Batch-1 amendment ruling. Set-compared (CompareTablesAsIdSet).
 	int GetUnitsInPlanes(lua_State* L, const char* caller);
 
+	// frustum / screen-rect / nearest spatial family (PR 40, Wave 6). The five
+	// frustum/screen-rect twins are served through a draw-side per-quad
+	// object-membership mirror keyed IDENTICALLY to CQuadField (GetQuads(pos,
+	// radius) disc membership, rebuilt per boundary from the pos/radius rows --
+	// NOT SnapshotPickGrid's selVol superset), walked by readMap->GridVisibility
+	// with a snapshot-backed IQuadDrawer re-applying the live filters. The two
+	// nearest scalars reproduce CGameHelper's closest-unit search over the pick
+	// grid + rows (GetClosestFriendlyUnit(synced=false) precedent). RULED
+	// (Batch-4): the ascending-snapshot-id tie-break is an accepted advisory-UI
+	// deviation. Set-compared where they return tables (CompareTablesAsIdSet).
+	int GetVisibleUnits(lua_State* L, const char* caller);
+	int GetVisibleFeatures(lua_State* L, const char* caller);
+	int GetUnitsInScreenRectangle(lua_State* L, const char* caller);
+	int GetFeaturesInScreenRectangle(lua_State* L, const char* caller);
+	int GetUnitNearestAlly(lua_State* L, const char* caller);
+	int GetUnitNearestEnemy(lua_State* L, const char* caller);
+
 	// command-queue family (PR 27b serving batch 2, first family): served from
 	// per-unit boundary copies of CCommandAI::commandQue / CFactoryCAI::
 	// newUnitCommands (+ the CFactory bugger-off scalars), refreshed by
