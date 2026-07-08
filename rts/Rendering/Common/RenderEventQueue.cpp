@@ -200,7 +200,13 @@ void RenderEventQueue::Dispatch(const Record& record)
 			// PR 27b: see the UnitDestroyed case (lights can track projectiles)
 			if (SimDrawSplit::Enabled()) {
 				boundaryDestroyedProjectiles.push_back(proj);
-				boundaryDeadProjectileIDs.push_back(record.id); // PR 38b DEAD_THIS_BATCH marking
+				// PR 38b DEAD_THIS_BATCH marking: only SYNCED projectiles live in the
+				// snapshot ProjectileRows. Projectiles have two independent id
+				// namespaces (synced/unsynced freelists); an unsynced destroy id can
+				// collide with a live synced projectile's id, so marking it would nil a
+				// valid synced projectile during the drain. Filter to the synced namespace.
+				if (record.syncedProj)
+					boundaryDeadProjectileIDs.push_back(record.id);
 			}
 		} break;
 

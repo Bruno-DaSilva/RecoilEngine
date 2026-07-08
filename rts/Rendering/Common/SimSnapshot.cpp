@@ -375,6 +375,11 @@ void SimSnapshot::HashCompletedFrame(int frameNum)
 // object's retained last-boundary (~at-death) state. Operates on the published
 // front buffers (Update swapped them in above). Guarded on INACTIVE so a slot a
 // new object reused this same batch (already ACTIVE) is never clobbered.
+// ACCEPTED DEVIATION (vs the deleted id->shell fallback): on same-batch id reuse
+// the LIVE (reused) object wins -- a deferred death handler for the OLD id reads
+// the NEW object's ACTIVE row, whereas the old shell keyed by destroy time would
+// have served the actual dead object. Benign: same-batch id reuse of an id a
+// widget is mid-death-handling is vanishingly rare and advisory-only.
 static inline void MarkDeadRows(std::vector<uint8_t>& valid, const std::vector<int>& deadIDs)
 {
 	for (const int id : deadIDs) {
