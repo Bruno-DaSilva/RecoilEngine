@@ -167,7 +167,7 @@ void RenderEventQueue::Dispatch(const Record& record)
 			// death-dependences; CGame consumes this after the drain
 			if (SimDrawSplit::Enabled()) {
 				boundaryDestroyedUnits.push_back(unit);
-				boundaryDeadUnits[record.id] = unit; // drain-window shell resolution
+				boundaryDeadUnitIDs.push_back(record.id); // PR 38b DEAD_THIS_BATCH marking
 			}
 		} break;
 
@@ -183,9 +183,9 @@ void RenderEventQueue::Dispatch(const Record& record)
 			eventHandler.RenderFeatureDestroyed(feature);
 			PopDestroyShell(ShellKey(ObjKind::Feature, false, record.id));
 
-			// PR 27b: drain-window shell resolution (see the unit case)
+			// PR 38b: DEAD_THIS_BATCH marking (see the unit case)
 			if (SimDrawSplit::Enabled())
-				boundaryDeadFeatures[record.id] = feature;
+				boundaryDeadFeatureIDs.push_back(record.id);
 		} break;
 
 		case T::ProjectileCreated: {
@@ -198,8 +198,10 @@ void RenderEventQueue::Dispatch(const Record& record)
 			PopDestroyShell(ShellKey(ObjKind::Projectile, record.syncedProj, record.id));
 
 			// PR 27b: see the UnitDestroyed case (lights can track projectiles)
-			if (SimDrawSplit::Enabled())
+			if (SimDrawSplit::Enabled()) {
 				boundaryDestroyedProjectiles.push_back(proj);
+				boundaryDeadProjectileIDs.push_back(record.id); // PR 38b DEAD_THIS_BATCH marking
+			}
 		} break;
 
 		case T::UnitEnteredLos: {

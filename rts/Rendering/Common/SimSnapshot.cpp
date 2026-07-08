@@ -370,6 +370,47 @@ void SimSnapshot::HashCompletedFrame(int frameNum)
 	SnapshotHash::HashFrame(frameNum, hashScratch, hashProjScratch, hashFeatScratch, hashTeamScratch);
 }
 
+// PR 38b: promote the just-published INACTIVE rows of the batch's destroyed ids
+// to DEAD_THIS_BATCH so the deferred handlers replaying at the barrier read the
+// object's retained last-boundary (~at-death) state. Operates on the published
+// front buffers (Update swapped them in above). Guarded on INACTIVE so a slot a
+// new object reused this same batch (already ACTIVE) is never clobbered.
+static inline void MarkDeadRows(std::vector<uint8_t>& valid, const std::vector<int>& deadIDs)
+{
+	for (const int id : deadIDs) {
+		if (static_cast<size_t>(id) < valid.size() && valid[id] == SimSnapshotValid::INACTIVE)
+			valid[id] = SimSnapshotValid::DEAD_THIS_BATCH;
+	}
+}
+
+void SimSnapshot::MarkDeadThisBatch(const std::vector<int>& deadUnitIDs,
+                                    const std::vector<int>& deadFeatureIDs,
+                                    const std::vector<int>& deadProjectileIDs)
+{
+	MarkDeadRows(front->valid, deadUnitIDs);
+	MarkDeadRows(featFront->valid, deadFeatureIDs);
+	MarkDeadRows(projFront->valid, deadProjectileIDs);
+}
+
+// PR 38b: revert the DEAD_THIS_BATCH marks to INACTIVE at the barrier ack (the
+// drain window has closed). A linear scan of the front buffers -- decoupled from
+// the RenderEventQueue dead-id lists (which the ack also clears) and robust to
+// any id churn. Only the small number of ==DEAD_THIS_BATCH slots are touched.
+static inline void ClearDeadRows(std::vector<uint8_t>& valid)
+{
+	for (uint8_t& v : valid) {
+		if (v == SimSnapshotValid::DEAD_THIS_BATCH)
+			v = SimSnapshotValid::INACTIVE;
+	}
+}
+
+void SimSnapshot::ClearDeadThisBatch()
+{
+	ClearDeadRows(front->valid);
+	ClearDeadRows(featFront->valid);
+	ClearDeadRows(projFront->valid);
+}
+
 void SimSnapshot::Clear()
 {
 	if (numExtractions > 0) {
@@ -714,7 +755,7 @@ void SimSnapshot::Extract(UnitRows& rows)
 	for (const CUnit* u : activeUnits) {
 		const int id = u->id;
 
-		rows.valid[id] = 1;
+		rows.valid[id] = SimSnapshotValid::ACTIVE;
 		rows.pos[id] = u->pos;
 		rows.midPos[id] = u->midPos;
 		rows.aimPos[id] = u->aimPos;
@@ -1028,7 +1069,7 @@ void SimSnapshot::ExtractProjectiles(ProjectileRows& rows)
 		const CProjectile* p = pc[i];
 		const int id = p->id;
 
-		rows.valid[id] = 1;
+		rows.valid[id] = SimSnapshotValid::ACTIVE;
 		rows.pos[id] = p->pos;
 		rows.speed[id] = p->speed;
 		rows.allyTeam[id] = p->GetAllyteamID();
@@ -1177,7 +1218,7 @@ void SimSnapshot::ExtractFeatures(FeatureRows& rows)
 		if (f == nullptr)
 			continue;
 
-		rows.valid[id] = 1;
+		rows.valid[id] = SimSnapshotValid::ACTIVE;
 		rows.pos[id] = f->pos;
 		rows.midPos[id] = f->midPos;
 		rows.aimPos[id] = f->aimPos;

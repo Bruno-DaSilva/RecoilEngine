@@ -1597,12 +1597,13 @@ void CGame::SimDrawBarrier()
 	// boundary-cost telemetry (the PR-27b gate's fine-print number)
 	SCOPED_TIMER("Misc::SimDrawBarrier");
 
-	// (0) split only: open the boundary drain window -- the destroy records
-	// about to dispatch populate the id->shell fallback that lets step 7's
-	// deferred handlers resolve objects that died later in the same burst
-	// (closed again at step 8, before the ack poisons the shells)
+	// (0) split only: open the boundary dispatch-drain window (PR 38b) -- the
+	// destroy records about to dispatch collect the batch's dead ids, which the
+	// publish below marks DEAD_THIS_BATCH so step 7's deferred handlers see
+	// objects that died later in the same burst at their retained state (closed
+	// again at step 8, before the ack clears those marks)
 	if (SimDrawSplit::Enabled())
-		SimDrawSplit::SetBoundaryShellWindow(true);
+		SimDrawSplit::SetBoundaryDrainWindow(true);
 
 	// (0b) split only: run the GL upload half of any sim-thread model loads
 	// BEFORE the drain -- the creation records about to dispatch may
@@ -1664,6 +1665,18 @@ void CGame::SimDrawBarrier()
 	// (3) publish the observable-state snapshot for draw-side consumers
 	// (contract in SimSnapshot.h; the team/player copy refreshes every call)
 	simSnapshot.Update();
+
+	// (3a) split only: mark the batch's destroyed ids DEAD_THIS_BATCH in the
+	// just-published rows (PR 38b). Their data rows retain the last-boundary
+	// state (Extract overwrites only active slots), and the open drain window
+	// promotes them to Valid() -- so step 7's deferred death/LOS/command
+	// handlers read the object at its at-death state, reproducing master's
+	// synchronous mid-frame dispatch. Cleared at the step-8 ack.
+	if (SimDrawSplit::Enabled())
+		simSnapshot.MarkDeadThisBatch(
+			renderEventQueue.BoundaryDeadUnitIDs(),
+			renderEventQueue.BoundaryDeadFeatureIDs(),
+			renderEventQueue.BoundaryDeadProjectileIDs());
 
 	// (3b) refresh the draw-side command-queue copies (PR 27b serving batch 2,
 	// LuaSnapshotServe). AFTER the publish, not with the resolve caches at
@@ -1754,12 +1767,15 @@ void CGame::SimDrawBarrier()
 	if (UnsyncedBoundaryQueue::Drain() > 0)
 		simSnapshot.MarkMutatedOutsideFrame();
 
-	// (8) split only: the relocated shell ack (see step 2). The drain window
-	// closes first -- the ack poisons the shells the window's id->shell
-	// fallback serves from (died-in-burst resolution for step 7's dispatches)
+	// (8) split only: close the drain window and the relocated shell ack (see
+	// step 2). The drain window closes FIRST -- so the DEAD_THIS_BATCH rows stop
+	// serving as valid -- then the marks are cleared to INACTIVE (pre-epoch
+	// clear, PR 38b), the dead-id lists are dropped, and the ack destructs the
+	// shells (the memory-lifetime mechanism, kept) whose records step 7 replayed.
 	if (SimDrawSplit::Enabled()) {
-		SimDrawSplit::SetBoundaryShellWindow(false);
-		renderEventQueue.ClearBoundaryDeadShells();
+		SimDrawSplit::SetBoundaryDrainWindow(false);
+		simSnapshot.ClearDeadThisBatch();
+		renderEventQueue.ClearBoundaryDeadIDs();
 		deferredObjectDeleter.AckDrainedDestroys();
 	}
 }
@@ -1919,11 +1935,13 @@ void CGame::AcquireSimPause()
 	// then destruct + release. Loops in case pressure recurs before the
 	// frame edge.
 	while (SimDrawSplit::ParkedAtValve()) {
-		// same live-read legality as the barrier (sim parked mid-frame)
-		LuaSplitContract::ScopedLiveException valveLive;
-
-		// same drain-window bracket as the barrier (steps 0 / 8)
-		SimDrawSplit::SetBoundaryShellWindow(true);
+		// PR 38b: no ScopedLiveException here anymore -- the deferred dispatches
+		// serve the published snapshot (the sim is parked mid-frame, so the last
+		// publish still has the valve-dead units ACTIVE, i.e. master-alive). The
+		// drain-window bracket stays (same as barrier steps 0 / 8): the valve does
+		// not republish, so no DEAD_THIS_BATCH marks exist here, but the bracket
+		// keeps the window state well-defined for the deferred drain below.
+		SimDrawSplit::SetBoundaryDrainWindow(true);
 
 		modelLoader.ServiceQueuedUploads();
 		renderEventQueue.Flush();
@@ -1943,8 +1961,8 @@ void CGame::AcquireSimPause()
 		if (UnsyncedBoundaryQueue::Drain() > 0)
 			simSnapshot.MarkMutatedOutsideFrame();
 
-		SimDrawSplit::SetBoundaryShellWindow(false);
-		renderEventQueue.ClearBoundaryDeadShells();
+		SimDrawSplit::SetBoundaryDrainWindow(false);
+		renderEventQueue.ClearBoundaryDeadIDs();
 
 		deferredObjectDeleter.AckDrainedDestroys();
 		deferredObjectDeleter.ReleaseAcked();
@@ -1990,13 +2008,15 @@ bool CGame::Draw() {
 	// spans the barrier + UpdateUnsynced through the drawer extraction.
 	AcquireSimPause();
 
-	{
-		// the barrier's own dispatches (Render* events, deferred unsynced
-		// callins) legally read live sim state -- the sim is parked; the
-		// widget callins later in the frame stay contract-served
-		LuaSplitContract::ScopedLiveException barrierLive;
-		SimDrawBarrier();
-	}
+	// PR 38b (zero-sanction flip): the barrier no longer runs under a
+	// ScopedLiveException. Its deferred unsynced callins (step 7) now read the
+	// PUBLISHED snapshot -- including the DEAD_THIS_BATCH rows of objects that
+	// died in the batch, so the death/LOS/command handlers see them at their
+	// at-death state. sanctionedLive is empty and the whole callout tail is
+	// served, so there is no live read path here anymore (the C++ boundary work
+	// -- RefreshCommandQueues/RefreshPieces/EvaluateTraceQueries/CheckBoundary --
+	// reads live directly while the sim is parked, unaffected by the contract).
+	SimDrawBarrier();
 
 	// gate telemetry for the /debug frame grapher (draw-row "Gate" slice):
 	// the pause-wait + valve service + barrier span no other category covers

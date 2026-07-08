@@ -142,32 +142,25 @@ namespace {
 
 	// sanctioned draw-side id->pointer resolution for drawer payload reads that
 	// only exist pointer-keyed (GetDrawFlag / the icon-state accessors): the
-	// drawer's boundary resolve cache first, the died-in-burst shell second,
-	// NEVER the sim-owned handler tables (dogfood invariant; same pattern as
-	// the GetUnitDrawFlag live fix, commit 6910e82315). nullptr = dead per
-	// drawer; callers answer the "no such unit" nil shape.
+	// drawer's boundary resolve cache, NEVER the sim-owned handler tables
+	// (dogfood invariant; same pattern as the GetUnitDrawFlag live fix, commit
+	// 6910e82315). nullptr = dead per drawer; callers answer the "no such unit"
+	// nil shape. PR 38b dropped the died-in-burst shell read-fallback: a unit
+	// dead this batch is absent from the drawer cache -> nil (the drawer-owned
+	// payloads for dead-in-batch objects move to id-keyed drawer storage in PR
+	// 39; the row-backed reads already serve DEAD_THIS_BATCH via the twins).
 	inline const CUnit* ResolveDrawUnit(int unitID)
 	{
-		const CUnit* unit = DrawerGetObjectByID<CUnit>(unitID);
-
-		if (unit == nullptr)
-			unit = SimDrawSplit::ShellFallbackUnit(unitID);
-
-		return unit;
+		return DrawerGetObjectByID<CUnit>(unitID);
 	}
 
 	// draw-side feature resolver for the unsynced-owned payload reads (the
 	// luaDraw/noDraw/drawFlag/selection-volume family): the drawer's boundary
-	// cache first, the died-in-burst shell second -- NEVER the sim-owned
-	// featureHandler (dogfood invariant, doc/pr27b-implementation-notes.md)
+	// cache, NEVER the sim-owned featureHandler (dogfood invariant). PR 38b
+	// dropped the died-in-burst shell read-fallback (see ResolveDrawUnit).
 	inline const CFeature* ResolveDrawFeature(int featureID)
 	{
-		const CFeature* feature = DrawerGetObjectByID<CFeature>(featureID);
-
-		if (feature == nullptr)
-			feature = SimDrawSplit::ShellFallbackFeature(featureID);
-
-		return feature;
+		return DrawerGetObjectByID<CFeature>(featureID);
 	}
 
 	// unit-flags family (PR 27b serving batch 2): the payloads are unsynced-
@@ -530,6 +523,12 @@ int LuaSnapshotServe::Route(lua_State* L, const char* caller, ServeFn liveFn, Se
 	// the split contract's parse gates out of this sanctioned fallback (found
 	// by the PR-27a count-mode gate: pregame draws tripped -- and strict mode
 	// would have denied -- the SERVED team callouts' live legs).
+	//
+	// PR 38b: this Generation()==0 pregame fallback is the ONLY surviving live
+	// read path after the zero-sanction flip. There is no sim thread pregame
+	// (SpawnSimThread runs once the game is playing), so reading the live tables
+	// here is single-threaded and race-free -- it is the one legitimate
+	// ScopedLiveException in Route(), not a contract hole.
 	if (simSnapshot.Generation() == 0) {
 		LuaSplitContract::ScopedLiveException prePublishFallback;
 		return liveFn(L, caller);
@@ -681,21 +680,19 @@ int LuaSnapshotServe::GetUnitPosition(lua_State* L, const char* caller)
 
 	// ParseUnit mirror: no such unit / not visible => nil (stale/nil contract).
 	//
-	// DEAD_THIS_BATCH (mirrors PR 38k's command-queue fix): a deferred UnitLeftLos
-	// handler for a unit that died THIS batch finds its snapshot row already
-	// invalidated -- the boundary re-extraction cleared valid[] for the now-gone
-	// unit. But Extract() overwrites pos[] only for active units, so pos[unitID]
-	// still holds the unit's last-boundary (~at-death) position, which is what
-	// master's synchronous mid-sim UnitLeftLos handler read (the CUnit is not
-	// destroyed until after the event fires). When the LOS-exit override is
-	// installed for this one unit, bypass the !Valid nil and serve that retained
-	// position -- still gated on PovUnitVisible, which honors the override's
-	// captured radar losStatus (INRADAR) so it opens/nils exactly as master's
-	// synchronous handler did. Inert flag-off and during the diff-gate dual-run
-	// (no deferral -> no override installed -> reduces to the original
-	// !Valid || !PovUnitVisible gate -> byte-identical).
-	const bool losExitOverride = SimSnapshotLosEvent::ActiveForUnit(unitID);
-	if ((!rows.Valid(unitID) && !losExitOverride) || !rows.PovUnitVisible(unitID, pov.readAllyTeam, pov.fullRead))
+	// PR 38b folds the old 38l special-case here: a deferred UnitLeftLos handler
+	// for a unit that died THIS batch used to hit an already-invalidated row and
+	// needed an ad-hoc `ActiveForUnit && !Valid -> serve pos[unitID]` bypass.
+	// Under the tri-state, that unit's row is now DEAD_THIS_BATCH and Valid()
+	// passes for it while the drain window is open -- so the NORMAL gate below
+	// serves the retained (last-boundary, ~at-death) pos[unitID], exactly what
+	// master's synchronous mid-sim handler read. The LOS-exit override stays but
+	// only where it belongs (orthogonal to validity): PovUnitVisible consults
+	// SimSnapshotLosEvent so it honors the captured radar losStatus (INRADAR),
+	// opening/nil-ing exactly as master's handler did. Byte-identical flag-off
+	// and during the diff-gate dual-run (no deferral -> no DEAD_THIS_BATCH mark
+	// and no override installed -> the plain !Valid || !PovUnitVisible gate).
+	if (!rows.Valid(unitID) || !rows.PovUnitVisible(unitID, pov.readAllyTeam, pov.fullRead))
 		return 0;
 
 	float3 errorVec;
@@ -2497,7 +2494,7 @@ int LuaSnapshotServe::GetTeamUnitCount(lua_State* L, const char* caller)
 	unsigned int unitCount = 0;
 
 	for (size_t id = 0; id < urows.MaxUnits(); ++id) {
-		if (urows.valid[id] == 0 || urows.team[id] != static_cast<uint8_t>(teamID))
+		if (urows.valid[id] != SimSnapshotValid::ACTIVE || urows.team[id] != static_cast<uint8_t>(teamID))
 			continue;
 
 		unitCount += int(urows.PovUnitVisible(static_cast<int>(id), pov.readAllyTeam, pov.fullRead));
@@ -3421,7 +3418,7 @@ namespace {
 			m.clear();
 
 		for (size_t id = 0; id < urows.MaxUnits(); ++id) {
-			if (urows.valid[id] == 0)
+			if (urows.valid[id] != SimSnapshotValid::ACTIVE)
 				continue;
 
 			const int unitID = static_cast<int>(id);
@@ -4433,7 +4430,7 @@ int LuaSnapshotServe::GetProjectilesInRectangle(lua_State* L, const char* caller
 	sqObjectIDs.clear();
 
 	for (size_t projID = 0; projID < rows.MaxSlots(); ++projID) {
-		if (rows.valid[projID] == 0)
+		if (rows.valid[projID] != SimSnapshotValid::ACTIVE)
 			continue;
 
 		const float3& pos = rows.pos[projID];
@@ -4612,6 +4609,14 @@ namespace {
 		if (m.built && m.generation == gen)
 			return m;
 
+		// PR 38b: enumeration/spatial twins include only ACTIVE rows, NOT
+		// DEAD_THIS_BATCH -- that state is a POINT-read mechanism (rows.Valid()
+		// serves a held id's at-death state during the drain), while a dead unit
+		// is gone from master's spatial containers. This index is also cached per
+		// generation, so admitting a DEAD_THIS_BATCH row (which only exists during
+		// the drain) would keep a corpse in the mirror past the ack that clears
+		// the mark. Same rule at every `valid[id] != ACTIVE` scan in this file.
+
 		// quadField geometry is immutable after map load (reads are const, no
 		// mutable-membership touch); numQuadsX/numQuadsZ match GetQuadAt(x, y)
 		m.numQuadsX = quadField.GetNumQuadsX();
@@ -4626,7 +4631,7 @@ namespace {
 		{
 			const auto& urows = simSnapshot.Read();
 			for (size_t id = 0; id < urows.MaxUnits(); ++id) {
-				if (urows.valid[id] == 0)
+				if (urows.valid[id] != SimSnapshotValid::ACTIVE)
 					continue;
 				// membership == CQuadField::MovedUnit's GetQuads(unit->pos,
 				// unit->radius); the scratch slot is the main-split slot under the
@@ -4641,7 +4646,7 @@ namespace {
 		{
 			const auto& frows = simSnapshot.ReadFeatures();
 			for (size_t id = 0; id < frows.MaxSlots(); ++id) {
-				if (frows.valid[id] == 0)
+				if (frows.valid[id] != SimSnapshotValid::ACTIVE)
 					continue;
 				// membership == CQuadField::AddFeature's GetQuads(feature->pos,
 				// feature->radius)
@@ -4761,7 +4766,7 @@ namespace {
 
 		const auto& prows = simSnapshot.ReadProjectiles();
 		for (size_t id = 0; id < prows.MaxSlots(); ++id) {
-			if (prows.valid[id] == 0)
+			if (prows.valid[id] != SimSnapshotValid::ACTIVE)
 				continue;
 
 			// == CQuadField::AddProjectile's membership rule. The GetQuadsOnRay
@@ -5515,7 +5520,7 @@ int LuaSnapshotServe::GetAllProjectiles(lua_State* L, const char* caller)
 	// DEVIATION: ascending ids (master lists the active-projectile container order)
 	sqObjectIDs.clear();
 	for (size_t projID = 0; projID < rows.MaxSlots(); ++projID) {
-		if (rows.valid[projID] == 0)
+		if (rows.valid[projID] != SimSnapshotValid::ACTIVE)
 			continue;
 		sqObjectIDs.push_back(static_cast<int>(projID));
 	}
@@ -5541,7 +5546,7 @@ int LuaSnapshotServe::GetProjectilesInSphere(lua_State* L, const char* caller)
 	sqObjectIDs.clear();
 
 	for (size_t projID = 0; projID < rows.MaxSlots(); ++projID) {
-		if (rows.valid[projID] == 0)
+		if (rows.valid[projID] != SimSnapshotValid::ACTIVE)
 			continue;
 
 		const float totRad = radius + rows.radius[projID];
@@ -5568,14 +5573,14 @@ int LuaSnapshotServe::GetAllFeatures(lua_State* L, const char* caller)
 	int count = 0;
 	if (pov.fullRead) {
 		for (size_t id = 0; id < rows.MaxSlots(); ++id) {
-			if (rows.valid[id] == 0)
+			if (rows.valid[id] != SimSnapshotValid::ACTIVE)
 				continue;
 			lua_pushnumber(L, static_cast<int>(id));
 			lua_rawseti(L, -2, ++count);
 		}
 	} else {
 		for (size_t id = 0; id < rows.MaxSlots(); ++id) {
-			if (rows.valid[id] == 0)
+			if (rows.valid[id] != SimSnapshotValid::ACTIVE)
 				continue;
 			if (!PovFeatureVisible(rows, static_cast<int>(id), pov))
 				continue;

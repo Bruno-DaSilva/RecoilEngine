@@ -1423,13 +1423,11 @@ static int GetUnitDrawFlagLive(lua_State* L, const char* caller)
 	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
 		const int unitID = luaL_checkint(L, 1);
 
+		// PR 38b: drawer boundary cache only (the died-in-burst shell read
+		// fallback was dropped at the flip -- a unit dead this batch is gone from
+		// the drawer cache -> the "no such unit" nil shape; its drawer-owned draw
+		// flag moves to id-keyed drawer storage in PR 39)
 		const CUnit* unit = DrawerGetObjectByID<CUnit>(unitID);
-
-		// died-in-burst: the drain already removed it from the drawer
-		// containers, but a deferred UnitCreated/Finished/Given handler may
-		// legally ask (master answered mid-frame); the shell keeps the flag
-		if (unit == nullptr)
-			unit = SimDrawSplit::ShellFallbackUnit(unitID);
 
 		if (unit == nullptr || !LuaUtils::IsUnitVisible(L, unit))
 			return 0;
@@ -1850,11 +1848,9 @@ static int GetFeatureDrawFlagLive(lua_State* L, const char* caller)
 	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
 		const int featureID = luaL_checkint(L, 1);
 
+		// PR 38b: drawer boundary cache only (see GetUnitDrawFlag -- the
+		// died-in-burst shell read fallback was dropped at the flip)
 		const CFeature* feature = DrawerGetObjectByID<CFeature>(featureID);
-
-		// see GetUnitDrawFlag (died-in-burst shell)
-		if (feature == nullptr)
-			feature = SimDrawSplit::ShellFallbackFeature(featureID);
 
 		if (feature == nullptr || !LuaUtils::IsFeatureVisible(L, feature))
 			return 0;

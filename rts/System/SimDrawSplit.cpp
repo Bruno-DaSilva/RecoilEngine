@@ -2,8 +2,6 @@
 
 #include "SimDrawSplit.h"
 
-#include "Rendering/Common/RenderEventQueue.h" // drain-window shell resolution
-
 #include <atomic>
 #include <cassert>
 #include <chrono>
@@ -22,9 +20,6 @@ namespace {
 	// see the header: keyed on execution context, not thread identity, so the
 	// pre-thread-spawn commits are a faithful single-threaded dress rehearsal
 	thread_local int tlSimPhaseDepth = 0;
-
-	// boundary drain window (died-in-burst shell serving); main thread only
-	bool boundaryShellWindow = false;
 }
 
 void UpdateConfig()
@@ -35,29 +30,16 @@ void UpdateConfig()
 void Clear()
 {
 	g_splitEnabled = false;
-	boundaryShellWindow = false;
+	g_boundaryDrainWindow = false;
 }
 
-// main-thread only (set inside the pause window, read by the Lua/GL id
-// resolvers, which execute on the main thread during the drains)
-void SetBoundaryShellWindow(bool active) { boundaryShellWindow = active; }
-bool BoundaryShellWindowActive() { return boundaryShellWindow; }
-
-const CUnit* ShellFallbackUnit(int unitID)
-{
-	if (!boundaryShellWindow)
-		return nullptr;
-
-	return renderEventQueue.ResolveBoundaryDeadUnit(unitID);
-}
-
-const CFeature* ShellFallbackFeature(int featureID)
-{
-	if (!boundaryShellWindow)
-		return nullptr;
-
-	return renderEventQueue.ResolveBoundaryDeadFeature(featureID);
-}
+// SetBoundaryDrainWindow / BoundaryDrainWindowActive are header-inline (see
+// SimDrawSplit.h): the flag gates SimSnapshot's DEAD_THIS_BATCH validity, which
+// is read inline from the row accessors -- so it lives in the header alongside
+// g_splitEnabled. The PR-27b shell-read fallback resolvers (ShellFallbackUnit/
+// Feature over RenderEventQueue's id->shell maps) were deleted at the PR-38b
+// flip: the served twins now read the DEAD_THIS_BATCH snapshot rows, and the
+// shells survive only as the DeferredObjectDeleter memory-lifetime mechanism.
 
 bool InSimPhase() { return (tlSimPhaseDepth > 0); }
 

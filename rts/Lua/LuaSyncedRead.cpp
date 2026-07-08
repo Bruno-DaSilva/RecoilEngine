@@ -627,13 +627,11 @@ static inline CUnit* ParseRawUnit(lua_State* L, const char* caller, int index)
 
 	CUnit* unit = unitHandler.GetUnit(unitID);
 
-	// boundary drain window (PR 27b): deferred handlers replaying events for
-	// a unit that died later in the same sim burst resolve its still-readable
-	// shell -- master ran them mid-frame with the unit alive. Read-only use
-	// (this file), hence the const_cast.
-	if (unit == nullptr)
-		unit = const_cast<CUnit*>(SimDrawSplit::ShellFallbackUnit(unitID));
-
+	// PR 38b: the PR-27b died-in-burst shell read-fallback was dropped at the
+	// flip. A deferred handler replaying an event for a unit that died this
+	// batch now reads the DEAD_THIS_BATCH snapshot rows through the served
+	// twins (which see it at its at-death state during the drain window); this
+	// raw live-pointer parse returns nullptr = the "no such unit" nil shape.
 	return unit;
 }
 
@@ -705,11 +703,9 @@ static const CFeature* ParseFeature(lua_State* L, const char* caller, int index)
 
 	const int featureID = lua_toint(L, index);
 
+	// PR 38b: the PR-27b died-in-burst shell read-fallback was dropped at the
+	// flip (see ParseRawUnit) -- the served twins read DEAD_THIS_BATCH rows.
 	const CFeature* feature = featureHandler.GetFeature(featureID);
-
-	// boundary drain window (PR 27b): see ParseRawUnit
-	if (feature == nullptr)
-		feature = SimDrawSplit::ShellFallbackFeature(featureID);
 
 	if (feature == nullptr)
 		return nullptr;
@@ -5159,7 +5155,9 @@ static int GetUnitDirectionLive(lua_State* L, const char* caller)
 int LuaSyncedRead::GetUnitDirection(lua_State* L)
 {
 	// PR 38j: honor a deferred UnitLeftLos residual-LOS override at the top (see
-	// GetUnitPosition) so the leaving unit's direction serves under barrierLive
+	// GetUnitPosition) so the leaving unit's direction serves the snapshot twin
+	// regardless of enforce mode (PR 38b removed the barrier live-exception, but
+	// consulting the override here keeps it authoritative for the event's unit)
 	if (LuaSnapshotServe::LosEventOverrideActive(L))
 		return LuaSnapshotServe::GetUnitDirection(L, __func__);
 	// snapshot-served from draw context (sim|draw PR 27a, see LuaSnapshotServe.h)
@@ -7085,8 +7083,9 @@ static int GetUnitCurrentCommandLive(lua_State* L, const char* caller)
 int LuaSyncedRead::GetUnitCurrentCommand(lua_State* L)
 {
 	// PR 38j: honor a deferred UnitCommand/UnitCmdDone event-time queue override
-	// at the top (see GetUnitCommands) so the event-changed queue serves under
-	// barrierLive without forcing the rest of the handler strict
+	// at the top (see GetUnitCommands) so the event-changed queue serves the
+	// snapshot twin for the event's unit regardless of enforce mode (PR 38b
+	// removed the barrier live-exception; this keeps the override authoritative)
 	if (LuaSnapshotServe::CmdQueueEventOverrideActive(L))
 		return LuaSnapshotServe::GetUnitCurrentCommand(L, __func__);
 	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)
@@ -7251,7 +7250,9 @@ static int GetUnitCommandCountLive(lua_State* L, const char* caller)
 int LuaSyncedRead::GetUnitCommandCount(lua_State* L)
 {
 	// PR 38j: honor a deferred command-event queue override at the top (see
-	// GetUnitCommands) so the event-time count serves under barrierLive
+	// GetUnitCommands) so the event-time count serves the snapshot twin for the
+	// event's unit regardless of enforce mode (PR 38b removed the barrier
+	// live-exception; this keeps the override authoritative)
 	if (LuaSnapshotServe::CmdQueueEventOverrideActive(L))
 		return LuaSnapshotServe::GetUnitCommandCount(L, __func__);
 	// snapshot-served from draw context (sim|draw PR 27b, see LuaSnapshotServe.h)

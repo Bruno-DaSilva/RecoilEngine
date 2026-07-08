@@ -50,20 +50,23 @@ namespace SimDrawSplit {
 	/// game teardown reset (thread-locals are per-thread and die with them)
 	void Clear();
 
-	// ---- boundary drain window (PR 27b, died-in-burst shell serving) ----
-	// True while the barrier (or the valve service) replays deferred
-	// dispatches whose objects may have died later in the same sim burst:
-	// the deferred-deletion shells are still readable (the ack comes after),
-	// so id resolution falls back to them instead of returning nil -- master
-	// ran those handlers mid-frame with the object alive. Main thread only;
-	// MUST be false again before the ack poisons the shells.
-	void SetBoundaryShellWindow(bool active);
-	bool BoundaryShellWindowActive();
+	// ---- boundary dispatch-drain window (PR 27b -> PR 38b) ----
+	// True while the barrier (or the valve service) replays the boundary-
+	// deferred dispatches whose target objects may have died later in the same
+	// sim burst. It is the successor of the PR-27b shell-read window: post-flip
+	// it no longer gates a live id->shell fallback (deleted at the flip), it now
+	// gates the snapshot's DEAD_THIS_BATCH validity -- a row whose object was
+	// destroyed in the batch just published reads as VALID only inside this
+	// window, so the deferred death/LOS/command handlers see the object at its
+	// retained last-boundary state (master ran them mid-frame with the object
+	// alive) and read the dead-id nil shape everywhere else. Main thread only;
+	// MUST be false again before the barrier ack clears the DEAD_THIS_BATCH
+	// rows. Header-inline (like g_splitEnabled) so SimSnapshot's Valid()
+	// accessors can consult it without pulling SimDrawSplit.cpp into every TU.
+	inline bool g_boundaryDrainWindow = false;
 
-	// resolver fallbacks for the window (nullptr outside it / on a miss);
-	// implemented over RenderEventQueue's dispatch-time id->shell maps
-	const CUnit* ShellFallbackUnit(int unitID);
-	const CFeature* ShellFallbackFeature(int featureID);
+	inline void SetBoundaryDrainWindow(bool active) { g_boundaryDrainWindow = active; }
+	inline bool BoundaryDrainWindowActive() { return g_boundaryDrainWindow; }
 
 	/// true while this thread executes the sim phase (ClientReadNet/SimFrame)
 	bool InSimPhase();

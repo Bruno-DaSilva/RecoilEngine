@@ -14,8 +14,23 @@
 #include "Sim/Misc/Resource.h"
 #include "Sim/Misc/TeamStatistics.h"
 #include "System/UnorderedMap.hpp"
+#include "System/SimDrawSplit.h" // PR 38b: DEAD_THIS_BATCH validity consults the drain-window flag
 #include "System/float3.h"
 #include "System/float4.h"
+
+// PR 38b (zero-sanction flip): the tri-state row-validity enum. The valid[]
+// arrays hold one of these per id. DEAD_THIS_BATCH is a retained-but-dead row
+// (the object's destroy record is in the batch just published): Extract left it
+// invalid, so its data rows still hold the last-boundary (~at-death) values, and
+// Valid() promotes it to true ONLY inside the boundary dispatch-drain window
+// (SimDrawSplit::BoundaryDrainWindowActive) -- so the deferred death/LOS/command
+// handlers read the object at its at-death state (as master's synchronous
+// mid-frame dispatch did) and everything else reads the dead-id nil shape.
+namespace SimSnapshotValid {
+	inline constexpr uint8_t INACTIVE        = 0; // no object / stale garbage
+	inline constexpr uint8_t ACTIVE          = 1; // live at the stamped simFrame
+	inline constexpr uint8_t DEAD_THIS_BATCH = 2; // destroyed this batch; row retained
+}
 
 /**
  * @brief SimSnapshot -- the extracted, flat, render-side copy of hot observable sim state
@@ -80,6 +95,16 @@
  *  - Valid(id) mirrors membership in unitHandler's active-unit list at the
  *    stamped simFrame; dying-but-not-yet-deleted units are therefore valid,
  *    exactly as master's live reads would see them.
+ *  - PR 38b tri-state: valid[] holds SimSnapshotValid::{INACTIVE,ACTIVE,
+ *    DEAD_THIS_BATCH}. A row destroyed in the batch just published is marked
+ *    DEAD_THIS_BATCH (its data rows retain the last-boundary/at-death values,
+ *    since Extract overwrites only ACTIVE slots). Valid(id) returns true for
+ *    DEAD_THIS_BATCH ONLY while the boundary dispatch-drain window is open
+ *    (SimDrawSplit::BoundaryDrainWindowActive), so the deferred death/LOS/
+ *    command handlers replaying at the barrier see the object at its at-death
+ *    state -- reproducing master's "the handler sees the object still alive"
+ *    from rows. Outside the drain (and flag-off, where DEAD_THIS_BATCH is never
+ *    set) it reads exactly like INACTIVE: the dead-id nil shape.
  *  - Rows of invalid ids hold stale garbage and must never be read directly;
  *    the field accessors below return a deterministic default (0) for invalid
  *    ids -- this is the documented stale/nil contract for consumers that hold
@@ -399,7 +424,11 @@ public:
 		// ran, when the arrays are still unsized) are part of the stale/nil
 		// contract: a deterministic miss, not an error
 		bool Valid(int unitID) const {
-			return (static_cast<size_t>(unitID) < valid.size() && valid[unitID] != 0);
+			if (static_cast<size_t>(unitID) >= valid.size())
+				return false;
+			const uint8_t v = valid[unitID];
+			return (v == SimSnapshotValid::ACTIVE) ||
+			       (v == SimSnapshotValid::DEAD_THIS_BATCH && SimDrawSplit::BoundaryDrainWindowActive());
 		}
 
 		size_t MaxUnits() const { return valid.size(); }
@@ -722,7 +751,11 @@ public:
 		std::vector<uint8_t> visInLosAll;
 
 		bool Valid(int projID) const {
-			return (static_cast<size_t>(projID) < valid.size() && valid[projID] != 0);
+			if (static_cast<size_t>(projID) >= valid.size())
+				return false;
+			const uint8_t v = valid[projID];
+			return (v == SimSnapshotValid::ACTIVE) ||
+			       (v == SimSnapshotValid::DEAD_THIS_BATCH && SimDrawSplit::BoundaryDrainWindowActive());
 		}
 		size_t MaxSlots() const { return valid.size(); }
 		// PR 34 stale/nil contract default (invalid ids read 0)
@@ -811,7 +844,11 @@ public:
 		std::vector<LuaRulesParams::Params> featureRulesParams; // [MaxSlots()]
 
 		bool Valid(int id) const {
-			return (static_cast<size_t>(id) < valid.size() && valid[id] != 0);
+			if (static_cast<size_t>(id) >= valid.size())
+				return false;
+			const uint8_t v = valid[id];
+			return (v == SimSnapshotValid::ACTIVE) ||
+			       (v == SimSnapshotValid::DEAD_THIS_BATCH && SimDrawSplit::BoundaryDrainWindowActive());
 		}
 		size_t MaxSlots() const { return valid.size(); }
 
@@ -1109,6 +1146,19 @@ public:
 	/// published front/back buffers or the generation, so draw-side behavior is
 	/// unchanged. No-op (single relaxed bool load) unless armed.
 	void HashCompletedFrame(int frameNum);
+
+	// PR 38b: after the boundary publish, mark the ids destroyed in this batch
+	// (from RenderEventQueue's drain lists) as DEAD_THIS_BATCH in the published
+	// front buffers -- only where Extract left the slot INACTIVE, so a slot
+	// reused by a new object this same batch stays ACTIVE. The retained data
+	// rows (Extract overwrites only ACTIVE slots) then serve the object's
+	// last-boundary state to the deferred handlers while the drain window is
+	// open. ClearDeadThisBatch reverts those marks to INACTIVE at the barrier
+	// ack (pre-epoch), so DEAD_THIS_BATCH never persists past its own drain.
+	void MarkDeadThisBatch(const std::vector<int>& deadUnitIDs,
+	                       const std::vector<int>& deadFeatureIDs,
+	                       const std::vector<int>& deadProjectileIDs);
+	void ClearDeadThisBatch();
 
 	const UnitRows& Read() const { return *front; }
 	const ProjectileRows& ReadProjectiles() const { return *projFront; }

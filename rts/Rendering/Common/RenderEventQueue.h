@@ -132,8 +132,9 @@ public:
 		pendingDestroyShells.clear();
 		boundaryDestroyedUnits.clear();
 		boundaryDestroyedProjectiles.clear();
-		boundaryDeadUnits.clear();
-		boundaryDeadFeatures.clear();
+		boundaryDeadUnitIDs.clear();
+		boundaryDeadFeatureIDs.clear();
+		boundaryDeadProjectileIDs.clear();
 		deferring = false;
 	}
 
@@ -149,25 +150,22 @@ public:
 		boundaryDestroyedProjectiles.clear();
 	}
 
-	// PR 27b: id->shell resolution for the boundary drain window. The
-	// deferred unsynced dispatches (step 7) replay events for objects that
-	// died later in the same sim burst; master ran those handlers mid-frame
-	// with the object alive, so their Spring.Get*/gl.Set*BufferUniforms
-	// reads must resolve to the (readable-until-ack) shell instead of nil --
-	// BAR's unsynced-LuaRules ecosystem breaks at scale otherwise (windowed
-	// dogfood, 2026-07-06). Populated at destroy-record dispatch, cleared
-	// right before the ack poisons the shells.
-	const CUnit* ResolveBoundaryDeadUnit(int id) const {
-		const auto it = boundaryDeadUnits.find(id);
-		return (it == boundaryDeadUnits.end()) ? nullptr : it->second;
-	}
-	const CFeature* ResolveBoundaryDeadFeature(int id) const {
-		const auto it = boundaryDeadFeatures.find(id);
-		return (it == boundaryDeadFeatures.end()) ? nullptr : it->second;
-	}
-	void ClearBoundaryDeadShells() {
-		boundaryDeadUnits.clear();
-		boundaryDeadFeatures.clear();
+	// PR 38b: the ids of the objects whose destroy records dispatched this
+	// drain -- the DEAD_THIS_BATCH marking list. The barrier marks these
+	// snapshot rows as retained-but-dead after the publish, so the deferred
+	// death/LOS/command handlers of step 7 see the object at its last-boundary
+	// state (master ran them mid-frame with the object alive) instead of the
+	// dead-id nil shape. This SUPERSEDES the PR-27b id->shell read-resolution
+	// maps (deleted at the flip: no live read path post-flip -- the rows serve).
+	// Populated at destroy-record dispatch (record.id, no shell deref needed),
+	// cleared at the barrier's ack. Only populated when the split flag is on.
+	const std::vector<int>& BoundaryDeadUnitIDs() const { return boundaryDeadUnitIDs; }
+	const std::vector<int>& BoundaryDeadFeatureIDs() const { return boundaryDeadFeatureIDs; }
+	const std::vector<int>& BoundaryDeadProjectileIDs() const { return boundaryDeadProjectileIDs; }
+	void ClearBoundaryDeadIDs() {
+		boundaryDeadUnitIDs.clear();
+		boundaryDeadFeatureIDs.clear();
+		boundaryDeadProjectileIDs.clear();
 	}
 
 	bool Empty() const { return records.empty(); }
@@ -245,9 +243,10 @@ private:
 	std::vector<const CUnit*> boundaryDestroyedUnits;
 	std::vector<const CProjectile*> boundaryDestroyedProjectiles;
 
-	// see ResolveBoundaryDeadUnit/Feature
-	spring::unordered_map<int, const CUnit*> boundaryDeadUnits;
-	spring::unordered_map<int, const CFeature*> boundaryDeadFeatures;
+	// PR 38b: DEAD_THIS_BATCH marking lists (see BoundaryDeadUnitIDs)
+	std::vector<int> boundaryDeadUnitIDs;
+	std::vector<int> boundaryDeadFeatureIDs;
+	std::vector<int> boundaryDeadProjectileIDs;
 	// side pool for the rare records that carry a per-allyteam mask; indexed
 	// by Record::arg1, cleared together with <records>
 	std::vector<GhostAllyMask> ghostMasks;
