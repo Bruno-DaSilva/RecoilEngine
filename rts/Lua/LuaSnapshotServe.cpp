@@ -575,6 +575,23 @@ int LuaSnapshotServe::Route(lua_State* L, const char* caller, ServeFn liveFn, Se
 	// returns instead of "none" (found live: a 1-arg GetUnitPosition call made
 	// the twin read the live path's x as its midPos flag).
 	const int base = lua_gettop(L);
+
+	// Snapshot the ORIGINAL argument values before the live leg. Most live
+	// bodies leave their arg slots untouched (they read args, push returns on
+	// top), so lua_settop(base) below would restore them -- but a few overwrite
+	// their arg slots in place: GetGroundInfoLive pops (x,z) and pushes the
+	// quantized (ix,iz) so LuaMetalMap's absolute-index read sees them. For
+	// those, lua_settop alone leaves the twin reading the mutated (ix,iz) as its
+	// (x,z) args -> a different map square -> a SPURIOUS dual-run mismatch (the
+	// twin is correct in real serving, where it runs alone on the true args).
+	// Restore the args verbatim instead. (Only reached when the gate is armed.)
+	lua_createtable(L, base, 0);
+	for (int i = 1; i <= base; ++i) {
+		lua_pushvalue(L, i);
+		lua_rawseti(L, -2, i);
+	}
+	const int argRef = luaL_ref(L, LUA_REGISTRYINDEX);
+
 	// the live leg deliberately reads live sim state from draw context (the
 	// whole point of the dual-run); suspend the split contract's gates so
 	// the parse helpers don't nil it out in strict mode
@@ -590,7 +607,15 @@ int LuaSnapshotServe::Route(lua_State* L, const char* caller, ServeFn liveFn, Se
 		lua_rawseti(L, -2, i);
 	}
 	const int liveRef = luaL_ref(L, LUA_REGISTRYINDEX);
-	lua_settop(L, base); // args only, exactly as liveFn saw them
+
+	// restore the original args exactly as liveFn first saw them (slots 1..base),
+	// undoing any in-place arg mutation the live leg did
+	lua_settop(L, 0);
+	lua_rawgeti(L, LUA_REGISTRYINDEX, argRef); // args table at slot 1
+	for (int i = 1; i <= base; ++i)
+		lua_rawgeti(L, 1, i);                  // args -> slots 2..base+1
+	lua_remove(L, 1);                          // drop the table -> args at 1..base
+	luaL_unref(L, LUA_REGISTRYINDEX, argRef);
 
 	const int snapN = snapFn(L, caller);
 
