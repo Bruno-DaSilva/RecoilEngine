@@ -25,6 +25,7 @@
 #include "Sim/Weapons/PlasmaRepulser.h"
 #include "Sim/Weapons/WeaponDef.h"
 #include "System/GlobalConfig.h"
+#include "System/SimDrawSplit.h"
 #include "System/SpringMath.h"
 
 #include <algorithm>
@@ -383,11 +384,16 @@ float GuiTraceRay(
 	const CFeature*& hitFeature,
 	bool useRadar,
 	bool groundOnly,
-	bool ignoreWater
+	bool ignoreWater,
+	int* hitUnitIDOut,
+	int* hitFeatureIDOut
 ) {
 	RECOIL_DETAILED_TRACY_ZONE;
 	hitUnit = nullptr;
 	hitFeature = nullptr;
+
+	if (hitUnitIDOut    != nullptr) *hitUnitIDOut    = -1;
+	if (hitFeatureIDOut != nullptr) *hitFeatureIDOut = -1;
 
 	if (dir == ZeroVector)
 		return -1.0f;
@@ -435,6 +441,13 @@ float GuiTraceRay(
 	const SimSnapshot::UnitRows& urows = simSnapshot.Read();
 	const SimSnapshot::FeatureRows& frows = simSnapshot.ReadFeatures();
 
+	// under the running split the sim thread may free/reuse a slot a
+	// boundary-stale candidate id names; gate every live id->object resolve
+	// (piece-tree collision fallback + the terminal winner lookup) behind the
+	// snapshot Valid check so no freed sim object is dereferenced in draw
+	// context. Flag-off (or sim thread not spawned) keeps the exact live path.
+	const bool splitRunning = SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning();
+
 	const int myAllyTeam = gu->myAllyTeam;
 	const bool fullView = gu->spectatingFullView;
 	const int excludeID = (exclude != nullptr) ? exclude->id : -1;
@@ -480,8 +493,10 @@ float GuiTraceRay(
 			// piece-tree selection volumes are deferred draw-side (PR 25; unused
 			// in BAR) -- fall back to a live sim read for these objects. This is
 			// the ONLY live-sim read remaining on the unit pick path; TODO remove
-			// at split-enable (PR 27). See SimSnapshot.h PR-25 note.
-			const CUnit* lu = unitHandler.GetUnit(id);
+			// at split-enable (PR 27). See SimSnapshot.h PR-25 note. Under the
+			// running split gate the resolve behind Valid (the candidate came
+			// from the boundary grid, so this never changes the pick).
+			const CUnit* lu = (!splitRunning || urows.Valid(id)) ? unitHandler.GetUnit(id) : nullptr;
 			hit = (lu != nullptr) && CCollisionHandler::MouseHit(lu, CUnitDrawer::GetUnsyncedTransformMatrix(lu), start, segEnd, &cv, &cq);
 		} else {
 			// reconstruct the unsynced (drawPos-based) transform from the
@@ -528,7 +543,9 @@ float GuiTraceRay(
 
 		bool hit;
 		if (cv.DefaultToPieceTree()) {
-			const CFeature* lf = featureHandler.GetFeature(id);
+			// piece-tree fallback: see the unit-path comment above (Valid-gated
+			// live resolve under the running split; byte-identical flag-off).
+			const CFeature* lf = (!splitRunning || frows.Valid(id)) ? featureHandler.GetFeature(id) : nullptr;
 			hit = (lf != nullptr) && CCollisionHandler::MouseHit(lf, CFeatureDrawer::GetUnsyncedTransformMatrix(lf), start, segEnd, &cv, &cq);
 		} else {
 			hit = CCollisionHandler::MouseHit(frows.relMidPos[id], frows.InVoid(id), CFeatureDrawer::GetUnsyncedTransformMatrix(id), start, segEnd, &cv, &cq);
@@ -558,13 +575,17 @@ float GuiTraceRay(
 		hitFeatureID = -1;
 	}
 
-	// resolve the winning snapshot id to a live pointer for the caller: the pick
-	// DECISION above is fully snapshot-driven, and this id -> pointer lookup is
-	// the seam left for the split (callers still dereference the object, which
-	// their own section-C conversions handle). TODO at split-enable (PR 27):
-	// return ids and drop this lookup.
-	hitUnit = (hitUnitID >= 0) ? unitHandler.GetUnit(hitUnitID) : nullptr;
-	hitFeature = (hitFeatureID >= 0) ? featureHandler.GetFeature(hitFeatureID) : nullptr;
+	// serve the winning snapshot ids directly (PR 27b): draw-context callers
+	// (TraceScreenRay) consume these instead of dereferencing the sim object.
+	if (hitUnitIDOut    != nullptr) *hitUnitIDOut    = hitUnitID;
+	if (hitFeatureIDOut != nullptr) *hitFeatureIDOut = hitFeatureID;
+
+	// resolve the winning snapshot id to a live pointer for the pointer-taking
+	// callers (engine mouse/GUI paths, which park the sim before calling). Under
+	// the running split gate the resolve behind Valid so a boundary-stale id
+	// never yields a freed sim pointer; flag-off keeps the exact legacy lookup.
+	hitUnit = (hitUnitID >= 0 && (!splitRunning || urows.Valid(hitUnitID))) ? unitHandler.GetUnit(hitUnitID) : nullptr;
+	hitFeature = (hitFeatureID >= 0 && (!splitRunning || frows.Valid(hitFeatureID))) ? featureHandler.GetFeature(hitFeatureID) : nullptr;
 
 	return minIngressDist;
 }

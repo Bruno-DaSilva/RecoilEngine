@@ -844,7 +844,15 @@ CUnit* CGameHelper::GetClosestUnit(const float3& pos, float searchRadius)
 		}
 	}
 
-	return (closeID >= 0) ? unitHandler.GetUnit(closeID) : nullptr;
+	// terminal id -> pointer lookup (the split seam). Under the running split
+	// gate it behind the snapshot Valid check so a boundary-stale winner id
+	// never resolves to a freed sim slot; flag-off keeps the legacy lookup.
+	if (closeID < 0)
+		return nullptr;
+	if ((SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) && !urows.Valid(closeID))
+		return nullptr;
+
+	return unitHandler.GetUnit(closeID);
 }
 
 CUnit* CGameHelper::GetClosestEnemyUnit(const CUnit* excludeUnit, const float3& pos, float searchRadius, int searchAllyteam)

@@ -1246,6 +1246,32 @@ const CSolidObject* CGroundDecalHandler::GetDecalSolidObjectOwner(uint32_t id) c
 	return nullptr;
 }
 
+int CGroundDecalHandler::GetDecalSolidObjectOwnerID(uint32_t id) const
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	// mirror of GetDecalSolidObjectOwner but returns the packed owner key
+	// (draw-owned) WITHOUT resolving it to a sim-owned pointer -- the caller
+	// gates the id through the snapshot Valid check instead of dereferencing a
+	// possibly-freed CUnit/CFeature under the split.
+	for (const auto& [owner, pos] : decalOwners) {
+		if (!std::holds_alternative<int>(owner))
+			continue;
+
+		assert(pos < decals.size());
+		const auto& decal = decals[pos];
+
+		if (!decal.IsValid())
+			continue;
+
+		if (id != decals[pos].info.id)
+			continue;
+
+		return std::get<int>(owner);
+	}
+
+	return -1;
+}
+
 void CGroundDecalHandler::SetUnitLeaveTracks(CUnit* unit, bool leaveTracks)
 {
 	//ZoneScoped;

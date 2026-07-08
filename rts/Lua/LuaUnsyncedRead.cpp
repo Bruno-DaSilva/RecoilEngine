@@ -43,6 +43,7 @@
 #include "Rendering/Units/UnitDrawer.h"
 #include "Rendering/Env/IWater.h"
 #include "Rendering/Env/IGroundDecalDrawer.h"
+#include "Rendering/Common/SimSnapshot.h"
 #include "Rendering/Env/Particles/Classes/NanoProjectile.h"
 #include "Rendering/Map/InfoTexture/IInfoTextureHandler.h"
 #include "Rendering/Features/FeatureDrawer.h"
@@ -3539,14 +3540,18 @@ int LuaUnsyncedRead::TraceScreenRay(lua_State* L)
 	const float3 camPos = camera->GetPos();
 	const float3 pxlDir = camera->CalcPixelDir(wx, wy);
 
-	// trace for player's allyteam
-	const float traceDist = TraceRay::GuiTraceRay(camPos, pxlDir, rawRange, nullptr, unit, feature, true, onlyCoords, ignoreWater);
+	// trace for player's allyteam; consume the served pick ids directly so the
+	// draw-context result never dereferences the sim-owned hit object (the id
+	// equals unit->id / feature->id, so this is byte-identical flag-off)
+	int hitUnitID = -1;
+	int hitFeatureID = -1;
+	const float traceDist = TraceRay::GuiTraceRay(camPos, pxlDir, rawRange, nullptr, unit, feature, true, onlyCoords, ignoreWater, &hitUnitID, &hitFeatureID);
 	const float planeDist = CGround::LinePlaneCol(camPos, pxlDir, rawRange, luaL_optnumber(L, newArgIdx, 0.0f));
 
 	const float3 tracePos = camPos + (pxlDir * traceDist);
 	const float3 planePos = camPos + (pxlDir * planeDist); // backup (for includeSky and onlyCoords)
 
-	if ((traceDist < 0.0f || traceDist > badRange) && unit == nullptr && feature == nullptr) {
+	if ((traceDist < 0.0f || traceDist > badRange) && hitUnitID < 0 && hitFeatureID < 0) {
 		// ray went into the void (or started too far above terrain)
 		if (!includeSky)
 			return 0;
@@ -3554,15 +3559,15 @@ int LuaUnsyncedRead::TraceScreenRay(lua_State* L)
 		lua_pushliteral(L, "sky");
 	} else {
 		if (!onlyCoords) {
-			if (unit != nullptr) {
+			if (hitUnitID >= 0) {
 				lua_pushliteral(L, "unit");
-				lua_pushnumber(L, unit->id);
+				lua_pushnumber(L, hitUnitID);
 				return 2;
 			}
 
-			if (feature != nullptr) {
+			if (hitFeatureID >= 0) {
 				lua_pushliteral(L, "feature");
-				lua_pushnumber(L, feature->id);
+				lua_pushnumber(L, hitFeatureID);
 				return 2;
 			}
 		}
@@ -5470,7 +5475,34 @@ int LuaUnsyncedRead::GetGroundDecalCreationFrame(lua_State* L)
  */
 int LuaUnsyncedRead::GetGroundDecalOwner(lua_State* L)
 {
-	const auto* so = groundDecals->GetDecalSolidObjectOwner(luaL_checkint(L, 1));
+	const int decalID = luaL_checkint(L, 1);
+
+	// Under the running split the decal tracker's owner is a sim-owned
+	// CUnit/CFeature whose slot the sim thread may be mutating or freeing;
+	// dereferencing it (so->id, the dynamic_cast vtable read) off the draw
+	// thread is unsafe. Resolve the packed owner key (draw-owned) directly and
+	// gate it through the snapshot Valid check: an owner id the snapshot no
+	// longer covers reads as nil instead of touching the freed object. The
+	// packed key already encodes unit-vs-feature exactly as the return contract
+	// (units [0, MaxUnits), features [MaxUnits, ...)).
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
+		const int somID = groundDecals->GetDecalSolidObjectOwnerID(decalID);
+		if (somID < 0)
+			return 0;
+
+		const int maxUnits = static_cast<int>(unitHandler.MaxUnits());
+		const bool ownerValid = (somID < maxUnits)
+			? simSnapshot.Read().Valid(somID)
+			: simSnapshot.ReadFeatures().Valid(somID - maxUnits);
+
+		if (!ownerValid)
+			return 0;
+
+		lua_pushnumber(L, somID);
+		return 1;
+	}
+
+	const auto* so = groundDecals->GetDecalSolidObjectOwner(decalID);
 	if (so == nullptr)
 		return 0;
 

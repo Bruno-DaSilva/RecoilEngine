@@ -69,6 +69,7 @@ public:
 		return std::vector<std::string>();
 	}
 	const CSolidObject* GetDecalSolidObjectOwner(uint32_t id) const override { return nullptr; }
+	int GetDecalSolidObjectOwnerID(uint32_t id) const override { return -1; }
 
 	void SetUnitLeaveTracks(CUnit* unit, bool leaveTracks) override {}
 protected:
@@ -198,6 +199,7 @@ public:
 	const std::vector<std::string> GetDecalTextures(const std::optional<bool>& mainTex) const override;
 	const std::vector<std::string> GetDecalTextureFileNames(const std::vector<std::string>& texList) const override;
 	const CSolidObject* GetDecalSolidObjectOwner(uint32_t id) const override;
+	int GetDecalSolidObjectOwnerID(uint32_t id) const override;
 
 	void SetUnitLeaveTracks(CUnit* unit, bool leaveTracks) override;
 private:

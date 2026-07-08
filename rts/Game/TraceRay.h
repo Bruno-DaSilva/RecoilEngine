@@ -63,6 +63,10 @@ namespace TraceRay {
 		std::vector<SShieldDist>& hitShields
 	);
 
+	// hitUnitIDOut/hitFeatureIDOut (optional): the winning snapshot pick ids,
+	// written unconditionally when non-null. Draw-context callers (TraceScreenRay)
+	// consume the served id directly instead of dereferencing the sim-owned
+	// object, which the split forbids off the draw thread (PR 27b terminal seam).
 	float GuiTraceRay(
 		const float3& start,
 		const float3& dir,
@@ -72,7 +76,9 @@ namespace TraceRay {
 		const CFeature*& hitFeature,
 		bool useRadar,
 		bool groundOnly = false,
-		bool ignoreWater = true
+		bool ignoreWater = true,
+		int* hitUnitIDOut = nullptr,
+		int* hitFeatureIDOut = nullptr
 	);
 
 	/**

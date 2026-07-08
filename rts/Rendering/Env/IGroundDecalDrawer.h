@@ -39,6 +39,11 @@ public:
 	virtual const std::vector<std::string> GetDecalTextures(const std::optional<bool>& mainTex = std::nullopt) const = 0;
 	virtual const std::vector<std::string> GetDecalTextureFileNames(const std::vector<std::string>& texList) const = 0;
 	virtual const CSolidObject* GetDecalSolidObjectOwner(uint32_t id) const = 0;
+	// draw-safe variant: the packed blocking-map owner key (units [0, MaxUnits),
+	// features [MaxUnits, ...)), or -1 if the decal has no solid-object owner.
+	// Returns the id WITHOUT resolving/dereferencing the sim-owned object, so
+	// draw context can gate it through the snapshot Valid check (PR 27b).
+	virtual int GetDecalSolidObjectOwnerID(uint32_t id) const = 0;
 
 	virtual void SetUnitLeaveTracks(CUnit* unit, bool leaveTracks) = 0;
 
@@ -89,6 +94,7 @@ public:
 	const std::vector<std::string> GetDecalTextures(const std::optional<bool>& mainTex) const override { return {}; }
 	const std::vector<std::string> GetDecalTextureFileNames(const std::vector<std::string>& texList) const override { return {}; }
 	const CSolidObject* GetDecalSolidObjectOwner(uint32_t id) const override { return nullptr; }
+	int GetDecalSolidObjectOwnerID(uint32_t id) const override { return -1; }
 
 	void SetUnitLeaveTracks(CUnit* unit, bool leaveTracks) override;
 };
