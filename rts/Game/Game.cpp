@@ -170,6 +170,7 @@ CONFIG(float, GuiOpacity).defaultValue(0.8f).minimumValue(0.0f).maximumValue(1.0
 CONFIG(std::string, InputTextGeo).defaultValue("");
 
 CONFIG(int, SmoothTimeOffset).defaultValue(0).headlessValue(0).description("Enables frametimeoffset smoothing, 0 = off (old version), -1 = forced 0.5,  1-20 smooth, recommended = 2-3");
+CONFIG(int, SplitWindowShrink).defaultValue(1).description("PR 42 (SimDrawSplit only): 1 = defer the mirror-fed info textures + widget Update callins past the sim-pause release so they run with the sim live (shrinks the parked window); 0 = keep the whole UI phase parked (pre-42 behavior). For A/B measurement.");
 
 CGame* game = nullptr;
 
@@ -1445,6 +1446,23 @@ bool CGame::UpdateUnsynced(const spring_time currentTime)
 
 	lastSimFrame = gs->frameNum;
 
+	// PR 42 window shrink: when the split is actually running, the sim is parked
+	// from the barrier through the drawer extraction below. Everything served /
+	// mirror-fed / draw-owned can run AFTER the sim resumes -- so the two heavy
+	// consumers that are safe sim-live (the mirror-fed info textures [PR 42's
+	// InfoTexture->DrawMapMirrors conversion] and the widget Update callins
+	// [snapshot-served]) are deferred to just after ReleaseSimPause below,
+	// shrinking the parked window by their cost. Flag-off (or split not running)
+	// keeps the exact current in-place order -- byte-identical. Enumerated
+	// deviation (flag-on only): a widget that moves the camera / sets unit
+	// tracking in its Update is reflected one draw frame late, because camera +
+	// culling extraction now finalize before the widget callins run.
+	// config toggle (default on) so the shrink can be A/B'd on one binary for
+	// measurement / bisection: SplitWindowShrink = 0 keeps the whole UI phase
+	// parked (pre-42 behavior), 1 defers the sim-live consumers past release.
+	const bool shrinkWindow = SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()
+		&& (configHandler->GetInt("SplitWindowShrink") != 0);
+
 	// the PR-11b boundary movers that used to run here moved into
 	// SimDrawBarrier() (PR 26) -- same per-sim-frame-batch gating, same order
 	// relative to the render-event drain, now inside the one barrier function
@@ -1458,13 +1476,21 @@ bool CGame::UpdateUnsynced(const spring_time currentTime)
 	CNamedTextures::Update();
 
 	// always update InfoTexture and SoundListener at <= 30Hz (even when paused)
-	if (newSimFrame || forceUpdate) {
+	const bool doInfoTexSoundUpdate = (newSimFrame || forceUpdate);
+	if (doInfoTexSoundUpdate) {
 		lastUnsyncedUpdateTime = currentTime;
 
-		// TODO: should be moved to WorldDrawer::Update
-		infoTextureHandler->Update();
-		// TODO call only when camera changed
-		sound->UpdateListener(camera->GetPos(), camera->GetDir(), camera->GetUp());
+		// PR 42: infoTextureHandler->Update reads the boundary-drained mirrors
+		// (DrawMapMirrors), so under the running split it defers to after
+		// ReleaseSimPause (sim-live); in-place otherwise. sound->UpdateListener
+		// just copies the camera vectors + flags the sound thread -- safe either
+		// side, deferred with infotex to keep the pair together.
+		if (!shrinkWindow) {
+			// TODO: should be moved to WorldDrawer::Update
+			infoTextureHandler->Update();
+			// TODO call only when camera changed
+			sound->UpdateListener(camera->GetPos(), camera->GetDir(), camera->GetUp());
+		}
 	}
 	SetDrawMode(gameNormalDraw); //TODO move to ::Draw()?
 
@@ -1505,7 +1531,10 @@ bool CGame::UpdateUnsynced(const spring_time currentTime)
 	for (auto& grouphandler: uiGroupHandlers)
 		grouphandler.Update();
 
-	{
+	// PR 42: the widget Update callins read snapshot-served / draw-owned state,
+	// so under the running split they defer to after ReleaseSimPause (sim-live);
+	// in-place otherwise. (Deferred with infotex below.)
+	if (!shrinkWindow) {
 		SCOPED_TIMER("Update::EventHandler");
 		eventHandler.Update();
 	}
@@ -1521,6 +1550,23 @@ bool CGame::UpdateUnsynced(const spring_time currentTime)
 		// PR-26 deferral) is complete -- everything below reads extracted or
 		// draw-owned storage only, so the sim may resume consuming
 		ReleaseSimPause();
+
+		// PR 42 window shrink: run the deferred sim-live consumers now that the
+		// sim has resumed (see the shrinkWindow note above). infotex reads the
+		// boundary-drained DrawMapMirrors; the widget Update callins read
+		// snapshot-served / draw-owned state. Same relative order as the in-place
+		// flag-off path (infotex+sound, then widget Update).
+		if (shrinkWindow) {
+			if (doInfoTexSoundUpdate) {
+				infoTextureHandler->Update();
+				sound->UpdateListener(camera->GetPos(), camera->GetDir(), camera->GetUp());
+			}
+			{
+				SCOPED_TIMER("Update::EventHandler");
+				eventHandler.Update();
+			}
+		}
+
 		transformsUploader.Update();
 		modelUniformsUploader.Update();
 	}
