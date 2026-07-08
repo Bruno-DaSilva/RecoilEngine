@@ -384,7 +384,7 @@ static inline uint64_t HashTeamRow(const SimSnapshot::TeamRows& r, int t)
 // job, projectile rows just extend divergence *detection* coverage.
 static inline uint64_t HashProjectileRow(const SimSnapshot::ProjectileRows& r, int id)
 {
-	uint32_t w[31];
+	uint32_t w[34];
 	w[0]  = static_cast<uint32_t>(id);
 	w[1]  = std::bit_cast<uint32_t>(r.pos[id].x);
 	w[2]  = std::bit_cast<uint32_t>(r.pos[id].y);
@@ -434,6 +434,18 @@ static inline uint64_t HashProjectileRow(const SimSnapshot::ProjectileRows& r, i
 	// PR 38g GetProjectileDamages: the flattened DamagesSnap is NOT hashed -- same
 	// as the unit wDamages precedent (weaponDef-derived; weaponDefID is hashed at
 	// w[11]); covered by the diff gate's proj:damages field pass + serving dual-run.
+
+	// PR 41 (GetVisibleProjectiles), appended in fixed order to keep every prior
+	// hash-word index stable. drawRadius is draw-authored but sim-deterministic for
+	// synced projectiles (extracted at sim-frame time, no draw-rate writer for
+	// synced) so it is bit-identical across deterministic runs; hitscan and the
+	// per-allyteam visInLosAll answer are synced state (like the inLosAll fold).
+	w[31] = std::bit_cast<uint32_t>(r.drawRadius[id]);
+	w[32] = static_cast<uint32_t>(r.hitscan[id]);
+	uint32_t visLosAcc = 2166136261u;
+	for (int at = 0; at < r.numAllyTeams; ++at)
+		visLosAcc = (visLosAcc ^ r.visInLosAll[at * r.MaxSlots() + id]) * 16777619u;
+	w[33] = visLosAcc;
 
 	return Mix(w, sizeof(w), UNIT_SEED);
 }

@@ -1014,7 +1014,10 @@ void SimSnapshot::ExtractProjectiles(ProjectileRows& rows)
 		rows.pieceName.resize(n);
 		rows.radius.resize(n); // PR 34 (spatial/list remainder)
 		rows.damages.resize(n); // PR 38g (GetProjectileDamages)
+		rows.drawRadius.resize(n); // PR 41 (GetVisibleProjectiles)
+		rows.hitscan.resize(n);    // PR 41 (GetVisibleProjectiles)
 		rows.inLosAll.resize(size_t(numAllyTeams) * n);
+		rows.visInLosAll.resize(size_t(numAllyTeams) * n); // PR 41
 	}
 
 	std::fill(rows.valid.begin(), rows.valid.end(), 0);
@@ -1035,6 +1038,13 @@ void SimSnapshot::ExtractProjectiles(ProjectileRows& rows)
 		rows.dir[id] = p->dir;
 		rows.mygravity[id] = p->mygravity;
 		rows.radius[id] = p->radius; // PR 34 (spatial/list remainder)
+		// PR 41 (GetVisibleProjectiles): draw-cull radius + hitscan membership flag.
+		// drawRadius is draw-authored but sim-rate for synced projectiles (only the
+		// unsynced CBitmapMuzzleFlame::Draw writes it at draw rate, and the callout
+		// filters unsynced out), so this sim-boundary value equals the call-time live
+		// p->GetDrawRadius() bit-for-bit.
+		rows.drawRadius[id] = p->GetDrawRadius();
+		rows.hitscan[id] = p->hitscan;
 		rows.teamID[id] = static_cast<int32_t>(p->GetTeamID());
 		rows.weaponDefID[id] = -1;
 		rows.targetType[id] = 0;
@@ -1093,8 +1103,13 @@ void SimSnapshot::ExtractProjectiles(ProjectileRows& rows)
 			}
 		}
 
-		for (int at = 0; at < numAllyTeams; ++at)
+		for (int at = 0; at < numAllyTeams; ++at) {
 			rows.inLosAll[at * slots + id] = losHandler->InLos(p->pos, at);
+			// PR 41: the CWorldObject* overload (alwaysVisible / useAirLos /
+			// two-position beam test) the GetVisibleProjectiles LOS filter uses --
+			// captured exactly, faithful by construction
+			rows.visInLosAll[at * slots + id] = losHandler->InLos(p, at);
+		}
 	}
 }
 

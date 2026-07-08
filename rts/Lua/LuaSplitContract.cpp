@@ -181,20 +181,22 @@ namespace {
 		// GetUnitNearestAlly/GetUnitNearestEnemy via the SnapshotPickGrid
 		// closest-search over the rows (blessed ascending-snapshot-id tie-break,
 		// Batch-4 ruling). See LuaSnapshotServe.cpp.
-		"GetVisibleProjectiles", // HELD PR 40 (Wave 6): the frustum mirror alone
-		                    // is not enough -- it additionally needs NEW projectile
-		                    // snapshot rows (drawRadius = draw-authored cull state
-		                    // for camera->InView(p->pos, p->GetDrawRadius()), plus a
-		                    // quad-membership radius so GetQuads matches the live
-		                    // AddProjectile membership), which touch SimSnapshot +
-		                    // SnapshotHash + SnapshotDiffGate; splits out until those
-		                    // rows land (see the PR 40 report escalation).
+		// SERVED PR 41 (Wave 6): GetVisibleProjectiles via the draw-side per-quad
+		// SYNCED-projectile membership mirror -- keyed like CQuadField::AddProjectile
+		// (hitscan -> GetQuadsOnRay(pos, dir, speed.w); non-hitscan -> the single
+		// cell WorldPosToQuadFieldIdx(pos)), walked by readMap->GridVisibility + a
+		// snapshot-backed IQuadDrawer + camera, re-applying the live filters over
+		// NEW ProjectileRows (drawRadius = draw-cull state; hitscan = membership
+		// selector; visInLosAll = the losHandler->InLos(p, at) CWorldObject-overload
+		// answer). speed.w (ray length) + dir already existed as rows. See
+		// LuaSnapshotServe.cpp. ***With this served, sanctionedLive is EMPTY.***
 		// -------------------------------------------------------------------
 		// Batch-4 P1 (sim|draw PR 38g) cleared the pathing / misc / camera /
-		// wall-clock survivors; PR 39 served GetUnitsInPlanes and PR 40 served the
-		// frustum/screen-rect/nearest family, leaving only GetVisibleProjectiles of
-		// the Wave-6 spatial group (it needs the new projectile rows above).
-		// Dispositions of the removed entries:
+		// wall-clock survivors; PR 39 served GetUnitsInPlanes, PR 40 served the
+		// frustum/screen-rect/nearest family, and PR 41 served the last one
+		// (GetVisibleProjectiles) -- the Wave-6 spatial group is fully served and
+		// sanctionedLive now has ZERO real entries (the operator's zero-sanction
+		// milestone). Dispositions of the removed entries:
 		//  - The Lua PathFinder object API DENIES under the split via its own
 		//    LuaSplitContract::DenyLiveRead gates (LuaPathFinder.cpp): RequestPath /
 		//    PathFinder::Next / DeletePath mutate the sim-owned pathManager, the

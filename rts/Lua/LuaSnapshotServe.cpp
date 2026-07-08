@@ -423,6 +423,11 @@ namespace {
 			// quadfield insertion order), so set mode is the correct comparator.
 			"GetVisibleUnits", "GetVisibleFeatures",
 			"GetUnitsInScreenRectangle", "GetFeaturesInScreenRectangle",
+			// PR 41 (Wave 6): GetVisibleProjectiles served over the per-quad SYNCED-
+			// projectile membership mirror (hitscan ray / non-hitscan single cell).
+			// Same within-quad order deviation (ascending id vs live quadfield
+			// insertion order); the visible set is identical, so set mode is correct.
+			"GetVisibleProjectiles",
 			// PR 40: the two nearest-unit scalars. These return a single id (or
 			// nil), not a table, so set mode is a no-op for them (the comparator
 			// only id-set-compares TABLE slots) -- listed for completeness/intent.
@@ -4705,6 +4710,79 @@ namespace {
 		}
 		return out;
 	}
+
+	// PR 41: per-quad SYNCED-projectile membership mirror, keyed IDENTICALLY to
+	// CQuadField. Per projectile the cell set mirrors CQuadField::AddProjectile
+	// EXACTLY -- hitscan -> GetQuadsOnRay(pos, dir, speed.w) (a RAY); non-hitscan ->
+	// the SINGLE cell WorldPosToQuadFieldIdx(pos) -- NOT the GetQuads(pos,radius)
+	// disc the unit/feature mirror uses. This reproduces the live p->quads
+	// bit-for-bit (MovedProjectile resyncs non-hitscan membership to the current pos
+	// every sim frame; hitscan pos/dir/speed.w are immutable after the ctor's
+	// AddProjectile), so walking it yields the same set the live
+	// CVisProjectileQuadDrawer collects from baseQuads[].projectiles. Built lazily
+	// per boundary (on snapshot-generation change), separate from the unit/feature
+	// mirror so the GetVisibleUnits/Features twins pay nothing for it.
+	struct ProjQuadMembership {
+		uint32_t generation = 0;
+		bool built = false;
+		int numQuadsX = 0;
+		int numQuadsZ = 0;
+		std::vector<std::vector<int>> cells; // [z * numQuadsX + x], == CQuadField cell index
+	};
+	ProjQuadMembership projQuadMembership;
+
+	// CQuadField::WorldPosToQuadFieldIdx is private; reproduce it EXACTLY from the
+	// public geometry getters (same int/float promotion, clamp, row-major index) so
+	// the non-hitscan single-cell membership is bit-identical to AddProjectile's.
+	static inline int SnapWorldPosToQuadFieldIdx(const float3& p)
+	{
+		const int qsx = quadField.GetQuadSizeX();
+		const int qsz = quadField.GetQuadSizeZ();
+		const int nqx = quadField.GetNumQuadsX();
+		const int nqz = quadField.GetNumQuadsZ();
+		return std::clamp(int(p.z / qsz), 0, nqz - 1) * nqx + std::clamp(int(p.x / qsx), 0, nqx - 1);
+	}
+
+	const ProjQuadMembership& GetProjQuadMembership()
+	{
+		ProjQuadMembership& m = projQuadMembership;
+		const uint32_t gen = simSnapshot.Generation();
+		if (m.built && m.generation == gen)
+			return m;
+
+		// quadField geometry is immutable after map load; numQuadsX/numQuadsZ match
+		// GetQuadAt(x, y) (the same indexing the live projQuadIter walks)
+		m.numQuadsX = quadField.GetNumQuadsX();
+		m.numQuadsZ = quadField.GetNumQuadsZ();
+		const size_t numCells = static_cast<size_t>(m.numQuadsX) * m.numQuadsZ;
+
+		m.cells.resize(numCells);
+		for (auto& c: m.cells) c.clear();
+
+		const auto& prows = simSnapshot.ReadProjectiles();
+		for (size_t id = 0; id < prows.MaxSlots(); ++id) {
+			if (prows.valid[id] == 0)
+				continue;
+
+			// == CQuadField::AddProjectile's membership rule. The GetQuadsOnRay
+			// scratch slot is the main-split slot (DefaultQuadFieldQueryOwner), so it
+			// cannot collide with the sim thread's slot-0 queries (same argument as
+			// the PR-40 GetQuads mirror).
+			if (prows.hitscan[id]) {
+				QuadFieldQuery qfq;
+				quadField.GetQuadsOnRay(qfq, prows.pos[id], prows.dir[id], prows.speed[id].w);
+				for (const int qi: *qfq.quads)
+					m.cells[qi].push_back(static_cast<int>(id));
+			} else {
+				const int qi = SnapWorldPosToQuadFieldIdx(prows.pos[id]);
+				m.cells[qi].push_back(static_cast<int>(id));
+			}
+		}
+
+		m.built = true;
+		m.generation = gen;
+		return m;
+	}
 }
 
 
@@ -4861,6 +4939,67 @@ int LuaSnapshotServe::GetVisibleFeatures(lua_State* L, const char* caller)
 			continue;
 
 		lua_pushnumber(L, featureID);
+		lua_rawseti(L, -2, ++count);
+	}
+
+	return 1;
+}
+
+
+// mirror of LuaUnsyncedRead::GetVisibleProjectiles (PR 41). Walks the per-quad
+// SYNCED-projectile membership mirror (hitscan ray / non-hitscan single cell ==
+// the live CQuadField::AddProjectile membership), re-applying the live body's
+// filters over the ProjectileRows: the CWorldObject-overload LOS answer
+// (visInLosAll, distinct from the positional inLosAll), the draw-cull
+// camera->InView(pos, drawRadius), and the weapon/piece toggles. The live
+// `!p->synced` filter is a no-op here -- ProjectileRows holds ONLY synced
+// projectiles (CQuadField::AddProjectile asserts p->synced), which is exactly the
+// set the live quadfield walk yields -- so it is omitted, not approximated.
+int LuaSnapshotServe::GetVisibleProjectiles(lua_State* L, const char* caller)
+{
+	const auto& trows = simSnapshot.ReadTeams();
+	const auto& prows = simSnapshot.ReadProjectiles();
+
+	int allyTeamID = luaL_optint(L, 1, -1);
+
+	if (allyTeamID >= 0) {
+		if (!trows.ValidAllyTeam(allyTeamID)) { // teamHandler.ValidAllyTeam mirror
+			return 0;
+		}
+	} else {
+		allyTeamID = -1;
+
+		if (!CLuaHandle::GetHandleFullRead(L)) {
+			allyTeamID = CLuaHandle::GetHandleReadAllyTeam(L);
+		}
+	}
+
+	/*const bool addSyncedProjectiles =*/ luaL_optboolean(L, 2, true);
+	const bool addWeaponProjectiles = luaL_optboolean(L, 3, true);
+	const bool addPieceProjectiles = luaL_optboolean(L, 4, true);
+
+	const ProjQuadMembership& mem = GetProjQuadMembership();
+	const std::vector<int>& ids = CollectVisibleMembership(mem.cells, mem.numQuadsX, prows.MaxSlots());
+
+	lua_createtable(L, ids.size(), 0);
+
+	unsigned int count = 0;
+	for (const int projID: ids) {
+		if (allyTeamID >= 0 && !prows.VisInLos(projID, allyTeamID))
+			continue;
+
+		if (!camera->InView(prows.pos[projID], prows.drawRadius[projID]))
+			continue;
+
+		// live `if (!p->synced) continue;` -- always false here (see the header note)
+
+		if (!addWeaponProjectiles && prows.isWeapon[projID])
+			continue;
+
+		if (!addPieceProjectiles && prows.isPiece[projID])
+			continue;
+
+		lua_pushnumber(L, projID);
 		lua_rawseti(L, -2, ++count);
 	}
 

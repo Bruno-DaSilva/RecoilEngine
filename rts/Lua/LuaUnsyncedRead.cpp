@@ -2465,14 +2465,10 @@ int LuaUnsyncedRead::GetVisibleFeatures(lua_State* L)
  * @param addPieceProjectiles boolean? (Default: `true`)
  * @return number[]? projectileIDs
  */
-int LuaUnsyncedRead::GetVisibleProjectiles(lua_State* L)
+// sim/draw PR 41: the live body, verbatim from the branch baseline (the PR-27a
+// DenyLiveRead gate dropped; unused caller kept for the Route ServeFn signature).
+static int GetVisibleProjectilesLive(lua_State* L, const char* caller)
 {
-	// split-contract gate (PR 27a): walks live quadfield projectile lists + losHandler directly
-	if (LuaSplitContract::DenyLiveRead(L, __func__)) {
-		lua_createtable(L, 0, 0);
-		return 1;
-	}
-
 	int allyTeamID = luaL_optint(L, 1, -1);
 
 	if (allyTeamID >= 0) {
@@ -2538,6 +2534,12 @@ int LuaUnsyncedRead::GetVisibleProjectiles(lua_State* L)
 	}
 
 	return 1;
+}
+
+int LuaUnsyncedRead::GetVisibleProjectiles(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 41, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetVisibleProjectilesLive, &LuaSnapshotServe::GetVisibleProjectiles);
 }
 
 namespace {

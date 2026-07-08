@@ -229,6 +229,11 @@ static constexpr const char* FIELD_NAMES[] = {
 	"feat:fireSmoke",
 	"proj:damages",
 	"unit:estPath",
+	// PR 41 (GetVisibleProjectiles): appended to match the enum tail P_DRAWRADIUS..
+	// P_VISINLOS
+	"proj:drawRadius",
+	"proj:hitscan",
+	"proj:visInLosAll",
 };
 
 // structural compare for the copied customOpts maps (emilib::HashMap has no
@@ -894,6 +899,15 @@ void SnapshotDiffGate::CheckProjectileRows()
 			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d proj=%d field=proj:radius snap=%.9g live=%.9g",
 				gs->frameNum, id, rows.radius[id], p->radius);
 
+		// PR 41 (GetVisibleProjectiles): draw-cull radius + hitscan membership flag
+		if (Bump(fields[P_DRAWRADIUS], BitEqual(rows.drawRadius[id], p->GetDrawRadius())))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d proj=%d field=proj:drawRadius snap=%.9g live=%.9g",
+				gs->frameNum, id, rows.drawRadius[id], p->GetDrawRadius());
+
+		if (Bump(fields[P_HITSCAN], rows.hitscan[id] == uint8_t(p->hitscan)))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d proj=%d field=proj:hitscan snap=%d live=%d",
+				gs->frameNum, id, int(rows.hitscan[id]), int(p->hitscan));
+
 		{
 			int32_t liveTtl = 0;
 			uint8_t liveIntercepted = 0;
@@ -991,6 +1005,14 @@ void SnapshotDiffGate::CheckProjectileRows()
 			if (Bump(fields[P_INLOS], snapLos == liveLos))
 				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d proj=%d field=proj:inLosAll[ally %d] snap=%d live=%d",
 					gs->frameNum, id, at, int(snapLos), int(liveLos));
+
+			// PR 41: the CWorldObject* overload answer (GetVisibleProjectiles filter)
+			const bool snapVisLos = (rows.visInLosAll[at * slots + id] != 0);
+			const bool liveVisLos = losHandler->InLos(p, at);
+
+			if (Bump(fields[P_VISINLOS], snapVisLos == liveVisLos))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d proj=%d field=proj:visInLosAll[ally %d] snap=%d live=%d",
+					gs->frameNum, id, at, int(snapVisLos), int(liveVisLos));
 		}
 	}
 

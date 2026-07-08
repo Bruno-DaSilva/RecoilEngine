@@ -256,6 +256,11 @@ private:
 		FT_FIRESMOKE,   // feature fireTime / smokeTime (GetFeatureFireTime/SmokeTime)
 		P_DAMAGES,      // projectile *wpro->damages flattened (GetProjectileDamages)
 		D_ESTPATH,      // unit estimated-path waypoints (GetUnitEstimatedPath)
+		// PR 41 (GetVisibleProjectiles): appended at the enum tail to keep every
+		// prior field index stable (FIELD_NAMES appended in lockstep)
+		P_DRAWRADIUS,   // projectile drawRadius (camera->InView cull radius)
+		P_HITSCAN,      // projectile hitscan flag (quad-membership rule selector)
+		P_VISINLOS,     // losHandler->InLos(p, at) CWorldObject-overload answer
 		F_COUNT
 	};
 

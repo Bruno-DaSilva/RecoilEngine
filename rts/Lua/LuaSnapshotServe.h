@@ -203,6 +203,7 @@ namespace LuaSnapshotServe {
 	// deviation. Set-compared where they return tables (CompareTablesAsIdSet).
 	int GetVisibleUnits(lua_State* L, const char* caller);
 	int GetVisibleFeatures(lua_State* L, const char* caller);
+	int GetVisibleProjectiles(lua_State* L, const char* caller); // PR 41 (LuaUnsyncedRead)
 	int GetUnitsInScreenRectangle(lua_State* L, const char* caller);
 	int GetFeaturesInScreenRectangle(lua_State* L, const char* caller);
 	int GetUnitNearestAlly(lua_State* L, const char* caller);

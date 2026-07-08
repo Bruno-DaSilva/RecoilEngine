@@ -697,6 +697,30 @@ public:
 		// serving dual-run.
 		std::vector<UnitRows::DamagesSnap> damages; // [MaxSlots()]
 
+		// ===== PR 41 (GetVisibleProjectiles serving) =====
+		// drawRadius: the projectile's draw-authored cull state (p->GetDrawRadius()),
+		// the radius arg of the live camera->InView(p->pos, p->GetDrawRadius()) filter.
+		// Draw-authored (mutable CWorldObject::drawRadius), but the ONLY draw-rate
+		// writer is CBitmapMuzzleFlame::Draw -- an UNSYNCED projectile, which the
+		// callout filters out (!p->synced). Every SYNCED projectile sets drawRadius
+		// only in its ctor / sim-rate Update(), so a sim-boundary snapshot equals the
+		// call-time live value bit-for-bit. It is a snapshot row (not a drawer-owned
+		// array like the PR-40 unit/feature drawRadius) because projectiles have no
+		// id-keyed drawer draw-radius store -- drawRadius lives on the sim object.
+		std::vector<float> drawRadius;
+		// hitscan: CProjectile::hitscan (synced, CR_MEMBER). Selects the quad-
+		// membership rule mirroring CQuadField::AddProjectile: a hitscan projectile
+		// keys a RAY (GetQuadsOnRay(pos, dir, speed.w)); a non-hitscan projectile keys
+		// the SINGLE cell WorldPosToQuadFieldIdx(pos). (speed.w = ray length is
+		// already in the float4 `speed` row; dir already exists above.)
+		std::vector<uint8_t> hitscan;
+		// visInLosAll: [numAllyTeams * MaxSlots()], row-major by allyteam. The
+		// extraction-time answer of losHandler->InLos(p, at) -- the CWorldObject*
+		// overload (alwaysVisible / useAirLos / two-position beam test) the callout's
+		// LOS filter uses. DISTINCT from inLosAll above, which is the positional
+		// losHandler->InLos(p->pos, at) single-point overload (a different function).
+		std::vector<uint8_t> visInLosAll;
+
 		bool Valid(int projID) const {
 			return (static_cast<size_t>(projID) < valid.size() && valid[projID] != 0);
 		}
@@ -707,6 +731,12 @@ public:
 		bool InLos(int projID, int argAllyTeam) const {
 			return (argAllyTeam >= 0 && argAllyTeam < numAllyTeams &&
 				inLosAll[argAllyTeam * MaxSlots() + projID] != 0);
+		}
+		// PR 41: GetVisibleProjectiles LOS filter -- the losHandler->InLos(p, at)
+		// (CWorldObject* overload) answer, distinct from the positional InLos above
+		bool VisInLos(int projID, int argAllyTeam) const {
+			return (argAllyTeam >= 0 && argAllyTeam < numAllyTeams &&
+				visInLosAll[argAllyTeam * MaxSlots() + projID] != 0);
 		}
 		// LuaUtils::IsProjectileVisible mirror; caller must have checked Valid()
 		bool PovVisible(int projID, int readAllyTeam, bool fullRead) const {
