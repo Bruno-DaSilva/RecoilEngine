@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "MetalMap.h"
+#include "Rendering/Common/DrawMapMirrors.h" // PR 42: extraction-map mirror dirty marking
 #include "System/SpringMath.h"
 #include "System/EventHandler.h"
 
@@ -109,6 +110,7 @@ float CMetalMap::RequestExtraction(int x, int z, float toDepth)
 	const float available = toDepth - current;
 
 	extractionMap[(z * sizeX) + x] = toDepth;
+	drawMapMirrors.MarkExtractionMapDirty(); // PR 42: extraction-map mirror choke
 
 	return available;
 }
@@ -121,6 +123,7 @@ void CMetalMap::RemoveExtraction(int x, int z, float depth)
 	z = std::clamp(z, 0, sizeZ - 1);
 
 	extractionMap[(z * sizeX) + x] -= depth;
+	drawMapMirrors.MarkExtractionMapDirty(); // PR 42: extraction-map mirror choke
 }
 
 

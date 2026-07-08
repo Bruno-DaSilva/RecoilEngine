@@ -3,6 +3,7 @@
 #include "Metal.h"
 #include "Map/MetalMap.h"
 #include "Map/ReadMap.h"
+#include "Rendering/Common/DrawMapMirrors.h" // PR 42: read the boundary-drained metal-distribution mirror, not live metalMap
 
 #include "System/Misc/TracyDefs.h"
 
@@ -28,10 +29,13 @@ CMetalTexture::CMetalTexture()
 
 void CMetalTexture::Update()
 {
-	assert(metalMap.GetSizeX() == texSize.x && metalMap.GetSizeZ() == texSize.y);
+	// PR 42: read the boundary-drained mirror so this can run with the sim live
+	if (!drawMapMirrors.Ready() || drawMapMirrors.MetalDistributionData().empty())
+		return; // mirror not drained yet (first frame); skip this update
+	assert(drawMapMirrors.MetalSizeX() == texSize.x && drawMapMirrors.MetalSizeZ() == texSize.y);
 
 	auto binding = texture.ScopedBind();
-	texture.UploadImage(metalMap.GetDistributionMap());
+	texture.UploadImage(drawMapMirrors.MetalDistributionData().data());
 
 	metalMapChanged = false;
 }

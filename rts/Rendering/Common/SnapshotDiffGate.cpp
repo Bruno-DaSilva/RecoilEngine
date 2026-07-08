@@ -234,6 +234,8 @@ static constexpr const char* FIELD_NAMES[] = {
 	"proj:drawRadius",
 	"proj:hitscan",
 	"proj:visInLosAll",
+	// PR 42: appended to match the enum tail MM_EXTRACTIONMAP
+	"map:extractionMap",
 };
 
 // structural compare for the copied customOpts maps (emilib::HashMap has no
@@ -1579,6 +1581,23 @@ void SnapshotDiffGate::CheckMapMirrors()
 			(mm.empty() || std::memcmp(mm.data(), metalMap.GetDistributionMap(), n * sizeof(uint8_t)) == 0);
 		if (Bump(fields[MM_METALMAP], eq))
 			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=map:metalMap mismatch", gs->frameNum);
+	}
+
+	// --- metal extraction map (PR 42): float per metal square ---
+	// A mismatch means a missed MarkExtractionMapDirty choke point (the two
+	// CMetalMap writers RequestExtraction/RemoveExtraction). Bit-exact float
+	// memcmp is correct: both sides are the same synced float writes, no draw-side
+	// recomputation.
+	{
+		const std::vector<float>& mm = drawMapMirrors.ExtractionMapVec();
+		const int sx = metalMap.GetSizeX();
+		const int sz = metalMap.GetSizeZ();
+		const size_t n = static_cast<size_t>(sx) * static_cast<size_t>(sz);
+		const bool eq =
+			(mm.size() == n) &&
+			(mm.empty() || std::memcmp(mm.data(), metalMap.GetExtractionMap(), n * sizeof(float)) == 0);
+		if (Bump(fields[MM_EXTRACTIONMAP], eq))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=map:extractionMap mismatch", gs->frameNum);
 	}
 }
 

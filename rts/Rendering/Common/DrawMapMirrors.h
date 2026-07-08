@@ -101,6 +101,12 @@ public:
 	/// GetGroundInfo reads via LuaMetalMap::GetMetalAmount). The load-time
 	/// metalMap.Init fill is picked up by the first drain (size-mismatch clause).
 	void MarkMetalMapDirty() { ++metalMapVersion; }
+	/// PR 42 (sim|draw): CMetalMap::RequestExtraction / RemoveExtraction -- the
+	/// two runtime writers of metalMap's extractionMap (the per-square extraction
+	/// depth the MetalExtraction info-texture reads via GetExtractionMap()).
+	/// Extraction churns most frames while extractors mine, so this uses the
+	/// whole-map dirty-flag class (like blocking), not the version-gated class.
+	void MarkExtractionMapDirty() { extractionDirty = true; }
 	/// SmoothHeightMesh::UpdateSmoothMesh / MakeSmoothMesh -- the mesh's own
 	/// window updater (the sole writer of its height array via its Set/Add
 	/// helpers)
@@ -136,6 +142,14 @@ public:
 	bool PosInAirLos(const float3& pos, int allyTeam) const;
 	bool PosInRadar (const float3& pos, int allyTeam) const;
 	bool PosInJammer(const float3& pos, int allyTeam) const;
+
+	// PR 42: per-allyteam global-LOS flag (losHandler->GetGlobalLOS mirror). The
+	// data is already drained unconditionally every barrier (globalLos below);
+	// the info-texture uploads (Los/AirLos/Radar) need this getter to stop
+	// dereferencing losHandler when the sim thread runs live.
+	bool GlobalLos(int ally) const {
+		return (ally >= 0 && ally < static_cast<int>(globalLos.size())) && globalLos[ally] != 0;
+	}
 
 	// ---- map-info queries ----
 	float OrigHeight(float x, float z) const;
@@ -203,6 +217,13 @@ public:
 	float MetalScale() const { return metalScale; }
 	const std::vector<uint8_t>& MetalDistributionData() const { return metalDistribution; }
 
+	// PR 42: metal EXTRACTION-map mirror (float per metal square, same dims as
+	// the distribution mirror). ExtractionMapData() feeds the MetalExtraction
+	// info-texture upload (const float* -> GL_R32F); ExtractionMapVec() is the
+	// SnapshotDiffGate::CheckMapMirrors float-memcmp source.
+	const float* ExtractionMapData() const { return extractionMap.data(); }
+	const std::vector<float>& ExtractionMapVec() const { return extractionMap; }
+
 	// PR 29: blocking-mirror diff-gate accessors (SnapshotDiffGate::
 	// CheckMapMirrors compares these per map square against the live
 	// groundBlockingObjectMap cell[0])
@@ -263,6 +284,13 @@ private:
 	float metalScale = 0.0f;                      // Init-time constant (maxMetal)
 	uint32_t metalMapVersion = 0;
 	uint32_t metalMapDrained = 0xffffffffu;
+
+	// PR 42: metal EXTRACTION-map mirror. Same dims as metalDistribution
+	// (metalSizeX*metalSizeZ), but extraction churns most frames while
+	// extractors mine, so it uses the whole-map dirty-flag class (copy on dirty),
+	// not the version-gated class. src type is float (CMetalMap::extractionMap).
+	std::vector<float> extractionMap;            // [metalSizeX*metalSizeZ]
+	bool extractionDirty = true;
 
 	// radar-error scalars (GetRadarErrorParams)
 	int numAllyTeams = 0;

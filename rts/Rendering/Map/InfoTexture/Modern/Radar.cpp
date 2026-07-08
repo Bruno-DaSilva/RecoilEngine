@@ -7,6 +7,7 @@
 #include "Rendering/Shaders/ShaderHandler.h"
 #include "Rendering/Shaders/Shader.h"
 #include "Rendering/GL/SubState.h"
+#include "Rendering/Common/DrawMapMirrors.h" // PR 42: read the boundary-drained radar/jammer mirror, not live losHandler
 #include "Sim/Misc/LosHandler.h"
 #include "Sim/Misc/ModInfo.h"
 #include "System/Exceptions.h"
@@ -101,7 +102,8 @@ CRadarTexture::~CRadarTexture()
 void CRadarTexture::Update()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	if (losHandler->GetGlobalLOS(gu->myAllyTeam)) {
+	// PR 42: read the boundary-drained mirror so this can run with the sim live
+	if (drawMapMirrors.GlobalLos(gu->myAllyTeam)) {
 		fbo.Bind();
 		glViewport(0, 0, texSize.x, texSize.y);
 		glClearColor(1.0f, 0.0f, 0.0f, 0.0f);
@@ -116,8 +118,12 @@ void CRadarTexture::Update()
 
 	const int jammerAllyTeam = modInfo.separateJammers ? gu->myAllyTeam : 0;
 
-	const auto& myRadar  = losHandler->radar.losMaps[gu->myAllyTeam].GetLosMap();
-	const auto& myJammer = losHandler->jammer.losMaps[jammerAllyTeam].GetLosMap();
+	const std::vector<uint16_t>* myRadarP  = drawMapMirrors.LosMap(DrawMapMirrors::LOS_MIRROR_TYPE_RADAR, gu->myAllyTeam);
+	const std::vector<uint16_t>* myJammerP = drawMapMirrors.LosMap(DrawMapMirrors::LOS_MIRROR_TYPE_JAMMER, jammerAllyTeam);
+	if (!drawMapMirrors.Ready() || myRadarP == nullptr || myRadarP->empty() || myJammerP == nullptr || myJammerP->empty())
+		return; // mirror not drained yet (first frame); skip this update
+	const auto& myRadar  = *myRadarP;
+	const auto& myJammer = *myJammerP;
 
 	auto binding1 = uploadTexRadar.ScopedBind(1);
 	uploadTexRadar.UploadImage(myRadar.data());

@@ -152,6 +152,19 @@ void DrawMapMirrors::DrainAtBarrier()
 				metalDistribution.clear();
 			metalMapDrained = metalMapVersion;
 		}
+
+		// --- metal extraction map (PR 42): whole-map dirty-flag copy ---
+		// Churns as extractors mine (RequestExtraction/RemoveExtraction mark it),
+		// so copy the whole float map whenever dirty or the mirror size mismatches
+		// (which also catches the load-time Init fill on the first drain).
+		if (extractionDirty || extractionMap.size() != n) {
+			const float* src = metalMap.GetExtractionMap();
+			if (n > 0)
+				extractionMap.assign(src, src + n);
+			else
+				extractionMap.clear();
+			extractionDirty = false;
+		}
 	}
 
 	// --- smooth-height mesh (version-gated whole copy; window updater) ---
@@ -246,6 +259,8 @@ void DrawMapMirrors::Clear()
 	metalSizeX = metalSizeZ = 0;
 	metalScale = 0.0f;
 	metalMapDrained = 0xffffffffu;
+	extractionMap.clear();
+	extractionDirty = true;
 
 	numAllyTeams = 0;
 	baseRadarErrorSize = baseRadarErrorMult = 0.0f;

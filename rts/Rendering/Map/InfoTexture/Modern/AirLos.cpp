@@ -6,6 +6,7 @@
 #include "Rendering/Shaders/ShaderHandler.h"
 #include "Rendering/Shaders/Shader.h"
 #include "Rendering/GL/SubState.h"
+#include "Rendering/Common/DrawMapMirrors.h" // PR 42: read the boundary-drained airLos mirror, not live losHandler
 #include "Sim/Misc/LosHandler.h"
 #include "System/Exceptions.h"
 #include "System/Log/ILog.h"
@@ -87,7 +88,8 @@ CAirLosTexture::~CAirLosTexture()
 void CAirLosTexture::Update()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	if (losHandler->GetGlobalLOS(gu->myAllyTeam)) {
+	// PR 42: read the boundary-drained mirror so this can run with the sim live
+	if (drawMapMirrors.GlobalLos(gu->myAllyTeam)) {
 		fbo.Bind();
 		glViewport(0, 0, texSize.x, texSize.y);
 		glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
@@ -100,7 +102,10 @@ void CAirLosTexture::Update()
 		return;
 	}
 
-	const auto& myAirLos = losHandler->airLos.losMaps[gu->myAllyTeam].GetLosMap();
+	const std::vector<uint16_t>* myAirLosP = drawMapMirrors.LosMap(DrawMapMirrors::LOS_MIRROR_TYPE_AIRLOS, gu->myAllyTeam);
+	if (!drawMapMirrors.Ready() || myAirLosP == nullptr || myAirLosP->empty())
+		return; // mirror not drained yet (first frame); skip this update
+	const auto& myAirLos = *myAirLosP;
 	{
 		auto binding = uploadTex.ScopedBind();
 		uploadTex.UploadImage(myAirLos.data());

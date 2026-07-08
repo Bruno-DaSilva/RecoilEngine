@@ -9,6 +9,7 @@
 #include "Rendering/Shaders/ShaderHandler.h"
 #include "Rendering/Shaders/Shader.h"
 #include "Rendering/GL/SubState.h"
+#include "Rendering/Common/DrawMapMirrors.h" // PR 42: read the boundary-drained extraction mirror, not live metalMap
 #include "Sim/Misc/LosHandler.h"
 #include "System/Exceptions.h"
 #include "System/Log/ILog.h"
@@ -98,12 +99,15 @@ void CMetalExtractionTexture::Update()
 
 	CInfoTexture* infoTex = infoTextureHandler->GetInfoTexture("los");
 
-	assert(metalMap.GetSizeX() == texSize.x && metalMap.GetSizeZ() == texSize.y);
+	// PR 42: read the boundary-drained mirror so this can run with the sim live
+	if (!drawMapMirrors.Ready() || drawMapMirrors.ExtractionMapVec().empty())
+		return; // mirror not drained yet (first frame); skip this update
+	assert(drawMapMirrors.MetalSizeX() == texSize.x && drawMapMirrors.MetalSizeZ() == texSize.y);
 
 	// upload raw data to gpu
 	{
 		auto binding = texture.ScopedBind();
-		texture.UploadImage(metalMap.GetExtractionMap());
+		texture.UploadImage(drawMapMirrors.ExtractionMapData());
 	}
 
 	using namespace GL::State;
