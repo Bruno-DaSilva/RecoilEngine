@@ -162,10 +162,28 @@ public:
 	const std::vector<int>& BoundaryDeadUnitIDs() const { return boundaryDeadUnitIDs; }
 	const std::vector<int>& BoundaryDeadFeatureIDs() const { return boundaryDeadFeatureIDs; }
 	const std::vector<int>& BoundaryDeadProjectileIDs() const { return boundaryDeadProjectileIDs; }
+
+	// PR 38b crash fix: id->shell POINTER resolution during the boundary drain
+	// window (the DEAD_THIS_BATCH id-lists above serve the row twins; these serve
+	// the POINTER-returning IdToObject path -- LuaVBO instance data + deferred
+	// *Destroyed handlers -- which have no row to fall back to). Populated with
+	// the still-readable death shell at destroy-record dispatch; cleared at the
+	// same ack that clears the id-lists (shell stays alive until the ack).
+	const CUnit* ResolveBoundaryDeadUnit(int id) const {
+		const auto it = boundaryDeadUnits.find(id);
+		return (it == boundaryDeadUnits.end()) ? nullptr : it->second;
+	}
+	const CFeature* ResolveBoundaryDeadFeature(int id) const {
+		const auto it = boundaryDeadFeatures.find(id);
+		return (it == boundaryDeadFeatures.end()) ? nullptr : it->second;
+	}
+
 	void ClearBoundaryDeadIDs() {
 		boundaryDeadUnitIDs.clear();
 		boundaryDeadFeatureIDs.clear();
 		boundaryDeadProjectileIDs.clear();
+		boundaryDeadUnits.clear();
+		boundaryDeadFeatures.clear();
 	}
 
 	bool Empty() const { return records.empty(); }
@@ -247,6 +265,10 @@ private:
 	std::vector<int> boundaryDeadUnitIDs;
 	std::vector<int> boundaryDeadFeatureIDs;
 	std::vector<int> boundaryDeadProjectileIDs;
+	// PR 38b crash fix: id->death-shell POINTER maps for the drain-window
+	// IdToObject path (see ResolveBoundaryDeadUnit); cleared at the ack
+	spring::unordered_map<int, const CUnit*> boundaryDeadUnits;
+	spring::unordered_map<int, const CFeature*> boundaryDeadFeatures;
 	// side pool for the rare records that carry a per-allyteam mask; indexed
 	// by Record::arg1, cleared together with <records>
 	std::vector<GhostAllyMask> ghostMasks;

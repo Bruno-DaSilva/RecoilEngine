@@ -9,6 +9,7 @@
 #include <mutex>
 
 #include "System/Config/ConfigHandler.h"
+#include "Rendering/Common/RenderEventQueue.h" // PR 38b: pointer-path death-shell resolution
 
 CONFIG(int, SimDrawSplit)
 	.defaultValue(0)
@@ -47,6 +48,26 @@ bool DeferUnsyncedNow() { return (g_splitEnabled && InSimPhase()); }
 
 ScopedSimPhase::ScopedSimPhase() { ++tlSimPhaseDepth; }
 ScopedSimPhase::~ScopedSimPhase() { assert(tlSimPhaseDepth > 0); --tlSimPhaseDepth; }
+
+
+// PR 38b crash fix (see the header): the pointer-returning Parse helpers fall
+// back to the retained death shell for an object that died THIS batch, but only
+// inside the dispatch-drain window (the same window that gates DEAD_THIS_BATCH
+// row validity). The RenderEventQueue id->shell maps survive as the memory-
+// lifetime mechanism; ResolveBoundaryDead{Unit,Feature} looks the shell up.
+const CUnit* ShellFallbackUnit(int unitID)
+{
+	if (!g_boundaryDrainWindow)
+		return nullptr;
+	return renderEventQueue.ResolveBoundaryDeadUnit(unitID);
+}
+
+const CFeature* ShellFallbackFeature(int featureID)
+{
+	if (!g_boundaryDrainWindow)
+		return nullptr;
+	return renderEventQueue.ResolveBoundaryDeadFeature(featureID);
+}
 
 
 // ---------------------------------------------------------------------------

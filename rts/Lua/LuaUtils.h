@@ -493,12 +493,17 @@ const inline CUnit* LuaUtils::IdToObject(int id, const char* func)
 	// PR 27b: with the sim thread running, the live handler walk both races
 	// the sim's own container mutation AND disagrees with the snapshot view
 	// callers guard with (spValidUnitID says boundary-N, the walk says
-	// mid-burst) -- resolve through the drawer's boundary cache instead.
-	// PR 38b dropped the died-in-burst shell read-fallback: a unit dead this
-	// batch is gone from the drawer cache -> nullptr (the "no such unit" shape);
-	// its row-backed reads serve DEAD_THIS_BATCH through the twins.
-	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning())
-		return DrawerGetObjectByID<CUnit>(id);
+	// mid-burst) -- resolve through the drawer's boundary cache instead, with the
+	// deferred-deletion shell as the died-in-burst fallback. PR 38b serves
+	// row-backed reads from DEAD_THIS_BATCH through the twins, but this POINTER
+	// path still hands a live CUnit* to callers not yet row-served (LuaVBO
+	// instance data, deferred *Destroyed handlers), so it keeps the shell
+	// fallback until PR 39 moves them to id-keyed storage (ShellFallbackUnit is
+	// null-safe: returns null outside the drain window).
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
+		const CUnit* unit = DrawerGetObjectByID<CUnit>(id);
+		return (unit != nullptr) ? unit : SimDrawSplit::ShellFallbackUnit(id);
+	}
 
 	return unitHandler.GetUnit(id);
 }
@@ -506,9 +511,11 @@ const inline CUnit* LuaUtils::IdToObject(int id, const char* func)
 template<>
 const inline CFeature* LuaUtils::IdToObject(int id, const char* func)
 {
-	// see the CUnit specialization (PR 38b dropped the shell read-fallback)
-	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning())
-		return DrawerGetObjectByID<CFeature>(id);
+	// see the CUnit specialization (PR 38b keeps the pointer-path shell fallback)
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
+		const CFeature* feature = DrawerGetObjectByID<CFeature>(id);
+		return (feature != nullptr) ? feature : SimDrawSplit::ShellFallbackFeature(id);
+	}
 
 	return featureHandler.GetFeature(id);
 }

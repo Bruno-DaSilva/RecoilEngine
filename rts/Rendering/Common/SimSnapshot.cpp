@@ -372,19 +372,40 @@ void SimSnapshot::HashCompletedFrame(int frameNum)
 
 // PR 38b: promote the just-published INACTIVE rows of the batch's destroyed ids
 // to DEAD_THIS_BATCH so the deferred handlers replaying at the barrier read the
-// object's retained last-boundary (~at-death) state. Operates on the published
-// front buffers (Update swapped them in above). Guarded on INACTIVE so a slot a
-// new object reused this same batch (already ACTIVE) is never clobbered.
-// ACCEPTED DEVIATION (vs the deleted id->shell fallback): on same-batch id reuse
-// the LIVE (reused) object wins -- a deferred death handler for the OLD id reads
-// the NEW object's ACTIVE row, whereas the old shell keyed by destroy time would
-// have served the actual dead object. Benign: same-batch id reuse of an id a
-// widget is mid-death-handling is vanishingly rare and advisory-only.
-static inline void MarkDeadRows(std::vector<uint8_t>& valid, const std::vector<int>& deadIDs)
+// object's retained ~at-death state. Operates on the published FRONT buffers
+// (Update swapped them in above).
+//
+// GENUINENESS GUARD (double-buffer correctness / crash fix): the front buffer is
+// filled by Extract only every OTHER frame (double-buffered: Extract fills back,
+// then swaps). So an unwritten (dead) slot in the just-published front holds data
+// from TWO boundaries ago -- genuine for an object that lived >=2 boundaries (its
+// IMMUTABLE defID is unchanged), but a stale / prior-occupant GARBAGE value for
+// one younger than that. Serving that garbage deref'd a null UnitDef (SIGSEGV in
+// GetUnitHealth etc.). So mark DEAD_THIS_BATCH only when the front row is
+// genuinely this object's retained data: (a) INACTIVE now (an id a new object
+// reused this batch stays ACTIVE -- the live object wins), (b) it was ACTIVE in
+// the previous publish (back), and (c) the front slot's immutable defID still
+// equals back's. A miss (never-published, too-young, or a reused slot) serves the
+// dead-id nil shape -- an object that lived <2 boundaries degrades its deferred
+// death handler to nil (accepted deviation, advisory-only). Projectiles carry no
+// persistent defID, but their twins read only plain values (no def-pointer
+// deref), so the ACTIVE-in-back guard alone is crash-safe for them.
+static inline void MarkDeadRows(std::vector<uint8_t>& frontValid,
+                                const std::vector<uint8_t>& backValid,
+                                const std::vector<int32_t>* frontDefID,
+                                const std::vector<int32_t>* backDefID,
+                                const std::vector<int>& deadIDs)
 {
 	for (const int id : deadIDs) {
-		if (static_cast<size_t>(id) < valid.size() && valid[id] == SimSnapshotValid::INACTIVE)
-			valid[id] = SimSnapshotValid::DEAD_THIS_BATCH;
+		if (static_cast<size_t>(id) >= frontValid.size() || static_cast<size_t>(id) >= backValid.size())
+			continue;
+		if (frontValid[id] != SimSnapshotValid::INACTIVE)
+			continue; // a new object reused the id this batch -> stays ACTIVE
+		if (backValid[id] != SimSnapshotValid::ACTIVE)
+			continue; // not genuinely published last boundary -> serve nil
+		if (frontDefID != nullptr && (*frontDefID)[id] != (*backDefID)[id])
+			continue; // front slot is stale / a prior occupant -> serve nil
+		frontValid[id] = SimSnapshotValid::DEAD_THIS_BATCH;
 	}
 }
 
@@ -392,9 +413,9 @@ void SimSnapshot::MarkDeadThisBatch(const std::vector<int>& deadUnitIDs,
                                     const std::vector<int>& deadFeatureIDs,
                                     const std::vector<int>& deadProjectileIDs)
 {
-	MarkDeadRows(front->valid, deadUnitIDs);
-	MarkDeadRows(featFront->valid, deadFeatureIDs);
-	MarkDeadRows(projFront->valid, deadProjectileIDs);
+	MarkDeadRows(front->valid,     back->valid,     &front->defID,     &back->defID,     deadUnitIDs);
+	MarkDeadRows(featFront->valid, featBack->valid, &featFront->defID, &featBack->defID, deadFeatureIDs);
+	MarkDeadRows(projFront->valid, projBack->valid, nullptr,           nullptr,          deadProjectileIDs);
 }
 
 // PR 38b: revert the DEAD_THIS_BATCH marks to INACTIVE at the barrier ack (the

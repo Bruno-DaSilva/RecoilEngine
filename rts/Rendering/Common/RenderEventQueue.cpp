@@ -167,7 +167,8 @@ void RenderEventQueue::Dispatch(const Record& record)
 			// death-dependences; CGame consumes this after the drain
 			if (SimDrawSplit::Enabled()) {
 				boundaryDestroyedUnits.push_back(unit);
-				boundaryDeadUnitIDs.push_back(record.id); // PR 38b DEAD_THIS_BATCH marking
+				boundaryDeadUnitIDs.push_back(record.id); // PR 38b DEAD_THIS_BATCH row marking
+				boundaryDeadUnits[record.id] = unit;      // PR 38b crash fix: drain-window shell POINTER (IdToObject / LuaVBO)
 			}
 		} break;
 
@@ -184,8 +185,10 @@ void RenderEventQueue::Dispatch(const Record& record)
 			PopDestroyShell(ShellKey(ObjKind::Feature, false, record.id));
 
 			// PR 38b: DEAD_THIS_BATCH marking (see the unit case)
-			if (SimDrawSplit::Enabled())
+			if (SimDrawSplit::Enabled()) {
 				boundaryDeadFeatureIDs.push_back(record.id);
+				boundaryDeadFeatures[record.id] = feature; // PR 38b crash fix: drain-window shell POINTER
+			}
 		} break;
 
 		case T::ProjectileCreated: {

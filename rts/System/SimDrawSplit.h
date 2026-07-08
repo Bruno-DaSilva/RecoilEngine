@@ -68,6 +68,18 @@ namespace SimDrawSplit {
 	inline void SetBoundaryDrainWindow(bool active) { g_boundaryDrainWindow = active; }
 	inline bool BoundaryDrainWindowActive() { return g_boundaryDrainWindow; }
 
+	// PR 38b crash fix: the DEAD_THIS_BATCH snapshot ROWS replace the shell read
+	// fallback for the row-served twins, but the pointer-returning Parse helpers
+	// (LuaUtils::IdToObject & the ParseUnit/ParseFeature pointer paths) still hand
+	// a live CUnit*/CFeature* to callers NOT yet row-served -- LuaVBO instance
+	// data, and the deferred *Destroyed death handlers. The drawer cache resolves
+	// an object that died THIS batch to nullptr, so -- inside the dispatch-drain
+	// window ONLY -- fall back to its retained death shell (the shells survive as
+	// the DeferredObjectDeleter memory-lifetime mechanism; Wave-7/PR-39 moves
+	// these callers to id-keyed drawer storage and this fallback goes with it).
+	const CUnit* ShellFallbackUnit(int unitID);
+	const CFeature* ShellFallbackFeature(int featureID);
+
 	/// true while this thread executes the sim phase (ClientReadNet/SimFrame)
 	bool InSimPhase();
 
