@@ -634,8 +634,23 @@ int LuaSnapshotServe::GetUnitPosition(lua_State* L, const char* caller)
 	const int unitID = ParseUnitIDSynced(L, caller, 1);
 	const Pov pov = HandlePov(L);
 
-	// ParseUnit mirror: no such unit / not visible => nil (stale/nil contract)
-	if (!rows.Valid(unitID) || !rows.PovUnitVisible(unitID, pov.readAllyTeam, pov.fullRead))
+	// ParseUnit mirror: no such unit / not visible => nil (stale/nil contract).
+	//
+	// DEAD_THIS_BATCH (mirrors PR 38k's command-queue fix): a deferred UnitLeftLos
+	// handler for a unit that died THIS batch finds its snapshot row already
+	// invalidated -- the boundary re-extraction cleared valid[] for the now-gone
+	// unit. But Extract() overwrites pos[] only for active units, so pos[unitID]
+	// still holds the unit's last-boundary (~at-death) position, which is what
+	// master's synchronous mid-sim UnitLeftLos handler read (the CUnit is not
+	// destroyed until after the event fires). When the LOS-exit override is
+	// installed for this one unit, bypass the !Valid nil and serve that retained
+	// position -- still gated on PovUnitVisible, which honors the override's
+	// captured radar losStatus (INRADAR) so it opens/nils exactly as master's
+	// synchronous handler did. Inert flag-off and during the diff-gate dual-run
+	// (no deferral -> no override installed -> reduces to the original
+	// !Valid || !PovUnitVisible gate -> byte-identical).
+	const bool losExitOverride = SimSnapshotLosEvent::ActiveForUnit(unitID);
+	if ((!rows.Valid(unitID) && !losExitOverride) || !rows.PovUnitVisible(unitID, pov.readAllyTeam, pov.fullRead))
 		return 0;
 
 	float3 errorVec;
