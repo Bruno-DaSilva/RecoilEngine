@@ -1935,12 +1935,12 @@ void CGame::AcquireSimPause()
 	// then destruct + release. Loops in case pressure recurs before the
 	// frame edge.
 	while (SimDrawSplit::ParkedAtValve()) {
-		// PR 38b: no ScopedLiveException here anymore -- the deferred dispatches
-		// serve the published snapshot (the sim is parked mid-frame, so the last
-		// publish still has the valve-dead units ACTIVE, i.e. master-alive). The
-		// drain-window bracket stays (same as barrier steps 0 / 8): the valve does
-		// not republish, so no DEAD_THIS_BATCH marks exist here, but the bracket
-		// keeps the window state well-defined for the deferred drain below.
+		// same live-read legality as the barrier (sim parked mid-frame): the
+		// deferred dispatches read live under a ScopedLiveException. PR 38b's
+		// read-published-state conversion is deferred to Wave 7 (see the barrier
+		// in CGame::Draw). The drain-window bracket stays (same as barrier steps
+		// 0 / 8) so the death-shell path stays well-defined for the drain below.
+		LuaSplitContract::ScopedLiveException valveLive;
 		SimDrawSplit::SetBoundaryDrainWindow(true);
 
 		modelLoader.ServiceQueuedUploads();
@@ -2008,15 +2008,22 @@ bool CGame::Draw() {
 	// spans the barrier + UpdateUnsynced through the drawer extraction.
 	AcquireSimPause();
 
-	// PR 38b (zero-sanction flip): the barrier no longer runs under a
-	// ScopedLiveException. Its deferred unsynced callins (step 7) now read the
-	// PUBLISHED snapshot -- including the DEAD_THIS_BATCH rows of objects that
-	// died in the batch, so the death/LOS/command handlers see them at their
-	// at-death state. sanctionedLive is empty and the whole callout tail is
-	// served, so there is no live read path here anymore (the C++ boundary work
-	// -- RefreshCommandQueues/RefreshPieces/EvaluateTraceQueries/CheckBoundary --
-	// reads live directly while the sim is parked, unaffected by the contract).
-	SimDrawBarrier();
+	{
+		// PR 38b: sanctionedLive is EMPTY (the whole callout tail is served) and
+		// the strict-mode zero-denial proof holds, so the ZERO-SANCTION FLIP is
+		// landed for the draw-window widget reads. The barrier's OWN deferred
+		// unsynced callins (step 7), however, keep reading live under a
+		// ScopedLiveException: the sim is parked here, so it is safe, and it is
+		// exactly master's semantics (the death/create/damage handlers see the
+		// object). Converting THOSE to read the published snapshot (the
+		// no-live-window "dress rehearsal") is DEFERRED to Wave 7 -- it needs the
+		// creation/event-time deferred-serving the epoch machinery (PR 43/44)
+		// provides; doing it here nil-served every deferred create/damage handler
+		// (headful-only regression, gate bthgtfct8/bhfd6lsho). DEAD_THIS_BATCH +
+		// the death-shell path stay in place, prepared for that Wave-7 conversion.
+		LuaSplitContract::ScopedLiveException barrierLive;
+		SimDrawBarrier();
+	}
 
 	// gate telemetry for the /debug frame grapher (draw-row "Gate" slice):
 	// the pause-wait + valve service + barrier span no other category covers
