@@ -168,10 +168,11 @@ namespace {
 		// spatial/list-query remainder (core family served PR 27b; the table
 		// centroids, whole-list projectile/feature twins, projectile radius row,
 		// and the draw-owned selection/group aggregates served PR 34)
-		"GetUnitsInPlanes", // PR 34 deferred: GetFilteredUnits resets its array
-		                    // counter per team, so multi-team allegiances
-		                    // overwrite earlier slots -- an order-dependent quirk
-		                    // the ascending-id snapshot can't reproduce/verify
+		// GetUnitsInPlanes SERVED PR 39 (Wave 6): iterates the per-boundary
+		// team-unit index (ascending id per team) and reproduces master's
+		// per-team GetFilteredUnits counter-reset overwrite exactly. Deviation
+		// (ascending-id within team; multi-team overwrite tail) is the binding
+		// Batch-1 amendment ruling; set-compared in the armed dual-run.
 		"GetUnitNearestAlly", "GetUnitNearestEnemy", // PR 34 deferred: CGameHelper
 		                    // closest-search fidelity/tie-break; scalar return is
 		                    // not id-set-verifiable (needs a design sign-off)

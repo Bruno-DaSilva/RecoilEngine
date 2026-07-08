@@ -408,6 +408,13 @@ namespace {
 			// table / draw-owned container as the live path (order-exact) and the
 			// counts tables are keyed (multiset compare would be wrong for them).
 			"GetAllProjectiles", "GetProjectilesInSphere", "GetAllFeatures",
+			// PR 39: GetUnitsInPlanes serves ascending-id per team and
+			// reproduces master's per-team counter-reset overwrite. Single-team
+			// queries are set-identical (order-only deviation, caught by set
+			// mode); multi-team queries can differ in the overwrite tail (the
+			// binding Batch-1 ruling's documented deviation) -- set mode is the
+			// best comparator available from the two result tables alone.
+			"GetUnitsInPlanes",
 		};
 		return (idSetCallouts.find(caller) != idSetCallouts.end());
 	}
@@ -4379,6 +4386,117 @@ int LuaSnapshotServe::GetProjectilesInRectangle(lua_State* L, const char* caller
 	}
 
 	GetProjectilesLuaTableSnap(L, rows, sqObjectIDs, excludeWeaponProjectiles, excludePieceProjectiles);
+	return 1;
+}
+
+
+/******************************************************************************
+ * Spatial remainder (PR 39, Wave 6).
+ ******************************************************************************/
+
+namespace {
+	// LuaSyncedRead's file-local Plane / UnitInPlanes, copied verbatim (immutable
+	// geometry; the float expression order is the bit-equality gate). Kept local
+	// so the twin is a line-by-line mirror of the live body.
+	struct SnapPlane {
+		float x, y, z, d;  // ax + by + cz + d = 0
+	};
+
+	static inline bool SnapUnitInPlanes(const float3& pos, const float radius, const std::vector<SnapPlane>& planes)
+	{
+		for (const SnapPlane& p: planes) {
+			const float dist = (pos.x * p.x) + (pos.y * p.y) + (pos.z * p.z) + p.d;
+			if ((dist - radius) > 0.0f) {
+				return false; // outside
+			}
+		}
+		return true;
+	}
+}
+
+// mirror of LuaSyncedRead::GetUnitsInPlanes.
+//
+// The live body loops teams [startTeam, endTeam] and, per team, calls
+// GetFilteredUnits over unitHandler.GetUnitsByTeam(team) writing into ONE shared
+// result table with a per-team counter that RESETS to 0 each team -- so a later
+// team's ids overwrite the low array slots of an earlier team's (master's known
+// counter-reset overwrite quirk). This twin reproduces that structure exactly:
+// GetFilteredUnitsSnap also resets its count per call and writes into the shared
+// table. Per the binding Batch-1 amendment ruling, per-team iteration is
+// ascending snapshot-id (idx.idsByTeam), NOT unitHandler.GetUnitsByTeam order.
+//
+// DEVIATION (ruled): single-team queries (allegiance >= 0 / MyUnits) are
+// set-identical to master (only within-team order differs). Multi-team queries
+// (AllUnits / AllyUnits / EnemyUnits over >1 team) can differ in the overwrite
+// tail -- which units survive the overwrite depends on within-team order, so the
+// final multiset is not order-invariant. This is the documented deviation the
+// ruling accepts; the armed dual-run set-compares (CompareTablesAsIdSet), which
+// passes single-team and may flag the multi-team overwrite tail.
+int LuaSnapshotServe::GetUnitsInPlanes(lua_State* L, const char* caller)
+{
+	if (!lua_istable(L, 1)) {
+		luaL_error(L, "Incorrect arguments to GetUnitsInPlanes()");
+	}
+
+	// parse the planes (identical to the live body, incl. the lua_gettop(L)
+	// table index quirk it uses)
+	std::vector<SnapPlane> planes;
+	const int table = lua_gettop(L);
+	for (lua_pushnil(L); lua_next(L, table) != 0; lua_pop(L, 1)) {
+		if (lua_istable(L, -1)) {
+			float values[4];
+			const int v = LuaUtils::ParseFloatArray(L, -1, values, 4);
+			if (v == 4) {
+				SnapPlane plane = { values[0], values[1], values[2], values[3] };
+				planes.push_back(plane);
+			}
+		}
+	}
+
+	const auto& rows = simSnapshot.Read();
+	const auto& trows = simSnapshot.ReadTeams();
+	const TeamUnitIndex& idx = GetTeamUnitIndex();
+	const Pov pov = HandlePov(L);
+
+	int startTeam, endTeam;
+
+	const int allegiance = ParseAllegianceMirror(L, caller, 2);
+	if (allegiance >= 0) {
+		startTeam = allegiance;
+		endTeam = allegiance;
+	}
+	else if (allegiance == LuaUtils::MyUnits) {
+		const int readTeam = CLuaHandle::GetHandleReadTeam(L);
+		startTeam = readTeam;
+		endTeam = readTeam;
+	}
+	else {
+		startTeam = 0;
+		endTeam = trows.activeTeams - 1;
+	}
+
+	const auto planesTest = [&](int unitID, const float3 &pos) {
+		return SnapUnitInPlanes(pos, rows.radius[unitID], planes);
+	};
+
+	static const std::vector<int> emptyIDs;
+
+	lua_newtable(L);
+
+	for (int team = startTeam; team <= endTeam; team++) {
+		// LuaUtils::IsAlliedTeam mirror (TeamRows::PovAlliedTeam)
+		if (allegiance == LuaUtils::AllyUnits && !trows.PovAlliedTeam(team, pov.readAllyTeam, pov.fullRead))
+			continue;
+		if (allegiance == LuaUtils::EnemyUnits && trows.PovAlliedTeam(team, pov.readAllyTeam, pov.fullRead))
+			continue;
+
+		// unitHandler.GetUnitsByTeam(team) mirror; empty for out-of-range teams
+		const std::vector<int>& units =
+			(team >= 0 && team < trows.activeTeams) ? idx.idsByTeam[team] : emptyIDs;
+
+		GetFilteredUnitsSnap(L, rows, allegiance, units, planesTest);
+	}
+
 	return 1;
 }
 

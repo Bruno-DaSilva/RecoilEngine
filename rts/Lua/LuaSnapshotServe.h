@@ -184,6 +184,13 @@ namespace LuaSnapshotServe {
 	int GetFeaturesInCylinder(lua_State* L, const char* caller);
 	int GetProjectilesInRectangle(lua_State* L, const char* caller);
 
+	// spatial remainder (PR 39, Wave 6). GetUnitsInPlanes iterates the
+	// per-boundary team-unit index (ascending id per team) reproducing master's
+	// per-team GetFilteredUnits counter-reset overwrite exactly; the deviation
+	// (ascending-id within team; multi-team overwrite-tail) is the binding
+	// Batch-1 amendment ruling. Set-compared (CompareTablesAsIdSet).
+	int GetUnitsInPlanes(lua_State* L, const char* caller);
+
 	// command-queue family (PR 27b serving batch 2, first family): served from
 	// per-unit boundary copies of CCommandAI::commandQue / CFactoryCAI::
 	// newUnitCommands (+ the CFactory bugger-off scalars), refreshed by

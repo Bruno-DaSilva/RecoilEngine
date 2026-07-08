@@ -3564,15 +3564,14 @@ static inline bool UnitInPlanes(const float3& pos, const float radius, const vec
  * @param allegiance integer?
  * @return integer[] unitIDs
  */
-int LuaSyncedRead::GetUnitsInPlanes(lua_State* L)
+// sim/draw PR 39: the live body, verbatim from master (the PR-27a DenyLiveRead
+// gate is gone -- Route redirects draw context to the snapshot twin, so the
+// live leg only runs synced / non-draw / flag-off / the armed dual-run's live
+// leg / the pre-publish fallback). `__func__` becomes `caller` so
+// ParseAllegiance's error text stays "GetUnitsInPlanes" (the
+// GetUnitsInRectangleLive precedent).
+static int GetUnitsInPlanesLive(lua_State* L, const char* caller)
 {
-	// split-contract gate (PR 27a): the teamHandler.ActiveTeams read comes early (allegiance
-	// resolution) and the body walks unitHandler's per-team unit lists, so gate at top
-	if (LuaSplitContract::DenyLiveRead(L, __func__)) {
-		lua_createtable(L, 0, 0);
-		return 1;
-	}
-
 	if (!lua_istable(L, 1)) {
 		luaL_error(L, "Incorrect arguments to GetUnitsInPlanes()");
 	}
@@ -3593,7 +3592,7 @@ int LuaSyncedRead::GetUnitsInPlanes(lua_State* L)
 
 	int startTeam, endTeam;
 
-	const int allegiance = LuaUtils::ParseAllegiance(L, __func__, 2);
+	const int allegiance = LuaUtils::ParseAllegiance(L, caller, 2);
 	if (allegiance >= 0) {
 		startTeam = allegiance;
 		endTeam = allegiance;
@@ -3626,6 +3625,12 @@ int LuaSyncedRead::GetUnitsInPlanes(lua_State* L)
 	}
 
 	return 1;
+}
+
+int LuaSyncedRead::GetUnitsInPlanes(lua_State* L)
+{
+	// snapshot-served from draw context (sim|draw PR 39, see LuaSnapshotServe.h)
+	return LuaSnapshotServe::Route(L, __func__, &GetUnitsInPlanesLive, &LuaSnapshotServe::GetUnitsInPlanes);
 }
 
 
