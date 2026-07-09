@@ -1733,8 +1733,25 @@ void CGame::SimDrawBarrier()
 	drawMapMirrors.DrainAtBarrier();
 
 	// (3) publish the observable-state snapshot for draw-side consumers
-	// (contract in SimSnapshot.h; the team/player copy refreshes every call)
+	// (contract in SimSnapshot.h; the team/player copy refreshes every call).
+	// PR 43: Update() is the epoch PRODUCER half (extract into a free ring
+	// slot + publish it as the newest-complete epoch).
 	simSnapshot.Update();
+
+	// (3a) PR 43: the epoch CONSUMER half -- acquire the newest complete
+	// epoch (ref++), release the previously held one (ref--). Under the 43
+	// lockstep this immediately follows every publish (a pointer rotation
+	// with the double buffer's values). A release that drops a slot's
+	// refcount to zero RETIRES that epoch: run the retirement hooks -- the
+	// DeferredObjectDeleter release is rekeyed from "end of Draw" to "epoch
+	// retirement" (§2.2), returning the pool slots of every shell acked under
+	// the retired (or an earlier) epoch.
+	{
+		const uint64_t retiredEpoch = simSnapshot.AcquireNewestEpoch();
+
+		if (SimDrawSplit::Enabled() && retiredEpoch != 0)
+			deferredObjectDeleter.ReleaseRetired(retiredEpoch);
+	}
 
 	// (3b) refresh the draw-side command-queue copies (PR 27b serving batch 2,
 	// LuaSnapshotServe). AFTER the publish, not with the resolve caches at
@@ -1752,6 +1769,16 @@ void CGame::SimDrawBarrier()
 	// accessors while the sim is parked (single-threaded pre-flip), so the
 	// served values are bit-identical to the live callouts.
 	LuaSnapshotServe::RefreshPieces();
+
+	// (3b'') PR 43 §2.1: record the epoch's channel-version scalars into the
+	// held ring slot (the old singleton cmdQueueCacheGeneration /
+	// pieceCacheGeneration / mirror drained-version scalars become per-slot
+	// state). Bookkeeping under the 43 lockstep -- the physical caches track
+	// the newest epoch; per-slot COPIES arrive with the 44a producer flip.
+	simSnapshot.SealEpochChannelVersions(
+		LuaSnapshotServe::CmdQueueCacheEpoch(),
+		LuaSnapshotServe::PieceCacheEpoch(),
+		drawMapMirrors.DrainSerial());
 
 	// (3c) evaluate the draw side's pending weapon trace-test queries (sim|draw
 	// PR 35, Batch-3 sim-side query/reply channel). The sim is parked here, so
@@ -1840,7 +1867,10 @@ void CGame::SimDrawBarrier()
 	if (SimDrawSplit::Enabled()) {
 		SimDrawSplit::SetBoundaryShellWindow(false);
 		renderEventQueue.ClearBoundaryDeadShells();
-		deferredObjectDeleter.AckDrainedDestroys();
+		// PR 43: the split ack tags the shells with the epoch whose record
+		// dispatch just completed; their pool RELEASE is keyed to that epoch's
+		// retirement (barrier step 3a), replacing the end-of-Draw ReleaseAcked
+		deferredObjectDeleter.AckDrainedDestroysEpoch(simSnapshot.EpochId());
 	}
 }
 
@@ -2033,6 +2063,12 @@ void CGame::AcquireSimPause()
 		SimDrawSplit::SetBoundaryShellWindow(false);
 		renderEventQueue.ClearBoundaryDeadShells();
 
+		// PR 43: the valve must free pages IMMEDIATELY (the sim is parked
+		// mid-frame out of pool headroom), so it keeps the ack+release-all
+		// pair -- the documented lockstep-degenerate form of "sim waits for
+		// epoch retirement" (§2.2: the epoch retires in place). Poisoned
+		// shells are never legally read, so releasing shells whose epoch has
+		// not formally retired only changes pool-return timing (address-blind).
 		deferredObjectDeleter.AckDrainedDestroys();
 		deferredObjectDeleter.ReleaseAcked();
 		SimDrawSplit::ResumeFromValve();
@@ -2257,10 +2293,11 @@ bool CGame::Draw() {
 
 	lastDrawFrameTime = currentTimePostDraw;
 
-	// return the poisoned slots of this Draw's acked destroys to the pools
-	// PR 27b: under the split the pools are sim-owned and the sim thread is
-	// running again here -- the release folds into the next barrier's ack
-	// (AckDrainedDestroys starts by releasing leftovers), per the PR-13 plan
+	// return the poisoned slots of this Draw's acked destroys to the pools.
+	// PR 27b/43: under the split the pools are sim-owned and the sim thread is
+	// running again here -- the release is keyed to EPOCH RETIREMENT instead
+	// (barrier step 3a: DeferredObjectDeleter::ReleaseRetired when the ring
+	// retires the epoch the shells were acked under)
 	if (!SimDrawSplit::Enabled())
 		deferredObjectDeleter.ReleaseAcked();
 

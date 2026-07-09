@@ -127,6 +127,10 @@ public:
 	/// copy dirty layers from live sim; called from CGame::SimDrawBarrier
 	/// before simSnapshot.Update(). No-op cheap when nothing is dirty.
 	void DrainAtBarrier();
+
+	/// PR 43 §2.1: monotonic count of completed DrainAtBarrier() calls -- the
+	/// "mirrors' drained-version" scalar the epoch ring records per slot
+	uint32_t DrainSerial() const { return drainSerial; }
 	/// game teardown: forget everything so the next game re-initialises
 	void Clear();
 
@@ -242,6 +246,9 @@ private:
 		int2 size = {0, 0};
 		std::vector<std::vector<uint16_t>> maps; // [allyTeam][size.x*size.y]
 	};
+
+	// PR 43 §2.1: see DrainSerial()
+	uint32_t drainSerial = 0;
 
 	std::array<LosMirror, LOS_MIRROR_TYPE_COUNT> los;
 	std::vector<uint8_t> globalLos;              // [numAllyTeams]

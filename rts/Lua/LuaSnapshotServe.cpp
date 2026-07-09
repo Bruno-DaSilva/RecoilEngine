@@ -530,7 +530,7 @@ int LuaSnapshotServe::Route(lua_State* L, const char* caller, ServeFn liveFn, Se
 	// the split contract's parse gates out of this sanctioned fallback (found
 	// by the PR-27a count-mode gate: pregame draws tripped -- and strict mode
 	// would have denied -- the SERVED team callouts' live legs).
-	if (simSnapshot.Generation() == 0) {
+	if (simSnapshot.EpochId() == 0) {
 		LuaSplitContract::ScopedLiveException prePublishFallback;
 		return liveFn(L, caller);
 	}
@@ -3392,7 +3392,7 @@ namespace {
 	 * Id vectors ascend by construction (the pass ascends).
 	 */
 	struct TeamUnitIndex {
-		uint32_t generation = 0;
+		uint64_t generation = 0; // PR 43 §2.5: EpochId key (u64, monotonic per game)
 		bool built = false;
 
 		std::vector<int> allIDs;                                             // every valid id
@@ -3404,7 +3404,7 @@ namespace {
 	const TeamUnitIndex& GetTeamUnitIndex()
 	{
 		TeamUnitIndex& idx = teamUnitIndex;
-		const uint32_t gen = simSnapshot.Generation();
+		const uint64_t gen = simSnapshot.EpochId();
 
 		if (idx.built && idx.generation == gen)
 			return idx;
@@ -4606,7 +4606,7 @@ namespace {
 	// per-quad object-membership mirror (see the section header). Rebuilt lazily
 	// on generation change from the front UnitRows/FeatureRows.
 	struct QuadMembership {
-		uint32_t generation = 0;
+		uint64_t generation = 0; // PR 43 §2.5: EpochId key (u64, monotonic per game)
 		bool built = false;
 		int numQuadsX = 0;
 		int numQuadsZ = 0;
@@ -4618,7 +4618,7 @@ namespace {
 	const QuadMembership& GetQuadMembership()
 	{
 		QuadMembership& m = quadMembership;
-		const uint32_t gen = simSnapshot.Generation();
+		const uint64_t gen = simSnapshot.EpochId();
 		if (m.built && m.generation == gen)
 			return m;
 
@@ -4733,7 +4733,7 @@ namespace {
 	// per boundary (on snapshot-generation change), separate from the unit/feature
 	// mirror so the GetVisibleUnits/Features twins pay nothing for it.
 	struct ProjQuadMembership {
-		uint32_t generation = 0;
+		uint64_t generation = 0; // PR 43 §2.5: EpochId key (u64, monotonic per game)
 		bool built = false;
 		int numQuadsX = 0;
 		int numQuadsZ = 0;
@@ -4756,7 +4756,7 @@ namespace {
 	const ProjQuadMembership& GetProjQuadMembership()
 	{
 		ProjQuadMembership& m = projQuadMembership;
-		const uint32_t gen = simSnapshot.Generation();
+		const uint64_t gen = simSnapshot.EpochId();
 		if (m.built && m.generation == gen)
 			return m;
 
@@ -6122,7 +6122,8 @@ namespace {
 
 	// indexed by unitID, sized unitHandler.MaxUnits() at first refresh
 	std::vector<UnitCmdQueueSlot> cmdQueueCache;
-	uint32_t cmdQueueCacheGeneration = 0;
+	// PR 43 §2.5: keyed by the u64 EpochId (was the u32 Generation)
+	uint64_t cmdQueueCacheEpoch = 0;
 
 	// PR 38f (event-time command-queue presentation): a per-unit override
 	// consulted FIRST by GetCmdQueueSlot. Installed by ScopedCmdQueueEventOverride
@@ -6547,18 +6548,20 @@ namespace {
 }
 
 
+uint64_t LuaSnapshotServe::CmdQueueCacheEpoch() { return cmdQueueCacheEpoch; }
+
 void LuaSnapshotServe::RefreshCommandQueues()
 {
 	// barrier-only (sim parked or single-threaded): walks unitHandler and
 	// reads live queues. Generation-gated so the copies always describe the
 	// same boundary as the published rows -- and so the walk is free when the
 	// publish above didn't swap (no sim frame, no boundary mutation).
-	const uint32_t gen = simSnapshot.Generation();
+	const uint64_t gen = simSnapshot.EpochId();
 
-	if (gen == 0 || gen == cmdQueueCacheGeneration)
+	if (gen == 0 || gen == cmdQueueCacheEpoch)
 		return;
 
-	cmdQueueCacheGeneration = gen;
+	cmdQueueCacheEpoch = gen;
 
 	const size_t maxUnits = unitHandler.MaxUnits();
 
@@ -7147,7 +7150,8 @@ namespace {
 	// indexed by unitID / featureID, sized at first refresh
 	std::vector<ObjectPieceSlot> unitPieceCache;
 	std::vector<ObjectPieceSlot> featurePieceCache;
-	uint32_t pieceCacheGeneration = 0;
+	// PR 43 §2.5: keyed by the u64 EpochId (was the u32 Generation)
+	uint64_t pieceCacheEpoch = 0;
 
 	// build (once) the immutable metadata for o's model from a live LocalModel
 	const ModelPieceMeta& GetOrBuildModelMeta(const void* key, const LocalModel& lm)
@@ -7508,14 +7512,16 @@ namespace {
 }
 
 
+uint64_t LuaSnapshotServe::PieceCacheEpoch() { return pieceCacheEpoch; }
+
 void LuaSnapshotServe::RefreshPieces()
 {
 	// barrier-only (sim parked / single-threaded), right after simSnapshot.Update().
 	// generation-gated so the copies always describe the same boundary as the
 	// published rows, and so the walk is free when the publish did not swap.
-	const uint32_t gen = simSnapshot.Generation();
+	const uint64_t gen = simSnapshot.EpochId();
 
-	if (gen == 0 || gen == pieceCacheGeneration)
+	if (gen == 0 || gen == pieceCacheEpoch)
 		return;
 
 	// flag-off (no contract, gate unarmed) never serves these twins -- skip the
@@ -7523,7 +7529,7 @@ void LuaSnapshotServe::RefreshPieces()
 	if (!LuaSplitContract::Enabled() && !snapshotDiffGate.Armed())
 		return;
 
-	pieceCacheGeneration = gen;
+	pieceCacheEpoch = gen;
 
 	const size_t maxUnits = unitHandler.MaxUnits();
 	if (unitPieceCache.size() != maxUnits)
@@ -7762,7 +7768,7 @@ void LuaSnapshotServe::ClearCaches()
 	// the next game, so a surviving entry could alias fresh ones
 	cmdQueueCache.clear();
 	cmdQueueCache.shrink_to_fit();
-	cmdQueueCacheGeneration = 0;
+	cmdQueueCacheEpoch = 0;
 
 	// PR 33 piece caches: unit/feature ids and model pointers restart with the
 	// next game, so a surviving entry could alias fresh ones
@@ -7771,7 +7777,7 @@ void LuaSnapshotServe::ClearCaches()
 	featurePieceCache.clear();
 	featurePieceCache.shrink_to_fit();
 	modelMetaCache.clear();
-	pieceCacheGeneration = 0;
+	pieceCacheEpoch = 0;
 
 	// PR 35 weapon trace-query channel state is self-pruning (the reply map is
 	// rebuilt from the pending set every barrier, and is keyed by the full query
@@ -9621,7 +9627,7 @@ int LuaSnapshotServe::RouteTraceQuery(lua_State* L, const char* caller, ServeFn 
 
 	// pregame: no sim thread yet, live tables exist, snapshot does not -- serve
 	// live under the sanctioned live-exception bracket (the Route() precedent)
-	if (simSnapshot.Generation() == 0) {
+	if (simSnapshot.EpochId() == 0) {
 		LuaSplitContract::ScopedLiveException prePublishFallback;
 		return liveFn(L, caller);
 	}
@@ -10059,7 +10065,7 @@ int LuaSnapshotServe::RoutePlacementQuery(lua_State* L, const char* caller, Serv
 
 	// pregame: no sim thread yet, live tables exist, snapshot does not -- serve
 	// live under the sanctioned live-exception bracket (the Route() precedent)
-	if (simSnapshot.Generation() == 0) {
+	if (simSnapshot.EpochId() == 0) {
 		LuaSplitContract::ScopedLiveException prePublishFallback;
 		return liveFn(L, caller);
 	}
@@ -10292,7 +10298,7 @@ bool LuaSnapshotServe::CmdQueueEventOverrideActive(lua_State* L)
 	if (!lua_isnumber(L, 1))
 		return false;
 
-	return (lua_toint(L, 1) == cmdEvtOverrideUnitID) && (simSnapshot.Generation() != 0);
+	return (lua_toint(L, 1) == cmdEvtOverrideUnitID) && (simSnapshot.EpochId() != 0);
 }
 
 bool LuaSnapshotServe::LosEventOverrideActive(lua_State* L)
@@ -10302,5 +10308,5 @@ bool LuaSnapshotServe::LosEventOverrideActive(lua_State* L)
 	if (!lua_isnumber(L, 1))
 		return false;
 
-	return SimSnapshotLosEvent::ActiveForUnit(lua_toint(L, 1)) && (simSnapshot.Generation() != 0);
+	return SimSnapshotLosEvent::ActiveForUnit(lua_toint(L, 1)) && (simSnapshot.EpochId() != 0);
 }

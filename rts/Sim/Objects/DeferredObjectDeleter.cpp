@@ -181,6 +181,36 @@ void DeferredObjectDeleter::AckDrainedDestroys()
 	epoch += 1;
 }
 
+void DeferredObjectDeleter::AckDrainedDestroysEpoch(uint64_t epochId)
+{
+	// PR 43: no auto-release of earlier poisoned slots here -- their pool
+	// return is keyed to epoch retirement (ReleaseRetired), which the barrier
+	// runs when the ring retires their epoch
+	for (Entry& e: pending) {
+		DestructAndPoison(e);
+		e.ackEpoch = epochId;
+	}
+
+	poisoned.insert(poisoned.end(), pending.begin(), pending.end());
+	pending.clear();
+	epoch += 1;
+}
+
+void DeferredObjectDeleter::ReleaseRetired(uint64_t retiredEpochId)
+{
+	size_t kept = 0;
+
+	for (Entry& e: poisoned) {
+		if (e.ackEpoch <= retiredEpochId) {
+			ReleaseSlot(e);
+			continue;
+		}
+		poisoned[kept++] = e;
+	}
+
+	poisoned.resize(kept);
+}
+
 void DeferredObjectDeleter::ReleaseAcked()
 {
 	for (const Entry& e: poisoned) {

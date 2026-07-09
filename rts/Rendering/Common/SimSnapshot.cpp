@@ -312,44 +312,202 @@ void SimSnapshot::Update()
 	// the MapParser and must stay off the sim thread.
 	CacheMapStartPositions();
 
-	// team/player boundary copy (PR 26, section E.3): re-extracted EVERY
-	// boundary, no due check -- net messages mutate these tables between sim
-	// frames (share/resign transfers, NETMSG_PLAYERINFO ping/cpu at net rate),
-	// invisibly to the frameNum/aliveCount checks below, and the copy is KBs
-	ExtractTeams(*teamBack);
-	ExtractPlayers(*playerBack);
-	// global-scalar copy (PR 27a): same unconditional lifecycle -- speed/
-	// pause/cheat state mutates via net between frames, and it is ~100 bytes
-	ExtractGlobals(*globBack);
-	std::swap(teamFront, teamBack);
-	std::swap(playerFront, playerBack);
-	std::swap(globFront, globBack);
-
 	const bool due =
 		mutatedOutsideFrame ||
-		(front->simFrame != gs->frameNum) ||
-		(front->aliveCount != static_cast<int32_t>(unitHandler.GetActiveUnits().size()));
+		(buffers[newestSlot].simFrame != gs->frameNum) ||
+		(buffers[newestSlot].aliveCount != static_cast<int32_t>(unitHandler.GetActiveUnits().size()));
 
-	if (!due)
+	if (!due) {
+		// LOCKSTEP EXCEPTION (PR 43, enumerated in the header block): no new
+		// epoch, but the net-mutable channels still refresh every boundary --
+		// net messages mutate team/player/global tables BETWEEN sim frames
+		// (share/resign transfers, NETMSG_PLAYERINFO ping/cpu at net rate),
+		// invisibly to the frameNum/aliveCount due-check. Pre-ring these
+		// re-extracted+swapped unconditionally; the value-identical ring form
+		// is an in-place refresh of the held epoch's channels (single-threaded
+		// under the park; goes away at the PR-44a producer flip, where every
+		// epoch is fully extracted at the sim frame edge).
+		ExtractTeams(teamBuffers[heldSlot]);
+		ExtractPlayers(playerBuffers[heldSlot]);
+		ExtractGlobals(globBuffers[heldSlot]);
 		return;
+	}
 
 	mutatedOutsideFrame = false;
 
 	const spring_time t0 = spring_gettime();
 
-	Extract(*back);
-	ExtractProjectiles(*projBack);
-	ExtractFeatures(*featBack);
-	std::swap(front, back);
-	std::swap(projFront, projBack);
-	std::swap(featFront, featBack);
-	generation += 1;
+	// producer half (PR 43): extract ALL channels into a free ring slot, then
+	// publish it as the newest-complete epoch. The consumer acquires it via
+	// AcquireNewestEpoch() (the barrier calls it right after this returns).
+	const int target = PickFreeSlot();
+
+	Extract(buffers[target]);
+	ExtractProjectiles(projBuffers[target]);
+	ExtractFeatures(featBuffers[target]);
+	ExtractTeams(teamBuffers[target]);
+	ExtractPlayers(playerBuffers[target]);
+	ExtractGlobals(globBuffers[target]);
+
+	EpochSlotMeta& meta = slotMeta[target];
+	meta.epochId = ++epochCounter;
+	// frame span: everything after the previous epoch's last frame; a forced
+	// same-frame republish (net mutation between frames) yields first > last
+	meta.firstSimFrame = slotMeta[newestSlot].lastSimFrame + 1;
+	meta.lastSimFrame = buffers[target].simFrame;
+	newestSlot = target;
 
 	const float dt = (spring_gettime() - t0).toMilliSecsf();
 	sumExtractMs += dt;
 	maxExtractMs = std::max(maxExtractMs, dt);
 	numExtractions += 1;
-	peakAliveCount = std::max(peakAliveCount, front->aliveCount);
+	peakAliveCount = std::max(peakAliveCount, buffers[target].aliveCount);
+}
+
+int SimSnapshot::PickFreeSlot() const
+{
+	for (int s = 0; s < EPOCH_RING_SLOTS; ++s) {
+		const int cand = (newestSlot + 1 + s) % EPOCH_RING_SLOTS;
+
+		if (cand == newestSlot || cand == heldSlot)
+			continue;
+		if (slotMeta[cand].refCount.load(std::memory_order_relaxed) != 0)
+			continue;
+
+		return cand;
+	}
+
+	// cannot happen under the 43 lockstep (<= 1 held + 1 newest of 3); if a
+	// future consumer leaks a reference, republishing in place over the newest
+	// slot is the safe degradation (the consumer is on this thread)
+	assert(false);
+	return newestSlot;
+}
+
+uint64_t SimSnapshot::AcquireNewestEpoch()
+{
+	if (holdingRef && newestSlot == heldSlot)
+		return 0;
+
+	slotMeta[newestSlot].refCount.fetch_add(1, std::memory_order_acq_rel);
+
+	const int prev = heldSlot;
+	const bool hadRef = holdingRef;
+
+	heldSlot = newestSlot;
+	holdingRef = true;
+
+	if (!hadRef || prev == heldSlot)
+		return 0;
+
+	if (slotMeta[prev].refCount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+		// the released slot retired: report its epoch so the caller can run
+		// the retirement hooks (DeferredObjectDeleter::ReleaseRetired)
+		return slotMeta[prev].epochId;
+	}
+
+	return 0;
+}
+
+void SimSnapshot::SealEpochChannelVersions(uint64_t cmdQueueCacheEpoch, uint64_t pieceCacheEpoch, uint32_t mirrorDrainSerial)
+{
+	EpochSlotMeta& meta = slotMeta[heldSlot];
+	meta.cmdQueueCacheEpoch = cmdQueueCacheEpoch;
+	meta.pieceCacheEpoch = pieceCacheEpoch;
+	meta.mirrorDrainSerial = mirrorDrainSerial;
+}
+
+namespace {
+	// approximate resident bytes of one LuaRulesParams::Params map copy
+	// (string keys + variant values; container overhead ignored)
+	size_t RulesParamsBytes(const LuaRulesParams::Params& params)
+	{
+		size_t bytes = 0;
+		for (const auto& [key, param] : params) {
+			bytes += key.size() + sizeof(param);
+			if (const std::string* s = std::get_if<std::string>(&param.value))
+				bytes += s->size();
+		}
+		return bytes;
+	}
+}
+
+void SimSnapshot::LogEpochStats() const
+{
+	// ring occupancy + spans (the /epochstats telemetry, PR 43 §2.8)
+	for (int s = 0; s < EPOCH_RING_SLOTS; ++s) {
+		const EpochSlotMeta& m = slotMeta[s];
+		LOG("[EpochStats] slot=%d epoch=%llu span=[%d,%d] ref=%d%s%s cmdCacheEpoch=%llu pieceCacheEpoch=%llu mirrorSerial=%u",
+			s, (unsigned long long)m.epochId, m.firstSimFrame, m.lastSimFrame,
+			m.refCount.load(std::memory_order_relaxed),
+			(s == heldSlot) ? " HELD" : "", (s == newestSlot) ? " NEWEST" : "",
+			(unsigned long long)m.cmdQueueCacheEpoch, (unsigned long long)m.pieceCacheEpoch,
+			m.mirrorDrainSerial);
+	}
+
+	// per-channel payload bytes of the held epoch (§7.1 standing-TODO numbers;
+	// flat-array sizes are exact, map/string channels are entry-walk estimates)
+	const UnitRows& u = buffers[heldSlot];
+	const ProjectileRows& p = projBuffers[heldSlot];
+	const FeatureRows& f = featBuffers[heldSlot];
+	const TeamRows& t = teamBuffers[heldSlot];
+
+	const size_t maxUnits = u.MaxUnits();
+	const size_t unitFlatBytes =
+		maxUnits * (sizeof(uint8_t) * 14 + sizeof(int16_t) * 2 + sizeof(int32_t) * 17 +
+		            sizeof(float) * 20 + sizeof(float3) * 10 + sizeof(float4) +
+		            sizeof(SResourcePack) * 6 + sizeof(CollisionVolume) + sizeof(MoveTypeBlock)) +
+		u.losStatusAll.size() + u.posErrorBits.size() + u.inRadarAll.size() +
+		u.unitInLosAll.size() + u.unitInAirLosAll.size() + u.unitInJammerAll.size();
+
+	const size_t weaponFlatBytes = u.wAngleGood.size() * (sizeof(uint8_t) * 6 + sizeof(int32_t) * 13 + sizeof(float) * 10 + sizeof(float3) * 5 + sizeof(UnitRows::DamagesSnap));
+
+	size_t unitRulesBytes = 0;
+	size_t validUnits = 0;
+	for (size_t id = 0; id < maxUnits; ++id) {
+		if (u.valid[id] == 0)
+			continue;
+		validUnits += 1;
+		unitRulesBytes += RulesParamsBytes(u.unitRulesParams[id]);
+	}
+
+	size_t featRulesBytes = 0;
+	size_t validFeats = 0;
+	for (size_t id = 0; id < f.MaxSlots(); ++id) {
+		if (f.valid[id] == 0)
+			continue;
+		validFeats += 1;
+		featRulesBytes += RulesParamsBytes(f.featureRulesParams[id]);
+	}
+
+	const size_t projFlatBytes = p.MaxSlots() *
+		(sizeof(uint8_t) * 5 + sizeof(int32_t) * 8 + sizeof(float) * 4 +
+		 sizeof(float3) * 4 + sizeof(float4) + sizeof(UnitRows::DamagesSnap)) +
+		p.inLosAll.size() + p.visInLosAll.size();
+
+	const size_t featFlatBytes = f.MaxSlots() *
+		(sizeof(uint8_t) * 5 + sizeof(int16_t) * 2 + sizeof(int32_t) * 5 +
+		 sizeof(float) * 8 + sizeof(float3) * 7 + sizeof(float4) +
+		 sizeof(SResourcePack) * 2 + sizeof(CollisionVolume)) + f.inLosAll.size();
+
+	size_t teamRulesBytes = 0;
+	size_t teamStatsBytes = 0;
+	for (int i = 0; i < t.activeTeams; ++i) {
+		teamRulesBytes += RulesParamsBytes(t.teamRulesParams[i]);
+		teamStatsBytes += t.statHistory[i].size() * sizeof(TeamStatistics);
+	}
+
+	LOG("[EpochStats] epoch=%llu simFrame=%d units=%d/%d feats=%d/%d projSlots=%d",
+		(unsigned long long)epochCounter, u.simFrame,
+		int(validUnits), int(maxUnits), int(validFeats), int(f.MaxSlots()), int(p.MaxSlots()));
+	LOG("[EpochStats] channel bytes (held epoch, x%d slots resident): "
+	    "unitFlat=%.1fKB weaponFlat=%.1fKB unitRules=%.1fKB "
+	    "projFlat=%.1fKB featFlat=%.1fKB featRules=%.1fKB "
+	    "teamRules=%.1fKB teamStatsHist=%.1fKB",
+		EPOCH_RING_SLOTS,
+		unitFlatBytes / 1024.0f, weaponFlatBytes / 1024.0f, unitRulesBytes / 1024.0f,
+		projFlatBytes / 1024.0f, featFlatBytes / 1024.0f, featRulesBytes / 1024.0f,
+		teamRulesBytes / 1024.0f, teamStatsBytes / 1024.0f);
 }
 
 void SimSnapshot::HashCompletedFrame(int frameNum)
@@ -359,8 +517,9 @@ void SimSnapshot::HashCompletedFrame(int frameNum)
 
 	// Extract a private copy of the same rows the published buffer holds, but
 	// from the just-completed sim frame's live state (Extract stamps
-	// gs->frameNum, which equals frameNum here). front/back and generation are
-	// untouched, so nothing draw-side observes this. Player rows are not
+	// gs->frameNum, which equals frameNum here). The epoch ring slots and the
+	// epoch counter are untouched, so nothing draw-side observes this. Player
+	// rows are not
 	// hashed at all (net-layer state, see the PlayerRows comment), so no
 	// player scratch exists.
 	Extract(hashScratch);
@@ -373,7 +532,7 @@ void SimSnapshot::HashCompletedFrame(int frameNum)
 void SimSnapshot::Clear()
 {
 	if (numExtractions > 0) {
-		const auto& r = *front;
+		const auto& r = buffers[heldSlot];
 		const size_t bufBytes =
 			r.radarErrorSizes.size() * sizeof(float) + r.allied.size() +
 			r.valid.size() + r.team.size() + r.allyTeam.size() +
@@ -413,7 +572,8 @@ void SimSnapshot::Clear()
 			r.unitInLosAll.size() + r.unitInAirLosAll.size() + r.unitInJammerAll.size();
 		LOG("[SimSnapshot] extractions=%u avgMs=%.4f maxMs=%.4f peakUnits=%d memKB=%.1f projSlots=%d featSlots=%d",
 			numExtractions, sumExtractMs / numExtractions, maxExtractMs, peakAliveCount,
-			(2.0f * bufBytes) / 1024.0f, int(projFront->MaxSlots()), int(featFront->MaxSlots()));
+			(float(EPOCH_RING_SLOTS) * bufBytes) / 1024.0f,
+			int(projBuffers[heldSlot].MaxSlots()), int(featBuffers[heldSlot].MaxSlots()));
 	}
 
 	for (UnitRows& rows : buffers) {
@@ -434,7 +594,22 @@ void SimSnapshot::Clear()
 	mapStartPos.clear();
 	mapStartPosValid.clear();
 
-	generation = 0;
+	// PR 43: reset the epoch ring with everything else (the ClearCaches-class
+	// teardown the epoch contract names; epochId stays monotonic per game)
+	for (EpochSlotMeta& meta : slotMeta) {
+		meta.epochId = 0;
+		meta.firstSimFrame = -1;
+		meta.lastSimFrame = -1;
+		meta.refCount.store(0, std::memory_order_relaxed);
+		meta.cmdQueueCacheEpoch = 0;
+		meta.pieceCacheEpoch = 0;
+		meta.mirrorDrainSerial = 0;
+	}
+	heldSlot = 0;
+	newestSlot = 0;
+	holdingRef = false;
+	epochCounter = 0;
+
 	mutatedOutsideFrame = false;
 	sumExtractMs = 0.0f;
 	maxExtractMs = 0.0f;

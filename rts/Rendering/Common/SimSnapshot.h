@@ -3,6 +3,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cassert>
 #include <cstdint>
 #include <string>
@@ -139,14 +140,36 @@
  *    staleness, the same pick-latency semantics decided for boundary picking
  *    (research doc section D).
  *
- * Generation / swap semantics:
- *  - Double-buffered: extraction fills the back buffer, then publishes it by
- *    swapping the front/back pointers and bumping Generation(). Read() is
- *    valid until the next Update(); today everything is on one thread, and
- *    under the future split the swap happens inside the extract barrier while
- *    draw-side readers hold the front buffer for the whole draw frame.
- *  - Each buffer is stamped with the simFrame it was extracted at and the
- *    viewAllyTeam its losStatus row belongs to.
+ * Epoch / publish semantics (PR 43, the epoch ring -- supersedes the PR-15
+ * double buffer):
+ *  - N=3 ring slots, each holding ALL row namespaces (unit/projectile/feature/
+ *    team/player/global) plus an EpochSlotMeta {u64 epochId (monotonic per
+ *    game, reset only at teardown), frame span, refcount}. Extraction fills a
+ *    FREE slot (refcount 0, neither newest nor held); publish makes it the
+ *    newest-complete slot and bumps the epoch counter. The consumer (CGame's
+ *    SimDrawBarrier, right after Update()) ACQUIRES the newest slot (ref++)
+ *    and RELEASES the previously held one (ref--); a slot whose refcount hits
+ *    zero is RETIRED (AcquireNewestEpoch returns its epochId so the caller can
+ *    run retirement hooks, e.g. DeferredObjectDeleter::ReleaseRetired). Under
+ *    PR 43's lockstep (produce at the barrier under the park, consume
+ *    immediately) this is a pointer rotation with exactly the values the old
+ *    double buffer held; N-buffering is exercised but not yet load-bearing
+ *    (that arrives with the PR-44 producer flip).
+ *  - EpochId() replaces the old uint32 Generation() as the key of every
+ *    draw-side derived cache (pick grid, team-unit index, quad-membership
+ *    mirrors, cmd-queue/piece caches). It is u64 and monotonic per game, so
+ *    cross-game aliasing cannot occur; teardown (Clear) resets it with
+ *    everything else.
+ *  - LOCKSTEP EXCEPTION (enumerated; dissolves at PR 44a): when the unit-row
+ *    due-check does not fire, the net-mutable channels (team/player/global
+ *    rows) are re-extracted IN PLACE into the currently held slot -- exactly
+ *    the pre-ring behavior, where they re-extracted+swapped every boundary
+ *    independent of the unit rows. Under the producer flip every epoch is
+ *    fully extracted at the sim frame edge and this in-place refresh goes away.
+ *  - Each slot's rows are stamped with the simFrame they were extracted at;
+ *    the slot meta additionally records the epoch's frame span
+ *    [firstSimFrame, lastSimFrame] (first > last denotes a same-frame
+ *    republish forced by a between-frames net mutation).
  *
  * Adding a field (every later consumer conversion follows this recipe):
  *  1. add the parallel array to UnitRows and size it in Resize();
@@ -1110,13 +1133,37 @@ public:
 	/// unchanged. No-op (single relaxed bool load) unless armed.
 	void HashCompletedFrame(int frameNum);
 
-	const UnitRows& Read() const { return *front; }
-	const ProjectileRows& ReadProjectiles() const { return *projFront; }
-	const FeatureRows& ReadFeatures() const { return *featFront; }
-	const TeamRows& ReadTeams() const { return *teamFront; }
-	const PlayerRows& ReadPlayers() const { return *playerFront; }
-	const GlobalRows& ReadGlobals() const { return *globFront; }
-	uint32_t Generation() const { return generation; }
+	const UnitRows& Read() const { return buffers[heldSlot]; }
+	const ProjectileRows& ReadProjectiles() const { return projBuffers[heldSlot]; }
+	const FeatureRows& ReadFeatures() const { return featBuffers[heldSlot]; }
+	const TeamRows& ReadTeams() const { return teamBuffers[heldSlot]; }
+	const PlayerRows& ReadPlayers() const { return playerBuffers[heldSlot]; }
+	const GlobalRows& ReadGlobals() const { return globBuffers[heldSlot]; }
+
+	/// the newest PUBLISHED epoch id (0 = nothing published yet, the pregame
+	/// state every `EpochId() == 0` fallback keys on). Monotonic u64 per game;
+	/// THE cache key for every draw-side derived structure (PR 43 §2.5).
+	uint64_t EpochId() const { return epochCounter; }
+
+	// ---- PR 43: the epoch ring (see the header block) ----
+
+	/// consumer half: acquire the newest complete epoch (ref++), release the
+	/// previously held one (ref--). Called once per boundary from
+	/// CGame::SimDrawBarrier, right after Update(). Returns the epochId of a
+	/// slot RETIRED by the release (refcount hit 0), or 0 when nothing retired
+	/// -- the caller runs the retirement hooks (DeferredObjectDeleter release).
+	uint64_t AcquireNewestEpoch();
+
+	/// record the per-slot channel-version scalars of the held epoch (the old
+	/// singleton cmdQueueCacheGeneration / pieceCacheGeneration / mirror
+	/// drained-version scalars become per-slot state, PR 43 §2.1); called by
+	/// the barrier after the cache refreshes. Telemetry/bookkeeping only under
+	/// the 43 lockstep (the physical caches track the newest epoch).
+	void SealEpochChannelVersions(uint64_t cmdQueueCacheEpoch, uint64_t pieceCacheEpoch, uint32_t mirrorDrainSerial);
+
+	/// /epochstats telemetry: log ring occupancy + per-channel payload bytes
+	/// of the held epoch (the §7.1 standing-TODO measurement hook)
+	void LogEpochStats() const;
 
 	// PR 36: GetMapStartPositions -- the map-defined start positions are
 	// immutable map data, so they are parsed once (LoadStartPositionsFromMap is
@@ -1141,30 +1188,51 @@ private:
 	// PR 36: fill mapStartPos/mapStartPosValid once (LoadStartPositionsFromMap)
 	void CacheMapStartPositions();
 	static void Resize(UnitRows& rows, size_t maxUnits, int numAllyTeams);
+public:
+	// PR 43: the epoch ring depth. N=3 so the PR-44 producer can fill a slot
+	// while the consumer holds one and a third retires (start value per the
+	// plan; under 43's lockstep only two are ever in flight).
+	static constexpr int EPOCH_RING_SLOTS = 3;
+
+	// per-slot bookkeeping (see the header block). refCount is atomic for the
+	// PR-44 cross-thread acquire/release; under 43's lockstep every access is
+	// main-thread inside the park.
+	struct EpochSlotMeta {
+		uint64_t epochId = 0;          // 0 = never published
+		int32_t firstSimFrame = -1;    // frame span (first > last: same-frame republish)
+		int32_t lastSimFrame = -1;
+		std::atomic<int32_t> refCount = {0};
+		// per-slot channel-version scalars (§2.1; sealed by the barrier)
+		uint64_t cmdQueueCacheEpoch = 0;
+		uint64_t pieceCacheEpoch = 0;
+		uint32_t mirrorDrainSerial = 0;
+	};
+
+	const EpochSlotMeta& SlotMeta(int slot) const { return slotMeta[slot]; }
+	int HeldSlot() const { return heldSlot; }
+	int NewestSlot() const { return newestSlot; }
 private:
-	UnitRows buffers[2];
-	UnitRows* front = &buffers[0];
-	UnitRows* back = &buffers[1];
+	// pick a slot to extract into: refcount 0, neither the newest-complete nor
+	// the held slot (both still readable). Guaranteed to exist at N=3 under
+	// lockstep; falls back to the newest slot (in-place republish) defensively.
+	int PickFreeSlot() const;
 
-	ProjectileRows projBuffers[2];
-	ProjectileRows* projFront = &projBuffers[0];
-	ProjectileRows* projBack = &projBuffers[1];
+private:
+	UnitRows buffers[EPOCH_RING_SLOTS];
+	ProjectileRows projBuffers[EPOCH_RING_SLOTS];
+	FeatureRows featBuffers[EPOCH_RING_SLOTS];
+	TeamRows teamBuffers[EPOCH_RING_SLOTS];
+	PlayerRows playerBuffers[EPOCH_RING_SLOTS];
+	GlobalRows globBuffers[EPOCH_RING_SLOTS];
+	EpochSlotMeta slotMeta[EPOCH_RING_SLOTS];
 
-	FeatureRows featBuffers[2];
-	FeatureRows* featFront = &featBuffers[0];
-	FeatureRows* featBack = &featBuffers[1];
-
-	TeamRows teamBuffers[2];
-	TeamRows* teamFront = &teamBuffers[0];
-	TeamRows* teamBack = &teamBuffers[1];
-
-	PlayerRows playerBuffers[2];
-	PlayerRows* playerFront = &playerBuffers[0];
-	PlayerRows* playerBack = &playerBuffers[1];
-
-	GlobalRows globBuffers[2];
-	GlobalRows* globFront = &globBuffers[0];
-	GlobalRows* globBack = &globBuffers[1];
+	// consumer-held slot (Read() views) and newest-complete slot; equal under
+	// 43's lockstep once the first epoch is acquired. Slot 0's default rows
+	// serve the pre-publish state (simFrame -1, EpochId() 0).
+	int heldSlot = 0;
+	int newestSlot = 0;
+	// the consumer holds no reference until its first AcquireNewestEpoch()
+	bool holdingRef = false;
 
 	// PR 16: scratch rows for per-sim-frame hashing; never published, kept only
 	// to avoid reallocating its arrays every armed frame
@@ -1173,7 +1241,8 @@ private:
 	FeatureRows hashFeatScratch;
 	TeamRows hashTeamScratch;
 
-	uint32_t generation = 0;
+	// PR 43: the monotonic epoch counter (see EpochId())
+	uint64_t epochCounter = 0;
 
 	// PR 36: GetMapStartPositions cache (immutable map data, parsed once)
 	std::vector<float3> mapStartPos;

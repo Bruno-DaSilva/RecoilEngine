@@ -225,10 +225,13 @@ void DrawMapMirrors::DrainAtBarrier()
 	}
 
 	ready = true;
+	drainSerial += 1; // PR 43 §2.1 (per-slot channel-version scalar)
 }
 
 void DrawMapMirrors::Clear()
 {
+	drainSerial = 0;
+
 	for (LosMirror& m : los) {
 		m.maps.clear();
 		m.invDiv = 0.0f;

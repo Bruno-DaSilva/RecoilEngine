@@ -82,10 +82,28 @@ public:
 	// THE ack point: called once, right after renderEventQueue.Drain() in
 	// CGame::Draw. Destructs + poisons all parked shells (their destroy
 	// records were just dispatched). Also releases slots a short-circuited
-	// previous Draw left poisoned.
+	// previous Draw left poisoned. FLAG-OFF path (byte-identical to PR 13);
+	// the split path uses AckDrainedDestroysEpoch below.
 	void AckDrainedDestroys();
 
-	// returns poisoned slots to their pools; end of CGame::Draw
+	// PR 43 (epoch rekey), split-only ack: destruct + poison all parked
+	// shells, TAGGING them with the epoch whose record dispatch just
+	// completed. Unlike AckDrainedDestroys it does NOT auto-release earlier
+	// poisoned slots -- release is keyed to epoch retirement (ReleaseRetired),
+	// replacing both the end-of-Draw ReleaseAcked and the "next ack releases
+	// leftovers" special case. The ack/release pair thus brackets one EPOCH's
+	// lifetime instead of one Draw; under 43's lockstep consumption these
+	// coincide (the epoch retires at the next barrier's acquire).
+	void AckDrainedDestroysEpoch(uint64_t epochId);
+
+	// PR 43: epoch-retirement release -- return every poisoned slot whose ack
+	// epoch is <= retiredEpochId to its pool. Called from the barrier when
+	// AcquireNewestEpoch retires a slot.
+	void ReleaseRetired(uint64_t retiredEpochId);
+
+	// returns ALL poisoned slots to their pools; flag-off end of CGame::Draw,
+	// the valve service (which must free pages immediately -- the documented
+	// lockstep-degenerate "epoch retires in place"), and teardown
 	void ReleaseAcked();
 
 	// teardown/reload only: destruct and free everything immediately
@@ -106,6 +124,9 @@ private:
 	struct Entry {
 		ObjKind kind;
 		void* obj;
+		// PR 43: the epoch whose record dispatch acked this shell (0 while
+		// pending / under the flag-off ack, which releases per Draw)
+		uint64_t ackEpoch = 0;
 	};
 
 	void Park(ObjKind kind, void* obj);

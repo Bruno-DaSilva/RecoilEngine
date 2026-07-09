@@ -76,7 +76,7 @@ private:
 	int numX = 0;
 	int numZ = 0;
 	int cellWorld = 0;         // elmos per cell (BASE_QUAD_SIZE)
-	uint32_t builtGeneration = 0;
+	uint64_t builtGeneration = 0; // PR 43 §2.5: EpochId key (u64, monotonic per game)
 	bool built = false;
 
 	// per-cell id lists, indexed [z * numX + x]; capacity is reused across

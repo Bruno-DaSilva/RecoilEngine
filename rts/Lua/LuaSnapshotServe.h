@@ -241,6 +241,12 @@ namespace LuaSnapshotServe {
 	/// single-threaded): walks unitHandler and reads live queues.
 	void RefreshCommandQueues();
 
+	/// PR 43 §2.1: the EpochId the cmd-queue / piece caches currently describe
+	/// (0 = never refreshed). Read by the barrier to seal the held ring slot's
+	/// channel-version scalars (SimSnapshot::SealEpochChannelVersions).
+	uint64_t CmdQueueCacheEpoch();
+	uint64_t PieceCacheEpoch();
+
 	// sim|draw PR 30 mirror-verification hook (SnapshotDiffGate::CheckCmdQueueRows):
 	// bit-compare the cached command-queue/cmd-desc/worker/factory slot for a unit
 	// against live sim state at the armed boundary. Test-only (armed runs). Lives
