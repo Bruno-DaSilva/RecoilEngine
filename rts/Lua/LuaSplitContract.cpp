@@ -3,6 +3,7 @@
 #include "LuaSplitContract.h"
 
 #include <algorithm>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -52,6 +53,12 @@ namespace {
 		std::function<void()> op;
 	};
 	std::vector<QueuedOp> queuedOps;
+	// PR 44a (producer flip): the ctrl-poke queue became a real cross-thread
+	// channel -- draw-context Lua enqueues while the SIM thread drains at its
+	// frame edge (pre-extraction, §1.8). Uncontended in practice (a handful of
+	// pokes per frame); flag-off both sides run on the main thread and the
+	// lock is trivially uncontended.
+	std::mutex queuedOpsMtx;
 
 	/**
 	 * The strict-mode sanctioned-live list -- THE explicit "what 27b may
@@ -376,7 +383,10 @@ bool QueueBoundaryApply(lua_State* L, const char* caller, std::function<void()>&
 
 	TripStat& stat = tripStats[caller];
 	stat.queuedPokes++;
-	queuedOps.push_back({caller, std::move(op)});
+	{
+		std::lock_guard<std::mutex> lock(queuedOpsMtx);
+		queuedOps.push_back({caller, std::move(op)});
+	}
 	return true;
 }
 
@@ -394,13 +404,22 @@ void CountSanctionedPoke(lua_State* L, const char* caller)
 
 size_t DrainBoundaryApplies()
 {
-	if (queuedOps.empty())
-		return 0;
-
 	// ops may not enqueue further ops (they are plain sim-state writes); a
-	// swap keeps the invariant checkable and the vector's capacity reusable
+	// swap keeps the invariant checkable and the vector's capacity reusable.
+	// PR 44a: swap under the lock (the drain now runs on the SIM thread at
+	// its frame edge while draw-context Lua may still be enqueueing); the ops
+	// themselves apply outside the lock -- they are sim-state writes and the
+	// drainer's thread owns sim state at its call sites (sim frame edge, or
+	// the parked-sim barrier pre-flip).
 	static std::vector<QueuedOp> draining;
-	std::swap(draining, queuedOps);
+	{
+		std::lock_guard<std::mutex> lock(queuedOpsMtx);
+
+		if (queuedOps.empty())
+			return 0;
+
+		std::swap(draining, queuedOps);
+	}
 
 	const size_t numApplied = draining.size();
 
@@ -409,7 +428,11 @@ size_t DrainBoundaryApplies()
 	}
 
 	draining.clear();
-	std::swap(draining, queuedOps); // hand the capacity back
+	{
+		std::lock_guard<std::mutex> lock(queuedOpsMtx);
+		if (queuedOps.empty())
+			std::swap(draining, queuedOps); // hand the capacity back
+	}
 
 	return numApplied;
 }
@@ -449,7 +472,10 @@ void Clear()
 		DumpInventory("game end");
 
 	tripStats.clear();
-	queuedOps.clear();
+	{
+		std::lock_guard<std::mutex> lock(queuedOpsMtx);
+		queuedOps.clear();
+	}
 }
 
 

@@ -45,7 +45,19 @@ const CUnit* ShellFallbackUnit(int unitID)
 	if (!g_boundaryShellWindow)
 		return nullptr;
 
-	return renderEventQueue.ResolveBoundaryDeadUnit(unitID);
+	if (const CUnit* shell = renderEventQueue.ResolveBoundaryDeadUnit(unitID))
+		return shell;
+
+	// PR 44a: under the producer flip the dispatch window replays an EPOCH's
+	// records, but the live sim may have run past the epoch's edge before the
+	// park -- an id referenced by this epoch's records can have died AFTER the
+	// epoch was sealed (its destroy record is pending in the NEXT epoch, so
+	// the dispatch-time dead map above does not know it yet). Its shell is
+	// parked and un-acked (the ack is per-sealed-batch), so serve it from the
+	// pending-destroy ledger. Lockstep (pre-flip / flag-off-with-contract)
+	// drains everything to the park point, leaving this ledger empty inside
+	// the window -- no behavior change there.
+	return renderEventQueue.FindPendingDestroyUnit(unitID);
 }
 
 const CFeature* ShellFallbackFeature(int featureID)
@@ -53,7 +65,11 @@ const CFeature* ShellFallbackFeature(int featureID)
 	if (!g_boundaryShellWindow)
 		return nullptr;
 
-	return renderEventQueue.ResolveBoundaryDeadFeature(featureID);
+	if (const CFeature* shell = renderEventQueue.ResolveBoundaryDeadFeature(featureID))
+		return shell;
+
+	// PR 44a: see ShellFallbackUnit
+	return renderEventQueue.FindPendingDestroyFeature(featureID);
 }
 
 bool InSimPhase() { return (tlSimPhaseDepth > 0); }

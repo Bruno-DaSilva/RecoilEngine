@@ -33,7 +33,7 @@ void SnapshotPickGrid::Clear()
 
 void SnapshotPickGrid::EnsureCurrent()
 {
-	const uint64_t gen = simSnapshot.EpochId(); // PR 43 §2.5: EpochId key
+	const uint64_t gen = simSnapshot.HeldEpochId(); // PR 43 §2.5 / PR 44a: held-epoch key (EpochId advances mid-frame under the flip)
 	if (built && gen == builtGeneration)
 		return;
 

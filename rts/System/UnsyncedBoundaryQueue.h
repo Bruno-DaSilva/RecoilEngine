@@ -70,6 +70,15 @@ namespace UnsyncedBoundaryQueue {
 	/// caller marks the snapshot mutated-outside-frame
 	size_t Drain();
 
+	// ---- PR 44a (producer flip): per-epoch closure batches ----
+	/// producer (sim thread, frame edge): seal the pending closures into the
+	/// epoch about to publish
+	void SealEpochBatch();
+	/// consumer (barrier, sim parked): replay exactly the sealed batch in
+	/// fire order, keeping the post-seal tail for the next epoch; same
+	/// return-count contract as Drain()
+	size_t DrainSealedBatch();
+
 	bool Empty();
 
 	/// teardown: drop anything queued (game is going away; the callin

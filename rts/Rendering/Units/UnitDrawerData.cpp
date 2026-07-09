@@ -221,8 +221,15 @@ void CUnitDrawerData::Update()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 
-	// defined extraction point: snapshot piece/object transforms once per new sim frame
-	ExtractTransforms();
+	// defined extraction point: snapshot piece/object transforms once per new
+	// sim frame. PR 44a: under the running flip the PRODUCER extracts at the
+	// sim frame edge (ExtractTransformsAtSimEdge); this consume-side call
+	// degrades to the targeted catch-up for objects added by this consume's
+	// record dispatch (sim parked here, so the live reads stay legal).
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning())
+		ExtractPendingNewObjectTransforms();
+	else
+		ExtractTransforms();
 
 	iconSizeBase = std::max(1.0f, std::max(globalRendering->viewSizeX, globalRendering->viewSizeY) * iconSizeMult * iconScale);
 

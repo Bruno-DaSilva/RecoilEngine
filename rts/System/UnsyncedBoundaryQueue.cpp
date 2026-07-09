@@ -27,6 +27,10 @@ namespace {
 	// drained batch kept separate so a closure firing new deferrable work
 	// cannot invalidate the iteration
 	std::vector<Entry> draining;
+	// PR 44a: entries [0, sealedEntries) belong to the newest published epoch
+	// (sealed by the producer at its frame edge, dispatched by the consumer
+	// under the park; park-fenced like RenderEventQueue::sealedRecords)
+	size_t sealedEntries = 0;
 }
 
 bool ShouldDefer(const CEventClient* ec)
@@ -66,6 +70,9 @@ size_t Drain()
 	}
 
 	draining.clear();
+	// PR 44a: a full drain (lockstep barrier / valve service) consumed any
+	// sealed-but-undispatched epoch batch along with the tail
+	sealedEntries = 0;
 
 	// nonzero: some handler may have poked sim state directly (the barrier's
 	// live exception applies class-C ctrl writes immediately, and the drain
@@ -75,12 +82,52 @@ size_t Drain()
 	return numDispatched;
 }
 
+void SealEpochBatch() { sealedEntries = entries.size(); }
+
+size_t DrainSealedBatch()
+{
+	// PR 44a consumer half: replay exactly the producer-sealed batch in fire
+	// order, keep the post-seal tail for the next epoch. Unlike Drain() this
+	// does NOT loop-to-empty: work a dispatched closure defers anew belongs
+	// to the next epoch by construction (the sim phase never ends under the
+	// flip, so re-deferral is the steady state, not a corner).
+	assert(!SimDrawSplit::InSimPhase());
+
+	if (sealedEntries == 0)
+		return 0;
+
+	assert(sealedEntries <= entries.size());
+
+	size_t numDispatched = 0;
+
+	draining.clear();
+	draining.insert(draining.end(),
+		std::make_move_iterator(entries.begin()),
+		std::make_move_iterator(entries.begin() + sealedEntries));
+	entries.erase(entries.begin(), entries.begin() + sealedEntries);
+	sealedEntries = 0;
+
+	for (auto& e: draining) {
+		if (e.tag != nullptr && !eventHandler.HasClient(const_cast<CEventClient*>(e.tag)))
+			continue;
+
+		e.fn();
+		numDispatched += 1;
+	}
+
+	draining.clear();
+
+	// see Drain() -- same mutated-outside-frame contract for the caller
+	return numDispatched;
+}
+
 bool Empty() { return entries.empty(); }
 
 void Clear()
 {
 	entries.clear();
 	draining.clear();
+	sealedEntries = 0;
 }
 
 }

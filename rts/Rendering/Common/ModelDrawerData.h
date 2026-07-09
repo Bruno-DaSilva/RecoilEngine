@@ -22,6 +22,7 @@
 #include "Sim/Objects/WorldObject.h" // DrawFlags
 #include "Rendering/Env/IWater.h"
 #include "Map/ReadMap.h"
+#include "System/SimDrawSplit.h" // PR 44a: flip predicate (AddObject catch-up queue)
 #include "Game/Camera.h"
 #include "Game/GlobalUnsynced.h"
 #include "Game/CameraHandler.h"
@@ -76,8 +77,19 @@ private:
 protected:
 	void DelObject(const T* co, bool del);
 	void UpdateObject(const T* co, bool init);
+public:
+	// PR 44a: the flip producer's entry (sim thread, frame edge, forced-serial)
+	void ExtractTransformsAtSimEdge() { ExtractTransforms(false); }
 protected:
-	void ExtractTransforms();
+	// PR 44a: allowMT=false forces the serial walk -- the flip producer runs
+	// this on the SIM thread at its frame edge and must not fork-join the
+	// shared thread pool concurrently with main-thread draw work
+	void ExtractTransforms(bool allowMT = true);
+	// PR 44a consumer catch-up: extract ONLY the objects added by this
+	// consume's record dispatch (the producer covers objects registered as of
+	// the previous consume; without this a new object's first rendered frame
+	// would have a zero/stale pose). Runs under the park. No-op when empty.
+	void ExtractPendingNewObjectTransforms();
 	void UpdateCommon(const T* o);
 	// authors the drawer-owned draw-flag storage (sim/draw §A, PR 4); the
 	// object itself is read-only (draw code cannot mutate sim state, PR 10)
@@ -217,6 +229,9 @@ protected:
 
 	// last sim frame ExtractTransforms() ran for; extraction is due once per new sim frame
 	int32_t transformsExtractedFrame = std::numeric_limits<int32_t>::lowest();
+	// PR 44a: ids added by the current consume's record dispatch (flip only;
+	// see ExtractPendingNewObjectTransforms)
+	std::vector<int> pendingNewObjectTransformIds;
 	// set on AddObject: new allocations need one extraction outside the sim-frame
 	// cadence (e.g. objects spawned before the first sim frame advances)
 	bool transformsExtractionPending = true;
@@ -275,6 +290,12 @@ inline void CModelDrawerDataBase<T>::AddObject(const T* o, bool add)
 	const uint32_t numMatrices = ((o->model ? o->model->numPieces : 0) + 1u) * 2;
 	scTransMemAllocMap.emplace(o->id, ScopedTransformMemAlloc(numMatrices));
 	transformsExtractionPending = true; //make sure the new allocation is filled at least once before the next sim frame
+
+	// PR 44a: under the running flip the record dispatch (sim parked) adds
+	// objects the producer's last extraction predates -- queue them for the
+	// consumer's targeted catch-up (ExtractPendingNewObjectTransforms)
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning())
+		pendingNewObjectTransformIds.push_back(o->id);
 
 	modelUniformsStorage.AddObject(o);
 }
@@ -336,7 +357,22 @@ inline void CModelDrawerDataBase<T>::UpdateObject(const T* co, bool init)
  *   pieces store Transform::Zero() in both slots.
  */
 template<typename T>
-inline void CModelDrawerDataBase<T>::ExtractTransforms()
+inline void CModelDrawerDataBase<T>::ExtractPendingNewObjectTransforms()
+{
+	for (const int id : pendingNewObjectTransformIds) {
+		// created-and-died in the same batch: DelObject already dropped the
+		// transform allocation, nothing to fill
+		if (scTransMemAllocMap.find(id) == scTransMemAllocMap.end())
+			continue;
+
+		ExtractObjectTransforms(DrawerGetObjectByID<T>(id));
+	}
+
+	pendingNewObjectTransformIds.clear();
+}
+
+template<typename T>
+inline void CModelDrawerDataBase<T>::ExtractTransforms(bool allowMT)
 {
 	if (!transformsExtractionPending && transformsExtractedFrame >= gs->frameNum)
 		return;
@@ -346,7 +382,7 @@ inline void CModelDrawerDataBase<T>::ExtractTransforms()
 
 	SCOPED_TIMER("Update::ExtractTransforms");
 
-	if (mtModelDrawer) {
+	if (mtModelDrawer && allowMT) {
 		for_mt_chunk(0, unsortedObjects.size(), [this](const int k) {
 			ExtractObjectTransforms(DrawerGetObjectByID<T>(unsortedObjects[k]));
 		}, CModelDrawerDataConcept::MT_CHUNK_OR_MIN_CHUNK_SIZE_UPDT);

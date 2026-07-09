@@ -51,12 +51,34 @@ void RenderEventQueue::Flush()
 	if (records.empty())
 		return;
 
+	DispatchRange(records.size());
+
+	// PR 44a: a full flush (valve service / lockstep drain) consumed any
+	// sealed-but-undispatched epoch batch along with the tail; the later
+	// consume of that epoch must not re-dispatch
+	sealedRecords = 0;
+}
+
+void RenderEventQueue::DispatchSealedBatch()
+{
+	// PR 44a consumer half: dispatch exactly the producer-sealed batch, keep
+	// the post-seal tail (it belongs to the next epoch) and the deferral
+	// window (the sim phase never ends under the flip)
+	if (sealedRecords == 0)
+		return;
+
+	assert(sealedRecords <= records.size());
+	DispatchRange(sealedRecords);
+	sealedRecords = 0;
+}
+
+void RenderEventQueue::DispatchRange(const size_t numRecords)
+{
 	assert(!draining);
 	draining = true;
 
 	// index loop by value: dispatched handlers do not fire further queued
 	// events today, but stay safe against appends invalidating iterators
-	const size_t numRecords = records.size();
 	for (size_t i = 0; i < numRecords; ++i) {
 		const Record record = records[i];
 
@@ -136,6 +158,39 @@ const void* RenderEventQueue::PopDestroyShell(uint64_t key)
 	return obj;
 }
 
+
+void RenderEventQueue::CollectPendingDeadShells(
+	std::vector<std::pair<int, const CUnit*>>& outUnits,
+	std::vector<std::pair<int, const CFeature*>>& outFeatures,
+	std::vector<std::pair<int, const CProjectile*>>& outProjectiles) const
+{
+	for (const auto& [key, fifo] : pendingDestroyShells) {
+		assert(!fifo.empty());
+
+		const ObjKind kind = static_cast<ObjKind>(key >> 40);
+		const bool synced = ((key >> 39) & 1) != 0;
+		const int32_t id = static_cast<int32_t>(static_cast<uint32_t>(key & 0xffffffffull));
+
+		// newest generation per id: the FIFO back (fire order interleaves
+		// generations strictly, see the resolution comment in the header)
+		const void* shell = fifo.back();
+
+		switch (kind) {
+			case ObjKind::Unit: {
+				outUnits.emplace_back(id, static_cast<const CUnit*>(shell));
+			} break;
+			case ObjKind::Feature: {
+				outFeatures.emplace_back(id, static_cast<const CFeature*>(shell));
+			} break;
+			case ObjKind::Projectile: {
+				// fd41dbdd92: SYNCED namespace only (ProjectileRows holds only
+				// synced projectiles; an unsynced destroy id must never mark one)
+				if (synced)
+					outProjectiles.emplace_back(id, static_cast<const CProjectile*>(shell));
+			} break;
+		}
+	}
+}
 
 const CUnit* RenderEventQueue::ResolveUnit(int32_t id) const
 {

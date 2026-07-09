@@ -178,6 +178,7 @@ void DeferredObjectDeleter::AckDrainedDestroys()
 	}
 
 	poisoned.swap(pending);
+	sealedPending = 0; // PR 44a: an all-shells ack consumes any sealed batch
 	epoch += 1;
 }
 
@@ -193,6 +194,29 @@ void DeferredObjectDeleter::AckDrainedDestroysEpoch(uint64_t epochId)
 
 	poisoned.insert(poisoned.end(), pending.begin(), pending.end());
 	pending.clear();
+	sealedPending = 0; // PR 44a: an all-shells ack consumes any sealed batch
+	epoch += 1;
+}
+
+void DeferredObjectDeleter::AckSealedDestroysEpoch(uint64_t epochId)
+{
+	// PR 44a: ack ONLY the producer-sealed prefix -- the tail's destroy
+	// records have not dispatched (they ride the next epoch), so those shells
+	// must stay readable
+	if (sealedPending == 0)
+		return;
+
+	assert(sealedPending <= pending.size());
+
+	for (size_t i = 0; i < sealedPending; ++i) {
+		Entry& e = pending[i];
+		DestructAndPoison(e);
+		e.ackEpoch = epochId;
+	}
+
+	poisoned.insert(poisoned.end(), pending.begin(), pending.begin() + sealedPending);
+	pending.erase(pending.begin(), pending.begin() + sealedPending);
+	sealedPending = 0;
 	epoch += 1;
 }
 
@@ -228,6 +252,7 @@ void DeferredObjectDeleter::Clear()
 
 	poisoned.insert(poisoned.end(), pending.begin(), pending.end());
 	pending.clear();
+	sealedPending = 0;
 
 	ReleaseAcked();
 }

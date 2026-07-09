@@ -3,11 +3,13 @@
 #include "DrawMapMirrors.h"
 
 #include <algorithm>
+#include <cassert>
 
 #include "Map/MapDimensions.h"
 #include "Map/MapInfo.h"
 #include "Map/MetalMap.h"                  // PR 38d: metal distribution mirror source
 #include "Map/ReadMap.h"
+#include "Rendering/Common/SimSnapshot.h"  // PR 44a: ring-depth static_assert
 #include "Sim/Features/Feature.h"          // PR 29: blocking cell[0] classification
 #include "Sim/Misc/GlobalConstants.h"
 #include "Sim/Misc/GroundBlockingObjectMap.h" // PR 29: blocking-map source
@@ -20,6 +22,9 @@
 #include "System/Log/ILog.h"
 #include "System/SpringMath.h"
 
+// PR 44a: one mirror payload per epoch-ring slot
+static_assert(DrawMapMirrors::MIRROR_SLOTS == SimSnapshot::EPOCH_RING_SLOTS, "mirror slots must match the epoch ring depth");
+
 DrawMapMirrors drawMapMirrors;
 
 // ---------------------------------------------------------------------------
@@ -31,25 +36,29 @@ void DrawMapMirrors::MarkLosDirty(int type, int ally)
 	if (type < 0 || type >= LOS_MIRROR_TYPE_COUNT)
 		return;
 
-	// before the first drain (or after a resize) the per-slot dirty array may
-	// not yet be sized; request a full re-copy in that case
-	if (ally >= 0 && ally < static_cast<int>(losDirty[type].size()))
-		losDirty[type][ally] = 1;
+	// before the first drain (or after a resize) the per-ally version array
+	// may not yet be sized; request a full re-copy in that case
+	if (ally >= 0 && ally < static_cast<int>(losVersions[type].size()))
+		++losVersions[type][ally];
 	else
-		losAllDirty = true;
+		++losFullVersion;
 }
 
 // ---------------------------------------------------------------------------
-// barrier drain
+// producer drain (PR 44a: per-slot; the flip's sim frame edge, or the
+// lockstep barrier under the park)
 // ---------------------------------------------------------------------------
 
-void DrawMapMirrors::DrainAtBarrier()
+void DrawMapMirrors::DrainAtBarrier(int slot)
 {
 	// pre-game / teardown: the sim map state does not exist yet
 	if (losHandler == nullptr || readMap == nullptr || mapInfo == nullptr)
 		return;
 
-	// --- LOS layers (whole-map dirty flag per type/ally) ---
+	assert(slot >= 0 && slot < MIRROR_SLOTS);
+	Payload& pl = payloads[slot];
+
+	// --- LOS layers (whole-map version per type/ally) ---
 	// map the ILosType members onto the mirror's fixed enum order
 	const ILosType* lts[LOS_MIRROR_TYPE_COUNT];
 	lts[LOS_MIRROR_TYPE_LOS]          = &losHandler->los;
@@ -62,14 +71,18 @@ void DrawMapMirrors::DrainAtBarrier()
 
 	const int liveAllyTeams = teamHandler.ActiveAllyTeams();
 
+	// this slot needs a full LOS re-copy when an unsized/out-of-range mark
+	// arrived since it last caught up (pre-first-drain marks, resizes)
+	bool slotLosAllDirty = (pl.losFullDrained != losFullVersion);
+
 	// detect a resize (new game / allyteam count change) -> full re-copy
-	for (int t = 0; !losAllDirty && t < LOS_MIRROR_TYPE_COUNT; ++t) {
-		if (static_cast<int>(los[t].maps.size()) != int(lts[t]->losMaps.size()))
-			losAllDirty = true;
+	for (int t = 0; !slotLosAllDirty && t < LOS_MIRROR_TYPE_COUNT; ++t) {
+		if (static_cast<int>(pl.los[t].maps.size()) != int(lts[t]->losMaps.size()))
+			slotLosAllDirty = true;
 	}
 
 	for (int t = 0; t < LOS_MIRROR_TYPE_COUNT; ++t) {
-		LosMirror& m = los[t];
+		LosMirror& m = pl.los[t];
 		const ILosType* lt = lts[t];
 		const int nAlly = static_cast<int>(lt->losMaps.size());
 
@@ -78,39 +91,42 @@ void DrawMapMirrors::DrainAtBarrier()
 
 		if (static_cast<int>(m.maps.size()) != nAlly)
 			m.maps.resize(nAlly);
-		if (static_cast<int>(losDirty[t].size()) != nAlly)
-			losDirty[t].assign(nAlly, 1);
+		// producing-thread-owned version array (shared across slots)
+		if (static_cast<int>(losVersions[t].size()) != nAlly)
+			losVersions[t].assign(nAlly, 1);
+		if (static_cast<int>(pl.losDrained[t].size()) != nAlly)
+			pl.losDrained[t].assign(nAlly, 0);
 
 		for (int at = 0; at < nAlly; ++at) {
-			if (!losAllDirty && losDirty[t][at] == 0)
+			if (!slotLosAllDirty && pl.losDrained[t][at] == losVersions[t][at])
 				continue;
 
 			m.maps[at] = lt->losMaps[at].GetLosMap(); // vector copy
-			losDirty[t][at] = 0;
+			pl.losDrained[t][at] = losVersions[t][at];
 		}
 	}
-	losAllDirty = false;
+	pl.losFullDrained = losFullVersion;
 
 	// --- global-LOS + jammer config (tiny, unconditional) ---
-	numAllyTeams = liveAllyTeams;
-	globalLos.resize(numAllyTeams);
-	for (int at = 0; at < numAllyTeams; ++at)
-		globalLos[at] = losHandler->GetGlobalLOS(at);
-	separateJammers = modInfo.separateJammers;
+	pl.numAllyTeams = liveAllyTeams;
+	pl.globalLos.resize(pl.numAllyTeams);
+	for (int at = 0; at < pl.numAllyTeams; ++at)
+		pl.globalLos[at] = losHandler->GetGlobalLOS(at);
+	pl.separateJammers = modInfo.separateJammers;
 
 	// --- radar-error scalars (tiny, unconditional) ---
-	baseRadarErrorSize = losHandler->GetBaseRadarErrorSize();
-	baseRadarErrorMult = losHandler->GetBaseRadarErrorMult();
-	radarErrorSizes.resize(numAllyTeams);
-	for (int at = 0; at < numAllyTeams; ++at)
-		radarErrorSizes[at] = losHandler->GetAllyTeamRadarErrorSize(at);
+	pl.baseRadarErrorSize = losHandler->GetBaseRadarErrorSize();
+	pl.baseRadarErrorMult = losHandler->GetBaseRadarErrorMult();
+	pl.radarErrorSizes.resize(pl.numAllyTeams);
+	for (int at = 0; at < pl.numAllyTeams; ++at)
+		pl.radarErrorSizes[at] = losHandler->GetAllyTeamRadarErrorSize(at);
 
 	// --- terrain-type table (version-gated whole copy; near-static) ---
-	if (terrainTypesDrained != terrainTypesVersion || terrainTypes.empty()) {
-		terrainTypes.resize(CMapInfo::NUM_TERRAIN_TYPES);
+	if (pl.terrainTypesDrained != terrainTypesVersion || pl.terrainTypes.empty()) {
+		pl.terrainTypes.resize(CMapInfo::NUM_TERRAIN_TYPES);
 		for (int i = 0; i < CMapInfo::NUM_TERRAIN_TYPES; ++i) {
 			const CMapInfo::TerrainType& tt = mapInfo->terrainTypes[i];
-			TerrainType& d = terrainTypes[i];
+			TerrainType& d = pl.terrainTypes[i];
 			d.name = tt.name;
 			d.hardness = tt.hardness;
 			d.tankSpeed = tt.tankSpeed;
@@ -119,7 +135,7 @@ void DrawMapMirrors::DrainAtBarrier()
 			d.shipSpeed = tt.shipSpeed;
 			d.receiveTracks = tt.receiveTracks;
 		}
-		terrainTypesDrained = terrainTypesVersion;
+		pl.terrainTypesDrained = terrainTypesVersion;
 	}
 
 	// --- typemap (PR 38d): per-square terrain-type index, version-gated ---
@@ -127,10 +143,10 @@ void DrawMapMirrors::DrainAtBarrier()
 	// load-time fill is caught by the size-mismatch clause on the first drain.
 	{
 		const size_t n = static_cast<size_t>(mapDims.hmapx) * static_cast<size_t>(mapDims.hmapy);
-		if (typeMapDrained != typeMapVersion || typeMap.size() != n) {
+		if (pl.typeMapDrained != typeMapVersion || pl.typeMap.size() != n) {
 			const uint8_t* src = readMap->GetTypeMapSynced();
-			typeMap.assign(src, src + n);
-			typeMapDrained = typeMapVersion;
+			pl.typeMap.assign(src, src + n);
+			pl.typeMapDrained = typeMapVersion;
 		}
 	}
 
@@ -140,69 +156,69 @@ void DrawMapMirrors::DrainAtBarrier()
 	// scalars); the distributionMap copy is gated on the version / a size change
 	// (which also catches the load-time metalMap.Init fill on the first drain).
 	{
-		metalSizeX = metalMap.GetSizeX();
-		metalSizeZ = metalMap.GetSizeZ();
-		metalScale = metalMap.GetMetalScale();
-		const size_t n = static_cast<size_t>(metalSizeX) * static_cast<size_t>(metalSizeZ);
-		if (metalMapDrained != metalMapVersion || metalDistribution.size() != n) {
+		pl.metalSizeX = metalMap.GetSizeX();
+		pl.metalSizeZ = metalMap.GetSizeZ();
+		pl.metalScale = metalMap.GetMetalScale();
+		const size_t n = static_cast<size_t>(pl.metalSizeX) * static_cast<size_t>(pl.metalSizeZ);
+		if (pl.metalMapDrained != metalMapVersion || pl.metalDistribution.size() != n) {
 			const unsigned char* src = metalMap.GetDistributionMap();
 			if (n > 0)
-				metalDistribution.assign(src, src + n);
+				pl.metalDistribution.assign(src, src + n);
 			else
-				metalDistribution.clear();
-			metalMapDrained = metalMapVersion;
+				pl.metalDistribution.clear();
+			pl.metalMapDrained = metalMapVersion;
 		}
 
-		// --- metal extraction map (PR 42): whole-map dirty-flag copy ---
+		// --- metal extraction map (PR 42): version-gated whole copy ---
 		// Churns as extractors mine (RequestExtraction/RemoveExtraction mark it),
-		// so copy the whole float map whenever dirty or the mirror size mismatches
-		// (which also catches the load-time Init fill on the first drain).
-		if (extractionDirty || extractionMap.size() != n) {
+		// so this copies most drains; the size clause catches the load-time fill
+		if (pl.extractionDrained != extractionVersion || pl.extractionMap.size() != n) {
 			const float* src = metalMap.GetExtractionMap();
 			if (n > 0)
-				extractionMap.assign(src, src + n);
+				pl.extractionMap.assign(src, src + n);
 			else
-				extractionMap.clear();
-			extractionDirty = false;
+				pl.extractionMap.clear();
+			pl.extractionDrained = extractionVersion;
 		}
 	}
 
 	// --- smooth-height mesh (version-gated whole copy; window updater) ---
-	smoothMaxX = smoothGround.GetMaxX();
-	smoothMaxY = smoothGround.GetMaxY();
-	smoothRes = smoothGround.GetResolution();
+	pl.smoothMaxX = smoothGround.GetMaxX();
+	pl.smoothMaxY = smoothGround.GetMaxY();
+	pl.smoothRes = smoothGround.GetResolution();
 	{
-		const size_t n = static_cast<size_t>(smoothMaxX) * static_cast<size_t>(smoothMaxY);
-		if (smoothMeshDrained != smoothMeshVersion || smoothMesh.size() != n) {
+		const size_t n = static_cast<size_t>(pl.smoothMaxX) * static_cast<size_t>(pl.smoothMaxY);
+		if (pl.smoothMeshDrained != smoothMeshVersion || pl.smoothMesh.size() != n) {
 			// GetMeshData() dereferences mesh[0]; only touch it when non-empty
 			if (n > 0)
-				smoothMesh.assign(smoothGround.GetMeshData(), smoothGround.GetMeshData() + n);
+				pl.smoothMesh.assign(smoothGround.GetMeshData(), smoothGround.GetMeshData() + n);
 			else
-				smoothMesh.clear();
-			smoothMeshDrained = smoothMeshVersion;
+				pl.smoothMesh.clear();
+			pl.smoothMeshDrained = smoothMeshVersion;
 		}
 	}
 
 	// --- original heightmap (version-gated whole copy) ---
 	{
 		const size_t n = static_cast<size_t>(mapDims.mapxp1) * static_cast<size_t>(mapDims.mapyp1);
-		if (origHeightDrained != origHeightVersion || origHeight.size() != n) {
+		if (pl.origHeightDrained != origHeightVersion || pl.origHeight.size() != n) {
 			const float* src = readMap->GetOriginalHeightMapSynced();
-			origHeight.assign(src, src + n);
-			origHeightDrained = origHeightVersion;
+			pl.origHeight.assign(src, src + n);
+			pl.origHeightDrained = origHeightVersion;
 		}
 	}
 
 	// --- blocking map (PR 29): per-square cell[0] id + kind ---
-	// Whole-map re-walk when a blocking mutation dirtied it (or on the first
-	// drain / a map-size change). GroundBlockedUnsafe(sq) returns the same
-	// cell[0] object the live placement callouts read; classify it once here so
-	// the served twins never dereference a live CSolidObject.
+	// Whole-map re-walk when a blocking mutation moved the version since this
+	// slot last copied (or on the slot's first drain / a map-size change).
+	// GroundBlockedUnsafe(sq) returns the same cell[0] object the live
+	// placement callouts read; classify it once here so the served twins never
+	// dereference a live CSolidObject.
 	{
 		const size_t nSquares = static_cast<size_t>(mapDims.mapx) * static_cast<size_t>(mapDims.mapy);
-		if (blockingDirty || blockId.size() != nSquares) {
-			blockId.assign(nSquares, -1);
-			blockKind.assign(nSquares, BLOCK_KIND_NONE);
+		if (pl.blockingDrained != blockingVersion || pl.blockId.size() != nSquares) {
+			pl.blockId.assign(nSquares, -1);
+			pl.blockKind.assign(nSquares, BLOCK_KIND_NONE);
 
 			for (size_t sq = 0; sq < nSquares; ++sq) {
 				const CSolidObject* s = groundBlockingObjectMap.GroundBlockedUnsafe(static_cast<unsigned int>(sq));
@@ -212,70 +228,41 @@ void DrawMapMirrors::DrainAtBarrier()
 				// live GetGroundBlocked order: feature cast first, then unit;
 				// anything else stays NONE (the twin's "neither" fall-through)
 				if (const CFeature* f = dynamic_cast<const CFeature*>(s)) {
-					blockId[sq] = f->id;
-					blockKind[sq] = BLOCK_KIND_FEATURE;
+					pl.blockId[sq] = f->id;
+					pl.blockKind[sq] = BLOCK_KIND_FEATURE;
 				} else if (const CUnit* u = dynamic_cast<const CUnit*>(s)) {
-					blockId[sq] = u->id;
-					blockKind[sq] = BLOCK_KIND_UNIT;
+					pl.blockId[sq] = u->id;
+					pl.blockKind[sq] = BLOCK_KIND_UNIT;
 				}
 			}
 
-			blockingDirty = false;
+			pl.blockingDrained = blockingVersion;
 		}
 	}
 
-	ready = true;
+	pl.ready = true;
 	drainSerial += 1; // PR 43 §2.1 (per-slot channel-version scalar)
 }
 
 void DrawMapMirrors::Clear()
 {
 	drainSerial = 0;
+	servingSlot = 0;
 
-	for (LosMirror& m : los) {
-		m.maps.clear();
-		m.invDiv = 0.0f;
-		m.size = {0, 0};
-	}
-	for (auto& d : losDirty)
-		d.clear();
-	losAllDirty = true;
+	for (Payload& pl : payloads)
+		pl = Payload{};
 
-	globalLos.clear();
-	separateJammers = false;
+	for (auto& v : losVersions)
+		v.clear();
+	losFullVersion = 1;
 
-	terrainTypes.clear();
-	smoothMesh.clear();
-	origHeight.clear();
-	smoothMaxX = smoothMaxY = 0;
-	smoothRes = 0.0f;
-
-	// force a re-copy of the version-gated layers on the next game's first drain
-	terrainTypesDrained = 0xffffffffu;
-	smoothMeshDrained = 0xffffffffu;
-	origHeightDrained = 0xffffffffu;
-
-	// PR 38d: typemap + metal mirrors -- force a re-copy on the next game's first drain
-	typeMap.clear();
-	typeMapDrained = 0xffffffffu;
-	metalDistribution.clear();
-	metalSizeX = metalSizeZ = 0;
-	metalScale = 0.0f;
-	metalMapDrained = 0xffffffffu;
-	extractionMap.clear();
-	extractionDirty = true;
-
-	numAllyTeams = 0;
-	baseRadarErrorSize = baseRadarErrorMult = 0.0f;
-	radarErrorSizes.clear();
-
-	// PR 29: blocking mirror -- force a full re-walk on the next game's first
-	// drain (empty + dirty)
-	blockId.clear();
-	blockKind.clear();
-	blockingDirty = true;
-
-	ready = false;
+	terrainTypesVersion = 0;
+	smoothMeshVersion = 0;
+	origHeightVersion = 0;
+	typeMapVersion = 0;
+	metalMapVersion = 0;
+	extractionVersion = 1;
+	blockingVersion = 1;
 }
 
 // PR 29: cell[0] id + kind at map square (x, z). Mirrors
@@ -288,12 +275,14 @@ int DrawMapMirrors::BlockedAt(int x, int z, uint8_t& kindOut) const
 	    static_cast<unsigned int>(z) >= static_cast<unsigned int>(mapDims.mapy))
 		return -1;
 
+	const Payload& pl = P();
+
 	const size_t sq = static_cast<size_t>(z) * static_cast<size_t>(mapDims.mapx) + static_cast<size_t>(x);
-	if (sq >= blockId.size())
+	if (sq >= pl.blockId.size())
 		return -1;
 
-	kindOut = blockKind[sq];
-	return blockId[sq];
+	kindOut = pl.blockKind[sq];
+	return pl.blockId[sq];
 }
 
 // ---------------------------------------------------------------------------
@@ -307,7 +296,7 @@ bool DrawMapMirrors::InSight(int type, const float3& pos, int allyTeam) const
 	if (type < 0 || type >= LOS_MIRROR_TYPE_COUNT)
 		return false;
 
-	const LosMirror& m = los[type];
+	const LosMirror& m = P().los[type];
 	if (allyTeam < 0 || allyTeam >= static_cast<int>(m.maps.size()))
 		return false;
 	if (m.size.x <= 0 || m.size.y <= 0)
@@ -325,7 +314,8 @@ bool DrawMapMirrors::InSight(int type, const float3& pos, int allyTeam) const
 // CLosHandler::InLos(const float3, allyTeam)
 bool DrawMapMirrors::PosInLos(const float3& pos, int allyTeam) const
 {
-	if (allyTeam >= 0 && allyTeam < static_cast<int>(globalLos.size()) && globalLos[allyTeam])
+	const Payload& pl = P();
+	if (allyTeam >= 0 && allyTeam < static_cast<int>(pl.globalLos.size()) && pl.globalLos[allyTeam])
 		return true;
 	return InSight(LOS_MIRROR_TYPE_LOS, pos, allyTeam);
 }
@@ -333,7 +323,8 @@ bool DrawMapMirrors::PosInLos(const float3& pos, int allyTeam) const
 // CLosHandler::InAirLos(const float3, allyTeam)
 bool DrawMapMirrors::PosInAirLos(const float3& pos, int allyTeam) const
 {
-	if (allyTeam >= 0 && allyTeam < static_cast<int>(globalLos.size()) && globalLos[allyTeam])
+	const Payload& pl = P();
+	if (allyTeam >= 0 && allyTeam < static_cast<int>(pl.globalLos.size()) && pl.globalLos[allyTeam])
 		return true;
 	return InSight(LOS_MIRROR_TYPE_AIRLOS, pos, allyTeam);
 }
@@ -342,18 +333,20 @@ bool DrawMapMirrors::PosInAirLos(const float3& pos, int allyTeam) const
 // matching the live body
 bool DrawMapMirrors::PosInRadar(const float3& pos, int allyTeam) const
 {
+	const bool sepJam = P().separateJammers;
+
 	if (pos.y < 0.0f)
 		return (InSight(LOS_MIRROR_TYPE_SONAR, pos, allyTeam) &&
-			!(!separateJammers && InSight(LOS_MIRROR_TYPE_SONAR_JAMMER, pos, 0)));
+			!(!sepJam && InSight(LOS_MIRROR_TYPE_SONAR_JAMMER, pos, 0)));
 
 	return (InSight(LOS_MIRROR_TYPE_RADAR, pos, allyTeam) &&
-		!(!separateJammers && InSight(LOS_MIRROR_TYPE_JAMMER, pos, 0)));
+		!(!sepJam && InSight(LOS_MIRROR_TYPE_JAMMER, pos, 0)));
 }
 
 // CLosHandler::InJammer(const float3, allyTeam)
 bool DrawMapMirrors::PosInJammer(const float3& pos, int allyTeam) const
 {
-	const int jammerAlly = separateJammers ? allyTeam : 0;
+	const int jammerAlly = P().separateJammers ? allyTeam : 0;
 
 	if (pos.y < 0.0f)
 		return InSight(LOS_MIRROR_TYPE_SONAR_JAMMER, pos, jammerAlly);
@@ -369,10 +362,12 @@ bool DrawMapMirrors::PosInJammer(const float3& pos, int allyTeam) const
 // (Map/Ground.cpp); the triangle interpolation is reproduced bit-for-bit
 float DrawMapMirrors::OrigHeight(float x, float z) const
 {
-	if (origHeight.empty())
+	const Payload& pl = P();
+
+	if (pl.origHeight.empty())
 		return 0.0f;
 
-	const float* cornerHeightMap = origHeight.data();
+	const float* cornerHeightMap = pl.origHeight.data();
 
 	x = std::clamp(x, 0.0f, float3::maxxpos) / SQUARE_SIZE;
 	z = std::clamp(z, 0.0f, float3::maxzpos) / SQUARE_SIZE;
@@ -413,15 +408,17 @@ float DrawMapMirrors::OrigHeight(float x, float z) const
 // (Sim/Misc/SmoothHeightMesh.cpp), reproduced bit-for-bit over the mirror
 float DrawMapMirrors::SmoothMeshHeight(float x, float y) const
 {
-	if (smoothMesh.empty() || smoothMaxX <= 0 || smoothMaxY <= 0 || smoothRes <= 0.0f)
+	const Payload& pl = P();
+
+	if (pl.smoothMesh.empty() || pl.smoothMaxX <= 0 || pl.smoothMaxY <= 0 || pl.smoothRes <= 0.0f)
 		return 0.0f;
 
-	const float* heightmap = smoothMesh.data();
-	const int maxx = smoothMaxX;
-	const int maxy = smoothMaxY;
+	const float* heightmap = pl.smoothMesh.data();
+	const int maxx = pl.smoothMaxX;
+	const int maxy = pl.smoothMaxY;
 
-	x = std::clamp(x / smoothRes, 0.0f, (float)maxx);
-	y = std::clamp(y / smoothRes, 0.0f, (float)maxy);
+	x = std::clamp(x / pl.smoothRes, 0.0f, (float)maxx);
+	y = std::clamp(y / pl.smoothRes, 0.0f, (float)maxy);
 	const int sx = std::min((int)x, maxx - 1);
 	const int sy = std::min((int)y, maxy - 1);
 	const float dx = (x - sx);
@@ -449,10 +446,12 @@ float DrawMapMirrors::SmoothMeshHeight(float x, float y) const
 // ix/iz/hmapx math, so an out-of-range value only happens pre-drain.
 int DrawMapMirrors::TypeMapAt(int sqrIndex) const
 {
-	if (sqrIndex < 0 || sqrIndex >= static_cast<int>(typeMap.size()))
+	const Payload& pl = P();
+
+	if (sqrIndex < 0 || sqrIndex >= static_cast<int>(pl.typeMap.size()))
 		return 0;
 
-	return typeMap[sqrIndex];
+	return pl.typeMap[sqrIndex];
 }
 
 // CMetalMap::GetMetalAmount(x, z) mirror -- clamp to [0,size-1] then
@@ -460,11 +459,13 @@ int DrawMapMirrors::TypeMapAt(int sqrIndex) const
 // Empty mirror -> 0 (pre-drain / unloaded metal map).
 float DrawMapMirrors::MetalAmount(int x, int z) const
 {
-	if (metalSizeX <= 0 || metalSizeZ <= 0 || metalDistribution.empty())
+	const Payload& pl = P();
+
+	if (pl.metalSizeX <= 0 || pl.metalSizeZ <= 0 || pl.metalDistribution.empty())
 		return 0.0f;
 
-	x = std::clamp(x, 0, metalSizeX - 1);
-	z = std::clamp(z, 0, metalSizeZ - 1);
+	x = std::clamp(x, 0, pl.metalSizeX - 1);
+	z = std::clamp(z, 0, pl.metalSizeZ - 1);
 
-	return metalDistribution[(z * metalSizeX) + x] * metalScale;
+	return pl.metalDistribution[(z * pl.metalSizeX) + x] * pl.metalScale;
 }

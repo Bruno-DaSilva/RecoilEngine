@@ -78,6 +78,9 @@ public:
 	static const CUnitDrawerData::UnitRenderRecord& GetRenderRecord(int unitID) { return modelDrawerData->GetRenderRecord(unitID); }
 	// PR 43 (3b): barrier step 8 / valve hook (see CUnitDrawerData)
 	static void ClearDeadRetainedRecords() { if (modelDrawerData != nullptr) modelDrawerData->ClearDeadRetainedRecords(); }
+	// PR 44a: producer-side transform extraction (sim thread, frame edge,
+	// forced-serial -- see CModelDrawerDataBase::ExtractTransforms)
+	static void ExtractTransformsAtSimEdge() { if (modelDrawerData != nullptr) modelDrawerData->ExtractTransformsAtSimEdge(); }
 
 	// drawer-owned Lua material state + per-piece LOD display lists evicted from
 	// LocalModel/LocalModelPiece (sim/draw PR 10)

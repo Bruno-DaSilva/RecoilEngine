@@ -162,6 +162,10 @@ private:
 	void SpawnSimThread();
 	void JoinSimThread();
 	void SimThreadProc();
+	/// PR 44a: the epoch producer -- runs on the sim thread at its frame
+	/// edges (SimThreadProc loop top); extraction+publish overlap the draw
+	/// thread's rendering instead of running under the park
+	void ProduceEpochAtSimEdge();
 	void AcquireSimPause();
 	void ReleaseSimPause();
 	void DeliverBoundaryDeaths();

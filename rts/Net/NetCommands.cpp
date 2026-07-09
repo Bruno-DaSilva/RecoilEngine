@@ -23,6 +23,7 @@
 #include "Lua/LuaHandle.h"
 #include "Net/Protocol/NetProtocol.h"
 #include "Rendering/GlobalRendering.h"
+#include "Rendering/Common/SimSnapshot.h" // PR 44a: between-frames mutation marks
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Path/IPathManager.h"
@@ -404,6 +405,12 @@ void CGame::ClientReadNet()
 				playerHandler.PlayerLeft(playerNum, inbuf[2]);
 				eventHandler.PlayerRemoved(playerNum, inbuf[2]);
 
+				// PR 44a: between-frames mutation of published team/player/
+				// global rows -- the flip producer re-extracts on this mark
+				// (the lockstep in-place refresh this replaces is gone)
+				if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning())
+					simSnapshot.MarkMutatedOutsideFrame();
+
 				AddTraffic(playerNum, packetCode, dataLength);
 			} break;
 
@@ -460,6 +467,13 @@ void CGame::ClientReadNet()
 				LOG("%s %s the game", playerHandler.Player(playerNum)->name.c_str(), (gs->paused ? "paused" : "unpaused"));
 
 				eventHandler.GamePaused(playerNum, gs->paused);
+
+				// PR 44a: between-frames mutation of published team/player/
+				// global rows -- the flip producer re-extracts on this mark
+				// (the lockstep in-place refresh this replaces is gone)
+				if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning())
+					simSnapshot.MarkMutatedOutsideFrame();
+
 				AddTraffic(playerNum, packetCode, dataLength);
 
 				lastReadNetTime = spring_gettime();
@@ -479,6 +493,13 @@ void CGame::ClientReadNet()
 				}
 
 				TracyPlot(tracingSpeedFactor, gs->speedFactor);
+
+				// PR 44a: between-frames mutation of published team/player/
+				// global rows -- the flip producer re-extracts on this mark
+				// (the lockstep in-place refresh this replaces is gone)
+				if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning())
+					simSnapshot.MarkMutatedOutsideFrame();
+
 				AddTraffic(-1, packetCode, dataLength);
 			} break;
 
@@ -497,6 +518,13 @@ void CGame::ClientReadNet()
 				TracyPlot(tracingWantedSpeedFactor, gs->wantedSpeedFactor);
 
 				LOG("Speed set to %.1f [%s]", gs->wantedSpeedFactor, pName);
+
+				// PR 44a: between-frames mutation of published team/player/
+				// global rows -- the flip producer re-extracts on this mark
+				// (the lockstep in-place refresh this replaces is gone)
+				if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning())
+					simSnapshot.MarkMutatedOutsideFrame();
+
 				AddTraffic(playerNum, packetCode, dataLength);
 			} break;
 
@@ -519,6 +547,12 @@ void CGame::ClientReadNet()
 
 				p->cpuUsage = *reinterpret_cast<const    float*>(&inbuf[2]);
 				p->ping     = *reinterpret_cast<const uint32_t*>(&inbuf[6]);
+
+				// PR 44a: between-frames mutation of published team/player/
+				// global rows -- the flip producer re-extracts on this mark
+				// (the lockstep in-place refresh this replaces is gone)
+				if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning())
+					simSnapshot.MarkMutatedOutsideFrame();
 
 				AddTraffic(playerNum, packetCode, dataLength);
 			} break;
@@ -1201,6 +1235,11 @@ void CGame::ClientReadNet()
 				if (eventHandler.AllowResourceLevel(teamNum, "e", energyShare))
 					team->resShare.energy = energyShare;
 
+				// PR 44a: between-frames team/player row mutation -- see the
+				// NETMSG_PLAYERINFO mark
+				if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning())
+					simSnapshot.MarkMutatedOutsideFrame();
+
 				AddTraffic(playerNum, packetCode, dataLength);
 			} break;
 
@@ -1333,6 +1372,11 @@ void CGame::ClientReadNet()
 						LOG_L(L_ERROR, "[Game::%s][NETMSG_TEAM] unknown team-action %i from player %i", __func__, teamAction, playerNum);
 					}
 				}
+
+				// PR 44a: between-frames team/player row mutation -- see the
+				// NETMSG_PLAYERINFO mark
+				if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning())
+					simSnapshot.MarkMutatedOutsideFrame();
 
 				AddTraffic(playerNum, packetCode, dataLength);
 			} break;

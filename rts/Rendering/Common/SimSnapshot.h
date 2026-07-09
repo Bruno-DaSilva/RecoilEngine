@@ -7,7 +7,12 @@
 #include <cassert>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
+
+class CUnit;
+class CFeature;
+class CProjectile;
 
 #include "Game/Players/PlayerStatistics.h"
 #include "Lua/LuaRulesParams.h" // PR 38: game+team rules-params mirror (Params map)
@@ -1172,17 +1177,25 @@ public:
 	/// unchanged. No-op (single relaxed bool load) unless armed.
 	void HashCompletedFrame(int frameNum);
 
-	const UnitRows& Read() const { return buffers[heldSlot]; }
-	const ProjectileRows& ReadProjectiles() const { return projBuffers[heldSlot]; }
-	const FeatureRows& ReadFeatures() const { return featBuffers[heldSlot]; }
-	const TeamRows& ReadTeams() const { return teamBuffers[heldSlot]; }
-	const PlayerRows& ReadPlayers() const { return playerBuffers[heldSlot]; }
-	const GlobalRows& ReadGlobals() const { return globBuffers[heldSlot]; }
+	const UnitRows& Read() const { return buffers[HeldIdx()]; }
+	const ProjectileRows& ReadProjectiles() const { return projBuffers[HeldIdx()]; }
+	const FeatureRows& ReadFeatures() const { return featBuffers[HeldIdx()]; }
+	const TeamRows& ReadTeams() const { return teamBuffers[HeldIdx()]; }
+	const PlayerRows& ReadPlayers() const { return playerBuffers[HeldIdx()]; }
+	const GlobalRows& ReadGlobals() const { return globBuffers[HeldIdx()]; }
 
-	/// the newest PUBLISHED epoch id (0 = nothing published yet, the pregame
-	/// state every `EpochId() == 0` fallback keys on). Monotonic u64 per game;
-	/// THE cache key for every draw-side derived structure (PR 43 §2.5).
-	uint64_t EpochId() const { return epochCounter; }
+	/// the newest PUBLISHED epoch id (0 = nothing published yet). Monotonic
+	/// u64 per game. PR 44a: under the producer flip this ADVANCES MID-DRAW-
+	/// FRAME (the sim thread publishes concurrently), so draw-side derived
+	/// caches must key on HeldEpochId() below -- EpochId() remains for
+	/// producer-side/pacing logic only.
+	uint64_t EpochId() const { return epochCounter.load(std::memory_order_relaxed); }
+
+	/// the epoch id of the slot the consumer currently HOLDS (0 = nothing
+	/// acquired yet -- the pregame state every `== 0` fallback keys on).
+	/// Main-thread stable between acquires: THE cache key for every draw-side
+	/// derived structure (PR 43 §2.5, re-keyed by PR 44a).
+	uint64_t HeldEpochId() const { return slotMeta[HeldIdx()].epochId; }
 
 	// ---- PR 43: the epoch ring (see the header block) ----
 
@@ -1199,6 +1212,39 @@ public:
 	/// the barrier after the cache refreshes. Telemetry/bookkeeping only under
 	/// the 43 lockstep (the physical caches track the newest epoch).
 	void SealEpochChannelVersions(uint64_t cmdQueueCacheEpoch, uint64_t pieceCacheEpoch, uint32_t mirrorDrainSerial);
+
+	// ---- PR 44a: the producer flip (extraction on the sim thread) ----
+
+	/// pacing gate (§3.2 skip-if-unconsumed): true when the newest published
+	/// epoch has been acquired by the consumer. Producer (sim) thread.
+	bool NewestEpochConsumed() const {
+		return consumedEpochId.load(std::memory_order_acquire) == epochCounter.load(std::memory_order_relaxed);
+	}
+
+	/// the row-namespace half of the flip's produce due-check (new sim frames
+	/// since the newest publish / alive-count change / between-frames
+	/// mutation); Game.cpp adds the pending-records/closures + fallback-timer
+	/// conditions. Producer (sim) thread.
+	bool ProduceDue() const;
+
+	/// the epoch id the next production will stamp (counter+1) -- the producer
+	/// keys its channel refreshes (cmd/piece caches) on it pre-publish
+	uint64_t NextEpochId() const { return epochCounter.load(std::memory_order_relaxed) + 1; }
+
+	/// flip producer half 1: extract ALL row namespaces (+ §7.7 dead rows,
+	/// sourced from the pending-destroy ledger) into a free ring slot and
+	/// stage its meta (epochId/frame span). NOT yet visible to the consumer.
+	/// Returns the slot index. Sim thread, frame edge only.
+	int BeginEpochProduction();
+
+	/// flip producer half 2: seal the channel-version scalars into the staged
+	/// slot's meta and publish it as newest-complete. Sim thread.
+	void PublishEpoch(int slot, uint64_t cmdQueueCacheEpoch, uint64_t pieceCacheEpoch, uint32_t mirrorDrainSerial);
+
+	/// PR 36 + 44a: fill the MapParser-backed start-position cache on the
+	/// MAIN thread (SpawnSimThread) -- the flip producer must never run the
+	/// MapParser on the sim thread. Idempotent.
+	void EnsureMapStartPositionsCached() { CacheMapStartPositions(); }
 
 	/// /epochstats telemetry: log ring occupancy + per-channel payload bytes
 	/// of the held epoch (the §7.1 standing-TODO measurement hook)
@@ -1252,7 +1298,13 @@ private:
 	// every plain-field row; sub-blocks whose owning objects PreDestruct()
 	// already destroyed (commandAI/moveType/weapons) read documented defaults.
 	// Split-only; INACTIVE-guarded so a same-batch id reuse stays ACTIVE.
-	void ExtractDeadRowsFromShells(UnitRows& urows, FeatureRows& frows, ProjectileRows& prows);
+	// PR 44a: the (id, shell) lists come from the caller -- the dispatch-time
+	// dead maps under lockstep, the pending-destroy ledger under the flip
+	// (ProduceSlotInternal builds the union; the two sources never overlap).
+	void ExtractDeadRowsFromShells(UnitRows& urows, FeatureRows& frows, ProjectileRows& prows,
+		const std::vector<std::pair<int, const CUnit*>>& deadUnits,
+		const std::vector<std::pair<int, const CFeature*>>& deadFeatures,
+		const std::vector<std::pair<int, const CProjectile*>>& deadProjectiles);
 	void ExtractTeams(TeamRows& rows);
 	void ExtractPlayers(PlayerRows& rows);
 	void ExtractGlobals(GlobalRows& rows);
@@ -1280,13 +1332,24 @@ public:
 	};
 
 	const EpochSlotMeta& SlotMeta(int slot) const { return slotMeta[slot]; }
-	int HeldSlot() const { return heldSlot; }
-	int NewestSlot() const { return newestSlot; }
+	int HeldSlot() const { return HeldIdx(); }
+	int NewestSlot() const { return NewestIdx(); }
 private:
+	// relaxed slot-index loads. heldSlot is written by the consumer under the
+	// park and read by the producer while running (PickFreeSlot) -- the park
+	// handshake fences the handoff; the atomics keep the loads well-defined.
+	int HeldIdx() const { return heldSlot.load(std::memory_order_relaxed); }
+	int NewestIdx() const { return newestSlot.load(std::memory_order_relaxed); }
+
 	// pick a slot to extract into: refcount 0, neither the newest-complete nor
 	// the held slot (both still readable). Guaranteed to exist at N=3 under
 	// lockstep; falls back to the newest slot (in-place republish) defensively.
 	int PickFreeSlot() const;
+
+	// shared produce body (lockstep Update + flip BeginEpochProduction):
+	// extract all row namespaces + §7.7 dead rows into PickFreeSlot(), stage
+	// the slot's meta (epochId = counter+1, frame span); returns the slot.
+	int ProduceSlotInternal();
 
 private:
 	UnitRows buffers[EPOCH_RING_SLOTS];
@@ -1299,9 +1362,11 @@ private:
 
 	// consumer-held slot (Read() views) and newest-complete slot; equal under
 	// 43's lockstep once the first epoch is acquired. Slot 0's default rows
-	// serve the pre-publish state (simFrame -1, EpochId() 0).
-	int heldSlot = 0;
-	int newestSlot = 0;
+	// serve the pre-publish state (simFrame -1, HeldEpochId() 0). PR 44a:
+	// atomics -- newestSlot is the producer->consumer publish point (release
+	// store / acquire load), heldSlot crosses the other way (park-fenced).
+	std::atomic<int> heldSlot = {0};
+	std::atomic<int> newestSlot = {0};
 	// the consumer holds no reference until its first AcquireNewestEpoch()
 	bool holdingRef = false;
 
@@ -1312,8 +1377,12 @@ private:
 	FeatureRows hashFeatScratch;
 	TeamRows hashTeamScratch;
 
-	// PR 43: the monotonic epoch counter (see EpochId())
-	uint64_t epochCounter = 0;
+	// PR 43: the monotonic epoch counter (see EpochId()); PR 44a: atomic --
+	// the producer bumps it at publish while the draw side may load it
+	std::atomic<uint64_t> epochCounter = {0};
+	// PR 44a: the epoch id the consumer last ACQUIRED (§3.2 pacing input);
+	// written by AcquireNewestEpoch (release), read by the producer (acquire)
+	std::atomic<uint64_t> consumedEpochId = {0};
 
 	// PR 43 §2.6: id-coverage gate counters (see CheckEpochIdCoverage)
 	uint64_t idCoverageChecked = 0;

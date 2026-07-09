@@ -5,6 +5,7 @@
 #include <array>
 #include <cassert>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include "Sim/Misc/GlobalConstants.h"
@@ -123,12 +124,29 @@ public:
 		deferring = false;
 	}
 
+	// ---- PR 44a (producer flip): per-epoch record batches ----
+	// The PRODUCER (sim thread, at its frame edge) seals the current pending
+	// records into the epoch it is about to publish; the CONSUMER (the
+	// barrier, sim parked) dispatches EXACTLY that sealed batch and leaves the
+	// post-seal tail for the next epoch (the §1.3 records-fold rule). At most
+	// one sealed-unconsumed batch exists at a time (publish is gated on the
+	// previous epoch's consumption). deferring stays TRUE across the sealed
+	// dispatch -- under the flip the sim phase never ends mid-game.
+	void SealEpochBatch() { sealedRecords = records.size(); }
+	size_t SealedRecordCount() const { return sealedRecords; }
+
+	/// dispatch the sealed batch in order (collecting coverage refs exactly
+	/// like Flush); erases the dispatched prefix, keeps the tail + deferral
+	/// window. No-op when nothing is sealed. Main thread, sim parked.
+	void DispatchSealedBatch();
+
 	/// drops all pending records without applying them; game teardown only
 	/// (CGame::KillRendering), where the referenced objects and the drawers
 	/// are both about to die without further drains
 	void Clear() {
 		records.clear();
 		ghostMasks.clear();
+		sealedRecords = 0;
 		pendingDestroyShells.clear();
 		boundaryDestroyedUnits.clear();
 		boundaryDestroyedProjectiles.clear();
@@ -201,6 +219,18 @@ public:
 	const spring::unordered_map<int, const CFeature*>& BoundaryDeadFeatures() const { return boundaryDeadFeatures; }
 	const spring::unordered_map<int, const CProjectile*>& BoundaryDeadProjectiles() const { return boundaryDeadProjectiles; }
 
+	// PR 44a: the flip-mode dead-row source -- the parked (not-yet-dispatched)
+	// destroy shells. At a produce edge the ledger holds exactly the batch's
+	// deaths (the previous batch's entries were popped by its sealed dispatch,
+	// and produce is gated on that consume). Appends (id, shell) pairs, the
+	// NEWEST generation per reused id (the FIFO back -- matching the
+	// dispatch-time maps' last-write-wins); unsynced projectiles are excluded
+	// (the fd41dbdd92 namespace rule). Sim thread (its own containers).
+	void CollectPendingDeadShells(
+		std::vector<std::pair<int, const CUnit*>>& outUnits,
+		std::vector<std::pair<int, const CFeature*>>& outFeatures,
+		std::vector<std::pair<int, const CProjectile*>>& outProjectiles) const;
+
 	bool Empty() const { return records.empty(); }
 
 	/// dispatches all pending records in order without closing the deferral
@@ -247,6 +277,10 @@ public:
 private:
 	void Push(const Record& record);
 	void Dispatch(const Record& record);
+	// shared body of Flush()/DispatchSealedBatch(): dispatch the first
+	// numRecords pending records in order (coverage-ref collection included)
+	// and erase them
+	void DispatchRange(size_t numRecords);
 
 	// dispatch-time id -> object resolution (PR 14). Keyed by object kind +
 	// (for projectiles) id namespace + id; the value is the FIFO of parked
@@ -272,6 +306,10 @@ private:
 	const CProjectile* ResolveProjectile(int32_t id, bool synced) const;
 private:
 	std::vector<Record> records;
+	// PR 44a: records [0, sealedRecords) belong to the newest published epoch
+	// (see SealEpochBatch); 0 = nothing sealed. Written by the producer at the
+	// frame edge, read/reset by the consumer under the park (park-fenced).
+	size_t sealedRecords = 0;
 	// PR 27b boundary death relay (see BoundaryDestroyedUnits)
 	std::vector<const CUnit*> boundaryDestroyedUnits;
 	std::vector<const CProjectile*> boundaryDestroyedProjectiles;

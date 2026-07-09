@@ -304,6 +304,16 @@ bool SimSnapshot::FeatureRows::IsInLosForAllyTeam(int id, int argAllyTeam) const
 	}
 }
 
+bool SimSnapshot::ProduceDue() const
+{
+	const int newest = NewestIdx();
+
+	return
+		mutatedOutsideFrame ||
+		(buffers[newest].simFrame != gs->frameNum) ||
+		(buffers[newest].aliveCount != static_cast<int32_t>(unitHandler.GetActiveUnits().size()));
+}
+
 void SimSnapshot::Update()
 {
 	SCOPED_TIMER("Update::SimSnapshot");
@@ -311,15 +321,11 @@ void SimSnapshot::Update()
 	// PR 36: GetMapStartPositions -- immutable map data, parsed once. Cached
 	// here (draw/main thread) rather than inside ExtractTeams, which also runs
 	// on the sim thread via HashCompletedFrame; LoadStartPositionsFromMap uses
-	// the MapParser and must stay off the sim thread.
+	// the MapParser and must stay off the sim thread. (PR 44a: the flip
+	// producer never runs Update(); SpawnSimThread pre-fills the cache.)
 	CacheMapStartPositions();
 
-	const bool due =
-		mutatedOutsideFrame ||
-		(buffers[newestSlot].simFrame != gs->frameNum) ||
-		(buffers[newestSlot].aliveCount != static_cast<int32_t>(unitHandler.GetActiveUnits().size()));
-
-	if (!due) {
+	if (!ProduceDue()) {
 		// LOCKSTEP EXCEPTION (PR 43, enumerated in the header block): no new
 		// epoch, but the net-mutable channels still refresh every boundary --
 		// net messages mutate team/player/global tables BETWEEN sim frames
@@ -327,23 +333,48 @@ void SimSnapshot::Update()
 		// invisibly to the frameNum/aliveCount due-check. Pre-ring these
 		// re-extracted+swapped unconditionally; the value-identical ring form
 		// is an in-place refresh of the held epoch's channels (single-threaded
-		// under the park; goes away at the PR-44a producer flip, where every
-		// epoch is fully extracted at the sim frame edge).
-		ExtractTeams(teamBuffers[heldSlot]);
-		ExtractPlayers(playerBuffers[heldSlot]);
-		ExtractGlobals(globBuffers[heldSlot]);
+		// under the park). PR 44a: DISSOLVED under the flip (this function is
+		// the lockstep producer only) -- the flip producer fully re-extracts
+		// on a between-frames mutation mark instead (the ClientReadNet
+		// handlers of the mutating net messages now mark, and a low-rate
+		// fallback republish covers residual classes).
+		ExtractTeams(teamBuffers[HeldIdx()]);
+		ExtractPlayers(playerBuffers[HeldIdx()]);
+		ExtractGlobals(globBuffers[HeldIdx()]);
 		return;
 	}
 
+	const int target = ProduceSlotInternal();
+
+	// lockstep publish: the consumer acquires it via AcquireNewestEpoch()
+	// (the barrier calls it right after this returns, same thread)
+	epochCounter.store(slotMeta[target].epochId, std::memory_order_relaxed);
+	newestSlot.store(target, std::memory_order_release);
+}
+
+int SimSnapshot::ProduceSlotInternal()
+{
 	mutatedOutsideFrame = false;
 	splitWasEnabled |= SimDrawSplit::Enabled(); // teardown-telemetry latch
 
 	const spring_time t0 = spring_gettime();
 
-	// producer half (PR 43): extract ALL channels into a free ring slot, then
-	// publish it as the newest-complete epoch. The consumer acquires it via
-	// AcquireNewestEpoch() (the barrier calls it right after this returns).
+	// producer half (PR 43): extract ALL channels into a free ring slot; the
+	// caller publishes it as the newest-complete epoch.
 	const int target = PickFreeSlot();
+
+	// PR 43 §7.7 dead-row sources. Under lockstep the barrier's drain already
+	// dispatched the batch's destroy records, populating the dispatch-time
+	// dead maps; under the PR-44a flip the producer runs BEFORE the dispatch,
+	// so the parked pending-destroy ledger holds the batch's deaths instead.
+	// The union covers both modes (whichever source is inactive is empty; the
+	// INACTIVE guard in ExtractDeadRowsFromShells also dedupes defensively).
+	static std::vector<std::pair<int, const CUnit*>> deadUnits;
+	static std::vector<std::pair<int, const CFeature*>> deadFeatures;
+	static std::vector<std::pair<int, const CProjectile*>> deadProjectiles;
+	deadUnits.clear();
+	deadFeatures.clear();
+	deadProjectiles.clear();
 
 	// PR 43 §7.7: the grow-only feature/projectile rows must also cover the
 	// batch's died-in-batch ids (their DEAD_THIS_BATCH rows are extracted
@@ -351,10 +382,22 @@ void SimSnapshot::Update()
 	// exceed every live id when the youngest object died
 	size_t minFeatSlots = 0;
 	size_t minProjSlots = 0;
+
 	if (SimDrawSplit::Enabled()) {
+		for (const auto& [id, shell] : renderEventQueue.BoundaryDeadUnits())
+			deadUnits.emplace_back(id, shell);
 		for (const auto& [id, shell] : renderEventQueue.BoundaryDeadFeatures())
-			minFeatSlots = std::max(minFeatSlots, static_cast<size_t>(id + 1));
+			deadFeatures.emplace_back(id, shell);
 		for (const auto& [id, shell] : renderEventQueue.BoundaryDeadProjectiles())
+			deadProjectiles.emplace_back(id, shell);
+
+		// PR 44a: the flip-mode source (empty under lockstep -- the drain pops
+		// the ledger; the fd41dbdd92 synced-namespace filter applies inside)
+		renderEventQueue.CollectPendingDeadShells(deadUnits, deadFeatures, deadProjectiles);
+
+		for (const auto& [id, shell] : deadFeatures)
+			minFeatSlots = std::max(minFeatSlots, static_cast<size_t>(id + 1));
+		for (const auto& [id, shell] : deadProjectiles)
 			minProjSlots = std::max(minProjSlots, static_cast<size_t>(id + 1));
 	}
 
@@ -368,33 +411,65 @@ void SimSnapshot::Update()
 	// PR 43 §7.7 (producer side): extract the batch's dying ids from their
 	// deferred-deletion shells into the publishing slot, marked
 	// DEAD_THIS_BATCH -- genuine at-death rows by construction (deletes the
-	// 38b genuineness-guard class). Inert-but-armed under 43: the barrier
-	// dispatches still read live (barrierLive), so only the id-coverage gate
-	// consumes these until 44b.
+	// 38b genuineness-guard class). The barrier dispatches still read live
+	// (barrierLive) under 43/44a, so only the id-coverage gate consumes these
+	// until 44b.
 	if (SimDrawSplit::Enabled())
-		ExtractDeadRowsFromShells(buffers[target], featBuffers[target], projBuffers[target]);
+		ExtractDeadRowsFromShells(buffers[target], featBuffers[target], projBuffers[target], deadUnits, deadFeatures, deadProjectiles);
 
 	EpochSlotMeta& meta = slotMeta[target];
-	meta.epochId = ++epochCounter;
+	meta.epochId = epochCounter.load(std::memory_order_relaxed) + 1;
 	// frame span: everything after the previous epoch's last frame; a forced
 	// same-frame republish (net mutation between frames) yields first > last
-	meta.firstSimFrame = slotMeta[newestSlot].lastSimFrame + 1;
+	meta.firstSimFrame = slotMeta[NewestIdx()].lastSimFrame + 1;
 	meta.lastSimFrame = buffers[target].simFrame;
-	newestSlot = target;
 
 	const float dt = (spring_gettime() - t0).toMilliSecsf();
 	sumExtractMs += dt;
 	maxExtractMs = std::max(maxExtractMs, dt);
 	numExtractions += 1;
 	peakAliveCount = std::max(peakAliveCount, buffers[target].aliveCount);
+
+	return target;
+}
+
+int SimSnapshot::BeginEpochProduction()
+{
+	SCOPED_TIMER("Update::SimSnapshot");
+
+	// PR 44a flip producer: MapParser cache must have been filled on the main
+	// thread (SpawnSimThread); everything else in the produce body is
+	// sim-thread-legal (the HashCompletedFrame precedent)
+	assert(mapStartPosCached);
+
+	return ProduceSlotInternal();
+}
+
+void SimSnapshot::PublishEpoch(int slot, uint64_t cmdQueueCacheEpoch, uint64_t pieceCacheEpoch, uint32_t mirrorDrainSerial)
+{
+	EpochSlotMeta& meta = slotMeta[slot];
+
+	// seal the channel-version scalars pre-publish (the flip analogue of the
+	// lockstep barrier's SealEpochChannelVersions call)
+	meta.cmdQueueCacheEpoch = cmdQueueCacheEpoch;
+	meta.pieceCacheEpoch = pieceCacheEpoch;
+	meta.mirrorDrainSerial = mirrorDrainSerial;
+
+	// publish: counter first (relaxed -- the release below orders both), then
+	// the newest-slot store the consumer acquires against
+	epochCounter.store(meta.epochId, std::memory_order_relaxed);
+	newestSlot.store(slot, std::memory_order_release);
 }
 
 int SimSnapshot::PickFreeSlot() const
 {
-	for (int s = 0; s < EPOCH_RING_SLOTS; ++s) {
-		const int cand = (newestSlot + 1 + s) % EPOCH_RING_SLOTS;
+	const int newest = NewestIdx();
+	const int held = HeldIdx();
 
-		if (cand == newestSlot || cand == heldSlot)
+	for (int s = 0; s < EPOCH_RING_SLOTS; ++s) {
+		const int cand = (newest + 1 + s) % EPOCH_RING_SLOTS;
+
+		if (cand == newest || cand == held)
 			continue;
 		if (slotMeta[cand].refCount.load(std::memory_order_relaxed) != 0)
 			continue;
@@ -402,27 +477,39 @@ int SimSnapshot::PickFreeSlot() const
 		return cand;
 	}
 
-	// cannot happen under the 43 lockstep (<= 1 held + 1 newest of 3); if a
-	// future consumer leaks a reference, republishing in place over the newest
-	// slot is the safe degradation (the consumer is on this thread)
+	// cannot happen under the 43 lockstep (<= 1 held + 1 newest of 3), nor
+	// under the 44a pacing (publish waits for consumption, so at most one
+	// unconsumed newest + one held are pinned); if a future consumer leaks a
+	// reference, republishing in place over the newest slot is the safe
+	// degradation (the producer owns the newest slot until the acquire)
 	assert(false);
-	return newestSlot;
+	return newest;
 }
 
 uint64_t SimSnapshot::AcquireNewestEpoch()
 {
-	if (holdingRef && newestSlot == heldSlot)
+	// PR 44a: acquire-load pairs with the producer's release publish -- every
+	// slot/channel write that preceded the publish is visible from here on
+	const int newest = newestSlot.load(std::memory_order_acquire);
+	const int held = HeldIdx();
+
+	if (holdingRef && newest == held)
 		return 0;
 
-	slotMeta[newestSlot].refCount.fetch_add(1, std::memory_order_acq_rel);
+	slotMeta[newest].refCount.fetch_add(1, std::memory_order_acq_rel);
 
-	const int prev = heldSlot;
+	const int prev = held;
 	const bool hadRef = holdingRef;
 
-	heldSlot = newestSlot;
+	heldSlot.store(newest, std::memory_order_relaxed);
 	holdingRef = true;
 
-	if (!hadRef || prev == heldSlot)
+	// PR 44a pacing signal (§3.2): the newest epoch is now CONSUMED -- release
+	// order so the producer's next publish (which recycles ring slots) can
+	// only proceed after our ref++/held update above is visible
+	consumedEpochId.store(slotMeta[newest].epochId, std::memory_order_release);
+
+	if (!hadRef || prev == newest)
 		return 0;
 
 	if (slotMeta[prev].refCount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
@@ -451,9 +538,10 @@ void SimSnapshot::CheckEpochIdCoverage()
 
 	constexpr uint64_t MAX_LOGGED = 50;
 
-	const UnitRows& u = buffers[heldSlot];
-	const FeatureRows& f = featBuffers[heldSlot];
-	const ProjectileRows& p = projBuffers[heldSlot];
+	const int held = HeldIdx();
+	const UnitRows& u = buffers[held];
+	const FeatureRows& f = featBuffers[held];
+	const ProjectileRows& p = projBuffers[held];
 
 	for (const RenderEventQueue::CoverageRef& ref : refs) {
 		idCoverageChecked += 1;
@@ -486,14 +574,14 @@ void SimSnapshot::CheckEpochIdCoverage()
 
 		if (idCoverageViolations <= MAX_LOGGED) {
 			LOG_L(L_ERROR, "[EpochIdCoverage] epoch=%llu frame=%d %s id=%d unservable (validity=%u) -- a record referenced an id the epoch does not serve",
-				(unsigned long long)epochCounter, buffers[heldSlot].simFrame, kindName, ref.id, unsigned(v));
+				(unsigned long long)slotMeta[held].epochId, u.simFrame, kindName, ref.id, unsigned(v));
 		}
 	}
 }
 
 void SimSnapshot::SealEpochChannelVersions(uint64_t cmdQueueCacheEpoch, uint64_t pieceCacheEpoch, uint32_t mirrorDrainSerial)
 {
-	EpochSlotMeta& meta = slotMeta[heldSlot];
+	EpochSlotMeta& meta = slotMeta[HeldIdx()];
 	meta.cmdQueueCacheEpoch = cmdQueueCacheEpoch;
 	meta.pieceCacheEpoch = pieceCacheEpoch;
 	meta.mirrorDrainSerial = mirrorDrainSerial;
@@ -522,17 +610,18 @@ void SimSnapshot::LogEpochStats() const
 		LOG("[EpochStats] slot=%d epoch=%llu span=[%d,%d] ref=%d%s%s cmdCacheEpoch=%llu pieceCacheEpoch=%llu mirrorSerial=%u",
 			s, (unsigned long long)m.epochId, m.firstSimFrame, m.lastSimFrame,
 			m.refCount.load(std::memory_order_relaxed),
-			(s == heldSlot) ? " HELD" : "", (s == newestSlot) ? " NEWEST" : "",
+			(s == HeldIdx()) ? " HELD" : "", (s == NewestIdx()) ? " NEWEST" : "",
 			(unsigned long long)m.cmdQueueCacheEpoch, (unsigned long long)m.pieceCacheEpoch,
 			m.mirrorDrainSerial);
 	}
 
 	// per-channel payload bytes of the held epoch (§7.1 standing-TODO numbers;
 	// flat-array sizes are exact, map/string channels are entry-walk estimates)
-	const UnitRows& u = buffers[heldSlot];
-	const ProjectileRows& p = projBuffers[heldSlot];
-	const FeatureRows& f = featBuffers[heldSlot];
-	const TeamRows& t = teamBuffers[heldSlot];
+	const int held = HeldIdx();
+	const UnitRows& u = buffers[held];
+	const ProjectileRows& p = projBuffers[held];
+	const FeatureRows& f = featBuffers[held];
+	const TeamRows& t = teamBuffers[held];
 
 	const size_t maxUnits = u.MaxUnits();
 	const size_t unitFlatBytes =
@@ -580,7 +669,7 @@ void SimSnapshot::LogEpochStats() const
 	}
 
 	LOG("[EpochStats] epoch=%llu simFrame=%d units=%d/%d feats=%d/%d projSlots=%d",
-		(unsigned long long)epochCounter, u.simFrame,
+		(unsigned long long)slotMeta[held].epochId, u.simFrame,
 		int(validUnits), int(maxUnits), int(validFeats), int(f.MaxSlots()), int(p.MaxSlots()));
 	LOG("[EpochStats] idCoverage: checked=%llu violations=%llu",
 		(unsigned long long)idCoverageChecked, (unsigned long long)idCoverageViolations);
@@ -593,7 +682,7 @@ void SimSnapshot::LogEpochStats() const
 	    "unitFlat=%.1fKB weaponFlat=%.1fKB unitRules=%.1fKB "
 	    "projFlat=%.1fKB featFlat=%.1fKB featRules=%.1fKB "
 	    "teamRules=%.1fKB teamStatsHist=%.1fKB "
-	    "cmdQueueCache=%.1fKB pieceCache=%.1fKB (cmd/piece are singletons until 44a)",
+	    "cmdQueueCache=%.1fKB pieceCache=%.1fKB (cmd/piece: held slot's per-slot copy, PR 44a)",
 		EPOCH_RING_SLOTS,
 		unitFlatBytes / 1024.0f, weaponFlatBytes / 1024.0f, unitRulesBytes / 1024.0f,
 		projFlatBytes / 1024.0f, featFlatBytes / 1024.0f, featRulesBytes / 1024.0f,
@@ -631,7 +720,7 @@ void SimSnapshot::Clear()
 	splitWasEnabled = false;
 
 	if (numExtractions > 0) {
-		const auto& r = buffers[heldSlot];
+		const auto& r = buffers[HeldIdx()];
 		const size_t bufBytes =
 			r.radarErrorSizes.size() * sizeof(float) + r.allied.size() +
 			r.valid.size() + r.team.size() + r.allyTeam.size() +
@@ -672,7 +761,7 @@ void SimSnapshot::Clear()
 		LOG("[SimSnapshot] extractions=%u avgMs=%.4f maxMs=%.4f peakUnits=%d memKB=%.1f projSlots=%d featSlots=%d",
 			numExtractions, sumExtractMs / numExtractions, maxExtractMs, peakAliveCount,
 			(float(EPOCH_RING_SLOTS) * bufBytes) / 1024.0f,
-			int(projBuffers[heldSlot].MaxSlots()), int(featBuffers[heldSlot].MaxSlots()));
+			int(projBuffers[HeldIdx()].MaxSlots()), int(featBuffers[HeldIdx()].MaxSlots()));
 	}
 
 	for (UnitRows& rows : buffers) {
@@ -704,10 +793,11 @@ void SimSnapshot::Clear()
 		meta.pieceCacheEpoch = 0;
 		meta.mirrorDrainSerial = 0;
 	}
-	heldSlot = 0;
-	newestSlot = 0;
+	heldSlot.store(0, std::memory_order_relaxed);
+	newestSlot.store(0, std::memory_order_relaxed);
 	holdingRef = false;
-	epochCounter = 0;
+	epochCounter.store(0, std::memory_order_relaxed);
+	consumedEpochId.store(0, std::memory_order_relaxed);
 	idCoverageChecked = 0;
 	idCoverageViolations = 0;
 
@@ -1517,12 +1607,15 @@ void SimSnapshot::ExtractFeatures(FeatureRows& rows, size_t minSlots)
 // or a DEAD_THIS_BATCH row would serve stale slot garbage for it.
 // ---------------------------------------------------------------------------
 
-void SimSnapshot::ExtractDeadRowsFromShells(UnitRows& urows, FeatureRows& frows, ProjectileRows& prows)
+void SimSnapshot::ExtractDeadRowsFromShells(UnitRows& urows, FeatureRows& frows, ProjectileRows& prows,
+	const std::vector<std::pair<int, const CUnit*>>& deadUnits,
+	const std::vector<std::pair<int, const CFeature*>>& deadFeatures,
+	const std::vector<std::pair<int, const CProjectile*>>& deadProjectiles)
 {
 	const int numAllyTeams = teamHandler.ActiveAllyTeams();
 
 	const size_t maxUnits = urows.MaxUnits();
-	for (const auto& [id, u] : renderEventQueue.BoundaryDeadUnits()) {
+	for (const auto& [id, u] : deadUnits) {
 		// INACTIVE guard: a slot a new object reused this same batch (already
 		// ACTIVE) is never clobbered; out-of-range cannot happen (fixed maxUnits)
 		if (static_cast<size_t>(id) >= maxUnits || urows.valid[id] != SimSnapshotValid::INACTIVE)
@@ -1656,7 +1749,7 @@ void SimSnapshot::ExtractDeadRowsFromShells(UnitRows& urows, FeatureRows& frows,
 	}
 
 	const size_t featSlots = frows.MaxSlots();
-	for (const auto& [id, f] : renderEventQueue.BoundaryDeadFeatures()) {
+	for (const auto& [id, f] : deadFeatures) {
 		if (static_cast<size_t>(id) >= featSlots || frows.valid[id] != SimSnapshotValid::INACTIVE)
 			continue;
 
@@ -1703,7 +1796,7 @@ void SimSnapshot::ExtractDeadRowsFromShells(UnitRows& urows, FeatureRows& frows,
 	}
 
 	const size_t projSlots = prows.MaxSlots();
-	for (const auto& [id, p] : renderEventQueue.BoundaryDeadProjectiles()) {
+	for (const auto& [id, p] : deadProjectiles) {
 		// the map is filtered to the SYNCED id namespace at record dispatch
 		// (the fd41dbdd92 rule: ProjectileRows holds only synced projectiles,
 		// and an unsynced destroy id must never shadow a live synced row)
@@ -1781,9 +1874,10 @@ static inline void ClearDeadRows(std::vector<uint8_t>& valid)
 
 void SimSnapshot::ClearDeadThisBatch()
 {
-	ClearDeadRows(buffers[heldSlot].valid);
-	ClearDeadRows(featBuffers[heldSlot].valid);
-	ClearDeadRows(projBuffers[heldSlot].valid);
+	const int held = HeldIdx();
+	ClearDeadRows(buffers[held].valid);
+	ClearDeadRows(featBuffers[held].valid);
+	ClearDeadRows(projBuffers[held].valid);
 }
 
 void SimSnapshot::ExtractTeams(TeamRows& rows)

@@ -234,18 +234,31 @@ namespace LuaSnapshotServe {
 	int FindUnitCmdDesc(lua_State* L, const char* caller);   // ParseTypedUnit gate
 	int GetUnitWorkerTask(lua_State* L, const char* caller); // ParseInLosUnit gate
 
-	/// barrier hook (CGame::SimDrawBarrier, right after the snapshot publish --
-	/// generation-gated, so queue copies and snapshot rows always describe the
-	/// same boundary): re-copies the queues of units whose CCommandQueue
-	/// version changed, drops entries of dead units. Sim must be parked (or
-	/// single-threaded): walks unitHandler and reads live queues.
-	void RefreshCommandQueues();
+	/// producer hook (PR 44a: the flip's sim frame edge into the slot being
+	/// produced, or the lockstep barrier into the held slot right after the
+	/// publish -- epoch-gated, so queue copies and snapshot rows always
+	/// describe the same boundary): re-copies the queues of units whose
+	/// CCommandQueue version changed vs ringSlot's previous content, drops
+	/// entries of dead units. The caller's thread must own live sim state
+	/// (sim thread at its edge / main thread with the sim parked).
+	void RefreshCommandQueues(int ringSlot, uint64_t targetEpoch);
 
-	/// PR 43 §2.1: the EpochId the cmd-queue / piece caches currently describe
-	/// (0 = never refreshed). Read by the barrier to seal the held ring slot's
-	/// channel-version scalars (SimSnapshot::SealEpochChannelVersions).
+	/// PR 43 §2.1: the EpochId the cmd-queue / piece cache slots currently
+	/// describe (0 = never refreshed). The 0-arg forms read the consumer-held
+	/// slot (the lockstep barrier's seal); the slot forms serve the producer.
 	uint64_t CmdQueueCacheEpoch();
+	uint64_t CmdQueueCacheEpoch(int slot);
 	uint64_t PieceCacheEpoch();
+	uint64_t PieceCacheEpoch(int slot);
+
+	// ---- PR 44a (producer flip): sim-edge query evaluation ----
+	/// PRODUCER: drain + evaluate the pending trace/placement queries on the
+	/// sim thread (frame edge, and idle/paused servicing) and STAGE the
+	/// replies; cheap no-op when nothing is pending.
+	void EvaluateQueriesAtSimEdge();
+	/// CONSUMER (barrier, sim parked): swap the staged replies into the
+	/// served maps the draw-side callouts read.
+	void CommitStagedQueryReplies();
 
 	/// PR 43 §2.8 (/epochstats): approximate resident bytes of the cmd-queue
 	/// and piece cache channels (the two non-SimSnapshot epoch channels with
@@ -438,7 +451,8 @@ namespace LuaSnapshotServe {
 	// model metadata so the unit/feature piece twins below serve pointer-free
 	// under the running split (see the serving-section header in the .cpp).
 	// Piece-projectile params/name are served from SimSnapshot::ProjectileRows.
-	void RefreshPieces();
+	// (PR 44a: slot-aware like RefreshCommandQueues -- see there.)
+	void RefreshPieces(int ringSlot, uint64_t targetEpoch);
 
 	int GetUnitRootPiece(lua_State* L, const char* caller);
 	int GetUnitPieceMap(lua_State* L, const char* caller);

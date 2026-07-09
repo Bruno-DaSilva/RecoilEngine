@@ -96,6 +96,20 @@ public:
 	// coincide (the epoch retires at the next barrier's acquire).
 	void AckDrainedDestroysEpoch(uint64_t epochId);
 
+	// ---- PR 44a (producer flip): per-epoch shell batches ----
+	// The producer (sim thread, frame edge) seals the current pending shells
+	// into the epoch about to publish -- pending order is death order, so the
+	// prefix is exactly the sealed batch's deaths (the tail died after the
+	// seal; its destroy records ride the NEXT epoch and its shells must stay
+	// readable through that epoch's dispatch).
+	void SealPendingBatch() { sealedPending = pending.size(); }
+
+	// consumer ack under the flip: destruct + poison ONLY the sealed prefix
+	// (whose destroy records just dispatched via DispatchSealedBatch), tagged
+	// with that epoch; the post-seal tail stays parked/readable. No-op when
+	// nothing is sealed.
+	void AckSealedDestroysEpoch(uint64_t epochId);
+
 	// PR 43: epoch-retirement release -- return every poisoned slot whose ack
 	// epoch is <= retiredEpochId to its pool. Called from the barrier when
 	// AcquireNewestEpoch retires a slot.
@@ -138,6 +152,10 @@ private:
 	std::vector<Entry> pending;
 	// destructed + poisoned slots awaiting return to their pool
 	std::vector<Entry> poisoned;
+
+	// PR 44a: pending[0, sealedPending) belong to the newest published epoch
+	// (see SealPendingBatch); reset by every all-shells ack (valve/lockstep)
+	size_t sealedPending = 0;
 
 	uint64_t epoch = 0; // completed ack cycles, diagnostics only
 };

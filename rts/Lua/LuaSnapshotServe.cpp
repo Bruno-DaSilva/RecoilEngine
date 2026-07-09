@@ -3,10 +3,13 @@
 #include "LuaSnapshotServe.h"
 
 #include <algorithm>
+#include <array>  // PR 44a: per-ring-slot cache arrays
 #include <cassert> // the rotation twins' IsOrthoNormal assert
 #include <cstdio>
 #include <cstring>
 #include <map>    // PR 34: PushUnitListSortedByDefSnap's ordered def buckets
+#include <memory> // PR 44a: pointer-stable model-meta values
+#include <mutex>  // PR 44a: cross-thread query channel + model-meta cache
 #include <unordered_map> // PR 35: trace-query reply map (main-thread-only channel)
 #include <vector>
 
@@ -522,7 +525,7 @@ int LuaSnapshotServe::Route(lua_State* L, const char* caller, ServeFn liveFn, Se
 	// the split contract's parse gates out of this sanctioned fallback (found
 	// by the PR-27a count-mode gate: pregame draws tripped -- and strict mode
 	// would have denied -- the SERVED team callouts' live legs).
-	if (simSnapshot.EpochId() == 0) {
+	if (simSnapshot.HeldEpochId() == 0) {
 		LuaSplitContract::ScopedLiveException prePublishFallback;
 		return liveFn(L, caller);
 	}
@@ -3396,7 +3399,7 @@ namespace {
 	const TeamUnitIndex& GetTeamUnitIndex()
 	{
 		TeamUnitIndex& idx = teamUnitIndex;
-		const uint64_t gen = simSnapshot.EpochId();
+		const uint64_t gen = simSnapshot.HeldEpochId();
 
 		if (idx.built && idx.generation == gen)
 			return idx;
@@ -4610,7 +4613,7 @@ namespace {
 	const QuadMembership& GetQuadMembership()
 	{
 		QuadMembership& m = quadMembership;
-		const uint64_t gen = simSnapshot.EpochId();
+		const uint64_t gen = simSnapshot.HeldEpochId();
 		if (m.built && m.generation == gen)
 			return m;
 
@@ -4756,7 +4759,7 @@ namespace {
 	const ProjQuadMembership& GetProjQuadMembership()
 	{
 		ProjQuadMembership& m = projQuadMembership;
-		const uint64_t gen = simSnapshot.EpochId();
+		const uint64_t gen = simSnapshot.HeldEpochId();
 		if (m.built && m.generation == gen)
 			return m;
 
@@ -6120,10 +6123,17 @@ namespace {
 		int lastSelectedCommandPage = 0;
 	};
 
-	// indexed by unitID, sized unitHandler.MaxUnits() at first refresh
-	std::vector<UnitCmdQueueSlot> cmdQueueCache;
-	// PR 43 §2.5: keyed by the u64 EpochId (was the u32 Generation)
-	uint64_t cmdQueueCacheEpoch = 0;
+	// indexed by unitID, sized unitHandler.MaxUnits() at first refresh.
+	// PR 44a: TRUE PER-SLOT COPIES keyed by the SimSnapshot epoch-ring slot
+	// (dissolving the PR-43 lockstep deviation where one physical cache
+	// tracked the newest epoch): the producer refreshes the slot of the epoch
+	// being produced, serving reads the consumer-held slot's copy.
+	std::array<std::vector<UnitCmdQueueSlot>, SimSnapshot::EPOCH_RING_SLOTS> cmdQueueCaches;
+	// PR 43 §2.5: keyed by the u64 EpochId (was the u32 Generation); per-slot
+	std::array<uint64_t, SimSnapshot::EPOCH_RING_SLOTS> cmdQueueCacheEpochs = {};
+
+	// the consumer-held slot's copies -- every serving read goes through this
+	std::vector<UnitCmdQueueSlot>& ServedCmdCache() { return cmdQueueCaches[simSnapshot.HeldSlot()]; }
 
 	// PR 38f (event-time command-queue presentation): a per-unit override
 	// consulted FIRST by GetCmdQueueSlot. Installed by ScopedCmdQueueEventOverride
@@ -6301,10 +6311,12 @@ namespace {
 		if (cmdEvtOverrideSlot != nullptr && unitID == cmdEvtOverrideUnitID)
 			return cmdEvtOverrideSlot;
 
-		if (unitID < 0 || static_cast<size_t>(unitID) >= cmdQueueCache.size())
+		const std::vector<UnitCmdQueueSlot>& cache = ServedCmdCache();
+
+		if (unitID < 0 || static_cast<size_t>(unitID) >= cache.size())
 			return nullptr;
 
-		const UnitCmdQueueSlot& slot = cmdQueueCache[unitID];
+		const UnitCmdQueueSlot& slot = cache[unitID];
 
 		return slot.present ? &slot : nullptr;
 	}
@@ -6548,21 +6560,27 @@ namespace {
 }
 
 
-uint64_t LuaSnapshotServe::CmdQueueCacheEpoch() { return cmdQueueCacheEpoch; }
+uint64_t LuaSnapshotServe::CmdQueueCacheEpoch() { return cmdQueueCacheEpochs[simSnapshot.HeldSlot()]; }
+uint64_t LuaSnapshotServe::CmdQueueCacheEpoch(int slot) { return cmdQueueCacheEpochs[slot]; }
 
-void LuaSnapshotServe::RefreshCommandQueues()
+void LuaSnapshotServe::RefreshCommandQueues(int ringSlot, uint64_t targetEpoch)
 {
-	// barrier-only (sim parked or single-threaded): walks unitHandler and
-	// reads live queues. Generation-gated so the copies always describe the
-	// same boundary as the published rows -- and so the walk is free when the
-	// publish above didn't swap (no sim frame, no boundary mutation).
-	const uint64_t gen = simSnapshot.EpochId();
+	// producer-only (the flip's sim frame edge, or the lockstep barrier with
+	// the sim parked): walks unitHandler and reads live queues. Epoch-gated so
+	// the copies always describe the same boundary as the target slot's rows
+	// -- and so the walk is free when nothing was (re)published. PR 44a: the
+	// version-gated per-unit recopy compares against THIS SLOT's previous
+	// content (up to EPOCH_RING_SLOTS boundaries old), so a changed queue is
+	// recopied into each slot as the ring rotates -- correctness by
+	// construction, ~ring-depth x the (sparse) per-boundary copy volume.
+	const uint64_t gen = targetEpoch;
 
-	if (gen == 0 || gen == cmdQueueCacheEpoch)
+	if (gen == 0 || gen == cmdQueueCacheEpochs[ringSlot])
 		return;
 
-	cmdQueueCacheEpoch = gen;
+	cmdQueueCacheEpochs[ringSlot] = gen;
 
+	std::vector<UnitCmdQueueSlot>& cmdQueueCache = cmdQueueCaches[ringSlot];
 	const size_t maxUnits = unitHandler.MaxUnits();
 
 	if (cmdQueueCache.size() != maxUnits)
@@ -6929,9 +6947,10 @@ LuaSnapshotServe::CmdQueueCompareResult LuaSnapshotServe::CompareCmdQueueSlot(in
 {
 	CmdQueueCompareResult res{};
 
+	const std::vector<UnitCmdQueueSlot>& cache = ServedCmdCache();
 	const UnitCmdQueueSlot* slot =
-		(unitID >= 0 && static_cast<size_t>(unitID) < cmdQueueCache.size() && cmdQueueCache[unitID].present)
-			? &cmdQueueCache[unitID] : nullptr;
+		(unitID >= 0 && static_cast<size_t>(unitID) < cache.size() && cache[unitID].present)
+			? &cache[unitID] : nullptr;
 
 	res.present = (slot != nullptr);
 	if (slot == nullptr || liveUnit == nullptr)
@@ -7020,10 +7039,12 @@ LuaSnapshotServe::CmdQueueCompareResult LuaSnapshotServe::CompareCmdQueueSlot(in
 // deferred command-event dispatch, so the event-time override is irrelevant here.
 bool LuaSnapshotServe::GetServedAvailableCommands(int unitID, std::vector<SCommandDescription>& outDescs, int& outPage)
 {
-	if (unitID < 0 || static_cast<size_t>(unitID) >= cmdQueueCache.size())
+	const std::vector<UnitCmdQueueSlot>& cache = ServedCmdCache();
+
+	if (unitID < 0 || static_cast<size_t>(unitID) >= cache.size())
 		return false;
 
-	const UnitCmdQueueSlot& slot = cmdQueueCache[unitID];
+	const UnitCmdQueueSlot& slot = cache[unitID];
 	if (!slot.present)
 		return false;
 
@@ -7120,7 +7141,12 @@ namespace {
 		std::vector<PieceStatic> pieces;
 	};
 
-	spring::unordered_map<const void*, ModelPieceMeta> modelMetaCache;
+	// PR 44a: values behind unique_ptr (pointer-stable across rehash) + a
+	// mutex -- the producer (sim thread) inserts on the first object of a
+	// model while draw-side serving twins look up concurrently. Insertions
+	// are rare (one per model type); lookups take an uncontended lock.
+	spring::unordered_map<const void*, std::unique_ptr<ModelPieceMeta>> modelMetaCache;
+	std::mutex modelMetaMtx;
 
 	// captured dynamic (per-boundary) piece state, final computed values
 	struct PieceDynamic {
@@ -7147,18 +7173,23 @@ namespace {
 		int32_t lastHitFrame = -1;       // pieceHitFrames[true]
 	};
 
-	// indexed by unitID / featureID, sized at first refresh
-	std::vector<ObjectPieceSlot> unitPieceCache;
-	std::vector<ObjectPieceSlot> featurePieceCache;
-	// PR 43 §2.5: keyed by the u64 EpochId (was the u32 Generation)
-	uint64_t pieceCacheEpoch = 0;
+	// indexed by unitID / featureID, sized at first refresh.
+	// PR 44a: TRUE PER-SLOT COPIES keyed by the SimSnapshot epoch-ring slot
+	// (see the cmd-queue cache note); serving reads the consumer-held slot.
+	std::array<std::vector<ObjectPieceSlot>, SimSnapshot::EPOCH_RING_SLOTS> unitPieceCaches;
+	std::array<std::vector<ObjectPieceSlot>, SimSnapshot::EPOCH_RING_SLOTS> featurePieceCaches;
+	// PR 43 §2.5: keyed by the u64 EpochId (was the u32 Generation); per-slot
+	std::array<uint64_t, SimSnapshot::EPOCH_RING_SLOTS> pieceCacheEpochs = {};
 
 	// build (once) the immutable metadata for o's model from a live LocalModel
 	const ModelPieceMeta& GetOrBuildModelMeta(const void* key, const LocalModel& lm)
 	{
-		auto it = modelMetaCache.find(key);
-		if (it != modelMetaCache.end())
-			return it->second;
+		{
+			std::lock_guard<std::mutex> lock(modelMetaMtx);
+			auto it = modelMetaCache.find(key);
+			if (it != modelMetaCache.end())
+				return *it->second;
+		}
 
 		ModelPieceMeta meta;
 		meta.rootPieceIndex = lm.GetRoot()->GetLModelPieceIndex();
@@ -7179,7 +7210,8 @@ namespace {
 			ps.emitDir = lm.pieces[i].GetDirection();
 		}
 
-		return modelMetaCache.emplace(key, std::move(meta)).first->second;
+		std::lock_guard<std::mutex> lock(modelMetaMtx);
+		return *modelMetaCache.emplace(key, std::make_unique<ModelPieceMeta>(std::move(meta))).first->second;
 	}
 
 	// capture o's dynamic piece state + static-metadata key at the barrier
@@ -7245,17 +7277,19 @@ namespace {
 
 	const ObjectPieceSlot* GetUnitPieceSlot(int unitID)
 	{
-		if (unitID < 0 || static_cast<size_t>(unitID) >= unitPieceCache.size())
+		const std::vector<ObjectPieceSlot>& cache = unitPieceCaches[simSnapshot.HeldSlot()];
+		if (unitID < 0 || static_cast<size_t>(unitID) >= cache.size())
 			return nullptr;
-		const ObjectPieceSlot& s = unitPieceCache[unitID];
+		const ObjectPieceSlot& s = cache[unitID];
 		return s.present ? &s : nullptr;
 	}
 
 	const ObjectPieceSlot* GetFeaturePieceSlot(int featureID)
 	{
-		if (featureID < 0 || static_cast<size_t>(featureID) >= featurePieceCache.size())
+		const std::vector<ObjectPieceSlot>& cache = featurePieceCaches[simSnapshot.HeldSlot()];
+		if (featureID < 0 || static_cast<size_t>(featureID) >= cache.size())
 			return nullptr;
-		const ObjectPieceSlot& s = featurePieceCache[featureID];
+		const ObjectPieceSlot& s = cache[featureID];
 		return s.present ? &s : nullptr;
 	}
 
@@ -7327,8 +7361,9 @@ namespace {
 	{
 		if (slot->metaKey == nullptr)
 			return nullptr;
+		std::lock_guard<std::mutex> lock(modelMetaMtx);
 		auto it = modelMetaCache.find(slot->metaKey);
-		return (it != modelMetaCache.end()) ? &it->second : nullptr;
+		return (it != modelMetaCache.end()) ? it->second.get() : nullptr;
 	}
 
 	// GetSolidObjectPieceInfoHelper mirror over cached metadata
@@ -7512,14 +7547,15 @@ namespace {
 }
 
 
-uint64_t LuaSnapshotServe::PieceCacheEpoch() { return pieceCacheEpoch; }
+uint64_t LuaSnapshotServe::PieceCacheEpoch() { return pieceCacheEpochs[simSnapshot.HeldSlot()]; }
+uint64_t LuaSnapshotServe::PieceCacheEpoch(int slot) { return pieceCacheEpochs[slot]; }
 
 // PR 43 §2.8 (/epochstats): approximate resident bytes of the cmd-queue and
 // piece cache channels (flat-vector payloads; container overhead ignored)
 void LuaSnapshotServe::EpochChannelBytes(size_t& cmdQueueBytes, size_t& pieceBytes)
 {
 	cmdQueueBytes = 0;
-	for (const UnitCmdQueueSlot& slot : cmdQueueCache) {
+	for (const UnitCmdQueueSlot& slot : ServedCmdCache()) {
 		cmdQueueBytes += sizeof(slot);
 		cmdQueueBytes += slot.commandQue.capacity() * sizeof(slot.commandQue[0]);
 		cmdQueueBytes += slot.commandQueParams.capacity() * sizeof(float);
@@ -7530,7 +7566,8 @@ void LuaSnapshotServe::EpochChannelBytes(size_t& cmdQueueBytes, size_t& pieceByt
 	}
 
 	pieceBytes = 0;
-	for (const auto* cache : {&unitPieceCache, &featurePieceCache}) {
+	const int heldSlot = simSnapshot.HeldSlot();
+	for (const auto* cache : {&unitPieceCaches[heldSlot], &featurePieceCaches[heldSlot]}) {
 		for (const ObjectPieceSlot& slot : *cache) {
 			pieceBytes += sizeof(slot);
 			pieceBytes += slot.pieces.capacity() * sizeof(PieceDynamic);
@@ -7539,14 +7576,15 @@ void LuaSnapshotServe::EpochChannelBytes(size_t& cmdQueueBytes, size_t& pieceByt
 	}
 }
 
-void LuaSnapshotServe::RefreshPieces()
+void LuaSnapshotServe::RefreshPieces(int ringSlot, uint64_t targetEpoch)
 {
-	// barrier-only (sim parked / single-threaded), right after simSnapshot.Update().
-	// generation-gated so the copies always describe the same boundary as the
-	// published rows, and so the walk is free when the publish did not swap.
-	const uint64_t gen = simSnapshot.EpochId();
+	// producer-only (the flip's sim frame edge, or the lockstep barrier with
+	// the sim parked). Epoch-gated so the copies always describe the same
+	// boundary as the target slot's rows, and so the walk is free when
+	// nothing was (re)published.
+	const uint64_t gen = targetEpoch;
 
-	if (gen == 0 || gen == pieceCacheEpoch)
+	if (gen == 0 || gen == pieceCacheEpochs[ringSlot])
 		return;
 
 	// flag-off (no contract, gate unarmed) never serves these twins -- skip the
@@ -7554,7 +7592,10 @@ void LuaSnapshotServe::RefreshPieces()
 	if (!LuaSplitContract::Enabled() && !snapshotDiffGate.Armed())
 		return;
 
-	pieceCacheEpoch = gen;
+	pieceCacheEpochs[ringSlot] = gen;
+
+	std::vector<ObjectPieceSlot>& unitPieceCache = unitPieceCaches[ringSlot];
+	std::vector<ObjectPieceSlot>& featurePieceCache = featurePieceCaches[ringSlot];
 
 	const size_t maxUnits = unitHandler.MaxUnits();
 	if (unitPieceCache.size() != maxUnits)
@@ -7791,18 +7832,25 @@ void LuaSnapshotServe::ClearCaches()
 
 	// command-queue serving cache: unit ids and queue versions restart with
 	// the next game, so a surviving entry could alias fresh ones
-	cmdQueueCache.clear();
-	cmdQueueCache.shrink_to_fit();
-	cmdQueueCacheEpoch = 0;
+	for (auto& cache : cmdQueueCaches) {
+		cache.clear();
+		cache.shrink_to_fit();
+	}
+	cmdQueueCacheEpochs.fill(0);
 
 	// PR 33 piece caches: unit/feature ids and model pointers restart with the
 	// next game, so a surviving entry could alias fresh ones
-	unitPieceCache.clear();
-	unitPieceCache.shrink_to_fit();
-	featurePieceCache.clear();
-	featurePieceCache.shrink_to_fit();
-	modelMetaCache.clear();
-	pieceCacheEpoch = 0;
+	for (auto* caches : {&unitPieceCaches, &featurePieceCaches}) {
+		for (auto& cache : *caches) {
+			cache.clear();
+			cache.shrink_to_fit();
+		}
+	}
+	{
+		std::lock_guard<std::mutex> lock(modelMetaMtx);
+		modelMetaCache.clear();
+	}
+	pieceCacheEpochs.fill(0);
 
 	// PR 35 weapon trace-query channel state is self-pruning (the reply map is
 	// rebuilt from the pending set every barrier, and is keyed by the full query
@@ -9379,10 +9427,20 @@ namespace {
 	// requested since the last barrier (draw-context callouts push here; the
 	// barrier drains + clears). Main-thread-only.
 	std::vector<WeaponTraceQuery> traceQueryPending;
+
+	// PR 44a (producer flip): the query channel became a real cross-thread
+	// channel -- draw-context Lua enqueues pending queries while the SIM
+	// thread drains + evaluates them at its frame edge (§1.7). One mutex
+	// guards both channels' pending queues and the staged reply maps; the
+	// SERVED reply maps stay main-thread-only (the consumer swaps the staged
+	// replies in at the park, CommitStagedQueryReplies).
+	std::mutex queryChannelMtx;
+	bool traceRepliesStagedValid = false;
 	// last boundary's sim-exact replies, keyed by the STANDING key (§7.3).
 	// Rebuilt each barrier from the pending set (a query the widgets stop
 	// requesting drops out -- no growth).
 	std::unordered_map<WeaponTraceQuery, uint8_t, WeaponTraceQueryHash, WeaponTraceQueryEq> traceQueryReplies;
+	std::unordered_map<WeaponTraceQuery, uint8_t, WeaponTraceQueryHash, WeaponTraceQueryEq> traceRepliesStaged;
 	std::unordered_map<WeaponTraceQuery, uint8_t, WeaponTraceQueryHash, WeaponTraceQueryEq> traceQueryRepliesScratch;
 	// standing key -> most recently registered full query (barrier scratch)
 	std::unordered_map<WeaponTraceQuery, WeaponTraceQuery, WeaponTraceQueryHash, WeaponTraceQueryEq> traceQueryLatest;
@@ -9542,7 +9600,11 @@ namespace {
 		if (BuildTraceQuery(L, caller, kind, q) == 0)
 			return 0;
 
-		traceQueryPending.push_back(q);
+		{
+			// PR 44a: the sim-thread producer drains this queue concurrently
+			std::lock_guard<std::mutex> lock(queryChannelMtx);
+			traceQueryPending.push_back(q);
+		}
 
 		// PR 43 §7.3: pos-agnostic standing-key lookup -- a cursor-tracking
 		// pos-form query hits the reply its previous boundary's registration
@@ -9674,7 +9736,7 @@ int LuaSnapshotServe::RouteTraceQuery(lua_State* L, const char* caller, ServeFn 
 
 	// pregame: no sim thread yet, live tables exist, snapshot does not -- serve
 	// live under the sanctioned live-exception bracket (the Route() precedent)
-	if (simSnapshot.EpochId() == 0) {
+	if (simSnapshot.HeldEpochId() == 0) {
 		LuaSplitContract::ScopedLiveException prePublishFallback;
 		return liveFn(L, caller);
 	}
@@ -9765,31 +9827,42 @@ void LuaSnapshotServe::EvaluateTraceQueries()
 	// flag-off / nothing enqueued -> inert (the twin only enqueues under the
 	// running split). Called at the SimDrawBarrier with the sim parked, so the
 	// live predicate evaluation is the sanctioned RefreshCommandQueues class.
-	if (traceQueryPending.empty())
-		return;
-
 	// rebuild the reply map from this boundary's pending set: a query the widgets
 	// stopped requesting drops out, so the map cannot grow unbounded across a game.
 	// PR 43 §7.3 (standing-latest-query): dedupe the pending set by STANDING key
 	// first, keeping the most recently registered full query per key, then
 	// evaluate that latest position and publish under the standing key.
+	// (PR 44a: pending steal under the channel lock -- inert here in practice,
+	// this lockstep path only runs when the flip producer does not.)
 	traceQueryLatest.clear();
-	for (const WeaponTraceQuery& q: traceQueryPending)
-		traceQueryLatest[StandingTraceKey(q)] = q;
+	{
+		std::lock_guard<std::mutex> lock(queryChannelMtx);
+
+		if (traceQueryPending.empty())
+			return;
+
+		for (const WeaponTraceQuery& q: traceQueryPending)
+			traceQueryLatest[StandingTraceKey(q)] = q;
+		traceQueryPending.clear();
+	}
 
 	traceQueryRepliesScratch.clear();
 	for (const auto& [key, q]: traceQueryLatest)
 		traceQueryRepliesScratch[key] = EvaluateTraceQueryLive(q) ? 1 : 0;
 
 	std::swap(traceQueryReplies, traceQueryRepliesScratch);
-	traceQueryPending.clear();
 }
 
 
 void LuaSnapshotServe::ClearTraceQueryChannel()
 {
-	traceQueryPending.clear();
-	traceQueryPending.shrink_to_fit();
+	{
+		std::lock_guard<std::mutex> lock(queryChannelMtx);
+		traceQueryPending.clear();
+		traceQueryPending.shrink_to_fit();
+		traceRepliesStaged.clear();
+		traceRepliesStagedValid = false;
+	}
 	traceQueryReplies.clear();
 	traceQueryRepliesScratch.clear();
 	traceQueryLatest.clear();
@@ -9941,10 +10014,13 @@ namespace {
 	// requested since the last barrier (draw-context callouts push here; the
 	// barrier drains + clears). Main-thread-only.
 	std::vector<PlacementQuery> placementQueryPending;
+	// PR 44a: see the trace channel note (shared queryChannelMtx)
+	bool placementRepliesStagedValid = false;
 	// last boundary's sim-exact replies, keyed by the STANDING key (§7.3).
 	// Rebuilt each barrier from the pending set (a query the widgets stop
 	// requesting drops out -- no growth).
 	std::unordered_map<PlacementQuery, PlacementReply, PlacementQueryHash, PlacementQueryEq> placementQueryReplies;
+	std::unordered_map<PlacementQuery, PlacementReply, PlacementQueryHash, PlacementQueryEq> placementRepliesStaged;
 	std::unordered_map<PlacementQuery, PlacementReply, PlacementQueryHash, PlacementQueryEq> placementQueryRepliesScratch;
 	// standing key -> most recently registered full query (barrier scratch)
 	std::unordered_map<PlacementQuery, PlacementQuery, PlacementQueryHash, PlacementQueryEq> placementQueryLatest;
@@ -10159,7 +10235,11 @@ namespace {
 		if (BuildPlacementQuery(L, caller, kind, q, inlineReply) == 0)
 			return PushPlacementReply(L, kind, inlineReply); // def early-out, no channel
 
-		placementQueryPending.push_back(q);
+		{
+			// PR 44a: the sim-thread producer drains this queue concurrently
+			std::lock_guard<std::mutex> lock(queryChannelMtx);
+			placementQueryPending.push_back(q);
+		}
 
 		// PR 43 §7.3: standing-key lookup (pos-agnostic for CBP/TMO, snapped-
 		// cell for TBO) -- a moving cursor hits the previous boundary's reply
@@ -10180,7 +10260,7 @@ int LuaSnapshotServe::RoutePlacementQuery(lua_State* L, const char* caller, Serv
 
 	// pregame: no sim thread yet, live tables exist, snapshot does not -- serve
 	// live under the sanctioned live-exception bracket (the Route() precedent)
-	if (simSnapshot.EpochId() == 0) {
+	if (simSnapshot.HeldEpochId() == 0) {
 		LuaSplitContract::ScopedLiveException prePublishFallback;
 		return liveFn(L, caller);
 	}
@@ -10279,34 +10359,125 @@ void LuaSnapshotServe::EvaluatePlacementQueries()
 	// flag-off / nothing enqueued -> inert (the twin only enqueues under the
 	// running split). Called at the SimDrawBarrier with the sim parked, so the
 	// live predicate evaluation is the sanctioned RefreshCommandQueues class.
-	if (placementQueryPending.empty())
-		return;
-
-	// rebuild the reply map from this boundary's pending set: a query the widgets
-	// stopped requesting drops out, so the map cannot grow unbounded across a game.
-	// PR 43 §7.3 (standing-latest-query): dedupe by STANDING key first, keeping
-	// the most recently registered full query per key, then evaluate that
-	// latest position and publish under the standing key.
+	// rebuild the reply map from this boundary's pending set (see the trace
+	// evaluator above for the pruning + §7.3 keying + PR 44a locking notes)
 	placementQueryLatest.clear();
-	for (const PlacementQuery& q: placementQueryPending)
-		placementQueryLatest[StandingPlacementKey(q)] = q;
+	{
+		std::lock_guard<std::mutex> lock(queryChannelMtx);
+
+		if (placementQueryPending.empty())
+			return;
+
+		for (const PlacementQuery& q: placementQueryPending)
+			placementQueryLatest[StandingPlacementKey(q)] = q;
+		placementQueryPending.clear();
+	}
 
 	placementQueryRepliesScratch.clear();
 	for (const auto& [key, q]: placementQueryLatest)
 		placementQueryRepliesScratch[key] = EvaluatePlacementQueryLive(q);
 
 	std::swap(placementQueryReplies, placementQueryRepliesScratch);
-	placementQueryPending.clear();
 }
 
 
 void LuaSnapshotServe::ClearPlacementQueryChannel()
 {
-	placementQueryPending.clear();
-	placementQueryPending.shrink_to_fit();
+	{
+		std::lock_guard<std::mutex> lock(queryChannelMtx);
+		placementQueryPending.clear();
+		placementQueryPending.shrink_to_fit();
+		placementRepliesStaged.clear();
+		placementRepliesStagedValid = false;
+	}
 	placementQueryReplies.clear();
 	placementQueryRepliesScratch.clear();
 	placementQueryLatest.clear();
+}
+
+// ---------------------------------------------------------------------------
+// PR 44a (producer flip): sim-edge query evaluation + park-time reply commit
+// ---------------------------------------------------------------------------
+
+void LuaSnapshotServe::EvaluateQueriesAtSimEdge()
+{
+	// PRODUCER half (sim thread): steal both channels' pending queries under
+	// the lock, evaluate the exact live predicates (the sim owns its state
+	// here -- the same evaluation the parked barrier ran pre-flip), and stage
+	// the replies for the consumer's park-time commit. Also serviced while
+	// the sim is idle/paused (no frame edges) so cursor-tracking widget
+	// queries stay live -- the §8 Gap-B note's pattern, generalized.
+	static std::vector<WeaponTraceQuery> tq;
+	static std::vector<PlacementQuery> pq;
+	tq.clear();
+	pq.clear();
+
+	{
+		std::lock_guard<std::mutex> lock(queryChannelMtx);
+		tq.swap(traceQueryPending);
+		pq.swap(placementQueryPending);
+	}
+
+	if (tq.empty() && pq.empty())
+		return;
+
+	// §7.3 standing-latest-query dedupe + evaluation, outside the lock (the
+	// predicates can be non-trivial); the *Latest maps are producer-owned
+	// here (the lockstep evaluators never run concurrently with the flip)
+	traceQueryLatest.clear();
+	for (const WeaponTraceQuery& q: tq)
+		traceQueryLatest[StandingTraceKey(q)] = q;
+
+	placementQueryLatest.clear();
+	for (const PlacementQuery& q: pq)
+		placementQueryLatest[StandingPlacementKey(q)] = q;
+
+	// evaluate into locals, then merge under the lock. MERGE (not replace):
+	// multiple sim-edge evaluations can run between two consumer commits
+	// (paused-idle servicing); a reply staged earlier in the window must
+	// survive until the commit or a one-shot query would be lost. The commit
+	// REPLACES the served map, preserving the per-draw-frame pruning.
+	traceQueryRepliesScratch.clear();
+	for (const auto& [key, q]: traceQueryLatest)
+		traceQueryRepliesScratch[key] = EvaluateTraceQueryLive(q) ? 1 : 0;
+
+	placementQueryRepliesScratch.clear();
+	for (const auto& [key, q]: placementQueryLatest)
+		placementQueryRepliesScratch[key] = EvaluatePlacementQueryLive(q);
+
+	{
+		std::lock_guard<std::mutex> lock(queryChannelMtx);
+
+		if (!traceQueryRepliesScratch.empty()) {
+			for (const auto& [key, r]: traceQueryRepliesScratch)
+				traceRepliesStaged[key] = r;
+			traceRepliesStagedValid = true;
+		}
+		if (!placementQueryRepliesScratch.empty()) {
+			for (const auto& [key, r]: placementQueryRepliesScratch)
+				placementRepliesStaged[key] = r;
+			placementRepliesStagedValid = true;
+		}
+	}
+}
+
+void LuaSnapshotServe::CommitStagedQueryReplies()
+{
+	// CONSUMER half (barrier, sim parked): swap the staged replies into the
+	// served maps. The served maps are read lock-free by the draw thread --
+	// this swap is the only writer and runs on that same thread.
+	std::lock_guard<std::mutex> lock(queryChannelMtx);
+
+	if (traceRepliesStagedValid) {
+		std::swap(traceQueryReplies, traceRepliesStaged);
+		traceRepliesStaged.clear();
+		traceRepliesStagedValid = false;
+	}
+	if (placementRepliesStagedValid) {
+		std::swap(placementQueryReplies, placementRepliesStaged);
+		placementRepliesStaged.clear();
+		placementRepliesStagedValid = false;
+	}
 }
 
 
@@ -10421,7 +10592,7 @@ bool LuaSnapshotServe::CmdQueueEventOverrideActive(lua_State* L)
 	if (!lua_isnumber(L, 1))
 		return false;
 
-	return (lua_toint(L, 1) == cmdEvtOverrideUnitID) && (simSnapshot.EpochId() != 0);
+	return (lua_toint(L, 1) == cmdEvtOverrideUnitID) && (simSnapshot.HeldEpochId() != 0);
 }
 
 bool LuaSnapshotServe::LosEventOverrideActive(lua_State* L)
@@ -10431,5 +10602,5 @@ bool LuaSnapshotServe::LosEventOverrideActive(lua_State* L)
 	if (!lua_isnumber(L, 1))
 		return false;
 
-	return SimSnapshotLosEvent::ActiveForUnit(lua_toint(L, 1)) && (simSnapshot.EpochId() != 0);
+	return SimSnapshotLosEvent::ActiveForUnit(lua_toint(L, 1)) && (simSnapshot.HeldEpochId() != 0);
 }
