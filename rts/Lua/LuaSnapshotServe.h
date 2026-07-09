@@ -582,27 +582,19 @@ namespace LuaSnapshotServe {
 	// PR 43's epoch mechanism must carry the query queue + reply map alongside the
 	// ring (flagged for the epoch-infra refresh).
 	//
-	// FLAG-ON DEVIATION (enumerated at integration -- PR 35 review finding): the
-	// reply map is keyed by the FULL query, including the float pos/tgt bits. For
-	// enemy-form queries {owner,weapon,enemyID} the key is stable, so after the
-	// first boundary the reply populates and tracks at <=1 stale (deviation #2).
-	// But a POS-FORM / cursor-tracking query whose ground position CHANGES every
-	// frame (attack-range / ground-attack placement widgets that follow the mouse
-	// cursor) produces a NEW key each frame => every serve is a map miss => the
-	// callout returns the default `false` PERSISTENTLY, never a correct answer,
-	// for as long as the position keeps moving. This is worse than the sanctioned
-	// "<=1 stale" envelope and is ADVISORY-UI-ONLY (no sync/leak consequence --
-	// the channel is unsynced draw-state). It is deliberately left forward-fixable
-	// rather than fixed here: evaluating pos-form synchronously at request time is
-	// UNSAFE under the running split (the predicates read the collision world /
-	// CGround / quadfield TraceRay scratch the sim thread is concurrently touching
-	// -- the exact race this channel avoids), and a pos-agnostic secondary key
-	// (return the most-recent-position reply) carries its own same-frame collision
-	// ambiguity between two widgets querying one owner/weapon at different cursor
-	// positions. If BAR ships a cursor-following pos-form predicate widget that
-	// this breaks, PR 43's epoch refresh is the place to revisit the keying. The
-	// windowed targeting-widget gate (batch end) MUST exercise a moving-cursor
-	// ground-placement predicate so this class is verified, not silently broken.
+	// FLAG-ON DEVIATION (PR 43 §7.3, operator-ruled keying -- supersedes the
+	// PR 35 full-query-key deviation): the reply map is keyed by the STANDING
+	// key (the query with its float pos/tgt payload zeroed). Enemy-form
+	// queries are unaffected (their float payload is already zero); a
+	// POS-FORM / cursor-tracking query now registers its CURRENT position
+	// each frame, the barrier evaluates the MOST RECENT registered position
+	// per standing key, and the serve is a pos-agnostic lookup -- <=1
+	// boundary late but NEVER-DEFAULT after the first boundary (the old
+	// full-pos key made a moving cursor a perpetual map miss returning
+	// `false` persistently). Enumerated deviations: (a) the reply reflects a
+	// <=1-boundary-old cursor position; (b) two same-frame queries sharing a
+	// standing key but different positions collide, last registered wins
+	// (ruled acceptable -- advisory UI predicates).
 	enum class TraceKind { TryTarget = 0, TestTarget = 1, TestRange = 2, HaveFreeLineOfFire = 3 };
 
 	/// entry-point glue for the four trace tests (called from LuaSyncedRead):
@@ -649,25 +641,23 @@ namespace LuaSnapshotServe {
 	// PR 43's epoch mechanism must carry the query queue + reply map alongside the
 	// ring (same flag as the PR 35 trace channel).
 	//
-	// FLAG-ON DEVIATION (enumerated; the PR 35 pos-form finding applies in FULL
-	// here and is the DOMINANT case for placement): the reply map is keyed by the
-	// FULL query, including the float pos bits. Build-placement / move-order
-	// widgets follow the MOUSE CURSOR, so the queried position CHANGES essentially
-	// every frame => a NEW key each frame => every serve is a map miss => the
-	// callout returns the documented DEFAULT (blocked / not-found) PERSISTENTLY
-	// while the cursor moves. This is worse than the "<=1 stale" envelope and is
-	// ADVISORY-UI-ONLY (no sync/leak consequence -- the channel is unsynced
-	// draw-state; flag-off is byte-identical). It is deliberately left
-	// forward-fixable at PR 43's epoch refresh rather than fixed here: evaluating
-	// the predicate synchronously at request time is UNSAFE under the running
-	// split (it reads the blocking map / terrain arrays / quadfield the sim thread
-	// is concurrently mutating -- the exact race this channel avoids), and a
-	// build-grid-snapped secondary key is only value-safe for TestBuildOrder (its
-	// result depends solely on the snapped pos), NOT for ClosestBuildPos (the
-	// nearest-pos search value depends continuously on worldPos) or reliably for
-	// TestMoveOrder -- so a uniform key change would silently corrupt two of the
-	// three. The windowed build-placement gate (batch end) MUST exercise a
-	// moving-cursor build preview so this class is verified, not silently broken.
+	// FLAG-ON DEVIATION (PR 43 §7.3, operator-ruled PER-CALLOUT keying --
+	// supersedes the 38e full-query-key deviation, which made a
+	// cursor-following build preview a perpetual map miss returning the
+	// conservative default):
+	//  - TestBuildOrder: keyed by the build-grid-SNAPPED pos (canonicalized
+	//    at query build). The verdict is grid-cell-quantized (Pos2BuildPos
+	//    snaps x/z and recomputes y from terrain), so within-cell cursor
+	//    motion hits the same key -- correct values WHILE the cursor moves;
+	//    this is the correct key, not a band-aid.
+	//  - ClosestBuildPos / TestMoveOrder: results depend continuously on
+	//    worldPos (no snap is value-safe), so they use the STANDING-LATEST-
+	//    QUERY model -- pos-agnostic reply key, the barrier evaluates the
+	//    most recent registered position: 1 boundary late but never-default.
+	// Enumerated deviations: (a) replies reflect a <=1-boundary-old cursor
+	// position; (b) two same-frame queries sharing a standing key but
+	// different positions collide, last registered wins (ruled acceptable --
+	// advisory UI predicates).
 	enum class PlacementKind { TestMoveOrder = 0, TestBuildOrder = 1, ClosestBuildPos = 2 };
 
 	/// entry-point glue for the three placement tests (called from LuaSyncedRead):

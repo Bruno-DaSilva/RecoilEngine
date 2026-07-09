@@ -9328,13 +9328,39 @@ namespace {
 		}
 	};
 
+	// PR 43 §7.3 (operator-ruled keying, Batch-4): the STANDING-LATEST-QUERY
+	// key -- the query with its float position payload canonicalized to zero.
+	// A pos-form / cursor-tracking query (TryTarget/TestTarget/TestRange pos
+	// form, HaveFreeLineOfFire srcPos/tgtPos variants) whose position moves
+	// every frame previously minted a new full-query key each frame => every
+	// serve was a map miss => the callout returned the default PERSISTENTLY
+	// while the cursor moved (the PR 35 pos-form deviation). Under the
+	// standing model the draw side registers its CURRENT per-(callout, owner,
+	// weapon, arg-shape) query each frame, the barrier evaluates the MOST
+	// RECENT registered position per standing key, and the reply is looked up
+	// pos-agnostically: <=1 boundary late but never-default. Enemy-form
+	// queries have zero float payload already, so their key is unchanged.
+	// Enumerated deviation (ruled acceptable): two same-frame queries sharing
+	// a standing key but different positions collide -- the last registered
+	// position wins for both.
+	WeaponTraceQuery StandingTraceKey(const WeaponTraceQuery& q)
+	{
+		WeaponTraceQuery k = q;
+		k.px = k.py = k.pz = 0.0f;
+		k.qx = k.qy = k.qz = 0.0f;
+		return k;
+	}
+
 	// requested since the last barrier (draw-context callouts push here; the
 	// barrier drains + clears). Main-thread-only.
 	std::vector<WeaponTraceQuery> traceQueryPending;
-	// last boundary's sim-exact replies, keyed by query. Rebuilt each barrier from
-	// the pending set (a query the widgets stop requesting drops out -- no growth).
+	// last boundary's sim-exact replies, keyed by the STANDING key (§7.3).
+	// Rebuilt each barrier from the pending set (a query the widgets stop
+	// requesting drops out -- no growth).
 	std::unordered_map<WeaponTraceQuery, uint8_t, WeaponTraceQueryHash, WeaponTraceQueryEq> traceQueryReplies;
 	std::unordered_map<WeaponTraceQuery, uint8_t, WeaponTraceQueryHash, WeaponTraceQueryEq> traceQueryRepliesScratch;
+	// standing key -> most recently registered full query (barrier scratch)
+	std::unordered_map<WeaponTraceQuery, WeaponTraceQuery, WeaponTraceQueryHash, WeaponTraceQueryEq> traceQueryLatest;
 
 	// Build a trace query from the Lua args, applying the SAME POV gates and
 	// return-shape as the live body but sourced from the snapshot (owner
@@ -9493,15 +9519,11 @@ namespace {
 
 		traceQueryPending.push_back(q);
 
-		// NOTE (enumerated flag-ON deviation -- see the header): the key includes
-		// the float pos bits, so an ENEMY-form query tracks at <=1 stale, but a
-		// POS-FORM query whose ground position moves every frame (cursor-following
-		// placement widgets) mints a new key each frame => this find() is always a
-		// miss => the callout returns `false` persistently until the position
-		// settles. Advisory-UI-only, deliberately forward-fixable (a synchronous
-		// draw-context eval would race the sim). The batch-end targeting-widget
-		// gate exercises a moving-cursor predicate to keep this class verified.
-		const auto it = traceQueryReplies.find(q);
+		// PR 43 §7.3: pos-agnostic standing-key lookup -- a cursor-tracking
+		// pos-form query hits the reply its previous boundary's registration
+		// produced (<=1 boundary stale, never-default after the first
+		// boundary). First-call/miss keeps the documented `false` default.
+		const auto it = traceQueryReplies.find(StandingTraceKey(q));
 		lua_pushboolean(L, (it != traceQueryReplies.end()) ? (it->second != 0) : 0);
 		return 1;
 	}
@@ -9723,9 +9745,16 @@ void LuaSnapshotServe::EvaluateTraceQueries()
 
 	// rebuild the reply map from this boundary's pending set: a query the widgets
 	// stopped requesting drops out, so the map cannot grow unbounded across a game.
-	traceQueryRepliesScratch.clear();
+	// PR 43 §7.3 (standing-latest-query): dedupe the pending set by STANDING key
+	// first, keeping the most recently registered full query per key, then
+	// evaluate that latest position and publish under the standing key.
+	traceQueryLatest.clear();
 	for (const WeaponTraceQuery& q: traceQueryPending)
-		traceQueryRepliesScratch[q] = EvaluateTraceQueryLive(q) ? 1 : 0;
+		traceQueryLatest[StandingTraceKey(q)] = q;
+
+	traceQueryRepliesScratch.clear();
+	for (const auto& [key, q]: traceQueryLatest)
+		traceQueryRepliesScratch[key] = EvaluateTraceQueryLive(q) ? 1 : 0;
 
 	std::swap(traceQueryReplies, traceQueryRepliesScratch);
 	traceQueryPending.clear();
@@ -9738,6 +9767,7 @@ void LuaSnapshotServe::ClearTraceQueryChannel()
 	traceQueryPending.shrink_to_fit();
 	traceQueryReplies.clear();
 	traceQueryRepliesScratch.clear();
+	traceQueryLatest.clear();
 }
 
 
@@ -9854,13 +9884,45 @@ namespace {
 		}
 	};
 
+	// PR 43 §7.3 (operator-ruled per-callout keying, Batch-4):
+	//  - TestBuildOrder keys by the build-grid-SNAPPED pos (applied at query
+	//    build, see BuildPlacementQuery): its verdict is grid-cell-quantized,
+	//    so within-cell cursor motion maps to the same key => cache hit =>
+	//    correct values while the cursor moves. This is the CORRECT key, not
+	//    a band-aid; no standing model needed.
+	//  - ClosestBuildPos / TestMoveOrder results depend CONTINUOUSLY on
+	//    worldPos, so no snap is value-safe; they use the STANDING-LATEST-
+	//    QUERY model: the reply is keyed pos-agnostically (StandingPlacementKey
+	//    zeroes the float pos payload), the barrier evaluates the most
+	//    recently registered position per standing key, and a moving cursor
+	//    gets a 1-boundary-late CORRECT answer instead of persistent-default.
+	//    Enumerated deviation (ruled acceptable): two same-frame queries
+	//    sharing a standing key but different positions collide -- the last
+	//    registered position wins for both.
+	PlacementQuery StandingPlacementKey(const PlacementQuery& q)
+	{
+		using PK = LuaSnapshotServe::PlacementKind;
+
+		// TestBuildOrder's pos is already canonical (grid-snapped at build)
+		if (static_cast<PK>(q.kind) == PK::TestBuildOrder)
+			return q;
+
+		PlacementQuery k = q;
+		k.px = k.py = k.pz = 0.0f;
+		k.dx = k.dy = k.dz = 0.0f; // TMO dir tracks the cursor path too
+		return k;
+	}
+
 	// requested since the last barrier (draw-context callouts push here; the
 	// barrier drains + clears). Main-thread-only.
 	std::vector<PlacementQuery> placementQueryPending;
-	// last boundary's sim-exact replies, keyed by query. Rebuilt each barrier from
-	// the pending set (a query the widgets stop requesting drops out -- no growth).
+	// last boundary's sim-exact replies, keyed by the STANDING key (§7.3).
+	// Rebuilt each barrier from the pending set (a query the widgets stop
+	// requesting drops out -- no growth).
 	std::unordered_map<PlacementQuery, PlacementReply, PlacementQueryHash, PlacementQueryEq> placementQueryReplies;
 	std::unordered_map<PlacementQuery, PlacementReply, PlacementQueryHash, PlacementQueryEq> placementQueryRepliesScratch;
+	// standing key -> most recently registered full query (barrier scratch)
+	std::unordered_map<PlacementQuery, PlacementQuery, PlacementQueryHash, PlacementQueryEq> placementQueryLatest;
 
 	// master's "no info yet" first-call/miss default per kind (documented):
 	//  - TMO: false (los-blocked answer)
@@ -9954,6 +10016,31 @@ namespace {
 				q.facing = LuaUtils::ParseFacing(L, caller, 5);
 				q.defID = unitDefID;
 				q.px = luaL_checkfloat(L, 2); q.py = luaL_checkfloat(L, 3); q.pz = luaL_checkfloat(L, 4);
+
+				// PR 43 §7.3: canonicalize the key to the BUILD GRID CELL. The
+				// verdict is grid-quantized -- CGameHelper::Pos2BuildPos snaps
+				// x/z to the 16-elmo build grid and recomputes y from terrain
+				// (the input y is ignored; GetBuildHeight reads pos.x/pos.z
+				// only) -- so within-cell cursor motion must map to the SAME
+				// key. The snap replicates Pos2BuildPos' x/z arithmetic over
+				// immutable def data (footprint parity folded through the
+				// facing, BuildInfo::GetXSize/GetZSize); it is idempotent, so
+				// evaluating the snapped query equals evaluating the raw one.
+				{
+					BuildInfo bi(unitDef, float3(q.px, q.py, q.pz), q.facing);
+
+					if (bi.GetXSize() & 2)
+						q.px = math::floor((q.px              ) / BUILD_SQUARE_SIZE) * BUILD_SQUARE_SIZE + SQUARE_SIZE;
+					else
+						q.px = math::floor((q.px + SQUARE_SIZE) / BUILD_SQUARE_SIZE) * BUILD_SQUARE_SIZE;
+
+					if (bi.GetZSize() & 2)
+						q.pz = math::floor((q.pz              ) / BUILD_SQUARE_SIZE) * BUILD_SQUARE_SIZE + SQUARE_SIZE;
+					else
+						q.pz = math::floor((q.pz + SQUARE_SIZE) / BUILD_SQUARE_SIZE) * BUILD_SQUARE_SIZE;
+
+					q.py = 0.0f;
+				}
 				return 1;
 			}
 			case PK::ClosestBuildPos: {
@@ -10049,7 +10136,10 @@ namespace {
 
 		placementQueryPending.push_back(q);
 
-		const auto it = placementQueryReplies.find(q);
+		// PR 43 §7.3: standing-key lookup (pos-agnostic for CBP/TMO, snapped-
+		// cell for TBO) -- a moving cursor hits the previous boundary's reply
+		// instead of minting a perpetual miss. First-call keeps the default.
+		const auto it = placementQueryReplies.find(StandingPlacementKey(q));
 		const PlacementReply r = (it != placementQueryReplies.end()) ? it->second : DefaultPlacementReply(kind);
 		return PushPlacementReply(L, kind, r);
 	}
@@ -10169,9 +10259,16 @@ void LuaSnapshotServe::EvaluatePlacementQueries()
 
 	// rebuild the reply map from this boundary's pending set: a query the widgets
 	// stopped requesting drops out, so the map cannot grow unbounded across a game.
-	placementQueryRepliesScratch.clear();
+	// PR 43 §7.3 (standing-latest-query): dedupe by STANDING key first, keeping
+	// the most recently registered full query per key, then evaluate that
+	// latest position and publish under the standing key.
+	placementQueryLatest.clear();
 	for (const PlacementQuery& q: placementQueryPending)
-		placementQueryRepliesScratch[q] = EvaluatePlacementQueryLive(q);
+		placementQueryLatest[StandingPlacementKey(q)] = q;
+
+	placementQueryRepliesScratch.clear();
+	for (const auto& [key, q]: placementQueryLatest)
+		placementQueryRepliesScratch[key] = EvaluatePlacementQueryLive(q);
 
 	std::swap(placementQueryReplies, placementQueryRepliesScratch);
 	placementQueryPending.clear();
@@ -10184,6 +10281,7 @@ void LuaSnapshotServe::ClearPlacementQueryChannel()
 	placementQueryPending.shrink_to_fit();
 	placementQueryReplies.clear();
 	placementQueryRepliesScratch.clear();
+	placementQueryLatest.clear();
 }
 
 
