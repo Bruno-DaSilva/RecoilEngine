@@ -96,6 +96,18 @@ public:
 	}
 	int  GetDefaultCommand(int x, int y, const float3& cameraPos, const float3& mouseDir) const;
 
+	// sim|draw PR 44 (Gap B): SimDrawBarrier hook. The context-cursor default
+	// command bottoms out in a live deep-CAI virtual call (GetDefaultCmd) + a
+	// GuiTraceRay, which cannot run from draw context under the running split.
+	// SetCursorIcon requests a re-evaluation (sets a flag) and reads the LAST
+	// barrier's reply; this hook, called at the barrier with the sim parked (the
+	// RefreshCommandQueues / EvaluateTraceQueries live-read class), recomputes the
+	// answer against live sim and publishes it for the next draw frame. Sim-side
+	// (via the producer) under the eventual flip -> same channel, no redesign.
+	// No-op unless a request is pending. Fires the DefaultCommand event once (like
+	// the live path) so widget cursor overrides are preserved.
+	void EvaluateDefaultCmdQuery();
+
 	bool SetActiveCommand(int cmdIndex, bool rightMouseButton);
 	bool SetActiveCommand(int cmdIndex, int button, bool leftMouseButton, bool rightMouseButton, bool alt, bool ctrl, bool meta, bool shift);
 	bool SetActiveCommand(const Action& action, const CKeySet& ks, int actionIndex);
@@ -161,6 +173,14 @@ private:
 	void SetCursorIcon() const;
 	bool TryTarget(const SCommandDescription& cmdDesc) const;
 
+	// sim|draw PR 44 (Gap B): the body of GetDefaultCommand WITHOUT the
+	// ScopedExternalSimPause (the caller/hook owns the park). `fireEvent` gates the
+	// eventHandler.DefaultCommand callin: true reproduces the live behaviour (used
+	// by GetDefaultCommand and the barrier hook so widget overrides apply once);
+	// false is the raw engine answer used by the armed diff-gate dual-run to
+	// compare the served-channel plumbing without double-firing the event.
+	int  GetDefaultCommandImpl(int x, int y, const float3& cameraPos, const float3& mouseDir, bool fireEvent) const;
+
 	void LoadDefaults();
 	void SanitizeConfig();
 	void ParseFillOrder(const std::string& text);
@@ -181,6 +201,14 @@ private:
 	int maxPage = 0;
 	int activePage = 0;
 	int defaultCmdMemory = -1;
+
+	// sim|draw PR 44 (Gap B): context-cursor default-command query/reply slot.
+	// mutable because SetCursorIcon() (const) sets the request flag. Single
+	// standing slot -- the cursor is one logical query; every SetCursorIcon
+	// consult uses the current mouse ray, so there is no pos-keyed-map miss.
+	mutable bool defaultCmdQueryPending = false; // SetCursorIcon requested a re-eval
+	mutable int  defaultCmdReplyCmd = -1;         // last barrier's evaluated index
+	mutable bool defaultCmdReplyValid = false;    // a reply has been published
 	int explicitCommand = -1;
 	int curIconCommand = -1;
 

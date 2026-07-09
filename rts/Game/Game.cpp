@@ -1523,7 +1523,14 @@ bool CGame::UpdateUnsynced(const spring_time currentTime)
 
 	mouse->Update();
 	mouse->UpdateCursors();
-	guihandler->Update();
+	// PR 42 window shrink + sim|draw PR 44 (Gap B): guihandler->Update's cursor
+	// path now reads the snapshot-served command surface + the barrier-published
+	// default-command reply instead of walking live commandAI, so under the
+	// running split it defers to after ReleaseSimPause (sim-live) with the other
+	// deferred UI consumers -- removing the PR-42b "keep guihandler parked"
+	// carve-out. In-place (byte-identical) flag-off / when not shrinking.
+	if (!shrinkWindow)
+		guihandler->Update();
 	commandDrawer->Update();
 
 	// UI unit-group housekeeping: draw-owned containers, no frame-keyed logic,
@@ -1561,6 +1568,10 @@ bool CGame::UpdateUnsynced(const spring_time currentTime)
 				infoTextureHandler->Update();
 				sound->UpdateListener(camera->GetPos(), camera->GetDir(), camera->GetUp());
 			}
+			// sim|draw PR 44 (Gap B): deferred from the parked window above. Reads
+			// the served command surface + the barrier default-command reply; kept
+			// before eventHandler.Update to preserve the in-place relative order.
+			guihandler->Update();
 			{
 				SCOPED_TIMER("Update::EventHandler");
 				eventHandler.Update();
@@ -1743,6 +1754,15 @@ void CGame::SimDrawBarrier()
 	// state; replies publish for the next draw frame. No-op (empty check) flag-off
 	// or when the draw side enqueued nothing since the last barrier.
 	LuaSnapshotServe::EvaluatePlacementQueries();
+
+	// (3e) evaluate the context-cursor default-command query (sim|draw PR 44,
+	// Gap B). Sim parked, so the deep-CAI GetDefaultCmd + GuiTraceRay run against
+	// valid boundary-N sim state -- the same sanctioned live-read class as
+	// RefreshCommandQueues / EvaluateTraceQueries; the reply publishes for the
+	// next draw frame so guihandler->Update can read it sim-live. No-op unless
+	// SetCursorIcon requested a re-eval since the last barrier.
+	if (guihandler != nullptr)
+		guihandler->EvaluateDefaultCmdQuery();
 
 	// (4) TEST-ONLY (PR 17): when armed via /snapshotdiffgate, verify every
 	// value the snapshot would serve bit-matches the live sim read at this

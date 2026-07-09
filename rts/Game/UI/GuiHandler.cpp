@@ -41,9 +41,11 @@
 #include "Sim/Units/UnitLoader.h"
 #include "Sim/Weapons/WeaponDefHandler.h"
 #include "Sim/Weapons/Weapon.h"
+#include "Rendering/Common/SnapshotDiffGate.h" // sim|draw PR 44: default-cmd field-pass
 #include "System/Config/ConfigHandler.h"
 #include "System/EventHandler.h"
 #include "System/GlobalConfig.h"
+#include "System/SimDrawSplit.h" // sim|draw PR 44: served default-cmd gating
 #include "System/Log/ILog.h"
 #include "System/SpringMath.h"
 #include "System/UnorderedMap.hpp"
@@ -1102,6 +1104,13 @@ void CGuiHandler::SetCursorIcon() const
 		}
 
 		if (useMinimap && (cmdDesc.id < 0)) {
+			// sim|draw PR 44 (Gap B): Pos2BuildPos + TestUnitBuildSquare read the
+			// live blocking map / heightmap. guihandler->Update now runs sim-live,
+			// so this rare minimap build-proxy branch parks the sim for the read
+			// (nest-safe, no-op flag-off / when already parked -- like TryTarget).
+			// The placement query/reply channel is the eventual served fix (§4.5).
+			CGame::ScopedExternalSimPause simPause;
+
 			BuildInfo bi;
 			bi.pos = minimap->GetMapPosition(mouse->lastx, mouse->lasty);
 			bi.buildFacing = buildFacing;
@@ -1127,8 +1136,31 @@ void CGuiHandler::SetCursorIcon() const
 
 		if (mouse->buttons[SDL_BUTTON_RIGHT].pressed && ((activeReceiver == this) || (minimap->ProxyMode()))) {
 			defcmd = defaultCmdMemory;
+		} else if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() && !SimDrawSplit::IsSimParked()) {
+			// sim|draw PR 44 (Gap B): under the running split the deep-CAI
+			// GetDefaultCmd + GuiTraceRay cannot run from draw context. Read the
+			// last barrier's reply (the context cursor is one draw frame stale)
+			// and request a re-eval for the next barrier. This is the only reason
+			// guihandler->Update can fold sim-live (see EvaluateDefaultCmdQuery).
+			defcmd = defaultCmdReplyValid ? defaultCmdReplyCmd : -1;
+			defaultCmdQueryPending = true;
 		} else {
+			// flag-off / sim parked / pregame: live inline (byte-identical).
 			defcmd = GetDefaultCommand(mouse->lastx, mouse->lasty);
+
+			// armed diff-gate (flag-off): exercise the reply-storage plumbing and
+			// confirm it hands back the same RAW engine answer a direct call
+			// produces (the served value IS a relocated GetDefaultCommandImpl, so
+			// equality is by construction; fireEvent=false avoids double-firing the
+			// DefaultCommand widget callin the live leg above already fired once).
+			if (snapshotDiffGate.Armed()) {
+				const int liveRaw = GetDefaultCommandImpl(mouse->lastx, mouse->lasty, camera->GetPos(), mouse->dir, false);
+				defaultCmdQueryPending = true;
+				defaultCmdReplyCmd = GetDefaultCommandImpl(mouse->lastx, mouse->lasty, camera->GetPos(), mouse->dir, false);
+				defaultCmdReplyValid = true;
+				defaultCmdQueryPending = false;
+				snapshotDiffGate.CheckDefaultCmd(defaultCmdReplyCmd, liveRaw);
+			}
 		}
 
 		if ((defcmd >= 0) && ((size_t)defcmd < commands.size())) {
@@ -1692,6 +1724,13 @@ int CGuiHandler::GetDefaultCommand(int x, int y, const float3& cameraPos, const 
 	// PR 27b: GuiTraceRay + commandAI possibleCommands walks (the windowed
 	// dogfood SIGSEGV at SelectedUnitsHandler::GetDefaultCmd); see TryTarget
 	CGame::ScopedExternalSimPause simPause;
+	return GetDefaultCommandImpl(x, y, cameraPos, mouseDir, true);
+}
+
+// sim|draw PR 44 (Gap B): the GetDefaultCommand body, park-free (the caller/hook
+// owns the sim-quiescence). `fireEvent` gates the DefaultCommand widget callin.
+int CGuiHandler::GetDefaultCommandImpl(int x, int y, const float3& cameraPos, const float3& mouseDir, bool fireEvent) const
+{
 	CInputReceiver* ir = nullptr;
 
 	if (!game->hideInterface && !mouse->offscreen)
@@ -1718,7 +1757,7 @@ int CGuiHandler::GetDefaultCommand(int x, int y, const float3& cameraPos, const 
 				return -1;
 		}
 
-		cmdID = selectedUnitsHandler.GetDefaultCmd(unit, feature);
+		cmdID = selectedUnitsHandler.GetDefaultCmd(unit, feature, fireEvent);
 	}
 
 	// make sure the command is currently available
@@ -1728,6 +1767,21 @@ int CGuiHandler::GetDefaultCommand(int x, int y, const float3& cameraPos, const 
 		}
 	}
 	return -1;
+}
+
+
+void CGuiHandler::EvaluateDefaultCmdQuery()
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	// SimDrawBarrier hook (sim parked). Recompute the requested context-cursor
+	// default command against live sim and publish it for the next draw frame.
+	// No-op unless SetCursorIcon requested a re-eval since the last barrier.
+	if (!defaultCmdQueryPending)
+		return;
+
+	defaultCmdQueryPending = false;
+	defaultCmdReplyCmd = GetDefaultCommandImpl(mouse->lastx, mouse->lasty, camera->GetPos(), mouse->dir, true);
+	defaultCmdReplyValid = true;
 }
 
 

@@ -3,9 +3,11 @@
 #pragma once
 
 #include <memory> // PR 38f: CaptureCmdQueueEvent's opaque shared_ptr<void>
+#include <vector> // sim|draw PR 44: GetServedAvailableCommands out-vector
 
 struct lua_State;
 class CUnit; // sim|draw PR 30: CompareCmdQueueSlot's live-unit argument
+struct SCommandDescription; // sim|draw PR 44: GetServedAvailableCommands out-vector
 
 /**
  * @brief LuaSnapshotServe -- snapshot-backed serving twins for draw-context Lua callouts
@@ -251,8 +253,20 @@ namespace LuaSnapshotServe {
 		bool descsOk  = false;
 		bool workerOk = false;
 		bool factoryOk = false;
+		bool pageOk   = false; // sim|draw PR 44: lastSelectedCommandPage
 	};
 	CmdQueueCompareResult CompareCmdQueueSlot(int unitID, const CUnit* liveUnit);
+
+	// sim|draw PR 44 (Gap B): served analogue of CCommandAI::GetPossibleCommands()
+	// + lastSelectedCommandPage, consumed by CSelectedUnitsHandler::
+	// GetAvailableCommands so LayoutIcons no longer walks live commandAI under the
+	// running split. Reconstructs SCommandDescriptions from the boundary cmd-desc
+	// cache into `outDescs` and returns the cached page in `outPage`. Returns false
+	// when unitID has no served slot (dead / never-copied) -- the caller skips the
+	// unit exactly as the live path skips a null CUnit. Main-thread-only (the cache
+	// is refreshed at the barrier); no POV gate (the live body reads the owner's
+	// commandAI directly regardless of allyteam -- selection is the local player's).
+	bool GetServedAvailableCommands(int unitID, std::vector<SCommandDescription>& outDescs, int& outPage);
 
 	// ---- PR 34 (spatial/list remainder) ----
 	// The remainder of the spatial/list family: per-team plane test + table

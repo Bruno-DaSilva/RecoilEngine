@@ -236,6 +236,9 @@ static constexpr const char* FIELD_NAMES[] = {
 	"proj:visInLosAll",
 	// PR 42: appended to match the enum tail MM_EXTRACTIONMAP
 	"map:extractionMap",
+	// sim|draw PR 44 (Gap B): appended to match the enum tail CQ_LASTPAGE, DEFCMD
+	"cq:lastPage",
+	"defCmd",
 };
 
 // structural compare for the copied customOpts maps (emilib::HashMap has no
@@ -1637,7 +1640,21 @@ void SnapshotDiffGate::CheckCmdQueueRows()
 
 		if (Bump(fields[CQ_FACTORY], r.factoryOk))
 			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=cq:factory mismatch", gs->frameNum, int(id));
+
+		if (Bump(fields[CQ_LASTPAGE], r.pageOk))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=cq:lastPage mismatch", gs->frameNum, int(id));
 	}
+}
+
+
+// sim|draw PR 44 (Gap B): GetDefaultCommand serving comparator (see the header).
+void SnapshotDiffGate::CheckDefaultCmd(int served, int live)
+{
+	if (!armed)
+		return;
+
+	if (Bump(fields[DEFCMD], served == live))
+		LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=defCmd served=%d live=%d", gs->frameNum, served, live);
 }
 
 // PR 31 mirror-verification: the UnitRows weapon block was extracted at

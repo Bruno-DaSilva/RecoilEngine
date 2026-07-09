@@ -6101,6 +6101,13 @@ namespace {
 		unsigned char workerTaskNumRet = 0;
 		int workerTaskCmd = 0;
 		int workerTaskTarget = 0;
+
+		// sim|draw PR 44 (Gap B): CCommandAI::lastSelectedCommandPage, consumed by
+		// CSelectedUnitsHandler::GetAvailableCommands (min over the selection) so
+		// LayoutIcons no longer reads live commandAI under the running split. Copied
+		// unconditionally every refresh (a plain int; the descs are the versioned
+		// half, and the page moves independently of the cmdDesc version).
+		int lastSelectedCommandPage = 0;
 	};
 
 	// indexed by unitID, sized unitHandler.MaxUnits() at first refresh
@@ -6133,6 +6140,7 @@ namespace {
 		slot.workerTaskNumRet = 0;
 		slot.workerTaskCmd = 0;
 		slot.workerTaskTarget = 0;
+		slot.lastSelectedCommandPage = 0;
 	}
 
 	void CopyQueueSnap(const CCommandQueue& q, std::vector<SnapCommand>& cmds, std::vector<float>& params)
@@ -6613,6 +6621,10 @@ void LuaSnapshotServe::RefreshCommandQueues()
 		// sim|draw PR 30: decode GetUnitWorkerTask's answer here (not queue-
 		// derivable); re-resolved every refresh (few builders/factories)
 		ResolveWorkerTask(unit, slot);
+
+		// sim|draw PR 44 (Gap B): CCommandAI::lastSelectedCommandPage for
+		// GetAvailableCommands. Plain int, copied unconditionally (no version).
+		slot.lastSelectedCommandPage = cai->lastSelectedCommandPage;
 	}
 }
 
@@ -6980,7 +6992,51 @@ LuaSnapshotServe::CmdQueueCompareResult LuaSnapshotServe::CompareCmdQueueSlot(in
 	}
 	res.factoryOk = factoryOk;
 
+	// sim|draw PR 44 (Gap B): lastSelectedCommandPage
+	res.pageOk = (slot->lastSelectedCommandPage == cai->lastSelectedCommandPage);
+
 	return res;
+}
+
+
+// sim|draw PR 44 (Gap B): served analogue of CCommandAI::GetPossibleCommands() +
+// lastSelectedCommandPage for CSelectedUnitsHandler::GetAvailableCommands. Rebuilds
+// SCommandDescriptions from the boundary cmd-desc cache (the same fields
+// CopyDescsSnap flattened; refCount defaults to 1, as on a fresh desc). Direct
+// cache lookup (not GetCmdQueueSlot) -- GetAvailableCommands never runs inside a
+// deferred command-event dispatch, so the event-time override is irrelevant here.
+bool LuaSnapshotServe::GetServedAvailableCommands(int unitID, std::vector<SCommandDescription>& outDescs, int& outPage)
+{
+	if (unitID < 0 || static_cast<size_t>(unitID) >= cmdQueueCache.size())
+		return false;
+
+	const UnitCmdQueueSlot& slot = cmdQueueCache[unitID];
+	if (!slot.present)
+		return false;
+
+	outPage = slot.lastSelectedCommandPage;
+
+	outDescs.clear();
+	outDescs.reserve(slot.descs.size());
+	for (const CmdDescRecord& r: slot.descs) {
+		SCommandDescription d;
+		d.id          = r.id;
+		d.type        = r.type;
+		d.queueing    = r.queueing;
+		d.hidden      = r.hidden;
+		d.disabled    = r.disabled;
+		d.showUnique  = r.showUnique;
+		d.onlyTexture = r.onlyTexture;
+		d.name        = r.name;
+		d.action      = r.action;
+		d.iconname    = r.iconname;
+		d.mouseicon   = r.mouseicon;
+		d.tooltip     = r.tooltip;
+		d.params      = r.params;
+		outDescs.push_back(std::move(d));
+	}
+
+	return true;
 }
 
 

@@ -24,6 +24,7 @@
 #include "Sim/MoveTypes/MoveDefHandler.h"
 #include "Sim/Features/Feature.h"
 #include "Rendering/Common/SimSnapshot.h"
+#include "Lua/LuaSnapshotServe.h" // sim|draw PR 44: served GetAvailableCommands
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Units/UnitHandler.h"
@@ -95,6 +96,77 @@ void CSelectedUnitsHandler::ToggleBuildIconsFirst()
 CSelectedUnitsHandler::AvailableCommandsStruct CSelectedUnitsHandler::GetAvailableCommands()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+
+	// sim|draw PR 44 (Gap B): under the RUNNING split (sim thread live, not
+	// parked) this can be reached sim-live (input-driven LayoutIcons; and, once
+	// guihandler->Update folds sim-live, every frame), where walking live
+	// commandAI->GetPossibleCommands() / lastSelectedCommandPage races the sim.
+	// Serve from the boundary cmd-desc cache instead. Flag-off / sim-parked /
+	// pregame falls through to the live body below -> byte-identical. The served
+	// twin mirrors the live 3-pass structure exactly; a selected unit with no
+	// served slot (died mid-frame / never copied) is skipped, matching the live
+	// path's null-CUnit skip.
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() && !SimDrawSplit::IsSimParked()) {
+		possibleCommandsChanged = false;
+
+		int commandPage = 1000;
+		spring::unordered_map<int, int> states;
+		std::vector<SCommandDescription> commands;
+
+		// fetch each selected unit's served descs + page once (in selectedUnits
+		// order, so the load-pass push order matches the live path)
+		std::vector<std::vector<SCommandDescription>> perUnitDescs;
+		perUnitDescs.reserve(selectedUnits.size());
+
+		for (const int unitID: selectedUnits) {
+			std::vector<SCommandDescription> descs;
+			int page = 0;
+			if (!LuaSnapshotServe::GetServedAvailableCommands(unitID, descs, page))
+				continue;
+
+			for (const SCommandDescription& cmdDesc: descs) {
+				if (cmdDesc.showUnique && selectedUnits.size() > 1)
+					states[cmdDesc.id] = 0;
+				else
+					states[cmdDesc.id] = cmdDesc.disabled ? 2 : 1;
+			}
+
+			if (page < commandPage)
+				commandPage = page;
+
+			perUnitDescs.push_back(std::move(descs));
+		}
+
+		// load the first set (separating build and non-build commands)
+		for (const std::vector<SCommandDescription>& descs: perUnitDescs) {
+			for (const SCommandDescription& cmdDesc: descs) {
+				if (buildIconsFirst != (cmdDesc.id < 0))
+					continue;
+				if (states[cmdDesc.id] > 0) {
+					commands.push_back(cmdDesc);
+					states[cmdDesc.id] = 0;
+				}
+			}
+		}
+
+		// load the second set (all those that have not already been included)
+		for (const std::vector<SCommandDescription>& descs: perUnitDescs) {
+			for (const SCommandDescription& cmdDesc: descs) {
+				if (buildIconsFirst != (cmdDesc.id >= 0))
+					continue;
+				if (states[cmdDesc.id] > 0) {
+					commands.push_back(cmdDesc);
+					states[cmdDesc.id] = 0;
+				}
+			}
+		}
+
+		AvailableCommandsStruct ac;
+		ac.commandPage = commandPage;
+		ac.commands = commands;
+		return ac;
+	}
+
 	possibleCommandsChanged = false;
 
 	int commandPage = 1000;
@@ -904,7 +976,7 @@ static inline bool IsBetterLeader(const UnitDef* newDef, const UnitDef* oldDef)
 // DrawMapStuff --> CGuiHandler::GetDefaultCommand --> GetDefaultCmd
 // CMouseHandler::DrawCursor --> DrawCentroidCursor --> CGuiHandler::GetDefaultCommand --> GetDefaultCmd
 // LuaUnsyncedRead::GetDefaultCommand --> CGuiHandler::GetDefaultCommand --> GetDefaultCmd
-int CSelectedUnitsHandler::GetDefaultCmd(const CUnit* unit, const CFeature* feature)
+int CSelectedUnitsHandler::GetDefaultCmd(const CUnit* unit, const CFeature* feature, bool fireEvent)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	// return the default if there are no units selected
@@ -953,7 +1025,9 @@ int CSelectedUnitsHandler::GetDefaultCmd(const CUnit* unit, const CFeature* feat
 		return CMD_STOP;
 
 	int cmd = leaderUnit->commandAI->GetDefaultCmd(unit, feature);
-	eventHandler.DefaultCommand(unit, feature, cmd);
+	// sim|draw PR 44 (Gap B): the armed diff-gate raw path skips the widget callin
+	if (fireEvent)
+		eventHandler.DefaultCommand(unit, feature, cmd);
 	return cmd;
 }
 

@@ -79,6 +79,12 @@ public:
 	/// logged on the first kMaxLogged mismatches per callout
 	void CountCallout(const char* callout, bool equal, const char* detail);
 
+	/// sim|draw PR 44 (Gap B): GetDefaultCommand serving comparator sink -- feeds
+	/// the DEFCMD field with the served-channel answer vs the live raw answer
+	/// (called from CGuiHandler::SetCursorIcon while armed, flag-off). No-op unless
+	/// armed.
+	void CheckDefaultCmd(int served, int live);
+
 private:
 	// one field's running tally; kMaxLogged caps the LOG_L spam per field per
 	// run while the counters keep the true totals
@@ -264,6 +270,10 @@ private:
 		// PR 42 (MetalExtraction info-texture mirror): appended at the enum tail to
 		// keep every prior field index stable (FIELD_NAMES appended in lockstep)
 		MM_EXTRACTIONMAP, // metalMap extraction map copy (float per metal square)
+		// sim|draw PR 44 (Gap B): appended at the enum tail to keep every prior
+		// field index stable (FIELD_NAMES appended in lockstep)
+		CQ_LASTPAGE,    // CCommandAI::lastSelectedCommandPage serving-cache copy
+		DEFCMD,         // GetDefaultCommand sim-side query reply vs live GetDefaultCmd
 		F_COUNT
 	};
 
