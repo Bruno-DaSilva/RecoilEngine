@@ -5,6 +5,7 @@
 #include <cstring>
 
 #include "SnapshotHash.h"
+#include "RenderEventQueue.h" // PR 43: boundary dead-id -> shell maps (DEAD_THIS_BATCH extraction)
 #include "ExternalAI/SkirmishAIData.h"     // PR 36: GetTeamLuaAI / GetAIInfo per-team AI block
 #include "ExternalAI/SkirmishAIHandler.h"
 #include "Game/Game.h"
@@ -342,12 +343,34 @@ void SimSnapshot::Update()
 	// AcquireNewestEpoch() (the barrier calls it right after this returns).
 	const int target = PickFreeSlot();
 
+	// PR 43 §7.7: the grow-only feature/projectile rows must also cover the
+	// batch's died-in-batch ids (their DEAD_THIS_BATCH rows are extracted
+	// below from the DeferredObjectDeleter shells); a died-in-batch id can
+	// exceed every live id when the youngest object died
+	size_t minFeatSlots = 0;
+	size_t minProjSlots = 0;
+	if (SimDrawSplit::Enabled()) {
+		for (const auto& [id, shell] : renderEventQueue.BoundaryDeadFeatures())
+			minFeatSlots = std::max(minFeatSlots, static_cast<size_t>(id + 1));
+		for (const auto& [id, shell] : renderEventQueue.BoundaryDeadProjectiles())
+			minProjSlots = std::max(minProjSlots, static_cast<size_t>(id + 1));
+	}
+
 	Extract(buffers[target]);
-	ExtractProjectiles(projBuffers[target]);
-	ExtractFeatures(featBuffers[target]);
+	ExtractProjectiles(projBuffers[target], minProjSlots);
+	ExtractFeatures(featBuffers[target], minFeatSlots);
 	ExtractTeams(teamBuffers[target]);
 	ExtractPlayers(playerBuffers[target]);
 	ExtractGlobals(globBuffers[target]);
+
+	// PR 43 §7.7 (producer side): extract the batch's dying ids from their
+	// deferred-deletion shells into the publishing slot, marked
+	// DEAD_THIS_BATCH -- genuine at-death rows by construction (deletes the
+	// 38b genuineness-guard class). Inert-but-armed under 43: the barrier
+	// dispatches still read live (barrierLive), so only the id-coverage gate
+	// consumes these until 44b.
+	if (SimDrawSplit::Enabled())
+		ExtractDeadRowsFromShells(buffers[target], featBuffers[target], projBuffers[target]);
 
 	EpochSlotMeta& meta = slotMeta[target];
 	meta.epochId = ++epochCounter;
@@ -889,7 +912,7 @@ void SimSnapshot::Extract(UnitRows& rows)
 	for (const CUnit* u : activeUnits) {
 		const int id = u->id;
 
-		rows.valid[id] = 1;
+		rows.valid[id] = SimSnapshotValid::ACTIVE;
 		rows.pos[id] = u->pos;
 		rows.midPos[id] = u->midPos;
 		rows.aimPos[id] = u->aimPos;
@@ -1149,7 +1172,7 @@ void SimSnapshot::Extract(UnitRows& rows)
 	rows.aliveCount = static_cast<int32_t>(activeUnits.size());
 }
 
-void SimSnapshot::ExtractProjectiles(ProjectileRows& rows)
+void SimSnapshot::ExtractProjectiles(ProjectileRows& rows, size_t minSlots)
 {
 	const int numAllyTeams = teamHandler.ActiveAllyTeams();
 	const auto& pc = projectileHandler.GetActiveProjectiles(true);
@@ -1160,7 +1183,8 @@ void SimSnapshot::ExtractProjectiles(ProjectileRows& rows)
 	for (size_t i = 0; i < pc.size(); ++i)
 		maxID = std::max(maxID, pc[i]->id);
 
-	const size_t wantSlots = static_cast<size_t>(maxID + 1);
+	// PR 43: also cover this batch's died-in-batch ids (DEAD_THIS_BATCH rows)
+	const size_t wantSlots = std::max(static_cast<size_t>(maxID + 1), minSlots);
 
 	if (rows.valid.size() < wantSlots || rows.numAllyTeams != numAllyTeams) {
 		const size_t n = std::max(wantSlots, rows.valid.size());
@@ -1203,7 +1227,7 @@ void SimSnapshot::ExtractProjectiles(ProjectileRows& rows)
 		const CProjectile* p = pc[i];
 		const int id = p->id;
 
-		rows.valid[id] = 1;
+		rows.valid[id] = SimSnapshotValid::ACTIVE;
 		rows.pos[id] = p->pos;
 		rows.speed[id] = p->speed;
 		rows.allyTeam[id] = p->GetAllyteamID();
@@ -1288,7 +1312,7 @@ void SimSnapshot::ExtractProjectiles(ProjectileRows& rows)
 	}
 }
 
-void SimSnapshot::ExtractFeatures(FeatureRows& rows)
+void SimSnapshot::ExtractFeatures(FeatureRows& rows, size_t minSlots)
 {
 	const int numAllyTeams = teamHandler.ActiveAllyTeams();
 	const auto& activeIDs = featureHandler.GetActiveFeatureIDs();
@@ -1299,7 +1323,8 @@ void SimSnapshot::ExtractFeatures(FeatureRows& rows)
 	for (const int id : activeIDs)
 		maxID = std::max(maxID, id);
 
-	const size_t wantSlots = static_cast<size_t>(maxID + 1);
+	// PR 43: also cover this batch's died-in-batch ids (DEAD_THIS_BATCH rows)
+	const size_t wantSlots = std::max(static_cast<size_t>(maxID + 1), minSlots);
 
 	if (rows.valid.size() < wantSlots || rows.numAllyTeams != numAllyTeams) {
 		const size_t n = std::max(wantSlots, rows.valid.size());
@@ -1352,7 +1377,7 @@ void SimSnapshot::ExtractFeatures(FeatureRows& rows)
 		if (f == nullptr)
 			continue;
 
-		rows.valid[id] = 1;
+		rows.valid[id] = SimSnapshotValid::ACTIVE;
 		rows.pos[id] = f->pos;
 		rows.midPos[id] = f->midPos;
 		rows.aimPos[id] = f->aimPos;
@@ -1393,6 +1418,294 @@ void SimSnapshot::ExtractFeatures(FeatureRows& rows)
 		for (int at = 0; at < numAllyTeams; ++at)
 			rows.inLosAll[at * slots + id] = losHandler->InLos(f->pos, at);
 	}
+}
+
+
+// ---------------------------------------------------------------------------
+// PR 43 §7.7: shell-sourced DEAD_THIS_BATCH row extraction (producer side)
+//
+// The shells parked in DeferredObjectDeleter are PreDestruct()ed: their PLAIN
+// members (pos/health/team/losStatus/modParams/def pointers/...) stay readable
+// until the step-8 ack, but the sub-objects PreDestruct destroys are gone --
+// CUnit::commandAI/moveType/weapons/script (and the projectile damage array).
+// The shell rows therefore carry genuine at-death values for every plain-field
+// row and DOCUMENTED DEFAULTS for the destroyed sub-blocks (weapon family
+// count 0, moveTypeKind 0/unknown, build-state none, estPath none, projectile
+// damages nil-shape, weapon-projectile target degraded to its ground pos).
+// Positional/LOS-map queries are computed against the live maps with shell
+// inputs (memory-safe; the map state is post-death, the position at-death).
+// KEEP THE FIELD LISTS IN SYNC with Extract/ExtractFeatures/ExtractProjectiles
+// -- a field added there must be either mirrored or explicitly defaulted here,
+// or a DEAD_THIS_BATCH row would serve stale slot garbage for it.
+// ---------------------------------------------------------------------------
+
+void SimSnapshot::ExtractDeadRowsFromShells(UnitRows& urows, FeatureRows& frows, ProjectileRows& prows)
+{
+	const int numAllyTeams = teamHandler.ActiveAllyTeams();
+
+	const size_t maxUnits = urows.MaxUnits();
+	for (const auto& [id, u] : renderEventQueue.BoundaryDeadUnits()) {
+		// INACTIVE guard: a slot a new object reused this same batch (already
+		// ACTIVE) is never clobbered; out-of-range cannot happen (fixed maxUnits)
+		if (static_cast<size_t>(id) >= maxUnits || urows.valid[id] != SimSnapshotValid::INACTIVE)
+			continue;
+
+		urows.valid[id] = SimSnapshotValid::DEAD_THIS_BATCH;
+		// ---- plain-field rows (genuine at-death values off the shell) ----
+		urows.pos[id] = u->pos;
+		urows.midPos[id] = u->midPos;
+		urows.aimPos[id] = u->aimPos;
+		urows.speed[id] = u->speed;
+		urows.health[id] = u->health;
+		urows.maxHealth[id] = u->maxHealth;
+		urows.paralyzeDamage[id] = u->paralyzeDamage;
+		urows.captureProgress[id] = u->captureProgress;
+		urows.team[id] = static_cast<uint8_t>(u->team);
+		urows.allyTeam[id] = static_cast<uint8_t>(u->allyteam);
+		urows.defID[id] = u->unitDef->id;
+		urows.buildProgress[id] = u->buildProgress;
+		urows.beingBuilt[id] = u->beingBuilt;
+		urows.stunned[id] = u->IsStunned();
+		urows.radius[id] = u->radius;
+		urows.selVol[id] = u->selectionVolume;
+		urows.noSelect[id] = u->noSelect;
+		urows.inVoid[id] = u->IsInVoid();
+		urows.isDead[id] = u->isDead;
+		urows.neutral[id] = u->neutral;
+		urows.activated[id] = u->activated;
+		urows.isCloaked[id] = u->isCloaked;
+		urows.armoredState[id] = u->armoredState;
+		urows.armoredMultiple[id] = u->armoredMultiple;
+		urows.heading[id] = u->heading;
+		urows.buildFacing[id] = u->buildFacing;
+		urows.height[id] = u->height;
+		urows.mass[id] = u->mass;
+		urows.maxRange[id] = u->maxRange;
+		urows.seismicSignature[id] = u->seismicSignature;
+		urows.experience[id] = u->experience;
+		urows.limExperience[id] = u->limExperience;
+		urows.selfDCountdown[id] = u->selfDCountdown;
+		urows.losRadius[id] = u->losRadius;
+		urows.airLosRadius[id] = u->airLosRadius;
+		urows.radarRadius[id] = u->radarRadius;
+		urows.sonarRadius[id] = u->sonarRadius;
+		urows.seismicRadius[id] = u->seismicRadius;
+		urows.jammerRadius[id] = u->jammerRadius;
+		urows.sonarJamRadius[id] = u->sonarJamRadius;
+		urows.moveDefID[id] = (u->moveDef != nullptr) ? static_cast<int32_t>(u->moveDef->pathType) : -1;
+		urows.resourcesMake[id] = u->resourcesMake;
+		urows.resourcesUse[id] = u->resourcesUse;
+		urows.harvested[id] = u->harvested;
+		urows.harvestStorage[id] = u->harvestStorage;
+		urows.cost[id] = u->cost;
+		urows.buildTime[id] = u->buildTime;
+		urows.blockingBits[id] = PackBlockingBits(u);
+		urows.relMidPos[id] = u->relMidPos;
+		urows.frontdir[id] = u->frontdir;
+		urows.updir[id] = u->updir;
+		urows.rightdir[id] = u->rightdir;
+		urows.posErrorVector[id] = u->posErrorVector;
+		urows.leavesGhost[id] = u->leavesGhost;
+		urows.fireState[id] = u->fireState;
+		urows.moveState[id] = u->moveState;
+		urows.wantCloak[id] = u->wantCloak;
+		urows.useHighTrajectory[id] = u->useHighTrajectory;
+		urows.storage[id] = u->storage;
+		urows.metalExtract[id] = u->metalExtract;
+		urows.buildeeRadius[id] = u->buildeeRadius;
+		urows.posErrorDelta[id] = u->posErrorDelta;
+		urows.nextPosErrorUpdate[id] = u->nextPosErrorUpdate;
+		urows.customTooltip[id] = unitToolTipMap.GetConst(id);
+		urows.unitRulesParams[id] = u->modParams;
+
+		// ---- destroyed-sub-block defaults (PreDestruct freed the owners) ----
+		urows.repairBelowHealth[id] = -1.0f;     // commandAI gone
+		urows.repeatOrders[id] = 0;
+		urows.lastAttackerID[id] = -1;           // dependence-severed pointer
+		urows.transporterID[id] = -1;
+		urows.transportees[id].clear();
+		urows.builderKind[id] = 0;               // build-state family: none
+		urows.curBuildID[id] = -1;
+		urows.buildDistance[id] = 0.0f;
+		urows.range3D[id] = 0;
+		urows.inBuildStance[id] = 0;
+		urows.buildPower[id] = 0.0f;
+		urows.nanoPieces[id].clear();
+		urows.moveTypeKind[id] = 0;              // moveType gone: "unknown"
+		urows.mtMaxSpeed[id] = 0.0f;
+		urows.mtMaxWantedSpeed[id] = 0.0f;
+		urows.mtGoalPos[id] = ZeroVector;
+		urows.mtProgressState[id] = 0;
+		urows.mtAutoLand[id] = 0;
+		urows.mtLoopbackAttack[id] = 0;
+		urows.moveTypeBlock[id] = MoveTypeBlock{};
+		urows.estPathHasPath[id] = 0;
+		urows.estPathPoints[id].clear();
+		urows.estPathStarts[id].clear();
+		// weapon family: weapons freed in PreDestruct -> the count-0 nil shape
+		// (no flat-array slots referenced); explosion damages were decref'd
+		urows.weaponOffset[id] = 0;
+		urows.weaponCount[id] = 0;
+		urows.reloadSpeed[id] = u->reloadSpeed;
+		urows.fpsNoFire[id] = 0;                 // fpsControlPlayer nulled
+		urows.flankingMode[id] = u->flankingBonusMode;
+		urows.flankingDir[id] = u->flankingBonusDir;
+		urows.flankingMoveFactor[id] = u->flankingBonusMobilityAdd;
+		urows.flankingAvgDamage[id] = u->flankingBonusAvgDamage;
+		urows.flankingDifDamage[id] = u->flankingBonusDifDamage;
+		urows.flankingMobility[id] = u->flankingBonusMobility;
+		urows.hasStockpile[id] = 0;
+		urows.stockpileNumStockpiled[id] = 0;
+		urows.stockpileNumQueued[id] = 0;
+		urows.stockpileBuildPercent[id] = 0.0f;
+		urows.hasShieldWeapon[id] = 0;
+		urows.shieldWeaponEnabled[id] = 0;
+		urows.shieldWeaponPower[id] = 0.0f;
+		urows.deathExpDamages[id].valid = 0;
+		urows.selfdExpDamages[id].valid = 0;
+
+		// ---- per-allyteam strides (plain losStatus bits off the shell; the
+		// map-backed answers are computed with shell inputs against the live
+		// post-death maps -- memory-safe, position at-death) ----
+		for (int at = 0; at < numAllyTeams; ++at) {
+			urows.losStatusAll[at * maxUnits + id] = u->losStatus[at];
+			urows.posErrorBits[at * maxUnits + id] = u->GetPosErrorBit(at);
+			urows.inRadarAll[at * maxUnits + id] = losHandler->InRadar(u, at);
+			urows.unitInLosAll[at * maxUnits + id] = losHandler->InLos(u, at);
+			urows.unitInAirLosAll[at * maxUnits + id] = losHandler->InAirLos(u, at);
+			urows.unitInJammerAll[at * maxUnits + id] = losHandler->InJammer(u, at);
+		}
+	}
+
+	const size_t featSlots = frows.MaxSlots();
+	for (const auto& [id, f] : renderEventQueue.BoundaryDeadFeatures()) {
+		if (static_cast<size_t>(id) >= featSlots || frows.valid[id] != SimSnapshotValid::INACTIVE)
+			continue;
+
+		// feature shells have no destroyed sub-blocks in their row surface:
+		// every field below is a plain member / immutable def pointer read
+		frows.valid[id] = SimSnapshotValid::DEAD_THIS_BATCH;
+		frows.pos[id] = f->pos;
+		frows.midPos[id] = f->midPos;
+		frows.aimPos[id] = f->aimPos;
+		frows.relMidPos[id] = f->relMidPos;
+		frows.radius[id] = f->radius;
+		frows.allyTeam[id] = f->allyteam;
+		frows.defID[id] = f->def->id;
+		frows.alwaysVisible[id] = f->alwaysVisible;
+		frows.noSelect[id] = f->noSelect;
+		frows.inVoid[id] = f->IsInVoid();
+		frows.selVol[id] = f->selectionVolume;
+		frows.team[id] = f->team;
+		frows.health[id] = f->health;
+		frows.resurrectProgress[id] = f->resurrectProgress;
+		frows.height[id] = f->height;
+		frows.mass[id] = f->mass;
+		frows.speed[id] = f->speed;
+		{
+			const CMatrix44f& fm = f->GetTransformMatrixRef();
+			frows.matXdir[id] = fm.GetX();
+			frows.matYdir[id] = fm.GetY();
+			frows.matZdir[id] = fm.GetZ();
+		}
+		frows.heading[id] = f->heading;
+		frows.buildFacing[id] = f->buildFacing;
+		frows.resources[id] = f->resources;
+		frows.defResources[id] = f->defResources;
+		frows.reclaimLeft[id] = f->reclaimLeft;
+		frows.reclaimTime[id] = f->reclaimTime;
+		frows.blockingBits[id] = PackBlockingBits(f);
+		frows.resurrectDefID[id] = (f->udef != nullptr) ? f->udef->id : -1;
+		frows.fireTime[id] = f->fireTime;
+		frows.smokeTime[id] = f->smokeTime;
+		frows.featureRulesParams[id] = f->modParams;
+
+		for (int at = 0; at < numAllyTeams; ++at)
+			frows.inLosAll[at * featSlots + id] = losHandler->InLos(f->pos, at);
+	}
+
+	const size_t projSlots = prows.MaxSlots();
+	for (const auto& [id, p] : renderEventQueue.BoundaryDeadProjectiles()) {
+		// the map is filtered to the SYNCED id namespace at record dispatch
+		// (the fd41dbdd92 rule: ProjectileRows holds only synced projectiles,
+		// and an unsynced destroy id must never shadow a live synced row)
+		if (static_cast<size_t>(id) >= projSlots || prows.valid[id] != SimSnapshotValid::INACTIVE)
+			continue;
+
+		prows.valid[id] = SimSnapshotValid::DEAD_THIS_BATCH;
+		prows.pos[id] = p->pos;
+		prows.speed[id] = p->speed;
+		prows.allyTeam[id] = p->GetAllyteamID();
+		prows.ownerID[id] = p->GetOwnerID();
+		prows.isWeapon[id] = p->weapon;
+		prows.isPiece[id] = p->piece;
+		prows.dir[id] = p->dir;
+		prows.mygravity[id] = p->mygravity;
+		prows.radius[id] = p->radius;
+		prows.drawRadius[id] = p->GetDrawRadius();
+		prows.hitscan[id] = p->hitscan;
+		prows.teamID[id] = static_cast<int32_t>(p->GetTeamID());
+		prows.weaponDefID[id] = -1;
+		prows.targetType[id] = 0;
+		prows.targetID[id] = 0;
+		prows.targetPos[id] = ZeroVector;
+		prows.ttl[id] = 0;
+		prows.intercepted[id] = 0;
+		prows.pieceExplFlags[id] = 0;
+		prows.pieceSpinAngle[id] = 0.0f;
+		prows.pieceSpinSpeed[id] = 0.0f;
+		prows.pieceSpinVec[id] = ZeroVector;
+		prows.pieceName[id].clear();
+		// nil-shape default: the damage array was decref'd at PreDestruct
+		prows.damages[id].valid = 0;
+
+		if (p->piece) {
+			const CPieceProjectile* ppro = static_cast<const CPieceProjectile*>(p);
+			prows.pieceExplFlags[id] = ppro->explFlags;
+			prows.pieceSpinAngle[id] = ppro->spinAngle;
+			prows.pieceSpinSpeed[id] = ppro->spinSpeed;
+			prows.pieceSpinVec[id] = ppro->spinVec;
+			if (ppro->omp != nullptr)
+				prows.pieceName[id] = ppro->omp->name;
+		}
+
+		if (p->weapon) {
+			const CWeaponProjectile* wpro = static_cast<const CWeaponProjectile*>(p);
+			const WeaponDef* wdef = wpro->GetWeaponDef();
+
+			prows.weaponDefID[id] = (wdef != nullptr) ? wdef->id : -1;
+			prows.ttl[id] = wpro->GetTimeToLive();
+			prows.intercepted[id] = wpro->IsBeingIntercepted();
+			// DOCUMENTED DEFAULT: the target OBJECT pointer is dependence-
+			// severed on a shell, so the at-death target degrades to its
+			// stored ground position ('g' form)
+			prows.targetType[id] = 'g';
+			prows.targetPos[id] = wpro->GetTargetPos();
+		}
+
+		for (int at = 0; at < numAllyTeams; ++at) {
+			prows.inLosAll[at * projSlots + id] = losHandler->InLos(p->pos, at);
+			prows.visInLosAll[at * projSlots + id] = losHandler->InLos(p, at);
+		}
+	}
+}
+
+// PR 43: revert the published slot's DEAD_THIS_BATCH marks to INACTIVE at the
+// barrier's step-8 window close. A linear scan of the held slot's valid[]
+// arrays -- robust to any id churn; only ==DEAD_THIS_BATCH slots are touched.
+static inline void ClearDeadRows(std::vector<uint8_t>& valid)
+{
+	for (uint8_t& v : valid) {
+		if (v == SimSnapshotValid::DEAD_THIS_BATCH)
+			v = SimSnapshotValid::INACTIVE;
+	}
+}
+
+void SimSnapshot::ClearDeadThisBatch()
+{
+	ClearDeadRows(buffers[heldSlot].valid);
+	ClearDeadRows(featBuffers[heldSlot].valid);
+	ClearDeadRows(projBuffers[heldSlot].valid);
 }
 
 void SimSnapshot::ExtractTeams(TeamRows& rows)

@@ -806,11 +806,36 @@ void CUnitDrawerData::RenderUnitDestroyed(const CUnit* unit)
 
 	LuaObjectDrawer::SetObjectLOD(unit, LUAOBJ_UNIT, 0);
 
-	// SCOPE-1: clear the deferred-safe handle so a dead id no longer resolves
-	// through DrawerGetObjectByID (dangling-pointer guard); the died-in-batch
-	// window is served by the ShellFallback until S7 retires it.
-	if (unit->id < renderRecords.size())
+	// PR 43 (3b, retires the IdToObject shell fallback): under the split the
+	// dead record is RETAINED -- its obj stays the deferred-deletion shell,
+	// which the PR-13 contract keeps readable until the step-8 ack -- so a
+	// died-in-batch id keeps resolving through DrawerGetObjectByID for the
+	// whole deferred-dispatch window (gl.Set*BufferUniforms from deferred
+	// RecvFromSynced forwarders: the SCOPE-1 nil-storm class).
+	// ClearDeadRetainedRecords (barrier step 8 / valve service) clears it
+	// right before the ack poisons the shell; a same-batch id reuse is safe
+	// (the new PreCreated overwrites the record, and the guarded clear skips
+	// it). Flag-off keeps the SCOPE-1 immediate clear (byte-identical).
+	if (SimDrawSplit::Enabled()) {
+		UnitRenderRecord& rr = RenderRecordRef(unit);
+		rr.obj = unit; // ensure the retained record IS this (latest) dead generation
+		deadRetainedRecords.emplace_back(unit->id, unit);
+	} else if (unit->id < renderRecords.size()) {
 		renderRecords[unit->id] = {};
+	}
+}
+
+// PR 43 (3b): see RenderUnitDestroyed -- clear the dead-retained records at
+// the end of the dispatch window, before the ack poisons their shells. The
+// obj==shell guard skips records a same-batch id reuse already overwrote.
+void CUnitDrawerData::ClearDeadRetainedRecords()
+{
+	for (const auto& [id, shell] : deadRetainedRecords) {
+		if (static_cast<size_t>(id) < renderRecords.size() && renderRecords[id].obj == shell)
+			renderRecords[id] = {};
+	}
+
+	deadRetainedRecords.clear();
 }
 
 void CUnitDrawerData::UnitEnteredRadar(const CUnit* unit, int allyTeam)

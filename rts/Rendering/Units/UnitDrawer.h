@@ -76,6 +76,8 @@ public:
 	// mutable fields the draw-window passes read); never dereference live CUnit
 	static const CUnitDrawerData::UnitRenderRecord& GetRenderRecord(const CUnit* unit) { return modelDrawerData->GetRenderRecord(unit); }
 	static const CUnitDrawerData::UnitRenderRecord& GetRenderRecord(int unitID) { return modelDrawerData->GetRenderRecord(unitID); }
+	// PR 43 (3b): barrier step 8 / valve hook (see CUnitDrawerData)
+	static void ClearDeadRetainedRecords() { if (modelDrawerData != nullptr) modelDrawerData->ClearDeadRetainedRecords(); }
 
 	// drawer-owned Lua material state + per-piece LOD display lists evicted from
 	// LocalModel/LocalModelPiece (sim/draw PR 10)

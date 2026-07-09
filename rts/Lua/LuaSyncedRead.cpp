@@ -631,6 +631,10 @@ static inline CUnit* ParseRawUnit(lua_State* L, const char* caller, int index)
 	// a unit that died later in the same sim burst resolve its still-readable
 	// shell -- master ran them mid-frame with the unit alive. Read-only use
 	// (this file), hence the const_cast.
+	// PR 43 NOTE: this (with the ParseFeature sibling) is the LAST surviving
+	// shell-fallback READ -- it is the live-parse leg the barrierLive
+	// dispatches run under, which 43 deliberately does not convert. 44b
+	// replaces it with the DEAD_THIS_BATCH row twins (§3.6).
 	if (unit == nullptr)
 		unit = const_cast<CUnit*>(SimDrawSplit::ShellFallbackUnit(unitID));
 

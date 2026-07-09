@@ -198,8 +198,17 @@ void RenderEventQueue::Dispatch(const Record& record)
 			PopDestroyShell(ShellKey(ObjKind::Projectile, record.syncedProj, record.id));
 
 			// PR 27b: see the UnitDestroyed case (lights can track projectiles)
-			if (SimDrawSplit::Enabled())
+			if (SimDrawSplit::Enabled()) {
 				boundaryDestroyedProjectiles.push_back(proj);
+
+				// PR 43 §7.7: dead-id -> shell map for the producer's
+				// DEAD_THIS_BATCH row extraction. SYNCED namespace only (the
+				// fd41dbdd92 rule): ProjectileRows holds only synced
+				// projectiles, and an unsynced destroy id could otherwise
+				// mark a live synced projectile's row dead (id collision).
+				if (record.syncedProj)
+					boundaryDeadProjectiles[record.id] = proj;
+			}
 		} break;
 
 		case T::UnitEnteredLos: {

@@ -334,6 +334,16 @@ private:
 		return renderRecords[u->id];
 	}
 	void UpdateRenderRecord(const CUnit* unit);
+public:
+	// PR 43 (3b): clear the destroy-retained records at the end of the
+	// boundary dispatch window (barrier step 8 / valve), before the ack
+	// poisons their shell handles. See RenderUnitDestroyed.
+	void ClearDeadRetainedRecords();
+private:
+	// PR 43 (3b): (id, shell) of records retained past their destroy-record
+	// dispatch so died-in-batch ids resolve through DrawerGetObjectByID for
+	// the deferred dispatches (replaces the IdToObject shell fallback)
+	std::vector<std::pair<int, const CUnit*>> deadRetainedRecords;
 
 	SavedData savedData;
 

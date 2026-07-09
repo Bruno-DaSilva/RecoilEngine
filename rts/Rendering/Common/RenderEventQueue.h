@@ -134,6 +134,7 @@ public:
 		boundaryDestroyedProjectiles.clear();
 		boundaryDeadUnits.clear();
 		boundaryDeadFeatures.clear();
+		boundaryDeadProjectiles.clear();
 		deferring = false;
 	}
 
@@ -168,7 +169,19 @@ public:
 	void ClearBoundaryDeadShells() {
 		boundaryDeadUnits.clear();
 		boundaryDeadFeatures.clear();
+		boundaryDeadProjectiles.clear();
 	}
+
+	// PR 43 §7.7: the batch's died-in-batch (id -> shell) maps, consumed by
+	// the producer (SimSnapshot::ExtractDeadRowsFromShells) to extract genuine
+	// at-death DEAD_THIS_BATCH rows at the frame edge. Same population/clear
+	// lifecycle as the Resolve* read maps above (destroy-record dispatch /
+	// step-8 window close); the projectile map is filtered to the SYNCED id
+	// namespace at dispatch (the fd41dbdd92 rule -- ProjectileRows holds only
+	// synced projectiles, so an unsynced destroy id must never mark one).
+	const spring::unordered_map<int, const CUnit*>& BoundaryDeadUnits() const { return boundaryDeadUnits; }
+	const spring::unordered_map<int, const CFeature*>& BoundaryDeadFeatures() const { return boundaryDeadFeatures; }
+	const spring::unordered_map<int, const CProjectile*>& BoundaryDeadProjectiles() const { return boundaryDeadProjectiles; }
 
 	bool Empty() const { return records.empty(); }
 
@@ -245,9 +258,11 @@ private:
 	std::vector<const CUnit*> boundaryDestroyedUnits;
 	std::vector<const CProjectile*> boundaryDestroyedProjectiles;
 
-	// see ResolveBoundaryDeadUnit/Feature
+	// see ResolveBoundaryDeadUnit/Feature + the PR-43 BoundaryDead* accessors
 	spring::unordered_map<int, const CUnit*> boundaryDeadUnits;
 	spring::unordered_map<int, const CFeature*> boundaryDeadFeatures;
+	// PR 43: synced-namespace-only (see BoundaryDeadProjectiles)
+	spring::unordered_map<int, const CProjectile*> boundaryDeadProjectiles;
 	// side pool for the rare records that carry a per-allyteam mask; indexed
 	// by Record::arg1, cleared together with <records>
 	std::vector<GhostAllyMask> ghostMasks;

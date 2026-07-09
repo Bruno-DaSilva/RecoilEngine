@@ -158,12 +158,42 @@ void CFeatureDrawerData::RenderFeatureDestroyed(const CFeature* feature)
 	if (feature->id < drawAlphas.size())
 		drawAlphas[feature->id] = 1.0f;
 
-	// SCOPE-1: clear the deferred-safe handle so a dead id no longer resolves
-	// through DrawerGetObjectByID (dangling-pointer guard; the died-in-batch
-	// window is served by the ShellFallback until S7 retires it). Covers both
-	// model and non-model features.
-	if (feature->id < renderRecords.size())
+	// PR 43 (3b, retires the IdToObject shell fallback): under the split the
+	// dead record is RETAINED -- its obj stays the deferred-deletion shell,
+	// readable until the step-8 ack -- so a died-in-batch id keeps resolving
+	// through DrawerGetObjectByID for the whole deferred-dispatch window
+	// (gl.SetFeatureBufferUniforms from deferred RecvFromSynced forwarders:
+	// unit_healthbars_widget_forwarding, the exact class that blocked the
+	// SCOPE-1 retirement). obj/def are (re)assigned unconditionally: a
+	// non-model feature created-and-died in the SAME batch never registered a
+	// record (RenderFeaturePreCreated early-returns for it, and the
+	// RegisterNonModelFeatureRecords sweep only sees live ids), and this is
+	// the only at-death registration point that covers it -- the record's
+	// cold-miss (FindPendingDestroyFeature) cannot, because the destroy
+	// record just popped its shell. ClearDeadRetainedRecords (barrier step 8
+	// / valve service) clears it before the ack poisons the shell. Flag-off
+	// keeps the SCOPE-1 immediate clear (byte-identical).
+	if (SimDrawSplit::Enabled()) {
+		FeatureRenderRecord& rr = RenderRecordRef(feature);
+		rr.obj = feature; // ensure the retained record IS this (latest) dead generation
+		rr.def = feature->def;
+		deadRetainedRecords.emplace_back(feature->id, feature);
+	} else if (feature->id < renderRecords.size()) {
 		renderRecords[feature->id] = {};
+	}
+}
+
+// PR 43 (3b): see RenderFeatureDestroyed -- clear the dead-retained records
+// at the end of the dispatch window, before the ack poisons their shells.
+// The obj==shell guard skips records a same-batch id reuse already overwrote.
+void CFeatureDrawerData::ClearDeadRetainedRecords()
+{
+	for (const auto& [id, shell] : deadRetainedRecords) {
+		if (static_cast<size_t>(id) < renderRecords.size() && renderRecords[id].obj == shell)
+			renderRecords[id] = {};
+	}
+
+	deadRetainedRecords.clear();
 }
 
 CFeatureDrawerData::CFeatureDrawerData(bool& mtModelDrawer_)

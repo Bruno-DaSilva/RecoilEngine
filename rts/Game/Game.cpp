@@ -1866,6 +1866,14 @@ void CGame::SimDrawBarrier()
 	// fallback serves from (died-in-burst resolution for step 7's dispatches)
 	if (SimDrawSplit::Enabled()) {
 		SimDrawSplit::SetBoundaryShellWindow(false);
+		// PR 43: the dispatch window has closed -- revert the published slot's
+		// DEAD_THIS_BATCH marks (they only read as valid inside the window)
+		// and clear the drawers' dead-retained render records (their shell
+		// handles are about to be poisoned by the ack below; item 3b keeps
+		// them resolvable exactly through the deferred-dispatch window)
+		simSnapshot.ClearDeadThisBatch();
+		CUnitDrawer::ClearDeadRetainedRecords();
+		CFeatureDrawer::ClearDeadRetainedRecords();
 		renderEventQueue.ClearBoundaryDeadShells();
 		// PR 43: the split ack tags the shells with the epoch whose record
 		// dispatch just completed; their pool RELEASE is keyed to that epoch's
@@ -2061,6 +2069,12 @@ void CGame::AcquireSimPause()
 			simSnapshot.MarkMutatedOutsideFrame();
 
 		SimDrawSplit::SetBoundaryShellWindow(false);
+		// PR 43 (3b): the valve's Flush dispatched destroy records too -- the
+		// drawers retained those records; clear them before the ack poisons
+		// their shell handles (the valve does not republish, so no
+		// DEAD_THIS_BATCH marks exist here)
+		CUnitDrawer::ClearDeadRetainedRecords();
+		CFeatureDrawer::ClearDeadRetainedRecords();
 		renderEventQueue.ClearBoundaryDeadShells();
 
 		// PR 43: the valve must free pages IMMEDIATELY (the sim is parked

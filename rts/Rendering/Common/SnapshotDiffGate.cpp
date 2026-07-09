@@ -537,7 +537,11 @@ void SnapshotDiffGate::CheckBoundary()
 		const int id = static_cast<int>(i);
 		const CUnit* u = unitHandler.GetUnitUnsafe(id); // id < maxUnits
 
-		const bool snapValid = (rows.valid[i] != 0);
+		// PR 43 tri-state: only ACTIVE rows have a live counterpart to compare;
+		// a DEAD_THIS_BATCH row (retained at-death state, no live object) is not
+		// a validity mismatch. Byte-identical flag-off, where DEAD_THIS_BATCH is
+		// never set (the gate's normal mode).
+		const bool snapValid = (rows.valid[i] == SimSnapshotValid::ACTIVE);
 		const bool liveValid = (u != nullptr);
 
 		if (Bump(fields[F_VALIDITY], snapValid == liveValid))
@@ -1023,7 +1027,7 @@ void SnapshotDiffGate::CheckProjectileRows()
 
 	// reverse validity: valid rows with no live projectile
 	for (size_t id = 0; id < slots; ++id) {
-		if (rows.valid[id] == 0 || liveSeen[id] != 0)
+		if (rows.valid[id] != SimSnapshotValid::ACTIVE || liveSeen[id] != 0) // PR 43: skip DEAD_THIS_BATCH (no live counterpart)
 			continue;
 
 		if (Bump(fields[P_VALIDITY], false))
@@ -1168,7 +1172,7 @@ void SnapshotDiffGate::CheckFeatureRows()
 
 	// reverse validity: valid rows with no live feature
 	for (size_t id = 0; id < slots; ++id) {
-		if (rows.valid[id] == 0 || liveSeen[id] != 0)
+		if (rows.valid[id] != SimSnapshotValid::ACTIVE || liveSeen[id] != 0) // PR 43: skip DEAD_THIS_BATCH (no live counterpart)
 			continue;
 		if (Bump(fields[FT_VALIDITY], false))
 			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d feat=%d field=feat:validity snap=1 live=0",
@@ -1701,7 +1705,7 @@ void SnapshotDiffGate::CheckWeaponRows()
 
 		// weapon rows share UnitRows validity; a validity mismatch is already
 		// reported by the main unit field pass, so only cross-check both-valid
-		if (u == nullptr || rows.valid[i] == 0)
+		if (u == nullptr || rows.valid[i] != SimSnapshotValid::ACTIVE) // PR 43: only cross-check ACTIVE rows
 			continue;
 
 		// per-unit weapon block (flanking / stockpile / shield-default / fps)

@@ -77,7 +77,12 @@ void SnapshotPickGrid::Rebuild()
 		const SimSnapshot::UnitRows& u = simSnapshot.Read();
 		unitSlotStamp.assign(u.MaxUnits(), 0);
 		for (size_t id = 0; id < u.MaxUnits(); ++id) {
-			if (u.valid[id] == 0)
+			// PR 43: only ACTIVE rows enter the pick grid -- NOT DEAD_THIS_BATCH.
+			// The index is cached per epoch; a rebuild triggered by a query during
+			// the dispatch window would otherwise bake a corpse into the grid and
+			// keep it pickable past the window close. A dead unit is not a pick
+			// candidate anyway (master unlinked it from the quadfield).
+			if (u.valid[id] != SimSnapshotValid::ACTIVE)
 				continue;
 			const float ext = std::max(u.radius[id], u.selVol[id].GetBoundingRadius());
 			insert(unitCells, numX, numZ, cellWorld, static_cast<int>(id), u.pos[id], ext);
@@ -87,7 +92,7 @@ void SnapshotPickGrid::Rebuild()
 		const SimSnapshot::FeatureRows& f = simSnapshot.ReadFeatures();
 		featureSlotStamp.assign(f.MaxSlots(), 0);
 		for (size_t id = 0; id < f.MaxSlots(); ++id) {
-			if (f.valid[id] == 0)
+			if (f.valid[id] != SimSnapshotValid::ACTIVE) // PR 43: see the unit loop
 				continue;
 			const float ext = std::max(f.radius[id], f.selVol[id].GetBoundingRadius());
 			insert(featureCells, numX, numZ, cellWorld, static_cast<int>(id), f.pos[id], ext);

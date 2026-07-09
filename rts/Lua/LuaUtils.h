@@ -494,56 +494,36 @@ const inline CUnit* LuaUtils::IdToObject(int id, const char* func)
 	// the sim's own container mutation AND disagrees with the snapshot view
 	// callers guard with (spValidUnitID says boundary-N, the walk says
 	// mid-burst) -- resolve through the drawer's render record instead
-	// (DrawerGetObjectByID, SCOPE-1), with the deferred-deletion shell as the
-	// died-in-burst fallback (deferred UnitCreated handlers / RecvFromSynced
-	// forwarders calling gl.Set*BufferUniforms).
+	// (DrawerGetObjectByID, SCOPE-1).
 	//
-	// SCOPE-1 NOTE (plan PR 39): the ShellFallback here is NOT retired. It is
-	// load-bearing until PR 43's DEAD_THIS_BATCH rows make the record retain a
-	// died-in-batch id (see doc §S7). Empirically, dropping it nil-storms
-	// gl.SetFeatureBufferUniforms from deferred RecvFromSynced handlers
-	// (unit_healthbars_widget_forwarding) — the boundary-dead shell covers ids
-	// the record's cold-miss FindPendingDestroy does not. §2.3: keep it until
-	// the id-keyed storage RETAINS the dead row (PR 43), not merely resolves live.
-	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
-		const CUnit* unit = DrawerGetObjectByID<CUnit>(id);
+	// PR 43 (3b): the explicit ShellFallback is RETIRED. The record now
+	// RETAINS a died-in-batch id's row (obj = the deferred-deletion shell,
+	// readable until the step-8 ack) through the whole deferred-dispatch
+	// window (CUnitDrawerData::RenderUnitDestroyed / ClearDeadRetainedRecords)
+	// -- exactly the retention SCOPE-1 lacked when dropping the fallback
+	// nil-stormed gl.SetFeatureBufferUniforms from deferred RecvFromSynced
+	// handlers (unit_healthbars_widget_forwarding). Outside the window a dead
+	// id resolves to nullptr = the "no such unit" nil shape, as before.
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning())
+		return DrawerGetObjectByID<CUnit>(id);
 
-		if (unit == nullptr)
-			unit = SimDrawSplit::ShellFallbackUnit(id);
-
-		return unit;
-	}
-
-	const CUnit* unit = unitHandler.GetUnit(id);
-
-	// boundary drain window (PR 27b): deferred handlers replaying events for
-	// an object that died later in the same sim burst resolve its
-	// still-readable shell
-	if (unit == nullptr)
-		unit = SimDrawSplit::ShellFallbackUnit(id);
-
-	return unit;
+	// flag-off / no sim thread: master's plain handler walk (the PR-27b shell
+	// fallback that used to follow it was inert here -- the shell window only
+	// opens under the running split)
+	return unitHandler.GetUnit(id);
 }
 
 template<>
 const inline CFeature* LuaUtils::IdToObject(int id, const char* func)
 {
-	// see the CUnit specialization (SCOPE-1: shell fallback KEPT, blocked on PR 43)
-	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
-		const CFeature* feature = DrawerGetObjectByID<CFeature>(id);
+	// see the CUnit specialization (PR 43 3b: shell fallback retired; the
+	// record retains died-in-batch ids through the dispatch window, including
+	// same-batch non-model features, which register their at-death record at
+	// destroy dispatch -- CFeatureDrawerData::RenderFeatureDestroyed)
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning())
+		return DrawerGetObjectByID<CFeature>(id);
 
-		if (feature == nullptr)
-			feature = SimDrawSplit::ShellFallbackFeature(id);
-
-		return feature;
-	}
-
-	const CFeature* feature = featureHandler.GetFeature(id);
-
-	if (feature == nullptr)
-		feature = SimDrawSplit::ShellFallbackFeature(id);
-
-	return feature;
+	return featureHandler.GetFeature(id);
 }
 
 template<>

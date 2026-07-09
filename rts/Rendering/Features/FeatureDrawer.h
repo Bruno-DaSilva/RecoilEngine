@@ -59,6 +59,8 @@ public:
 	// mutable fields the draw-window passes read); never dereference live CFeature
 	static const CFeatureDrawerData::FeatureRenderRecord& GetRenderRecord(const CFeature* feature) { return modelDrawerData->GetRenderRecord(feature); }
 	static const CFeatureDrawerData::FeatureRenderRecord& GetRenderRecord(int featureID) { return modelDrawerData->GetRenderRecord(featureID); }
+	// PR 43 (3b): barrier step 8 / valve hook (see CFeatureDrawerData)
+	static void ClearDeadRetainedRecords() { if (modelDrawerData != nullptr) modelDrawerData->ClearDeadRetainedRecords(); }
 
 	// drawer-owned Lua material state + per-piece LOD display lists evicted from
 	// LocalModel/LocalModelPiece (sim/draw PR 10)

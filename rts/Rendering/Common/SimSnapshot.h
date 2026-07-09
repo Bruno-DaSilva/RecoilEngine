@@ -15,8 +15,30 @@
 #include "Sim/Misc/Resource.h"
 #include "Sim/Misc/TeamStatistics.h"
 #include "System/UnorderedMap.hpp"
+#include "System/SimDrawSplit.h" // PR 43: DEAD_THIS_BATCH validity consults the dispatch-window flag
 #include "System/float3.h"
 #include "System/float4.h"
+
+// PR 43 (resurrected from the 38b flip attempt, amended per §7.7): the
+// tri-state row-validity enum. The valid[] arrays hold one of these per id.
+// DEAD_THIS_BATCH is a retained-but-dead row: the object's destroy record is
+// in the epoch just published, and its row was extracted PRODUCER-SIDE from
+// the object's DeferredObjectDeleter shell at the frame edge -- genuine
+// at-death state by construction (this deletes the 38b genuineness-guard
+// class, which existed because 38b retained the possibly-2-boundary-stale
+// front-slot data instead). Valid() promotes it to true ONLY inside the
+// boundary dispatch-drain window (SimDrawSplit::BoundaryShellWindowActive),
+// so the deferred death/LOS/command handlers can read the object at its
+// at-death state; everything else reads the dead-id nil shape. Under PR 43
+// the barrier dispatches still read LIVE under the barrier's
+// ScopedLiveException (43 does not convert them -- that is 44b), so these
+// rows are inert-but-armed: populated, validated by the epoch id-coverage
+// gate, and consumed for real at 44b.
+namespace SimSnapshotValid {
+	inline constexpr uint8_t INACTIVE        = 0; // no object / stale garbage
+	inline constexpr uint8_t ACTIVE          = 1; // live at the stamped simFrame
+	inline constexpr uint8_t DEAD_THIS_BATCH = 2; // destroyed this epoch; at-death row retained
+}
 
 /**
  * @brief SimSnapshot -- the extracted, flat, render-side copy of hot observable sim state
@@ -420,9 +442,16 @@ public:
 
 		// out-of-range ids (including any id before the first extraction ever
 		// ran, when the arrays are still unsized) are part of the stale/nil
-		// contract: a deterministic miss, not an error
+		// contract: a deterministic miss, not an error.
+		// PR 43 tri-state: DEAD_THIS_BATCH rows (shell-sourced at-death state)
+		// read as valid only while the boundary dispatch-drain window is open;
+		// flag-off DEAD_THIS_BATCH is never set and this reduces to != 0.
 		bool Valid(int unitID) const {
-			return (static_cast<size_t>(unitID) < valid.size() && valid[unitID] != 0);
+			if (static_cast<size_t>(unitID) >= valid.size())
+				return false;
+			const uint8_t v = valid[unitID];
+			return (v == SimSnapshotValid::ACTIVE) ||
+			       (v == SimSnapshotValid::DEAD_THIS_BATCH && SimDrawSplit::BoundaryShellWindowActive());
 		}
 
 		size_t MaxUnits() const { return valid.size(); }
@@ -745,7 +774,12 @@ public:
 		std::vector<uint8_t> visInLosAll;
 
 		bool Valid(int projID) const {
-			return (static_cast<size_t>(projID) < valid.size() && valid[projID] != 0);
+			// PR 43 tri-state: see UnitRows::Valid
+			if (static_cast<size_t>(projID) >= valid.size())
+				return false;
+			const uint8_t v = valid[projID];
+			return (v == SimSnapshotValid::ACTIVE) ||
+			       (v == SimSnapshotValid::DEAD_THIS_BATCH && SimDrawSplit::BoundaryShellWindowActive());
 		}
 		size_t MaxSlots() const { return valid.size(); }
 		// PR 34 stale/nil contract default (invalid ids read 0)
@@ -834,7 +868,12 @@ public:
 		std::vector<LuaRulesParams::Params> featureRulesParams; // [MaxSlots()]
 
 		bool Valid(int id) const {
-			return (static_cast<size_t>(id) < valid.size() && valid[id] != 0);
+			// PR 43 tri-state: see UnitRows::Valid
+			if (static_cast<size_t>(id) >= valid.size())
+				return false;
+			const uint8_t v = valid[id];
+			return (v == SimSnapshotValid::ACTIVE) ||
+			       (v == SimSnapshotValid::DEAD_THIS_BATCH && SimDrawSplit::BoundaryShellWindowActive());
 		}
 		size_t MaxSlots() const { return valid.size(); }
 
@@ -1178,10 +1217,28 @@ public:
 	float3 MapStartPos(int teamNum) const {
 		return MapStartPosValid(teamNum) ? mapStartPos[teamNum] : float3{};
 	}
+public:
+	// PR 43: revert this epoch's DEAD_THIS_BATCH marks in the published slot
+	// to INACTIVE once its dispatch window closed (barrier step 8). With
+	// per-slot data the marks would also die on slot recycle; the explicit
+	// clear keeps the published slot's validity well-defined for consumers
+	// that scan valid[] directly between boundaries.
+	void ClearDeadThisBatch();
 private:
 	void Extract(UnitRows& rows);
-	void ExtractProjectiles(ProjectileRows& rows);
-	void ExtractFeatures(FeatureRows& rows);
+	// minSlots (PR 43): grow-only row sizing may need to cover ids that died
+	// in the batch (shell-sourced DEAD_THIS_BATCH rows for ids the live
+	// containers no longer hold); Update() passes the dead-id maxima, the
+	// sim-thread hash scratch passes nothing
+	void ExtractProjectiles(ProjectileRows& rows, size_t minSlots = 0);
+	void ExtractFeatures(FeatureRows& rows, size_t minSlots = 0);
+	// PR 43 §7.7: producer-side extraction of the batch's dying ids from
+	// their DeferredObjectDeleter shells (readable until the step-8 ack) into
+	// the publishing slot, marked DEAD_THIS_BATCH. Genuine at-death state for
+	// every plain-field row; sub-blocks whose owning objects PreDestruct()
+	// already destroyed (commandAI/moveType/weapons) read documented defaults.
+	// Split-only; INACTIVE-guarded so a same-batch id reuse stays ACTIVE.
+	void ExtractDeadRowsFromShells(UnitRows& urows, FeatureRows& frows, ProjectileRows& prows);
 	void ExtractTeams(TeamRows& rows);
 	void ExtractPlayers(PlayerRows& rows);
 	void ExtractGlobals(GlobalRows& rows);

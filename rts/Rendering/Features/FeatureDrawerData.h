@@ -94,6 +94,11 @@ public:
 			renderRecords.resize(id + 1);
 		return renderRecords[id].lodDispLists;
 	}
+
+	// PR 43 (3b): clear the destroy-retained records at the end of the
+	// boundary dispatch window (barrier step 8 / valve), before the ack
+	// poisons their shell handles. See RenderFeatureDestroyed.
+	void ClearDeadRetainedRecords();
 protected:
 	void UpdateObjectDrawFlags(const CSolidObject* o) override;
 private:
@@ -108,6 +113,11 @@ private:
 	// render-record producer-side authoring (see FeatureRenderRecord above)
 	FeatureRenderRecord& RenderRecordRef(const CFeature* f);
 	void UpdateRenderRecord(const CFeature* feature);
+
+	// PR 43 (3b): (id, shell) of records retained past their destroy-record
+	// dispatch so died-in-batch ids resolve through DrawerGetObjectByID for
+	// the deferred dispatches (replaces the IdToObject shell fallback)
+	std::vector<std::pair<int, const CFeature*>> deadRetainedRecords;
 public:
 	float featureDrawDistance;
 	float featureFadeDistance;

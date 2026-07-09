@@ -1423,13 +1423,11 @@ static int GetUnitDrawFlagLive(lua_State* L, const char* caller)
 	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
 		const int unitID = luaL_checkint(L, 1);
 
+		// died-in-burst: the render record RETAINS a died-in-batch id (obj =
+		// shell) through the deferred-dispatch window (PR 43 3b) -- a deferred
+		// UnitCreated/Finished/Given handler may legally ask (master answered
+		// mid-frame), and the retained record keeps the flag readable
 		const CUnit* unit = DrawerGetObjectByID<CUnit>(unitID);
-
-		// died-in-burst: the drain already removed it from the drawer
-		// containers, but a deferred UnitCreated/Finished/Given handler may
-		// legally ask (master answered mid-frame); the shell keeps the flag
-		if (unit == nullptr)
-			unit = SimDrawSplit::ShellFallbackUnit(unitID);
 
 		if (unit == nullptr || !LuaUtils::IsUnitVisible(L, unit))
 			return 0;
@@ -1850,11 +1848,8 @@ static int GetFeatureDrawFlagLive(lua_State* L, const char* caller)
 	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
 		const int featureID = luaL_checkint(L, 1);
 
+		// see GetUnitDrawFlag (died-in-burst ids ride the retained record, PR 43 3b)
 		const CFeature* feature = DrawerGetObjectByID<CFeature>(featureID);
-
-		// see GetUnitDrawFlag (died-in-burst shell)
-		if (feature == nullptr)
-			feature = SimDrawSplit::ShellFallbackFeature(featureID);
 
 		if (feature == nullptr || !LuaUtils::IsFeatureVisible(L, feature))
 			return 0;

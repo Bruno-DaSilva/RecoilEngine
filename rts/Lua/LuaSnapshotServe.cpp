@@ -142,32 +142,24 @@ namespace {
 
 	// sanctioned draw-side id->pointer resolution for drawer payload reads that
 	// only exist pointer-keyed (GetDrawFlag / the icon-state accessors): the
-	// drawer's boundary resolve cache first, the died-in-burst shell second,
-	// NEVER the sim-owned handler tables (dogfood invariant; same pattern as
-	// the GetUnitDrawFlag live fix, commit 6910e82315). nullptr = dead per
-	// drawer; callers answer the "no such unit" nil shape.
+	// drawer's render record, NEVER the sim-owned handler tables (dogfood
+	// invariant; same pattern as the GetUnitDrawFlag live fix, commit
+	// 6910e82315). nullptr = dead per drawer; callers answer the "no such
+	// unit" nil shape. PR 43 (3b): the died-in-burst shell fallback is
+	// retired -- the record itself RETAINS a died-in-batch id (obj = shell)
+	// through the deferred-dispatch window (ClearDeadRetainedRecords).
 	inline const CUnit* ResolveDrawUnit(int unitID)
 	{
-		const CUnit* unit = DrawerGetObjectByID<CUnit>(unitID);
-
-		if (unit == nullptr)
-			unit = SimDrawSplit::ShellFallbackUnit(unitID);
-
-		return unit;
+		return DrawerGetObjectByID<CUnit>(unitID);
 	}
 
 	// draw-side feature resolver for the unsynced-owned payload reads (the
-	// luaDraw/noDraw/drawFlag/selection-volume family): the drawer's boundary
-	// cache first, the died-in-burst shell second -- NEVER the sim-owned
-	// featureHandler (dogfood invariant, doc/pr27b-implementation-notes.md)
+	// luaDraw/noDraw/drawFlag/selection-volume family): the drawer's render
+	// record, NEVER the sim-owned featureHandler (dogfood invariant). PR 43
+	// (3b): shell fallback retired, see ResolveDrawUnit.
 	inline const CFeature* ResolveDrawFeature(int featureID)
 	{
-		const CFeature* feature = DrawerGetObjectByID<CFeature>(featureID);
-
-		if (feature == nullptr)
-			feature = SimDrawSplit::ShellFallbackFeature(featureID);
-
-		return feature;
+		return DrawerGetObjectByID<CFeature>(featureID);
 	}
 
 	// unit-flags family (PR 27b serving batch 2): the payloads are unsynced-
@@ -2497,7 +2489,7 @@ int LuaSnapshotServe::GetTeamUnitCount(lua_State* L, const char* caller)
 	unsigned int unitCount = 0;
 
 	for (size_t id = 0; id < urows.MaxUnits(); ++id) {
-		if (urows.valid[id] == 0 || urows.team[id] != static_cast<uint8_t>(teamID))
+		if (urows.valid[id] != SimSnapshotValid::ACTIVE || urows.team[id] != static_cast<uint8_t>(teamID))
 			continue;
 
 		unitCount += int(urows.PovUnitVisible(static_cast<int>(id), pov.readAllyTeam, pov.fullRead));
@@ -3421,7 +3413,7 @@ namespace {
 			m.clear();
 
 		for (size_t id = 0; id < urows.MaxUnits(); ++id) {
-			if (urows.valid[id] == 0)
+			if (urows.valid[id] != SimSnapshotValid::ACTIVE)
 				continue;
 
 			const int unitID = static_cast<int>(id);
@@ -4443,7 +4435,7 @@ int LuaSnapshotServe::GetProjectilesInRectangle(lua_State* L, const char* caller
 	sqObjectIDs.clear();
 
 	for (size_t projID = 0; projID < rows.MaxSlots(); ++projID) {
-		if (rows.valid[projID] == 0)
+		if (rows.valid[projID] != SimSnapshotValid::ACTIVE)
 			continue;
 
 		const float3& pos = rows.pos[projID];
@@ -4622,6 +4614,14 @@ namespace {
 		if (m.built && m.generation == gen)
 			return m;
 
+		// PR 43: enumeration/spatial twins include only ACTIVE rows, NOT
+		// DEAD_THIS_BATCH -- that state is a POINT-read mechanism (rows.Valid()
+		// serves a held id's at-death state during the dispatch window), while a
+		// dead unit is gone from master's spatial containers. These indices are
+		// also cached per epoch, so admitting a DEAD_THIS_BATCH row (which only
+		// exists during the window) would keep a corpse in the mirror past the
+		// window close. Same rule at every `valid[id] != ACTIVE` scan here.
+
 		// quadField geometry is immutable after map load (reads are const, no
 		// mutable-membership touch); numQuadsX/numQuadsZ match GetQuadAt(x, y)
 		m.numQuadsX = quadField.GetNumQuadsX();
@@ -4636,7 +4636,7 @@ namespace {
 		{
 			const auto& urows = simSnapshot.Read();
 			for (size_t id = 0; id < urows.MaxUnits(); ++id) {
-				if (urows.valid[id] == 0)
+				if (urows.valid[id] != SimSnapshotValid::ACTIVE)
 					continue;
 				// membership == CQuadField::MovedUnit's GetQuads(unit->pos,
 				// unit->radius); the scratch slot is the main-split slot under the
@@ -4651,7 +4651,7 @@ namespace {
 		{
 			const auto& frows = simSnapshot.ReadFeatures();
 			for (size_t id = 0; id < frows.MaxSlots(); ++id) {
-				if (frows.valid[id] == 0)
+				if (frows.valid[id] != SimSnapshotValid::ACTIVE)
 					continue;
 				// membership == CQuadField::AddFeature's GetQuads(feature->pos,
 				// feature->radius)
@@ -4771,7 +4771,7 @@ namespace {
 
 		const auto& prows = simSnapshot.ReadProjectiles();
 		for (size_t id = 0; id < prows.MaxSlots(); ++id) {
-			if (prows.valid[id] == 0)
+			if (prows.valid[id] != SimSnapshotValid::ACTIVE)
 				continue;
 
 			// == CQuadField::AddProjectile's membership rule. The GetQuadsOnRay
@@ -5525,7 +5525,7 @@ int LuaSnapshotServe::GetAllProjectiles(lua_State* L, const char* caller)
 	// DEVIATION: ascending ids (master lists the active-projectile container order)
 	sqObjectIDs.clear();
 	for (size_t projID = 0; projID < rows.MaxSlots(); ++projID) {
-		if (rows.valid[projID] == 0)
+		if (rows.valid[projID] != SimSnapshotValid::ACTIVE)
 			continue;
 		sqObjectIDs.push_back(static_cast<int>(projID));
 	}
@@ -5551,7 +5551,7 @@ int LuaSnapshotServe::GetProjectilesInSphere(lua_State* L, const char* caller)
 	sqObjectIDs.clear();
 
 	for (size_t projID = 0; projID < rows.MaxSlots(); ++projID) {
-		if (rows.valid[projID] == 0)
+		if (rows.valid[projID] != SimSnapshotValid::ACTIVE)
 			continue;
 
 		const float totRad = radius + rows.radius[projID];
@@ -5578,14 +5578,14 @@ int LuaSnapshotServe::GetAllFeatures(lua_State* L, const char* caller)
 	int count = 0;
 	if (pov.fullRead) {
 		for (size_t id = 0; id < rows.MaxSlots(); ++id) {
-			if (rows.valid[id] == 0)
+			if (rows.valid[id] != SimSnapshotValid::ACTIVE)
 				continue;
 			lua_pushnumber(L, static_cast<int>(id));
 			lua_rawseti(L, -2, ++count);
 		}
 	} else {
 		for (size_t id = 0; id < rows.MaxSlots(); ++id) {
-			if (rows.valid[id] == 0)
+			if (rows.valid[id] != SimSnapshotValid::ACTIVE)
 				continue;
 			if (!PovFeatureVisible(rows, static_cast<int>(id), pov))
 				continue;
