@@ -4221,6 +4221,22 @@ bool UnsyncedGameCommands::ActionReleased(const Action& action)
 
 
 
+// Sim/draw split (PR 44 prereq E): tag a console-action executor as NOT
+// touching live sim state, so CGuiHandler::RunCustomCommands can skip the
+// per-action sim park for it. Executors default to touchesSimState=true
+// (conservative: unclassified executors still park). The DRAW-UI / NET-SEND
+// families -- camera, rendering/asset config, sound, chat/echo, net-send,
+// pure UI toggles, and the async redirect-to-synced pokes -- read no live sim,
+// so wrapping their registration here drops their park. The SIM-POKE minority
+// (selection/group/team/spectator/give/destroy/particle-limits/DumpState/
+// track/AI/save/pause) keeps the default and still parks. See §4.5-SendCommands
+// in doc/sim-draw-pre44c-pause-surface-clearing.md for the full classification.
+static IUnsyncedActionExecutor* SimSafe(IUnsyncedActionExecutor* e)
+{
+	e->SetTouchesSimState(false);
+	return e;
+}
+
 void UnsyncedGameCommands::AddDefaultActionExecutors()
 {
 	if (!actionExecutors.empty())
@@ -4230,53 +4246,55 @@ void UnsyncedGameCommands::AddDefaultActionExecutors()
 	AddActionExecutor(AllocActionExecutor<SelectUnitsActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<SelectCycleActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<DeselectActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<ShadowsActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<DumpShadowsActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<MapShadowPolyOffsetActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<MapMeshDrawerActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<MapBorderActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<WaterActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<AdvMapShadingActionExecutor>()); // [maint]
-	AddActionExecutor(AllocActionExecutor<UnitDrawerTypeActionExecutor>()); // [maint]
-	AddActionExecutor(AllocActionExecutor<FeatureDrawerTypeActionExecutor>()); // [maint]
-	AddActionExecutor(AllocActionExecutor<SayActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<SayPrivateActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<SayPrivateByPlayerIDActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<EchoActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<SetActionExecutor>(true));
-	AddActionExecutor(AllocActionExecutor<SetActionExecutor>(false));
-	AddActionExecutor(AllocActionExecutor<EnableDrawInMapActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<DrawLabelActionExecutor>());
+	AddActionExecutor(SimSafe(AllocActionExecutor<ShadowsActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<DumpShadowsActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<MapShadowPolyOffsetActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<MapMeshDrawerActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<MapBorderActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<WaterActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<AdvMapShadingActionExecutor>())); // [maint]
+	AddActionExecutor(SimSafe(AllocActionExecutor<UnitDrawerTypeActionExecutor>())); // [maint]
+	AddActionExecutor(SimSafe(AllocActionExecutor<FeatureDrawerTypeActionExecutor>())); // [maint]
+	AddActionExecutor(SimSafe(AllocActionExecutor<SayActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<SayPrivateActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<SayPrivateByPlayerIDActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<EchoActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<SetActionExecutor>(true)));
+	AddActionExecutor(SimSafe(AllocActionExecutor<SetActionExecutor>(false)));
+	AddActionExecutor(SimSafe(AllocActionExecutor<EnableDrawInMapActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<DrawLabelActionExecutor>()));
+	// Mouse* simulate mouse button presses -> may drive an order build (GetCommand)
+	// which reads live sim; keep the default park (they are input-bound, not per-frame).
 	AddActionExecutor(AllocActionExecutor<MouseActionExecutor>(1));
 	AddActionExecutor(AllocActionExecutor<MouseActionExecutor>(2));
 	AddActionExecutor(AllocActionExecutor<MouseActionExecutor>(3));
 	AddActionExecutor(AllocActionExecutor<MouseActionExecutor>(4));
 	AddActionExecutor(AllocActionExecutor<MouseActionExecutor>(5));
-	AddActionExecutor(AllocActionExecutor<MouseCancelSelectionRectangleActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<ViewSelectionActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<CameraMoveActionExecutor>(CCamera::MOVE_STATE_FWD, "Forward"     ));
-	AddActionExecutor(AllocActionExecutor<CameraMoveActionExecutor>(CCamera::MOVE_STATE_BCK, "Back"        ));
-	AddActionExecutor(AllocActionExecutor<CameraMoveActionExecutor>(CCamera::MOVE_STATE_LFT, "Left"        ));
-	AddActionExecutor(AllocActionExecutor<CameraMoveActionExecutor>(CCamera::MOVE_STATE_RGT, "Right"       ));
-	AddActionExecutor(AllocActionExecutor<CameraMoveActionExecutor>(CCamera::MOVE_STATE_UP , "Up"          ));
-	AddActionExecutor(AllocActionExecutor<CameraMoveActionExecutor>(CCamera::MOVE_STATE_DWN, "Down"        ));
-	AddActionExecutor(AllocActionExecutor<CameraMoveActionExecutor>(CCamera::MOVE_STATE_FST, "Fast"  , false));
-	AddActionExecutor(AllocActionExecutor<CameraMoveActionExecutor>(CCamera::MOVE_STATE_SLW, "Slow"  , false));
-	AddActionExecutor(AllocActionExecutor<CameraMoveActionExecutor>(CCamera::MOVE_STATE_TLT, "Tilt"  , false));
-	AddActionExecutor(AllocActionExecutor<CameraMoveActionExecutor>(CCamera::MOVE_STATE_RST, "Reset" , false));
-	AddActionExecutor(AllocActionExecutor<CameraMoveActionExecutor>(CCamera::MOVE_STATE_RTT, "Rotate", false));
-	AddActionExecutor(AllocActionExecutor<MouseStateActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<AIKillReloadActionExecutor>(true));
-	AddActionExecutor(AllocActionExecutor<AIKillReloadActionExecutor>(false));
-	AddActionExecutor(AllocActionExecutor<AIControlActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<AIListActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<TeamActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<SpectatorActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<SpecTeamActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<SpecFullViewActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<AllyActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<GroupActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<GroupIDActionExecutor>(0));
+	AddActionExecutor(SimSafe(AllocActionExecutor<MouseCancelSelectionRectangleActionExecutor>()));
+	AddActionExecutor(AllocActionExecutor<ViewSelectionActionExecutor>()); // SIM-POKE (selection read)
+	AddActionExecutor(SimSafe(AllocActionExecutor<CameraMoveActionExecutor>(CCamera::MOVE_STATE_FWD, "Forward"     )));
+	AddActionExecutor(SimSafe(AllocActionExecutor<CameraMoveActionExecutor>(CCamera::MOVE_STATE_BCK, "Back"        )));
+	AddActionExecutor(SimSafe(AllocActionExecutor<CameraMoveActionExecutor>(CCamera::MOVE_STATE_LFT, "Left"        )));
+	AddActionExecutor(SimSafe(AllocActionExecutor<CameraMoveActionExecutor>(CCamera::MOVE_STATE_RGT, "Right"       )));
+	AddActionExecutor(SimSafe(AllocActionExecutor<CameraMoveActionExecutor>(CCamera::MOVE_STATE_UP , "Up"          )));
+	AddActionExecutor(SimSafe(AllocActionExecutor<CameraMoveActionExecutor>(CCamera::MOVE_STATE_DWN, "Down"        )));
+	AddActionExecutor(SimSafe(AllocActionExecutor<CameraMoveActionExecutor>(CCamera::MOVE_STATE_FST, "Fast"  , false)));
+	AddActionExecutor(SimSafe(AllocActionExecutor<CameraMoveActionExecutor>(CCamera::MOVE_STATE_SLW, "Slow"  , false)));
+	AddActionExecutor(SimSafe(AllocActionExecutor<CameraMoveActionExecutor>(CCamera::MOVE_STATE_TLT, "Tilt"  , false)));
+	AddActionExecutor(SimSafe(AllocActionExecutor<CameraMoveActionExecutor>(CCamera::MOVE_STATE_RST, "Reset" , false)));
+	AddActionExecutor(SimSafe(AllocActionExecutor<CameraMoveActionExecutor>(CCamera::MOVE_STATE_RTT, "Rotate", false)));
+	AddActionExecutor(SimSafe(AllocActionExecutor<MouseStateActionExecutor>()));
+	AddActionExecutor(AllocActionExecutor<AIKillReloadActionExecutor>(true));  // SIM-POKE (AI/team)
+	AddActionExecutor(AllocActionExecutor<AIKillReloadActionExecutor>(false)); // SIM-POKE (AI/team)
+	AddActionExecutor(AllocActionExecutor<AIControlActionExecutor>());         // SIM-POKE (AI/team)
+	AddActionExecutor(AllocActionExecutor<AIListActionExecutor>());            // SIM-POKE (AI/team)
+	AddActionExecutor(AllocActionExecutor<TeamActionExecutor>());              // SIM-POKE (teamHandler)
+	AddActionExecutor(AllocActionExecutor<SpectatorActionExecutor>());         // SIM-POKE (teamHandler/gs)
+	AddActionExecutor(AllocActionExecutor<SpecTeamActionExecutor>());          // SIM-POKE (teamHandler/gs)
+	AddActionExecutor(AllocActionExecutor<SpecFullViewActionExecutor>());      // SIM-POKE (teamHandler/gs)
+	AddActionExecutor(AllocActionExecutor<AllyActionExecutor>());              // SIM-POKE (teamHandler)
+	AddActionExecutor(AllocActionExecutor<GroupActionExecutor>());             // SIM-POKE (selection/group)
+	AddActionExecutor(AllocActionExecutor<GroupIDActionExecutor>(0));          // SIM-POKE (selection/group)
 	AddActionExecutor(AllocActionExecutor<GroupIDActionExecutor>(1));
 	AddActionExecutor(AllocActionExecutor<GroupIDActionExecutor>(2));
 	AddActionExecutor(AllocActionExecutor<GroupIDActionExecutor>(3));
@@ -4286,162 +4304,165 @@ void UnsyncedGameCommands::AddDefaultActionExecutors()
 	AddActionExecutor(AllocActionExecutor<GroupIDActionExecutor>(7));
 	AddActionExecutor(AllocActionExecutor<GroupIDActionExecutor>(8));
 	AddActionExecutor(AllocActionExecutor<GroupIDActionExecutor>(9));
-	AddActionExecutor(AllocActionExecutor<LastMessagePositionActionExecutor>());
+	AddActionExecutor(SimSafe(AllocActionExecutor<LastMessagePositionActionExecutor>()));
 
-	AddActionExecutor(AllocActionExecutor<ChatActionExecutor>("",     "",   false));
-	AddActionExecutor(AllocActionExecutor<ChatActionExecutor>("All",  "",   true));
-	AddActionExecutor(AllocActionExecutor<ChatActionExecutor>("Ally", "a:", true));
-	AddActionExecutor(AllocActionExecutor<ChatActionExecutor>("Spec", "s:", true));
+	AddActionExecutor(SimSafe(AllocActionExecutor<ChatActionExecutor>("",     "",   false)));
+	AddActionExecutor(SimSafe(AllocActionExecutor<ChatActionExecutor>("All",  "",   true)));
+	AddActionExecutor(SimSafe(AllocActionExecutor<ChatActionExecutor>("Ally", "a:", true)));
+	AddActionExecutor(SimSafe(AllocActionExecutor<ChatActionExecutor>("Spec", "s:", true)));
 
-	AddActionExecutor(AllocActionExecutor<TrackActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<TrackModeActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<PauseActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<DebugActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<ProfileDumpActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<BoundaryDumpActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<SnapHashDumpActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<CalloutCensusActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<SplitContractDumpActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<SnapshotDiffGateActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<DebugCubeMapActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<DebugQuadFieldActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<DrawSkyActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<DebugGLActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<DebugGLErrorsActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<DebugColVolDrawerActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<DebugVisibilityDrawerActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<DebugPathDrawerActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<DebugTraceRayDrawerActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<DebugShadowFrustum>());
-	AddActionExecutor(AllocActionExecutor<MuteActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<SoundActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<SoundChannelEnableActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<CreateVideoActionExecutor>());
+	AddActionExecutor(AllocActionExecutor<TrackActionExecutor>()); // SIM-POKE (follows selection)
+	AddActionExecutor(SimSafe(AllocActionExecutor<TrackModeActionExecutor>()));
+	AddActionExecutor(AllocActionExecutor<PauseActionExecutor>());  // SIM-POKE (pause state / net)
+	AddActionExecutor(SimSafe(AllocActionExecutor<DebugActionExecutor>()));
+	AddActionExecutor(AllocActionExecutor<ProfileDumpActionExecutor>());       // diagnostic (walks sim)
+	AddActionExecutor(AllocActionExecutor<BoundaryDumpActionExecutor>());      // diagnostic (walks sim)
+	AddActionExecutor(AllocActionExecutor<SnapHashDumpActionExecutor>());      // diagnostic (walks sim)
+	AddActionExecutor(AllocActionExecutor<CalloutCensusActionExecutor>());     // diagnostic (walks sim)
+	AddActionExecutor(AllocActionExecutor<SplitContractDumpActionExecutor>()); // diagnostic (walks sim)
+	AddActionExecutor(AllocActionExecutor<SnapshotDiffGateActionExecutor>());  // diagnostic (walks sim)
+	AddActionExecutor(SimSafe(AllocActionExecutor<DebugCubeMapActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<DebugQuadFieldActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<DrawSkyActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<DebugGLActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<DebugGLErrorsActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<DebugColVolDrawerActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<DebugVisibilityDrawerActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<DebugPathDrawerActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<DebugTraceRayDrawerActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<DebugShadowFrustum>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<MuteActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<SoundActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<SoundChannelEnableActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<CreateVideoActionExecutor>()));
 	// [devel] AddActionExecutor(AllocActionExecutor<DrawGrassActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<NetPingActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<NetMsgSmoothingActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<SpeedControlActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<GameInfoActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<GameInfoCloseActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<HideInterfaceActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<HardwareCursorActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<FullscreenActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<WindowBorderlessActionExecutor>());
+	AddActionExecutor(SimSafe(AllocActionExecutor<NetPingActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<NetMsgSmoothingActionExecutor>()));
+	AddActionExecutor(AllocActionExecutor<SpeedControlActionExecutor>()); // SIM-POKE (speed control)
+	AddActionExecutor(SimSafe(AllocActionExecutor<GameInfoActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<GameInfoCloseActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<HideInterfaceActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<HardwareCursorActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<FullscreenActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<WindowBorderlessActionExecutor>()));
 	// [devel] AddActionExecutor(AllocActionExecutor<GammaExponentActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<IncreaseViewRadiusActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<DecreaseViewRadiusActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<GroundDetailActionExecutor>());
+	AddActionExecutor(SimSafe(AllocActionExecutor<IncreaseViewRadiusActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<DecreaseViewRadiusActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<GroundDetailActionExecutor>()));
 	// [devel] AddActionExecutor(AllocActionExecutor<MoreGrassActionExecutor>());
 	// [devel] AddActionExecutor(AllocActionExecutor<LessGrassActionExecutor>());
 	// [devel] AddActionExecutor(AllocActionExecutor<RotateSkyActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<FeatureFadeDistActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<FeatureDrawDistActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<SpeedUpActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<SlowDownActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<SetGamespeedActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<ControlUnitActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<ShowStandardActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<ShowElevationActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<ShowInfoTexActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<ShowLOSActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<ShowMetalMapActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<ShowPathTravActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<ShowPathHeatActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<ShowPathFlowActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<ShowPathCostActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<ToggleLOSActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<ToggleInfoActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<ShowPathTypeActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<ShareDialogActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<QuitMessageActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<QuitMenuActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<QuitActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<ReloadActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<IncreaseGUIOpacityActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<DecreaseGUIOpacityActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<ScreenShotActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<GrabInputActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<ClockActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<CrossActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<FPSActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<SpeedActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<TeamHighlightActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<InfoActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<CmdColorsActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<CtrlPanelActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<FontActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<VSyncActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<SafeGLActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<ResBarActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<ToolTipActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<ConsoleActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<EndGraphActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<FPSHudActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<DebugDrawAIActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<MapMarksActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<AllMapMarksActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<ClearMapMarksActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<NoLuaDrawActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<LuaUIActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<LuaMenuActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<LuaGarbageCollectControlExecutor>());
-	AddActionExecutor(AllocActionExecutor<MiniMapActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<GroundDecalsActionExecutor>());
+	AddActionExecutor(SimSafe(AllocActionExecutor<FeatureFadeDistActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<FeatureDrawDistActionExecutor>()));
+	AddActionExecutor(AllocActionExecutor<SpeedUpActionExecutor>());     // SIM-POKE (gamespeed / net)
+	AddActionExecutor(AllocActionExecutor<SlowDownActionExecutor>());    // SIM-POKE (gamespeed / net)
+	AddActionExecutor(AllocActionExecutor<SetGamespeedActionExecutor>());// SIM-POKE (gamespeed / net)
+	AddActionExecutor(AllocActionExecutor<ControlUnitActionExecutor>()); // SIM-POKE (direct control)
+	AddActionExecutor(SimSafe(AllocActionExecutor<ShowStandardActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<ShowElevationActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<ShowInfoTexActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<ShowLOSActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<ShowMetalMapActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<ShowPathTravActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<ShowPathHeatActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<ShowPathFlowActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<ShowPathCostActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<ToggleLOSActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<ToggleInfoActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<ShowPathTypeActionExecutor>()));
+	AddActionExecutor(AllocActionExecutor<ShareDialogActionExecutor>()); // opens CShareBox (reads teams); keep park
+	AddActionExecutor(SimSafe(AllocActionExecutor<QuitMessageActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<QuitMenuActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<QuitActionExecutor>()));
+	AddActionExecutor(AllocActionExecutor<ReloadActionExecutor>()); // lifecycle (keep park)
+	AddActionExecutor(SimSafe(AllocActionExecutor<IncreaseGUIOpacityActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<DecreaseGUIOpacityActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<ScreenShotActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<GrabInputActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<ClockActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<CrossActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<FPSActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<SpeedActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<TeamHighlightActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<InfoActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<CmdColorsActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<CtrlPanelActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<FontActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<VSyncActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<SafeGLActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<ResBarActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<ToolTipActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<ConsoleActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<EndGraphActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<FPSHudActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<DebugDrawAIActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<MapMarksActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<AllMapMarksActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<ClearMapMarksActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<NoLuaDrawActionExecutor>()));
+	// LuaUI/LuaMenu: reload has its own lifecycle quiescence bracket; the
+	// GotChatMsg passthrough is unsynced Lua (snapshot-served, no live read).
+	AddActionExecutor(SimSafe(AllocActionExecutor<LuaUIActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<LuaMenuActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<LuaGarbageCollectControlExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<MiniMapActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<GroundDecalsActionExecutor>()));
 
-	AddActionExecutor(AllocActionExecutor<DistSortProjectilesActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<ParticleSoftenActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<ParticleDrawOrderActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<MaxParticlesActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<MaxNanoParticlesActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<MinViewRangeActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<MaxViewRangeActionExecutor>());
+	AddActionExecutor(SimSafe(AllocActionExecutor<DistSortProjectilesActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<ParticleSoftenActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<ParticleDrawOrderActionExecutor>()));
+	AddActionExecutor(AllocActionExecutor<MaxParticlesActionExecutor>());    // SIM-POKE (projectileHandler)
+	AddActionExecutor(AllocActionExecutor<MaxNanoParticlesActionExecutor>());// SIM-POKE (projectileHandler)
+	AddActionExecutor(SimSafe(AllocActionExecutor<MinViewRangeActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<MaxViewRangeActionExecutor>()));
 
-	AddActionExecutor(AllocActionExecutor<GatherModeActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<PasteTextActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<BufferTextActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<InputTextGeoActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<DistIconActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<IconsAsUIActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<IconScaleActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<IconFadeStartActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<IconFadeVanishActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<IconsHideWithUIActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<LODScaleActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<AirMeshActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<WireModelActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<WireMapActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<WireSkyActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<WireWaterActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<CrashActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<HangActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<ExceptionActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<DivByZeroActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<GiveActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<DestroyActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<RemoveActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<SendActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<DumpStateActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<DumpRNGActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<SaveActionExecutor>(true));
-	AddActionExecutor(AllocActionExecutor<SaveActionExecutor>(false));
-	AddActionExecutor(AllocActionExecutor<ReloadShadersActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<ReloadTexturesActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<DumpAtlasActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<DebugInfoActionExecutor>());
+	AddActionExecutor(SimSafe(AllocActionExecutor<GatherModeActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<PasteTextActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<BufferTextActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<InputTextGeoActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<DistIconActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<IconsAsUIActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<IconScaleActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<IconFadeStartActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<IconFadeVanishActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<IconsHideWithUIActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<LODScaleActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<AirMeshActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<WireModelActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<WireMapActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<WireSkyActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<WireWaterActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<CrashActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<HangActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<ExceptionActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<DivByZeroActionExecutor>()));
+	AddActionExecutor(AllocActionExecutor<GiveActionExecutor>());    // SIM-POKE (CGround / net)
+	AddActionExecutor(AllocActionExecutor<DestroyActionExecutor>()); // SIM-POKE (selection / net)
+	AddActionExecutor(AllocActionExecutor<RemoveActionExecutor>());  // SIM-POKE (selection / net)
+	AddActionExecutor(SimSafe(AllocActionExecutor<SendActionExecutor>())); // net-send only
+	AddActionExecutor(AllocActionExecutor<DumpStateActionExecutor>()); // SIM-POKE (heavy live read)
+	AddActionExecutor(AllocActionExecutor<DumpRNGActionExecutor>());   // SIM-POKE (heavy live read)
+	AddActionExecutor(AllocActionExecutor<SaveActionExecutor>(true));  // serializes live sim
+	AddActionExecutor(AllocActionExecutor<SaveActionExecutor>(false)); // serializes live sim
+	AddActionExecutor(SimSafe(AllocActionExecutor<ReloadShadersActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<ReloadTexturesActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<DumpAtlasActionExecutor>()));
+	AddActionExecutor(AllocActionExecutor<DebugInfoActionExecutor>()); // diagnostic (keep park)
 
 	// XXX are these redirects really required?
-	AddActionExecutor(AllocActionExecutor<RedirectToSyncedActionExecutor>("ATM"));
+	// RedirectToSynced: pure async clientNet->Send (no inline live-sim read).
+	AddActionExecutor(SimSafe(AllocActionExecutor<RedirectToSyncedActionExecutor>("ATM")));
 #ifdef DEBUG
-	AddActionExecutor(AllocActionExecutor<RedirectToSyncedActionExecutor>("Desync"));
+	AddActionExecutor(SimSafe(AllocActionExecutor<RedirectToSyncedActionExecutor>("Desync")));
 #endif
-	AddActionExecutor(AllocActionExecutor<RedirectToSyncedActionExecutor>("Resync"));
+	AddActionExecutor(SimSafe(AllocActionExecutor<RedirectToSyncedActionExecutor>("Resync")));
 	if (modInfo.allowTake)
-		AddActionExecutor(AllocActionExecutor<RedirectToSyncedActionExecutor>("Take"));
+		AddActionExecutor(SimSafe(AllocActionExecutor<RedirectToSyncedActionExecutor>("Take")));
 
-	AddActionExecutor(AllocActionExecutor<RedirectToSyncedActionExecutor>("LuaRules"));
-	AddActionExecutor(AllocActionExecutor<RedirectToSyncedActionExecutor>("LuaGaia"));
-	AddActionExecutor(AllocActionExecutor<CommandListActionExecutor>());
-	AddActionExecutor(AllocActionExecutor<CommandHelpActionExecutor>());
+	AddActionExecutor(SimSafe(AllocActionExecutor<RedirectToSyncedActionExecutor>("LuaRules")));
+	AddActionExecutor(SimSafe(AllocActionExecutor<RedirectToSyncedActionExecutor>("LuaGaia")));
+	AddActionExecutor(SimSafe(AllocActionExecutor<CommandListActionExecutor>()));
+	AddActionExecutor(SimSafe(AllocActionExecutor<CommandHelpActionExecutor>()));
 }
 
 

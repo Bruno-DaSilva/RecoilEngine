@@ -51,8 +51,24 @@ public:
 
 	virtual ~IUnsyncedActionExecutor() {}
 
+	// Sim/draw split (PR 44 prereq E): does this console-action executor read
+	// or write LIVE sim state when it runs on the draw thread? Defaults TRUE
+	// (conservative -- an unclassified executor gets the sim parked around it,
+	// preserving the old full-batch behaviour). The DRAW-UI / NET-SEND families
+	// (camera, rendering, config, sound, chat, net-send) are marked FALSE at
+	// registration (UnsyncedGameCommands.cpp) so per-action park scoping
+	// (CGuiHandler::RunCustomCommands) can skip the park for them -- they touch
+	// no live sim, so parking is pure overhead (measured ~per-draw-frame headful
+	// via stock-BAR widgets calling Spring.SendCommands). Only the SIM-POKE
+	// minority (selection/group/team/give/destroy/particle-limits/DumpState)
+	// keeps the default TRUE and still parks. Flag-off the park is inert.
+	bool TouchesSimState() const { return touchesSimState; }
+	void SetTouchesSimState(bool v) { touchesSimState = v; }
+
 private:
 	virtual bool ExecuteRelease(const UnsyncedAction& action) const { return false; }
+
+	bool touchesSimState = true;
 };
 
 #endif // UNSYNCED_ACTION_EXECUTOR_H

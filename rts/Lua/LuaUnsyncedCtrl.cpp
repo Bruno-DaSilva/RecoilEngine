@@ -594,14 +594,13 @@ int LuaUnsyncedCtrl::SendCommands(lua_State* L)
 
 	lua_settop(L, 0); // pop the input arguments
 
-	// PR 37: console actions dispatch arbitrary executors, some of which poke
-	// sim state -- park the sim for the batch (the same bracket CGuiHandler wraps
-	// its own action dispatch in; nest-safe, no-op flag-off). This is the
-	// conservative, order-preserving default; per-action net/UI/sim
-	// classification (net-send synchronous, draw-owned UI immediate, sim pokes
-	// boundary-applied) is the documented optimization deferred past the flip.
-	CGame::ScopedExternalSimPause simPause(CGame::SimPauseSite::LUA_SEND_COMMANDS);
-
+	// PR 37 / PR 44 prereq E: console actions dispatch arbitrary executors, some
+	// of which poke live sim state. The park is now scoped PER ACTION inside
+	// CGuiHandler::RunCustomCommands (sim-safe DRAW-UI/NET-SEND actions dispatch
+	// without parking; only the SIM-POKE minority parks), replacing the old
+	// conservative full-batch park here -- which was measured to re-park the
+	// running sim ~per draw frame headful (stock-BAR widgets call SendCommands
+	// per frame with sim-safe actions). Flag-off both forms are inert / identical.
 	configHandler->EnableWriting(globalConfig.luaWritableConfigFile);
 	guihandler->RunCustomCommands(cmds, false);
 	configHandler->EnableWriting(true);

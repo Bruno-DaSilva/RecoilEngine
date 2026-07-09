@@ -11,6 +11,8 @@
 #include "Game/Camera.h"
 #include "Game/Game.h"
 #include "Game/GameHelper.h"
+#include "Game/UnsyncedGameCommands.h"      // sim|draw PR 44 prereq E: per-action park scoping
+#include "Game/UnsyncedActionExecutor.h"    // sim|draw PR 44 prereq E: TouchesSimState()
 #include "Game/GlobalUnsynced.h"
 #include "Game/SelectedUnitsHandler.h"
 #include "Game/TraceRay.h"
@@ -59,6 +61,8 @@
 
 #include <SDL_keycode.h>
 #include <SDL_mouse.h>
+
+#include <optional>
 
 #include "System/Misc/TracyDefs.h"
 
@@ -1636,9 +1640,36 @@ void CGuiHandler::RunCustomCommands(const std::vector<std::string>& cmds, bool r
 				if (outMods.shift != DontCare)  { KeyInput::SetKeyModState(KMOD_SHIFT, int(outMods.shift == Required)); }
 
 				Action action(copy);
+
+				// sim|draw PR 44 prereq E: scope the sim park PER ACTION.
+				// Console actions dispatch arbitrary executors, most of which
+				// (DRAW-UI / NET-SEND: camera, rendering, config, sound, chat,
+				// net-send) read no live sim and are marked sim-safe at
+				// registration -> they dispatch WITHOUT parking. Only the
+				// SIM-POKE minority (selection/group/team/give/destroy/particle-
+				// limits/DumpState, plus any unclassified or guihandler-local /
+				// unknown action -- conservative default) takes the park. This
+				// replaces the old full-batch park in LuaUnsyncedCtrl::SendCommands,
+				// which was measured to re-park the running sim ~per draw frame
+				// headful (stock-BAR widgets calling Spring.SendCommands). The
+				// park is nest-safe (nested calls no-op) and inert flag-off, so
+				// flag-off behaviour is byte-identical. Order is preserved:
+				// actions still dispatch in sequence; the sim may advance a frame
+				// edge between two parked actions, which is safe (console actions
+				// are independent, deadlock-safe -- no executor blocks on the sim;
+				// see doc/sim-draw-pre44c-pause-surface-clearing.md §4.5-SendCommands).
+				const IUnsyncedActionExecutor* uExec =
+					unsyncedGameCommands->GetActionExecutor(action.command);
+				const bool actionTouchesSim = (uExec == nullptr) || uExec->TouchesSimState();
+
+				std::optional<CGame::ScopedExternalSimPause> simPause;
+				if (actionTouchesSim)
+					simPause.emplace(CGame::SimPauseSite::LUA_SEND_COMMANDS);
+
 				if (!ProcessLocalActions(action)) {
 					game->ProcessAction(action);
 				}
+				simPause.reset();
 
 				KeyInput::SetKeyModState(KMOD_ALT,   tmpAlt);
 				KeyInput::SetKeyModState(KMOD_CTRL,  tmpCtrl);
