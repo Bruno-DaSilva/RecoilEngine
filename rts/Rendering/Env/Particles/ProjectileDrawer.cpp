@@ -56,35 +56,25 @@ static bool CProjectileSortingPredicate(const CProjectile* p1, const CProjectile
 	return std::forward_as_tuple(projectileDrawer->GetSortDist(p1, sortCamType), p1) > std::forward_as_tuple(projectileDrawer->GetSortDist(p2, sortCamType), p2);
 };
 
-// bin-walk resolution of the packed (id << 1 | synced) drawer handles; every
-// registered handle resolves to a live projectile after the boundary drain.
-// PR 27b: with the split running, post-release passes may not resolve
-// through the sim-owned containers (the sim thread rehashes them mid-frame)
-// -- they read the boundary-built cache instead.
+// resolve a packed (id << 1 | synced) drawer handle to its object through the
+// producer-captured store (PR 40); every registered handle resolves to a
+// deferred-safe object pointer. Post-release / concurrent-sim passes may not
+// resolve through the sim-owned FreeListMapCompact containers (the sim thread
+// rehashes them mid-frame), so the store -- not projectileHandler -- is the
+// only resolution path.
 static const CProjectile* ResolveProjectileHandle(uint32_t handle)
 {
 	const int id = int(handle >> 1);
 	const bool synced = ((handle & 1u) != 0);
 
-	if (SimDrawSplit::Enabled() && projectileDrawer->SplitResolveCacheBuilt()) {
-		const CProjectile* p = projectileDrawer->ResolveSplitCachedProjectile(id, synced);
-
-		assert(p != nullptr);
-		return p;
-	}
-
-	const CProjectile* p = synced ?
-		projectileHandler.GetProjectileBySyncedID(id) :
-		projectileHandler.GetProjectileByUnsyncedID(id);
+	const CProjectile* p = projectileDrawer->GetRenderObject(id, synced);
 
 	assert(p != nullptr);
 	return p;
 }
 
-void CProjectileDrawer::BuildSplitResolveCache()
+void CProjectileDrawer::SnapshotEffectContainers()
 {
-	splitResolveCacheBuilt = true;
-
 	// barrier copies of the sim-owned effect containers (see the members);
 	// dead flashes are deferred shells until the next ack, so every copied
 	// pointer stays readable for the whole draw frame
@@ -92,23 +82,6 @@ void CProjectileDrawer::BuildSplitResolveCache()
 
 	for (int mt = 0; mt < MODELTYPE_CNT; ++mt) {
 		splitFlyingPieces[mt] = projectileHandler.flyingPieces[mt];
-	}
-
-	std::fill(splitResolveCache[0].begin(), splitResolveCache[0].end(), nullptr);
-	std::fill(splitResolveCache[1].begin(), splitResolveCache[1].end(), nullptr);
-
-	for (const uint32_t handle: renderHandles) {
-		const int id = int(handle >> 1);
-		const bool synced = ((handle & 1u) != 0);
-
-		auto& v = splitResolveCache[synced];
-
-		if (size_t(id) >= v.size())
-			v.resize(id + 1, nullptr);
-
-		v[id] = synced ?
-			projectileHandler.GetProjectileBySyncedID(id) :
-			projectileHandler.GetProjectileByUnsyncedID(id);
 	}
 }
 
@@ -411,6 +384,7 @@ void CProjectileDrawer::Kill() {
 
 	for (int ns = 0; ns < 2; ns++) {
 		renderIndices[ns].clear();
+		renderObjects[ns].clear();
 		drawPositions[ns].clear();
 		drawFlags[ns].clear();
 		sortDists[ns].clear();
@@ -438,9 +412,11 @@ void CProjectileDrawer::UpdateDrawFlags()
 {
 	ZoneScopedN("ProjectileDrawer::UpdateDrawFlags");
 
-	// resolve the registered handles into this draw frame's pointer set: one
-	// handler lookup per projectile per frame, every later pass (alpha
-	// passes, minimap, transparent shadows) iterates the resolved pointers
+	// resolve the registered handles into this draw frame's pointer set from
+	// the producer-captured store (PR 40), never projectileHandler: under the
+	// flip this pass runs concurrent with the sim and may not walk the
+	// sim-owned containers. Every later pass (alpha passes, minimap,
+	// transparent shadows) iterates the resolved pointers
 	renderProjectiles.resize(renderHandles.size());
 
 	for_mt(0, renderHandles.size(), [this](int i) {
@@ -448,9 +424,7 @@ void CProjectileDrawer::UpdateDrawFlags()
 		const bool synced = (handle & 1u) != 0;
 		const int id = int(handle >> 1);
 
-		const CProjectile* p = synced ?
-			projectileHandler.GetProjectileBySyncedID(id) :
-			projectileHandler.GetProjectileByUnsyncedID(id);
+		const CProjectile* p = GetRenderObject(id, synced);
 
 		// post-drain invariant: every registered id resolves to a live object
 		assert(p != nullptr);
@@ -1311,12 +1285,14 @@ void CProjectileDrawer::RenderProjectileCreated(const CProjectile* p)
 		auto& flags = drawFlags[synced];
 		auto& dists = sortDists[synced];
 		auto& indices = renderIndices[synced];
+		auto& objects = renderObjects[synced];
 
 		if (id >= indices.size()) {
 			positions.resize(id + 1);
 			flags.resize(id + 1, DrawFlags::SO_NODRAW_FLAG);
 			dists.resize(id + 1);
 			indices.resize(id + 1, uint32_t(-1));
+			objects.resize(id + 1, nullptr);
 		}
 
 		// NB: not "= {}" -- float3 has operator=(const float f[3]) and an empty
@@ -1324,6 +1300,11 @@ void CProjectileDrawer::RenderProjectileCreated(const CProjectile* p)
 		positions[id] = ZeroVector; // zero until the first UpdateDrawFlags, as the old member was
 		flags[id] = DrawFlags::SO_NODRAW_FLAG; // as the old member default was
 		dists[id] = {}; // zero until first in view, as the old member default was
+
+		// PR 40: producer-captured deferred-safe handle -- every registered
+		// renderHandle resolves through this store, so the draw passes never
+		// walk projectileHandler (see GetRenderObject)
+		objects[id] = p;
 
 		assert(indices[id] == uint32_t(-1));
 		indices[id] = renderHandles.size();
@@ -1360,6 +1341,7 @@ void CProjectileDrawer::RenderProjectileDestroyed(const CProjectile* p)
 	}
 
 	indices[id] = uint32_t(-1);
+	renderObjects[synced][id] = nullptr; // PR 40: drop the captured handle
 
 	if (p->model != nullptr)
 		modelRenderers[MDL_TYPE(p)].DelObject(p);

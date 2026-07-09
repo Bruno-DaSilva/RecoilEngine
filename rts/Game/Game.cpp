@@ -1677,15 +1677,17 @@ void CGame::SimDrawBarrier()
 	// (SimDrawSplit.h), and this is their replacement notification
 	DeliverBoundaryDeaths();
 
-	// (1c) split only: rebuild the drawer id->object resolution caches (the
-	// draw passes may not touch the sim-owned handler tables post-release;
+	// (1c) split only: snapshot the sim-owned effect containers the draw passes
+	// iterate (the draw passes may not touch the sim-owned tables post-release;
 	// see ModelDrawerData.h). After the drain so fresh registrations are
 	// covered, before anything downstream resolves.
 	if (SimDrawSplit::Enabled()) {
-		// SCOPE-1 (plan PR 39): unit/feature caches DELETED — those drawers now
-		// resolve ids through their render record's deferred-safe handle (no
-		// per-barrier rebuild). The projectile drawer keeps its own cache (PR 40).
-		projectileDrawer->BuildSplitResolveCache();
+		// SCOPE-1 (plan PR 39) + PR 40: the unit/feature/projectile id->object
+		// resolution caches are all DELETED — those drawers now resolve ids
+		// through a producer-captured deferred-safe handle (no per-barrier
+		// rebuild). The projectile drawer still needs a boundary copy of the
+		// ground-flash / flying-piece containers it iterates live.
+		projectileDrawer->SnapshotEffectContainers();
 	}
 
 	// (2) the drain dispatched every queued destroy record: the draw side has
@@ -2000,11 +2002,13 @@ void CGame::AcquireSimPause()
 		renderEventQueue.Flush();
 		DeliverBoundaryDeaths();
 
-		// keep the resolution caches in step with the flushed registrations
-		// SCOPE-1 (plan PR 39): unit/feature caches DELETED — those drawers now
-		// resolve ids through their render record's deferred-safe handle (no
-		// per-barrier rebuild). The projectile drawer keeps its own cache (PR 40).
-		projectileDrawer->BuildSplitResolveCache();
+		// keep the effect-container snapshot in step with the flushed
+		// registrations. SCOPE-1 (plan PR 39) + PR 40: the unit/feature/
+		// projectile id->object caches are DELETED — those drawers resolve ids
+		// through a producer-captured deferred-safe handle (no per-barrier
+		// rebuild); the projectile drawer still needs the ground-flash /
+		// flying-piece container copies.
+		projectileDrawer->SnapshotEffectContainers();
 
 		// generation-gated no-op today (the valve does not republish the
 		// snapshot, and queue copies must stay boundary-consistent with the

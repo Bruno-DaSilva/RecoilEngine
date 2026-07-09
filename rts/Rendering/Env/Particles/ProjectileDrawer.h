@@ -86,13 +86,25 @@ public:
 	// (yet) registered, as the old member default was. (previousDrawFlag was dropped:
 	// it was a per-frame dead store for projectiles — no reader ever consumed it, the
 	// GetRenderObjectsDrawFlagChanged consumer only queries units/features.)
-	// PR 27b: see the splitResolveCache member
-	void BuildSplitResolveCache();
-	bool SplitResolveCacheBuilt() const { return splitResolveCacheBuilt; }
-	const CProjectile* ResolveSplitCachedProjectile(int id, bool synced) const {
-		const auto& v = splitResolveCache[synced];
+	// PR 40: producer-captured deferred-safe handle store, keyed [synced][id]
+	// (replaces the PR-27b barrier-built splitResolveCache). The draw passes
+	// resolve a registered handle to its object through this store instead of
+	// walking the sim-owned FreeListMapCompact containers: the pointer is
+	// captured at RenderProjectileCreated and is deferred-deletion-safe (the
+	// sim Defer()s the dead object; the shell stays readable until the draw
+	// boundary ack) for the whole draw frame it is referenced. nullptr for ids
+	// not (yet) registered. Under the flip the passes run concurrent with the
+	// sim, so they may never resolve through projectileHandler.
+	const CProjectile* GetRenderObject(int id, bool synced) const {
+		const auto& v = renderObjects[synced];
 		return (size_t(id) < v.size()) ? v[id] : nullptr;
 	}
+
+	// PR 40: barrier snapshot of the sim-owned effect containers the draw
+	// passes iterate (ground flashes + flying pieces). Sim-quiescent producer
+	// work (was folded into the deleted BuildSplitResolveCache); moves to the
+	// sim frame edge under the flip.
+	void SnapshotEffectContainers();
 
 	uint8_t GetDrawFlag(const CProjectile* p) const {
 		const auto& v = drawFlags[p->synced];
@@ -225,13 +237,11 @@ private:
 	/// only by the render events (PR 14: no object pointers)
 	std::vector<uint32_t> renderHandles;
 
-	// PR 27b: boundary-built handle->object resolution cache, keyed
-	// [synced][id] like renderIndices (see ResolveProjectileHandle: with the
-	// split running, post-release passes may not resolve through the
-	// sim-owned FreeListMapCompact containers). Built by
-	// BuildSplitResolveCache from the SimDrawBarrier / valve service.
-	std::array<std::vector<const CProjectile*>, 2> splitResolveCache;
-	bool splitResolveCacheBuilt = false;
+	// PR 40: producer-captured handle->object store, keyed [synced][id] (see
+	// GetRenderObject). Maintained by RenderProjectileCreated/Destroyed in
+	// lockstep with renderHandles/renderIndices -- every registered handle
+	// resolves here, so the draw passes never touch projectileHandler.
+	std::array<std::vector<const CProjectile*>, 2> renderObjects;
 
 	// PR 27b: barrier copies of the sim-owned effect containers the passes
 	// iterate live flag-off (the sim mutates both mid-frame under the split;
