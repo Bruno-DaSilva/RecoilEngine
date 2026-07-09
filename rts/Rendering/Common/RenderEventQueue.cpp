@@ -59,6 +59,35 @@ void RenderEventQueue::Flush()
 	const size_t numRecords = records.size();
 	for (size_t i = 0; i < numRecords; ++i) {
 		const Record record = records[i];
+
+		// PR 43 §2.6: collect the batch's referenced ids for the epoch
+		// id-coverage gate (checked after the publish; see BatchCoverageRefs).
+		// Unsynced projectile records are excluded (no row namespace).
+		if (SimDrawSplit::Enabled()) {
+			switch (record.type) {
+				case Record::Type::UnitPreCreated:
+				case Record::Type::UnitCreated:
+				case Record::Type::UnitDestroyed:
+				case Record::Type::UnitEnteredLos:
+				case Record::Type::UnitLeftLos:
+				case Record::Type::UnitEnteredRadar:
+				case Record::Type::UnitLeftRadar:
+				case Record::Type::UnitLeavesGhostChanged:
+					batchCoverageRefs.push_back({0, record.id});
+					break;
+				case Record::Type::FeaturePreCreated:
+				case Record::Type::FeatureCreated:
+				case Record::Type::FeatureDestroyed:
+					batchCoverageRefs.push_back({1, record.id});
+					break;
+				case Record::Type::ProjectileCreated:
+				case Record::Type::ProjectileDestroyed:
+					if (record.syncedProj)
+						batchCoverageRefs.push_back({2, record.id});
+					break;
+			}
+		}
+
 		Dispatch(record);
 	}
 

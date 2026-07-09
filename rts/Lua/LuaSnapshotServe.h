@@ -247,6 +247,11 @@ namespace LuaSnapshotServe {
 	uint64_t CmdQueueCacheEpoch();
 	uint64_t PieceCacheEpoch();
 
+	/// PR 43 §2.8 (/epochstats): approximate resident bytes of the cmd-queue
+	/// and piece cache channels (the two non-SimSnapshot epoch channels with
+	/// draw-owned payload stores)
+	void EpochChannelBytes(size_t& cmdQueueBytes, size_t& pieceBytes);
+
 	// sim|draw PR 30 mirror-verification hook (SnapshotDiffGate::CheckCmdQueueRows):
 	// bit-compare the cached command-queue/cmd-desc/worker/factory slot for a unit
 	// against live sim state at the armed boundary. Test-only (armed runs). Lives

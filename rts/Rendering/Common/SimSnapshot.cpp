@@ -56,7 +56,8 @@
 #include "Sim/Weapons/BombDropper.h"
 #include "Sim/Weapons/WeaponTarget.h"
 #include "Sim/Misc/DamageArray.h"
-#include "Lua/LuaHandleSynced.h"           // PR 38: CSplitLuaHandle::GetGameParams (game rules params)
+#include "Lua/LuaHandleSynced.h"
+#include "Lua/LuaSnapshotServe.h"     // PR 43: /epochstats channel bytes           // PR 38: CSplitLuaHandle::GetGameParams (game rules params)
 #include "System/Log/ILog.h"
 #include "System/Misc/SpringTime.h"
 #include "System/TimeProfiler.h"
@@ -335,6 +336,7 @@ void SimSnapshot::Update()
 	}
 
 	mutatedOutsideFrame = false;
+	splitWasEnabled |= SimDrawSplit::Enabled(); // teardown-telemetry latch
 
 	const spring_time t0 = spring_gettime();
 
@@ -432,6 +434,63 @@ uint64_t SimSnapshot::AcquireNewestEpoch()
 	return 0;
 }
 
+
+void SimSnapshot::CheckEpochIdCoverage()
+{
+	// THE ARMED ID-COVERAGE GATE (PR 43 §2.6 / §3.6a): every id referenced by
+	// the batch's records must be servable from the published epoch -- ACTIVE
+	// (alive at the epoch's edge; a just-created object IS extracted because
+	// extraction runs after the batch's creations) or DEAD_THIS_BATCH (the
+	// shell-sourced at-death row for created-and-died / died-in-batch ids).
+	// Runs while the dispatch window is still open, so a raw validity read is
+	// used (Valid() would also pass DEAD_THIS_BATCH here, but be explicit).
+	const auto& refs = renderEventQueue.BatchCoverageRefs();
+
+	if (refs.empty())
+		return;
+
+	constexpr uint64_t MAX_LOGGED = 50;
+
+	const UnitRows& u = buffers[heldSlot];
+	const FeatureRows& f = featBuffers[heldSlot];
+	const ProjectileRows& p = projBuffers[heldSlot];
+
+	for (const RenderEventQueue::CoverageRef& ref : refs) {
+		idCoverageChecked += 1;
+
+		uint8_t v = SimSnapshotValid::INACTIVE;
+		const char* kindName = "?";
+
+		switch (ref.kind) {
+			case 0: {
+				kindName = "unit";
+				if (static_cast<size_t>(ref.id) < u.valid.size())
+					v = u.valid[ref.id];
+			} break;
+			case 1: {
+				kindName = "feature";
+				if (static_cast<size_t>(ref.id) < f.valid.size())
+					v = f.valid[ref.id];
+			} break;
+			case 2: {
+				kindName = "projectile";
+				if (static_cast<size_t>(ref.id) < p.valid.size())
+					v = p.valid[ref.id];
+			} break;
+		}
+
+		if (v == SimSnapshotValid::ACTIVE || v == SimSnapshotValid::DEAD_THIS_BATCH)
+			continue;
+
+		idCoverageViolations += 1;
+
+		if (idCoverageViolations <= MAX_LOGGED) {
+			LOG_L(L_ERROR, "[EpochIdCoverage] epoch=%llu frame=%d %s id=%d unservable (validity=%u) -- a record referenced an id the epoch does not serve",
+				(unsigned long long)epochCounter, buffers[heldSlot].simFrame, kindName, ref.id, unsigned(v));
+		}
+	}
+}
+
 void SimSnapshot::SealEpochChannelVersions(uint64_t cmdQueueCacheEpoch, uint64_t pieceCacheEpoch, uint32_t mirrorDrainSerial)
 {
 	EpochSlotMeta& meta = slotMeta[heldSlot];
@@ -523,14 +582,23 @@ void SimSnapshot::LogEpochStats() const
 	LOG("[EpochStats] epoch=%llu simFrame=%d units=%d/%d feats=%d/%d projSlots=%d",
 		(unsigned long long)epochCounter, u.simFrame,
 		int(validUnits), int(maxUnits), int(validFeats), int(f.MaxSlots()), int(p.MaxSlots()));
+	LOG("[EpochStats] idCoverage: checked=%llu violations=%llu",
+		(unsigned long long)idCoverageChecked, (unsigned long long)idCoverageViolations);
+	// the two singleton (newest-epoch-tracking) channels outside SimSnapshot
+	size_t cmdQueueBytes = 0;
+	size_t pieceBytes = 0;
+	LuaSnapshotServe::EpochChannelBytes(cmdQueueBytes, pieceBytes);
+
 	LOG("[EpochStats] channel bytes (held epoch, x%d slots resident): "
 	    "unitFlat=%.1fKB weaponFlat=%.1fKB unitRules=%.1fKB "
 	    "projFlat=%.1fKB featFlat=%.1fKB featRules=%.1fKB "
-	    "teamRules=%.1fKB teamStatsHist=%.1fKB",
+	    "teamRules=%.1fKB teamStatsHist=%.1fKB "
+	    "cmdQueueCache=%.1fKB pieceCache=%.1fKB (cmd/piece are singletons until 44a)",
 		EPOCH_RING_SLOTS,
 		unitFlatBytes / 1024.0f, weaponFlatBytes / 1024.0f, unitRulesBytes / 1024.0f,
 		projFlatBytes / 1024.0f, featFlatBytes / 1024.0f, featRulesBytes / 1024.0f,
-		teamRulesBytes / 1024.0f, teamStatsBytes / 1024.0f);
+		teamRulesBytes / 1024.0f, teamStatsBytes / 1024.0f,
+		cmdQueueBytes / 1024.0f, pieceBytes / 1024.0f);
 }
 
 void SimSnapshot::HashCompletedFrame(int frameNum)
@@ -554,6 +622,14 @@ void SimSnapshot::HashCompletedFrame(int frameNum)
 
 void SimSnapshot::Clear()
 {
+	// PR 43 §2.8: end-of-game epoch telemetry (ring occupancy, channel bytes,
+	// id-coverage counters) so every gate run leaves measured §7.1 numbers.
+	// Keyed on splitWasEnabled, NOT Enabled(): CGame teardown runs
+	// SimDrawSplit::Clear() (which drops the flag) before this.
+	if (numExtractions > 0 && splitWasEnabled)
+		LogEpochStats();
+	splitWasEnabled = false;
+
 	if (numExtractions > 0) {
 		const auto& r = buffers[heldSlot];
 		const size_t bufBytes =
@@ -632,6 +708,8 @@ void SimSnapshot::Clear()
 	newestSlot = 0;
 	holdingRef = false;
 	epochCounter = 0;
+	idCoverageChecked = 0;
+	idCoverageViolations = 0;
 
 	mutatedOutsideFrame = false;
 	sumExtractMs = 0.0f;

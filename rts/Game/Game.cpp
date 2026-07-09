@@ -1753,6 +1753,15 @@ void CGame::SimDrawBarrier()
 			deferredObjectDeleter.ReleaseRetired(retiredEpoch);
 	}
 
+	// (3a') PR 43 §2.6 -- THE ARMED ID-COVERAGE GATE: every id the batch's
+	// records referenced (collected during the step-1 drain) must resolve in
+	// the epoch just published/acquired, as ACTIVE or DEAD_THIS_BATCH. This
+	// is 44b's make-or-break invariant, proven under the park now; a
+	// violation is a deterministic "[EpochIdCoverage]" error line. The refs
+	// are cleared with the dead-shell maps at step 8.
+	if (SimDrawSplit::Enabled())
+		simSnapshot.CheckEpochIdCoverage();
+
 	// (3b) refresh the draw-side command-queue copies (PR 27b serving batch 2,
 	// LuaSnapshotServe). AFTER the publish, not with the resolve caches at
 	// (1c): the refresh is generation-gated so queue copies and snapshot rows
@@ -1875,6 +1884,7 @@ void CGame::SimDrawBarrier()
 		CUnitDrawer::ClearDeadRetainedRecords();
 		CFeatureDrawer::ClearDeadRetainedRecords();
 		renderEventQueue.ClearBoundaryDeadShells();
+		renderEventQueue.ClearBatchCoverageRefs();
 		// PR 43: the split ack tags the shells with the epoch whose record
 		// dispatch just completed; their pool RELEASE is keyed to that epoch's
 		// retirement (barrier step 3a), replacing the end-of-Draw ReleaseAcked
@@ -2076,6 +2086,10 @@ void CGame::AcquireSimPause()
 		CUnitDrawer::ClearDeadRetainedRecords();
 		CFeatureDrawer::ClearDeadRetainedRecords();
 		renderEventQueue.ClearBoundaryDeadShells();
+		// the valve cannot coverage-check (it does not publish an epoch);
+		// its flushed records' ids are dropped unchecked -- the next barrier
+		// checks its own batch
+		renderEventQueue.ClearBatchCoverageRefs();
 
 		// PR 43: the valve must free pages IMMEDIATELY (the sim is parked
 		// mid-frame out of pool headroom), so it keeps the ack+release-all

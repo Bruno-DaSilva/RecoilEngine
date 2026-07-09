@@ -7514,6 +7514,31 @@ namespace {
 
 uint64_t LuaSnapshotServe::PieceCacheEpoch() { return pieceCacheEpoch; }
 
+// PR 43 §2.8 (/epochstats): approximate resident bytes of the cmd-queue and
+// piece cache channels (flat-vector payloads; container overhead ignored)
+void LuaSnapshotServe::EpochChannelBytes(size_t& cmdQueueBytes, size_t& pieceBytes)
+{
+	cmdQueueBytes = 0;
+	for (const UnitCmdQueueSlot& slot : cmdQueueCache) {
+		cmdQueueBytes += sizeof(slot);
+		cmdQueueBytes += slot.commandQue.capacity() * sizeof(slot.commandQue[0]);
+		cmdQueueBytes += slot.commandQueParams.capacity() * sizeof(float);
+		cmdQueueBytes += slot.newUnitCommands.capacity() * sizeof(slot.commandQue[0]);
+		cmdQueueBytes += slot.newUnitCommandsParams.capacity() * sizeof(float);
+		for (const auto& d : slot.descs)
+			cmdQueueBytes += sizeof(d) + d.params.size() * 24; // rough string payload
+	}
+
+	pieceBytes = 0;
+	for (const auto* cache : {&unitPieceCache, &featurePieceCache}) {
+		for (const ObjectPieceSlot& slot : *cache) {
+			pieceBytes += sizeof(slot);
+			pieceBytes += slot.pieces.capacity() * sizeof(PieceDynamic);
+			pieceBytes += slot.scriptToModel.capacity() * sizeof(int32_t);
+		}
+	}
+}
+
 void LuaSnapshotServe::RefreshPieces()
 {
 	// barrier-only (sim parked / single-threaded), right after simSnapshot.Update().

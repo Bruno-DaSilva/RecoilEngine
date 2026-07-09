@@ -135,6 +135,7 @@ public:
 		boundaryDeadUnits.clear();
 		boundaryDeadFeatures.clear();
 		boundaryDeadProjectiles.clear();
+		batchCoverageRefs.clear();
 		deferring = false;
 	}
 
@@ -171,6 +172,23 @@ public:
 		boundaryDeadFeatures.clear();
 		boundaryDeadProjectiles.clear();
 	}
+
+	// PR 43 §2.6/§3.6a: the ARMED ID-COVERAGE GATE's input -- every object id
+	// referenced by a record dispatched in this batch (unit/feature ids + the
+	// SYNCED-namespace projectile ids; unsynced projectiles have no rows by
+	// design and are excluded per the fd41dbdd92 namespace rule). After the
+	// publish, CGame runs SimSnapshot::CheckEpochIdCoverage over this list:
+	// every id must resolve in the published epoch as ACTIVE or
+	// DEAD_THIS_BATCH -- 44b's make-or-break invariant, proven under the park
+	// now. Populated only while draining under the split; cleared with the
+	// dead-shell maps at the step-8 window close (or by the valve service,
+	// which cannot check -- it does not publish).
+	struct CoverageRef {
+		uint8_t kind; // 0 unit, 1 feature, 2 synced projectile
+		int32_t id;
+	};
+	const std::vector<CoverageRef>& BatchCoverageRefs() const { return batchCoverageRefs; }
+	void ClearBatchCoverageRefs() { batchCoverageRefs.clear(); }
 
 	// PR 43 §7.7: the batch's died-in-batch (id -> shell) maps, consumed by
 	// the producer (SimSnapshot::ExtractDeadRowsFromShells) to extract genuine
@@ -263,6 +281,8 @@ private:
 	spring::unordered_map<int, const CFeature*> boundaryDeadFeatures;
 	// PR 43: synced-namespace-only (see BoundaryDeadProjectiles)
 	spring::unordered_map<int, const CProjectile*> boundaryDeadProjectiles;
+	// PR 43: see BatchCoverageRefs
+	std::vector<CoverageRef> batchCoverageRefs;
 	// side pool for the rare records that carry a per-allyteam mask; indexed
 	// by Record::arg1, cleared together with <records>
 	std::vector<GhostAllyMask> ghostMasks;

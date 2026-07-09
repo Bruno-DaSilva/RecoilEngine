@@ -23,8 +23,6 @@ namespace {
 	// pre-thread-spawn commits are a faithful single-threaded dress rehearsal
 	thread_local int tlSimPhaseDepth = 0;
 
-	// boundary drain window (died-in-burst shell serving); main thread only
-	bool boundaryShellWindow = false;
 }
 
 void UpdateConfig()
@@ -35,17 +33,16 @@ void UpdateConfig()
 void Clear()
 {
 	g_splitEnabled = false;
-	boundaryShellWindow = false;
+	g_boundaryShellWindow = false;
 }
 
-// main-thread only (set inside the pause window, read by the Lua/GL id
-// resolvers, which execute on the main thread during the drains)
-void SetBoundaryShellWindow(bool active) { boundaryShellWindow = active; }
-bool BoundaryShellWindowActive() { return boundaryShellWindow; }
+// SetBoundaryShellWindow / BoundaryShellWindowActive are header-inline (see
+// SimDrawSplit.h): the flag gates SimSnapshot's DEAD_THIS_BATCH validity,
+// which is read inline from the row accessors.
 
 const CUnit* ShellFallbackUnit(int unitID)
 {
-	if (!boundaryShellWindow)
+	if (!g_boundaryShellWindow)
 		return nullptr;
 
 	return renderEventQueue.ResolveBoundaryDeadUnit(unitID);
@@ -53,7 +50,7 @@ const CUnit* ShellFallbackUnit(int unitID)
 
 const CFeature* ShellFallbackFeature(int featureID)
 {
-	if (!boundaryShellWindow)
+	if (!g_boundaryShellWindow)
 		return nullptr;
 
 	return renderEventQueue.ResolveBoundaryDeadFeature(featureID);

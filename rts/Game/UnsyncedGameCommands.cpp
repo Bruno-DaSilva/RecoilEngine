@@ -14,6 +14,7 @@
 #include "Action.h"
 #include "BoundaryStats.h"
 #include "CameraHandler.h"
+#include "Rendering/Common/SimSnapshot.h" // PR 43: /epochstats
 #include "Rendering/Common/SnapshotDiffGate.h"
 #include "ConsoleHistory.h"
 #include "CommandMessage.h"
@@ -1546,6 +1547,23 @@ public:
 
 		// one fixed-width row per sim frame; sampled from CGame::SimFrame
 		BoundaryStats::StartDump(f0, f1, path);
+		return true;
+	}
+};
+
+
+class EpochStatsActionExecutor : public IUnsyncedActionExecutor {
+public:
+	EpochStatsActionExecutor() : IUnsyncedActionExecutor(
+		"EpochStats",
+		"Log sim|draw PR-43 epoch-ring telemetry: ring occupancy (per-slot epochId/"
+		"frame span/refcount/channel versions), per-channel payload bytes of the "
+		"held epoch (the §7.1 standing-TODO numbers) and the id-coverage gate "
+		"counters: /epochstats"
+	) {}
+
+	bool Execute(const UnsyncedAction& action) const final {
+		simSnapshot.LogEpochStats();
 		return true;
 	}
 };
@@ -4317,6 +4335,7 @@ void UnsyncedGameCommands::AddDefaultActionExecutors()
 	AddActionExecutor(SimSafe(AllocActionExecutor<DebugActionExecutor>()));
 	AddActionExecutor(AllocActionExecutor<ProfileDumpActionExecutor>());       // diagnostic (walks sim)
 	AddActionExecutor(AllocActionExecutor<BoundaryDumpActionExecutor>());      // diagnostic (walks sim)
+	AddActionExecutor(AllocActionExecutor<EpochStatsActionExecutor>());       // diagnostic (reads draw-owned epoch state only)
 	AddActionExecutor(AllocActionExecutor<SnapHashDumpActionExecutor>());      // diagnostic (walks sim)
 	AddActionExecutor(AllocActionExecutor<CalloutCensusActionExecutor>());     // diagnostic (walks sim)
 	AddActionExecutor(AllocActionExecutor<SplitContractDumpActionExecutor>()); // diagnostic (walks sim)

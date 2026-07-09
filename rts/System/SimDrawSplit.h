@@ -50,18 +50,29 @@ namespace SimDrawSplit {
 	/// game teardown reset (thread-locals are per-thread and die with them)
 	void Clear();
 
-	// ---- boundary drain window (PR 27b, died-in-burst shell serving) ----
+	// ---- boundary dispatch-drain window (PR 27b -> PR 43) ----
 	// True while the barrier (or the valve service) replays deferred
 	// dispatches whose objects may have died later in the same sim burst:
 	// the deferred-deletion shells are still readable (the ack comes after),
 	// so id resolution falls back to them instead of returning nil -- master
-	// ran those handlers mid-frame with the object alive. Main thread only;
-	// MUST be false again before the ack poisons the shells.
-	void SetBoundaryShellWindow(bool active);
-	bool BoundaryShellWindowActive();
+	// ran those handlers mid-frame with the object alive. PR 43 additionally
+	// keys the snapshot's DEAD_THIS_BATCH row validity and the drawers'
+	// dead-retained render records on this window. Main thread only; MUST be
+	// false again before the ack poisons the shells. Header-inline (like
+	// g_splitEnabled) so SimSnapshot's Valid() accessors can consult it
+	// without pulling SimDrawSplit.cpp into every TU (test executables).
+	inline bool g_boundaryShellWindow = false;
+
+	inline void SetBoundaryShellWindow(bool active) { g_boundaryShellWindow = active; }
+	inline bool BoundaryShellWindowActive() { return g_boundaryShellWindow; }
 
 	// resolver fallbacks for the window (nullptr outside it / on a miss);
-	// implemented over RenderEventQueue's dispatch-time id->shell maps
+	// implemented over RenderEventQueue's dispatch-time id->shell maps.
+	// PR 43 (3b): the ONLY remaining callers are LuaSyncedRead's
+	// ParseRawUnit/ParseFeature -- the live-parse leg of the barrierLive
+	// dispatches 43 does not convert (44b retires them onto the
+	// DEAD_THIS_BATCH twins). Everything else resolves via the drawers'
+	// dead-retained render records.
 	const CUnit* ShellFallbackUnit(int unitID);
 	const CFeature* ShellFallbackFeature(int featureID);
 

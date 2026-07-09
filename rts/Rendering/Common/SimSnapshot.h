@@ -1204,6 +1204,20 @@ public:
 	/// of the held epoch (the §7.1 standing-TODO measurement hook)
 	void LogEpochStats() const;
 
+	/// PR 43 §2.6/§3.6a -- THE ARMED ID-COVERAGE GATE: verify every object id
+	/// this batch's records referenced (RenderEventQueue::BatchCoverageRefs)
+	/// resolves in the just-published epoch as ACTIVE or DEAD_THIS_BATCH.
+	/// This is 44b's make-or-break invariant (no record may dispatch against
+	/// an unservable id); 43 proves it holds under the park. A violation is a
+	/// deterministic LOG_L(L_ERROR) "[EpochIdCoverage]" line (log-capped) +
+	/// counter, converting the 38b headful-widget-error attrition class into
+	/// a greppable gate failure. Called from the barrier after the acquire;
+	/// no-op flag-off (refs are only collected under the split).
+	void CheckEpochIdCoverage();
+
+	uint64_t IdCoverageViolations() const { return idCoverageViolations; }
+	uint64_t IdCoverageChecked() const { return idCoverageChecked; }
+
 	// PR 36: GetMapStartPositions -- the map-defined start positions are
 	// immutable map data, so they are parsed once (LoadStartPositionsFromMap is
 	// expensive) into a SimSnapshot-level cache, not a double-buffered TeamRows
@@ -1300,6 +1314,14 @@ private:
 
 	// PR 43: the monotonic epoch counter (see EpochId())
 	uint64_t epochCounter = 0;
+
+	// PR 43 §2.6: id-coverage gate counters (see CheckEpochIdCoverage)
+	uint64_t idCoverageChecked = 0;
+	uint64_t idCoverageViolations = 0;
+
+	// PR 43 §2.8: latched at extraction; keys the teardown LogEpochStats
+	// (SimDrawSplit::Clear precedes SimSnapshot::Clear at teardown)
+	bool splitWasEnabled = false;
 
 	// PR 36: GetMapStartPositions cache (immutable map data, parsed once)
 	std::vector<float3> mapStartPos;
