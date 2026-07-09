@@ -1727,6 +1727,25 @@ int CGuiHandler::GetDefaultCommand(int x, int y, const float3& cameraPos, const 
 	return GetDefaultCommandImpl(x, y, cameraPos, mouseDir, true);
 }
 
+// sim|draw PR 44 (prereq D): served read for the per-frame draw-path callers.
+int CGuiHandler::GetDefaultCommandServed(int x, int y, const float3& cameraPos, const float3& mouseDir) const
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	// The single standing reply slot is keyed on the CURRENT mouse ray
+	// (mouse->lastx/lasty), evaluated at the barrier by EvaluateDefaultCmdQuery.
+	// Serve it only when the split sim is running (draw runs post-ReleaseSimPause,
+	// so the sim is live, not parked) AND the query is for the current mouse pos.
+	// Otherwise (flag-off / sim parked / pregame / a different (x,y)) run the live
+	// parking path -- byte-identical, and the only case that engages the park.
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() && !SimDrawSplit::IsSimParked()
+	    && x == mouse->lastx && y == mouse->lasty) {
+		defaultCmdQueryPending = true;
+		return defaultCmdReplyValid ? defaultCmdReplyCmd : -1;
+	}
+
+	return GetDefaultCommand(x, y, cameraPos, mouseDir);
+}
+
 // sim|draw PR 44 (Gap B): the GetDefaultCommand body, park-free (the caller/hook
 // owns the sim-quiescence). `fireEvent` gates the DefaultCommand widget callin.
 int CGuiHandler::GetDefaultCommandImpl(int x, int y, const float3& cameraPos, const float3& mouseDir, bool fireEvent) const
@@ -3616,10 +3635,16 @@ static inline void DrawWeaponArc(const CUnit* unit)
 void CGuiHandler::DrawMapStuff(bool onMiniMap)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	// PR 27b: the world-space GUI pass reads sim state broadly (queues,
-	// ranges, traces); park for the whole pass. Perf follow-up: fold into
-	// the barrier window instead of a second park. See TryTarget.
-	CGame::ScopedExternalSimPause simPause(CGame::SimPauseSite::GUI_DRAW_MAPSTUFF);
+	// sim|draw PR 44 (prereq D): the whole-pass park is gone. The one per-frame
+	// live read -- the context-cursor default command near the end -- is served
+	// (GetDefaultCommandServed); GuiTraceRay picks are snapshot-backed (draw-safe);
+	// the ground/build-pos snap reads the draw-safe unsynced heightmap. What stays
+	// live is the residual weapon-state / range-ring / build-overlap-queue / yardmap
+	// reads (no serving channel) -- each is INPUT-GATED (attack/build command active
+	// or shift-hover or a drag), so it engages ~0 in steady-state gameplay and keeps
+	// a NARROW GUI_DRAW_MAPSTUFF park scoped to just that block (nest-safe, no-op
+	// flag-off / when the sim is already parked). Fully serving those residuals needs
+	// a weapon-state channel + a C++ placement/queue query path (a follow-up PR).
 	if (!onMiniMap) {
 		glEnable(GL_DEPTH_TEST);
 		glDepthMask(GL_FALSE);
@@ -3805,6 +3830,13 @@ void CGuiHandler::DrawMapStuff(bool onMiniMap)
 	      float rayTraceDist = -1.0f;
 
 	if (GetQueueKeystate()) {
+		// sim|draw PR 44 (prereq D): residual narrow park. The hovered unit's
+		// weapon list / maxRange / decloak / stockpile-weapon reads (range rings)
+		// have no serving channel; the pick itself (GetSelectUnit / GuiTraceRay) is
+		// snapshot-backed but the live weapon-object derefs need the sim quiescent.
+		// Shift-hover-gated -> ~0 engages in steady state.
+		CGame::ScopedExternalSimPause simPause(CGame::SimPauseSite::GUI_DRAW_MAPSTUFF);
+
 		const CUnit* unit = nullptr;
 		const CFeature* feature = nullptr;
 
@@ -3866,6 +3898,14 @@ void CGuiHandler::DrawMapStuff(bool onMiniMap)
 
 	// draw buildings we are about to build
 	if ((size_t(inCommand) < commands.size()) && (commands[inCommand].type == CMDTYPE_ICON_BUILDING)) {
+		// sim|draw PR 44 (prereq D): residual narrow park. The build preview walks
+		// live sim broadly: builder CAIs (pos/team/buildDistance), TestUnitBuildSquare
+		// (via ShowUnitBuildSquare) + GetOverlapQueued build-overlap on selected units'
+		// command queues -- none of which has a draw-side C++ served accessor today
+		// (the placement/queue channels are Lua-only / lack a GetOverlapQueued twin).
+		// The nested GetBuildPositions park nests no-op under this. Build-command-gated
+		// -> ~0 engages in steady state.
+		CGame::ScopedExternalSimPause simPause(CGame::SimPauseSite::GUI_DRAW_MAPSTUFF);
 		{
 			// draw build distance for all immobile builders during build commands
 			for (const auto& [bid, builderCAI]: unitHandler.GetBuilderCAIs()) {
@@ -3978,14 +4018,21 @@ void CGuiHandler::DrawMapStuff(bool onMiniMap)
 	}
 
 	{
-		// draw range circles (for immobile units) if attack orders are imminent
-		const int defcmd = GetDefaultCommand(mouse->lastx, mouse->lasty, tracePos, traceDir);
+		// draw range circles (for immobile units) if attack orders are imminent.
+		// sim|draw PR 44 (prereq D): this default-command read is the ONE per-frame
+		// live read of DrawMapStuff -- served from the barrier reply (no park).
+		const int defcmd = GetDefaultCommandServed(mouse->lastx, mouse->lasty, tracePos, traceDir);
 
 		const bool  playerAttackCmd = (size_t(inCommand) < commands.size() && commands[inCommand].id == CMD_ATTACK);
 		const bool defaultAttackCmd = (inCommand == -1 && defcmd > 0 && commands[defcmd].id == CMD_ATTACK);
 		const bool   drawWeaponArcs = (!onMiniMap && gs->cheatEnabled && globalRendering->drawDebug);
 
 		if (playerAttackCmd || defaultAttackCmd) {
+			// sim|draw PR 44 (prereq D): residual narrow park -- the selected units'
+			// live weapon list / maxRange / pos reads (attack range rings) have no
+			// serving channel. Attack-command-gated -> ~0 engages in steady state.
+			CGame::ScopedExternalSimPause simPause(CGame::SimPauseSite::GUI_DRAW_MAPSTUFF);
+
 			for (const int unitID: selectedUnitsHandler.selectedUnits) {
 				const CUnit* unit = unitHandler.GetUnit(unitID);
 
@@ -4095,7 +4142,8 @@ void CGuiHandler::DrawCentroidCursor()
 		if (mouse->buttons[SDL_BUTTON_RIGHT].pressed && ((activeReceiver == this) || (minimap->ProxyMode()))) {
 			defcmd = defaultCmdMemory;
 		} else {
-			defcmd = GetDefaultCommand(mouse->lastx, mouse->lasty);
+			// sim|draw PR 44 (prereq D): served (per-frame draw-path caller).
+			defcmd = GetDefaultCommandServed(mouse->lastx, mouse->lasty);
 		}
 
 		if (defcmd < commands.size())

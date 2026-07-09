@@ -96,6 +96,23 @@ public:
 	}
 	int  GetDefaultCommand(int x, int y, const float3& cameraPos, const float3& mouseDir) const;
 
+	// sim|draw PR 44 (prereq D): the served read of the context-cursor default
+	// command for the per-frame draw-path callers (DrawMapStuff, DrawCentroidCursor,
+	// LuaUnsyncedRead::GetDefaultCommand). All query the default command at the
+	// CURRENT mouse ray -- the same single standing slot SetCursorIcon uses -- so
+	// under the running split they read the last barrier's published reply (and
+	// request a re-eval) instead of parking to run the live deep-CAI GetDefaultCmd.
+	// This removes the per-frame GUI_GET_DEFAULT_CMD park those callers engaged.
+	// Flag-off / sim parked / pregame / a non-cursor (x,y): the live parking path
+	// (byte-identical). The DefaultCommand widget override is computed once per
+	// barrier (in the reply) and shared by every reader -- same value, fewer event
+	// fires; the Gap-B cursor path already made this tradeoff.
+	int  GetDefaultCommandServed(int x, int y) const
+	{
+		return GetDefaultCommandServed(x, y, camera->GetPos(), ::mouse->dir);
+	}
+	int  GetDefaultCommandServed(int x, int y, const float3& cameraPos, const float3& mouseDir) const;
+
 	// sim|draw PR 44 (Gap B): SimDrawBarrier hook. The context-cursor default
 	// command bottoms out in a live deep-CAI virtual call (GetDefaultCmd) + a
 	// GuiTraceRay, which cannot run from draw context under the running split.

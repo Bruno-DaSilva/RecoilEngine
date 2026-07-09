@@ -1427,9 +1427,12 @@ void CMiniMap::DrawForReal(bool useNormalizedCoors, bool updateTex, bool luaCall
 void CMiniMap::DrawCameraFrustumAndMouseSelection()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	// PR 27b: the minimap hover trace (GuiTraceRay) walks sim state; park
-	// the sim (nest-safe, no-op flag-off/parked)
-	CGame::ScopedExternalSimPause simPause(CGame::SimPauseSite::MINIMAP_FRUSTUM);
+	// sim|draw PR 44 (prereq D): park dropped. The frustum GuiTraceRay consumes
+	// ONLY the returned hit distance (to pick the frustum draw height); it ignores
+	// the resolved unit/feature pointers. GuiTraceRay's pick is snapshot-backed
+	// (SimSnapshot rows + snapshotPickGrid, Valid-gated), so it is draw-safe under
+	// the running split -- the same park-free draw-context read TraceScreenRay does.
+	// The selection box below reads only draw-owned mouse/map state.
 	glEnable(GL_SCISSOR_TEST);
 	glScissor(curPos.x, curPos.y, curDim.x, curDim.y);
 

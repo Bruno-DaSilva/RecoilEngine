@@ -3969,7 +3969,10 @@ int LuaUnsyncedRead::GetDefaultCommand(lua_State* L)
 	if (guihandler == nullptr)
 		return 0;
 
-	const int defCmd = guihandler->GetDefaultCommand(mouse->lastx, mouse->lasty);
+	// sim|draw PR 44 (prereq D): served read (per-frame draw-path caller; widgets
+	// poll Spring.GetDefaultCommand roughly per frame). Removes the per-frame
+	// GUI_GET_DEFAULT_CMD park this callout engaged.
+	const int defCmd = guihandler->GetDefaultCommandServed(mouse->lastx, mouse->lasty);
 
 	const vector<SCommandDescription>& cmdDescs = guihandler->commands;
 	const int cmdDescCount = (int)cmdDescs.size();

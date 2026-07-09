@@ -120,10 +120,16 @@ public:
 		GUI_TEST_BUILDSQUARE,// GuiHandler::SetCursorIcon minimap build-proxy (Gap B narrow park)
 		GUI_GET_COMMAND,     // GuiHandler::GetCommand (mouse-release order build)
 		GUI_GET_BUILDPOS,    // GuiHandler::GetBuildPositions (blocking/yardmap)
-		GUI_DRAW_MAPSTUFF,   // GuiHandler::DrawMapStuff (per-frame world-GUI pass)
-		GUI_GET_DEFAULT_CMD, // GuiHandler::GetDefaultCommand fallback (Gap B: non-cursor callers)
+		GUI_DRAW_MAPSTUFF,   // GuiHandler::DrawMapStuff (PR 44 prereq D: whole-pass park
+		                     // dropped; now only the residual weapon-range / build-preview
+		                     // interior blocks -- all input-gated, ~0 in steady state)
+		GUI_GET_DEFAULT_CMD, // GuiHandler::GetDefaultCommand fallback (PR 44 prereq D served
+		                     // the per-frame draw-path callers; only rare input-path /
+		                     // pregame calls still park)
 		MOUSE_RELEASE,       // MouseHandler::MouseRelease (selection box)
-		MINIMAP_FRUSTUM,     // MiniMap::DrawCameraFrustumAndMouseSelection (per-frame minimap)
+		MINIMAP_FRUSTUM,     // MiniMap frustum -- RETIRED (PR 44 prereq D: GuiTraceRay is
+		                     // snapshot-backed + distance-only, park dropped; enum kept for
+		                     // telemetry-id stability, no longer counted)
 		LUA_SEND_COMMANDS,   // LuaUnsyncedCtrl::SendCommands (console-action batch)
 		LUA_GIVE_ORDER,      // LuaUnsyncedCtrl::GiveOrder family
 		COUNT
