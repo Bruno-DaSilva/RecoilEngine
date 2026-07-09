@@ -4114,8 +4114,18 @@ int LuaSnapshotServe::GetTeamUnitsByDefs(lua_State* L, const char* caller)
 
 		/* kept from the live body: the per-def groups are shuffled so the
 		 * result order reveals nothing (ascending id would leak creation
-		 * order); the armed dual-run compares this callout as an ID set */
-		spring::random_shuffle(unitIDs.begin() + lastOfsset, unitIDs.end(), guRNG);
+		 * order); the armed dual-run compares this callout as an ID set.
+		 *
+		 * §4.8 (Race 2): this served twin runs on the DRAW thread under the
+		 * split; the global unsynced guRNG is concurrently RMW'd by sim-thread
+		 * particle/CEG spawns, a data race on one PCG32 state (UB, though the
+		 * order is only cosmetic anti-leak). Use a draw-owned unsynced stream
+		 * instead. Inert flag-off: this twin never runs (the Live
+		 * GetTeamUnitsByDefs on the main thread is used); the default PCG32
+		 * state is a valid stream (no seed needed), and the callout is compared
+		 * order-insensitively. */
+		static CGlobalUnsyncedRNG drawUnsyncedRNG;
+		spring::random_shuffle(unitIDs.begin() + lastOfsset, unitIDs.end(), drawUnsyncedRNG);
 		lastOfsset = unitIDs.size();
 	}
 

@@ -600,7 +600,7 @@ int LuaUnsyncedCtrl::SendCommands(lua_State* L)
 	// conservative, order-preserving default; per-action net/UI/sim
 	// classification (net-send synchronous, draw-owned UI immediate, sim pokes
 	// boundary-applied) is the documented optimization deferred past the flip.
-	CGame::ScopedExternalSimPause simPause;
+	CGame::ScopedExternalSimPause simPause(CGame::SimPauseSite::LUA_SEND_COMMANDS);
 
 	configHandler->EnableWriting(globalConfig.luaWritableConfigFile);
 	guihandler->RunCustomCommands(cmds, false);
@@ -2406,21 +2406,42 @@ int LuaUnsyncedCtrl::SetMiniMapRotation(lua_State* L)
  */
 int LuaUnsyncedCtrl::SetUnitNoGroup(lua_State* L)
 {
-	CUnit* unit = ParseCtrlUnit(L, __func__, 1);
+	// read leg: snapshot-routed identity/permission under the split (no live deref
+	// of unit->team, which ParseCtrlUnit did -- the §4.6 pre-flip ctrl remainder)
+	const int unitID = ParseCtrlUnitID(L, __func__, 1);
 
-	if (unit == nullptr)
+	if (unitID < 0)
 		return 0;
 
 	const bool noGroup = luaL_checkboolean(L, 2);
 
-	// PR 37: group state is draw-owned -- noGroup is a draw-only field (read only
-	// by the draw-owned CGroupHandler) and CUnit::SetGroup mutates uiGroupHandlers
-	// + the draw-owned selection. Runs synchronously on the draw side.
+	// §4.6: noGroup lives on the (sim-owned) CUnit and CUnit::SetGroup reads the
+	// live unit->team to index uiGroupHandlers[team]. Boundary-apply the poke
+	// (capture the id; the unit may die before the drain) so the field write and
+	// the group clear run with the sim parked at the barrier -- no live team read
+	// or CUnit* handoff from the draw side. Mirrors SetUnitNoSelect.
+	if (LuaSplitContract::QueueBoundaryApply(L, __func__, [id = unitID, noGroup]() {
+		CUnit* u = unitHandler.GetUnit(id);
+		if (u == nullptr)
+			return;
+
+		u->noGroup = noGroup;
+
+		if (u->noGroup)
+			u->SetGroup(nullptr);
+	}))
+		return 0;
+
+	// flag-off: byte-identical live path (group state is draw-owned; noGroup is a
+	// draw-only field and CUnit::SetGroup mutates uiGroupHandlers + selection)
+	CUnit* unit = unitHandler.GetUnit(unitID);
+	if (unit == nullptr)
+		return 0;
+
 	unit->noGroup = noGroup;
 
-	if (unit->noGroup) {
+	if (unit->noGroup)
 		unit->SetGroup(nullptr);
-	}
 	return 0;
 }
 
@@ -2833,12 +2854,15 @@ int LuaUnsyncedCtrl::UnitIconSetDraw(lua_State* L)
  */
 int LuaUnsyncedCtrl::SetUnitIconDraw(lua_State* L)
 {
-	CUnit* unit = ParseCtrlUnit(L, __func__, 1);
+	// §4.6: snapshot-routed identity/permission (no live unit->team read) + the
+	// id-keyed draw op (icon draw state is a draw-owned id-keyed vector); no live
+	// CUnit* ever crosses into the drawer.
+	const int unitID = ParseCtrlUnitID(L, __func__, 1);
 
-	if (unit == nullptr)
+	if (unitID < 0)
 		return 0;
 
-	CUnitDrawer::SetUnitDrawIcon(unit, luaL_checkboolean(L, 2));
+	CUnitDrawer::SetUnitDrawIcon(unitID, luaL_checkboolean(L, 2));
 	return 0;
 }
 
@@ -2851,14 +2875,21 @@ int LuaUnsyncedCtrl::SetUnitIconDraw(lua_State* L)
  */
 int LuaUnsyncedCtrl::SetUnitIcon(lua_State* L)
 {
-	CUnit* unit = ParseCtrlUnit(L, __func__, 1);
+	// §4.6: snapshot-routed identity/permission (no live unit->team read). The
+	// custom-icon store is a draw-owned id-keyed vector (id op, no live CUnit*);
+	// the follow-up icon refresh resolves the object through the drawer's
+	// deferred-safe handle (DrawerGetObjectByID, never a sim-handler walk) -- the
+	// same seam PlayerChanged uses for this exact call. UpdateCurrentUnitIcon's
+	// losStatus read is the pre-existing draw-reads-LOS surface, unchanged here.
+	const int unitID = ParseCtrlUnitID(L, __func__, 1);
 
-	if (unit == nullptr)
+	if (unitID < 0)
 		return 0;
 
 	if (lua_isnoneornil(L, 2)) {
-		CUnitDrawer::SetUnitCustomIcon(unit, icon::INVALID_ICON_INDEX);
-		unitDrawer->UpdateCurrentUnitIcon(unit);
+		CUnitDrawer::SetUnitCustomIcon(unitID, icon::INVALID_ICON_INDEX);
+		if (const CUnit* u = DrawerGetObjectByID<CUnit>(unitID))
+			unitDrawer->UpdateCurrentUnitIcon(u);
 		return 0;
 	}
 
@@ -2870,8 +2901,9 @@ int LuaUnsyncedCtrl::SetUnitIcon(lua_State* L)
 		return 0;
 	}
 
-	CUnitDrawer::SetUnitCustomIcon(unit, iconIdx);
-	unitDrawer->UpdateCurrentUnitIcon(unit);
+	CUnitDrawer::SetUnitCustomIcon(unitID, iconIdx);
+	if (const CUnit* u = DrawerGetObjectByID<CUnit>(unitID))
+		unitDrawer->UpdateCurrentUnitIcon(u);
 
 	return 0;
 }
@@ -3783,7 +3815,7 @@ int LuaUnsyncedCtrl::GiveOrder(lua_State* L)
 	// off the draw thread (waitCommandsAI wait-command inserts, the ok-sound's
 	// live unit read); nest-safe, no-op flag-off, the same bracket CGuiHandler
 	// wraps its own user-order dispatch in.
-	CGame::ScopedExternalSimPause simPause;
+	CGame::ScopedExternalSimPause simPause(CGame::SimPauseSite::LUA_GIVE_ORDER);
 
 	selectedUnitsHandler.GiveCommand(LuaUtils::ParseCommand(L, __func__, 1));
 

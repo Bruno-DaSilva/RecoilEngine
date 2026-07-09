@@ -3508,11 +3508,14 @@ int LuaUnsyncedRead::TraceScreenRay(lua_State* L)
 			const float3 pos = minimap->GetMapPosition(wx, wy);
 
 			if (!onlyCoords) {
-				const CUnit* unit = minimap->GetSelectUnit(pos);
+				// §4.6: id-only pick -- the draw-context result never dereferences
+				// the sim-owned hit object (mirrors the main branch's hit*ID
+				// out-params below; byte-identical flag-off since it equals unit->id)
+				const int hitUnitID = minimap->GetSelectUnitID(pos);
 
-				if (unit != nullptr) {
+				if (hitUnitID >= 0) {
 					lua_pushliteral(L, "unit");
-					lua_pushnumber(L, unit->id);
+					lua_pushnumber(L, hitUnitID);
 					return 2;
 				}
 			}

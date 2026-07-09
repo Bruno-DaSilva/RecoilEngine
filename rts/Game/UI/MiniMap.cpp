@@ -871,6 +871,17 @@ CUnit* CMiniMap::GetSelectUnit(const float3& pos) const
 }
 
 
+int CMiniMap::GetSelectUnitID(const float3& pos) const
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	// §4.6: the id deref stays inside the draw-owned pick helper so a draw-context
+	// caller (Lua TraceScreenRay) consumes the picked id without a live CUnit*
+	// crossing the seam. Pick + LOS gate are already snapshot-served (see above).
+	const CUnit* unit = GetSelectUnit(pos);
+	return (unit != nullptr) ? unit->id : -1;
+}
+
+
 float3 CMiniMap::GetMapPosition(int x, int y) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
@@ -1418,7 +1429,7 @@ void CMiniMap::DrawCameraFrustumAndMouseSelection()
 	RECOIL_DETAILED_TRACY_ZONE;
 	// PR 27b: the minimap hover trace (GuiTraceRay) walks sim state; park
 	// the sim (nest-safe, no-op flag-off/parked)
-	CGame::ScopedExternalSimPause simPause;
+	CGame::ScopedExternalSimPause simPause(CGame::SimPauseSite::MINIMAP_FRUSTUM);
 	glEnable(GL_SCISSOR_TEST);
 	glScissor(curPos.x, curPos.y, curDim.x, curDim.y);
 

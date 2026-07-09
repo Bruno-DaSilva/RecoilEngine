@@ -4,6 +4,10 @@
 
 #include <Rml/Backends/RmlUi_Backend.h>
 #include <RmlUi/Core.h>
+
+#include <array>    // §4.5 pause-surface telemetry counters
+#include <atomic>
+#include <cstdint>
 #include "Game.h"
 #include "BoundaryStats.h"
 #include "Camera.h"
@@ -325,6 +329,9 @@ CGame::~CGame()
 
 	// report the snapshot differential gate totals if it was left armed
 	snapshotDiffGate.FlushPartial();
+
+	// §4.5: dump the mid-gameplay sim-park survey (which pause sites engaged)
+	DumpSimPauseSurvey();
 
 	RmlGui::Shutdown();
 	helper->Kill();
@@ -2042,13 +2049,47 @@ void CGame::ReleaseSimPause()
 	eventHandler.DbgTimingInfo(TIMING_SIM_PARKED, simPauseBeginTime, spring_now());
 }
 
-CGame::ScopedExternalSimPause::ScopedExternalSimPause()
+// §4.5 pause-surface telemetry: per-site count of parks that actually engaged
+// (re-parked the running sim). Relaxed atomics -- read/written from the draw
+// thread today, but kept atomic so the eventual 44b consumers stay clean.
+static std::array<std::atomic<uint64_t>, size_t(CGame::SimPauseSite::COUNT)> simPauseSiteCounts = {};
+
+void CGame::DumpSimPauseSurvey()
+{
+	static const char* siteNames[size_t(SimPauseSite::COUNT)] = {
+		"LIFECYCLE", "GUI_TRY_TARGET", "GUI_TEST_BUILDSQUARE", "GUI_GET_COMMAND",
+		"GUI_GET_BUILDPOS", "GUI_DRAW_MAPSTUFF", "GUI_GET_DEFAULT_CMD",
+		"MOUSE_RELEASE", "MINIMAP_FRUSTUM", "LUA_SEND_COMMANDS", "LUA_GIVE_ORDER",
+	};
+
+	uint64_t total = 0;
+	for (auto& c: simPauseSiteCounts)
+		total += c.load(std::memory_order_relaxed);
+
+	if (total == 0)
+		return; // split off / never parked mid-gameplay
+
+	LOG("[SimPauseSurvey] mid-gameplay ScopedExternalSimPause parks that engaged "
+	    "(re-parked the running sim), by site:");
+	for (size_t i = 0; i < size_t(SimPauseSite::COUNT); ++i) {
+		const uint64_t n = simPauseSiteCounts[i].load(std::memory_order_relaxed);
+		if (n > 0)
+			LOG("[SimPauseSurvey]   %-22s %llu", siteNames[i], (unsigned long long)n);
+	}
+}
+
+CGame::ScopedExternalSimPause::ScopedExternalSimPause(SimPauseSite site)
 {
 	if (game == nullptr || game->simPauseHeld)
 		return;
 
 	game->AcquireSimPause();
 	acquired = game->simPauseHeld;
+
+	// telemetry (§4.5): only count parks that actually engaged (a nested
+	// bracket returns above with acquired=false and is not a real re-park)
+	if (acquired)
+		simPauseSiteCounts[size_t(site)].fetch_add(1, std::memory_order_relaxed);
 }
 
 CGame::ScopedExternalSimPause::~ScopedExternalSimPause()

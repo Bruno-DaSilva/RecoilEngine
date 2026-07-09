@@ -216,6 +216,10 @@ public:
 	void SetUnitCustomIcon(const CUnit* u, size_t iconIdx) { IconStateRef(u).customIconIndex = iconIdx; }
 	void SetUnitDrawIcon(const CUnit* u, bool b) { IconStateRef(u).drawIcon = b; }
 	void SetUnitIconRadius(const CUnit* u, float r) { IconStateRef(u).iconRadius = r; }
+	// id-keyed variants (§4.6): draw-context Lua ctrl pokes hold a snapshot id,
+	// never a live CUnit* -- icon draw state is a draw-owned id-keyed vector
+	void SetUnitCustomIcon(int id, size_t iconIdx) { IconStateRef(id).customIconIndex = iconIdx; }
+	void SetUnitDrawIcon(int id, bool b) { IconStateRef(id).drawIcon = b; }
 public:
 	// render-owned per-unit render record (sim/draw §A, SCOPE-1 / plan PR 39):
 	// the immutable header ({model, unitDef}) plus the sim-owned MUTABLE fields
@@ -321,6 +325,7 @@ private:
 	const UnitIconState& GetIconState(const CUnit* u) const;
 	const UnitIconState& GetIconState(int id) const;
 	UnitIconState& IconStateRef(const CUnit* u);
+	UnitIconState& IconStateRef(int id);
 
 	// render-record producer-side authoring (see UnitRenderRecord above)
 	UnitRenderRecord& RenderRecordRef(const CUnit* u) {

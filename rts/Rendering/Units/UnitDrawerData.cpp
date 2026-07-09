@@ -638,10 +638,15 @@ const CUnitDrawerData::UnitIconState& CUnitDrawerData::GetIconState(int id) cons
 
 CUnitDrawerData::UnitIconState& CUnitDrawerData::IconStateRef(const CUnit* u)
 {
-	if (u->id >= iconStates.size())
-		iconStates.resize(u->id + 1);
+	return IconStateRef(u->id);
+}
 
-	return iconStates[u->id];
+CUnitDrawerData::UnitIconState& CUnitDrawerData::IconStateRef(int id)
+{
+	if (static_cast<size_t>(id) >= iconStates.size())
+		iconStates.resize(id + 1);
+
+	return iconStates[id];
 }
 
 void CUnitDrawerData::RenderUnitPreCreated(const CUnit* unit)

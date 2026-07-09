@@ -1109,7 +1109,7 @@ void CGuiHandler::SetCursorIcon() const
 			// so this rare minimap build-proxy branch parks the sim for the read
 			// (nest-safe, no-op flag-off / when already parked -- like TryTarget).
 			// The placement query/reply channel is the eventual served fix (§4.5).
-			CGame::ScopedExternalSimPause simPause;
+			CGame::ScopedExternalSimPause simPause(CGame::SimPauseSite::GUI_TEST_BUILDSQUARE);
 
 			BuildInfo bi;
 			bi.pos = minimap->GetMapPosition(mouse->lastx, mouse->lasty);
@@ -1186,7 +1186,7 @@ bool CGuiHandler::TryTarget(const SCommandDescription& cmdDesc) const
 	RECOIL_DETAILED_TRACY_ZONE;
 	// PR 27b: GuiTraceRay + weapon-state reads walk sim state; park the sim
 	// (nest-safe, no-op flag-off/parked) -- master ran this serially anyway
-	CGame::ScopedExternalSimPause simPause;
+	CGame::ScopedExternalSimPause simPause(CGame::SimPauseSite::GUI_TRY_TARGET);
 	if (cmdDesc.id != CMD_ATTACK)
 		return true;
 
@@ -1723,7 +1723,7 @@ int CGuiHandler::GetDefaultCommand(int x, int y, const float3& cameraPos, const 
 	RECOIL_DETAILED_TRACY_ZONE;
 	// PR 27b: GuiTraceRay + commandAI possibleCommands walks (the windowed
 	// dogfood SIGSEGV at SelectedUnitsHandler::GetDefaultCmd); see TryTarget
-	CGame::ScopedExternalSimPause simPause;
+	CGame::ScopedExternalSimPause simPause(CGame::SimPauseSite::GUI_GET_DEFAULT_CMD);
 	return GetDefaultCommandImpl(x, y, cameraPos, mouseDir, true);
 }
 
@@ -2238,7 +2238,7 @@ Command CGuiHandler::GetCommand(int mouseX, int mouseY, int buttonHint, bool pre
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	// PR 27b: see TryTarget
-	CGame::ScopedExternalSimPause simPause;
+	CGame::ScopedExternalSimPause simPause(CGame::SimPauseSite::GUI_GET_COMMAND);
 	const Command defaultRet(CMD_FAILED);
 
 	int tempInCommand = inCommand;
@@ -2573,7 +2573,7 @@ size_t CGuiHandler::GetBuildPositions(const BuildInfo& startInfo, const BuildInf
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	// PR 27b: blocking-map + yardmap reads; see TryTarget
-	CGame::ScopedExternalSimPause simPause;
+	CGame::ScopedExternalSimPause simPause(CGame::SimPauseSite::GUI_GET_BUILDPOS);
 	// both builds must have the same unitdef
 	assert(startInfo.def == endInfo.def);
 
@@ -3619,7 +3619,7 @@ void CGuiHandler::DrawMapStuff(bool onMiniMap)
 	// PR 27b: the world-space GUI pass reads sim state broadly (queues,
 	// ranges, traces); park for the whole pass. Perf follow-up: fold into
 	// the barrier window instead of a second park. See TryTarget.
-	CGame::ScopedExternalSimPause simPause;
+	CGame::ScopedExternalSimPause simPause(CGame::SimPauseSite::GUI_DRAW_MAPSTUFF);
 	if (!onMiniMap) {
 		glEnable(GL_DEPTH_TEST);
 		glDepthMask(GL_FALSE);

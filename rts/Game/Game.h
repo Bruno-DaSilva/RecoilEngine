@@ -108,12 +108,34 @@ public:
 	bool ActionPressed(const Action& action, bool isRepeat);
 	bool ActionReleased(const Action& action);
 
+	// §4.5 pause-surface telemetry: which mid-gameplay ScopedExternalSimPause
+	// call site actually ENGAGED a sim park (i.e. re-parked the running sim,
+	// not a nested no-op). Counted per site so the pre-44c disposition can
+	// separate per-frame parks (must be served before the flip) from rare
+	// input/display-gated parks (accepted). LIFECYCLE covers the untagged
+	// save/Lua-handle/teardown brackets. Dumped at game shutdown.
+	enum class SimPauseSite : int {
+		LIFECYCLE = 0,       // untagged: saves, Lua handle (re)load/kill, path infotex, etc.
+		GUI_TRY_TARGET,      // GuiHandler::TryTarget (attack-cursor GuiTraceRay)
+		GUI_TEST_BUILDSQUARE,// GuiHandler::SetCursorIcon minimap build-proxy (Gap B narrow park)
+		GUI_GET_COMMAND,     // GuiHandler::GetCommand (mouse-release order build)
+		GUI_GET_BUILDPOS,    // GuiHandler::GetBuildPositions (blocking/yardmap)
+		GUI_DRAW_MAPSTUFF,   // GuiHandler::DrawMapStuff (per-frame world-GUI pass)
+		GUI_GET_DEFAULT_CMD, // GuiHandler::GetDefaultCommand fallback (Gap B: non-cursor callers)
+		MOUSE_RELEASE,       // MouseHandler::MouseRelease (selection box)
+		MINIMAP_FRUSTUM,     // MiniMap::DrawCameraFrustumAndMouseSelection (per-frame minimap)
+		LUA_SEND_COMMANDS,   // LuaUnsyncedCtrl::SendCommands (console-action batch)
+		LUA_GIVE_ORDER,      // LuaUnsyncedCtrl::GiveOrder family
+		COUNT
+	};
+	static void DumpSimPauseSurvey();
+
 	// PR 27b: external sim-quiescence bracket (game saves, Lua handler
 	// (re)loads, other whole-sim walks); no-op when the split is off, the
 	// game is null, or a pause is already held (nest-safe: only the
-	// outermost bracket releases)
+	// outermost bracket releases). The site tag is telemetry-only (§4.5).
 	struct ScopedExternalSimPause {
-		ScopedExternalSimPause();
+		explicit ScopedExternalSimPause(SimPauseSite site = SimPauseSite::LIFECYCLE);
 		~ScopedExternalSimPause();
 	private:
 		bool acquired = false;

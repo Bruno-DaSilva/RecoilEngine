@@ -101,6 +101,9 @@ public:
 	static bool GetUnitDrawIcon(const CUnit* unit) { return modelDrawerData->GetUnitDrawIcon(unit); }
 	static void SetUnitDrawIcon(const CUnit* unit, bool b) { modelDrawerData->SetUnitDrawIcon(unit, b); }
 	static void SetUnitCustomIcon(const CUnit* unit, size_t iconIdx) { modelDrawerData->SetUnitCustomIcon(unit, iconIdx); }
+	// id-keyed variants (§4.6): draw-context Lua ctrl pokes hold a snapshot id
+	static void SetUnitDrawIcon(int unitID, bool b) { modelDrawerData->SetUnitDrawIcon(unitID, b); }
+	static void SetUnitCustomIcon(int unitID, size_t iconIdx) { modelDrawerData->SetUnitCustomIcon(unitID, iconIdx); }
 public:
 	// DrawUnit*
 	virtual void DrawUnitNoTrans(const CUnit* unit, uint32_t preList, uint32_t postList, bool lodCall, bool noLuaCall) const = 0;
