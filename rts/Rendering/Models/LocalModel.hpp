@@ -28,11 +28,6 @@ struct LocalModel
 	const LocalModelPiece* GetRoot() const { return (GetPiece(0)); }
 	const CollisionVolume* GetBoundingVolume() const { return &boundingVolume; }
 
-	// non-const result on purpose: luaMaterialData is render-owned state (see
-	// the member comment) that draw passes legitimately author while the sim
-	// object itself is const (sim/draw PR 10)
-	LuaObjectMaterialData* GetLuaMaterialData() const { return &luaMaterialData; }
-
 	const float3 GetRelMidPos() const { return (boundingVolume.GetOffsets()); }
 
 	// raw forms, the piece-index must be valid
@@ -42,17 +37,20 @@ struct LocalModel
 	float GetDrawRadius() const { return (boundingVolume.GetBoundingRadius()); }
 
 
-	void Draw() const {
-		if (!luaMaterialData.Enabled()) {
+	// luaMaterialData + per-piece lodDispLists were evicted to the drawer-owned
+	// render record (sim/draw PR 10); draw callers thread them in as primitives
+	// so LocalModel stays free of the drawer types
+	void Draw(const LuaObjectMaterialData* lmd, const std::vector<std::vector<uint32_t>>* lodLists) const {
+		if (!lmd->Enabled()) {
 			DrawPieces();
 			return;
 		}
 
-		DrawPiecesLOD(luaMaterialData.GetCurrentLOD());
+		DrawPiecesLOD(lmd->GetCurrentLOD(), lmd, lodLists);
 	}
 
 	void SetModel(const S3DModel* model, bool initialize = true);
-	void SetLODCount(unsigned int lodCount) const;
+	void SetLODCount(unsigned int lodCount, LuaObjectMaterialData* lmd, std::vector<std::vector<uint32_t>>* lodLists) const;
 	void UpdateBoundingVolume();
 
 	void GetBoundingBoxVerts(std::vector<float3>& verts) const {
@@ -84,7 +82,7 @@ private:
 	LocalModelPiece* CreateLocalModelPieces(const S3DModelPiece* mpParent);
 
 	void DrawPieces() const;
-	void DrawPiecesLOD(unsigned int lod) const;
+	void DrawPiecesLOD(unsigned int lod, const LuaObjectMaterialData* lmd, const std::vector<std::vector<uint32_t>>* lodLists) const;
 
 public:
 	std::vector<LocalModelPiece> pieces;
@@ -92,13 +90,6 @@ public:
 private:
 	// object-oriented box; accounts for piece movement
 	CollisionVolume boundingVolume;
-
-	// custom Lua-set material this model should be rendered with.
-	// mutable: render-owned (CR_IGNORED, authored only by draw passes and
-	// unsynced Lua — LOD selection, material-bin backrefs), physically resident
-	// on the sim object; discovered-and-deferred eviction candidate (sim/draw
-	// PR 10, same class as the LocalModelPiece transform caches)
-	mutable LuaObjectMaterialData luaMaterialData;
 
 	bool needsBoundariesRecalc = true;
 };

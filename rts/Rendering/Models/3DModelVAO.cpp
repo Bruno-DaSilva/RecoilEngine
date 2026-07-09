@@ -341,7 +341,7 @@ bool S3DModelVAO::AddToSubmission(const CUnit* unit)
 	const S3DModel* model = unit->model;
 	assert(model);
 
-	return AddToSubmissionImpl(unit, model->indxStart, model->indxCount, unit->team, CUnitDrawer::GetDrawFlag(unit));
+	return AddToSubmissionImpl(unit, model->indxStart, model->indxCount, CUnitDrawer::GetRenderRecord(unit).team, CUnitDrawer::GetDrawFlag(unit));
 }
 
 bool S3DModelVAO::AddToSubmission(const CFeature* feature)
@@ -352,7 +352,7 @@ bool S3DModelVAO::AddToSubmission(const CFeature* feature)
 	const S3DModel* model = feature->model;
 	assert(model);
 
-	return AddToSubmissionImpl(feature, model->indxStart, model->indxCount, feature->team, CFeatureDrawer::GetDrawFlag(feature));
+	return AddToSubmissionImpl(feature, model->indxStart, model->indxCount, CFeatureDrawer::GetRenderRecord(feature).team, CFeatureDrawer::GetDrawFlag(feature));
 }
 
 bool S3DModelVAO::AddToSubmission(const UnitDef* unitDef, uint8_t teamID)
@@ -486,7 +486,7 @@ bool S3DModelVAO::SubmitImmediately(const CUnit* unit, const GLenum mode, bool b
 	const S3DModel* model = unit->model;
 	assert(model);
 
-	return SubmitImmediatelyImpl(unit, model->indxStart, model->indxCount, unit->team, CUnitDrawer::GetDrawFlag(unit), mode, bindUnbind);
+	return SubmitImmediatelyImpl(unit, model->indxStart, model->indxCount, CUnitDrawer::GetRenderRecord(unit).team, CUnitDrawer::GetDrawFlag(unit), mode, bindUnbind);
 }
 
 bool S3DModelVAO::SubmitImmediately(const CFeature* feature, GLenum mode, bool bindUnbind)
@@ -497,7 +497,7 @@ bool S3DModelVAO::SubmitImmediately(const CFeature* feature, GLenum mode, bool b
 	const S3DModel* model = feature->model;
 	assert(model);
 
-	return SubmitImmediatelyImpl(feature, model->indxStart, model->indxCount, feature->team, CFeatureDrawer::GetDrawFlag(feature), mode, bindUnbind);
+	return SubmitImmediatelyImpl(feature, model->indxStart, model->indxCount, CFeatureDrawer::GetRenderRecord(feature).team, CFeatureDrawer::GetDrawFlag(feature), mode, bindUnbind);
 }
 
 bool S3DModelVAO::SubmitImmediately(const UnitDef* unitDef, int teamID, GLenum mode, bool bindUnbind)

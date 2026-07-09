@@ -72,6 +72,16 @@ public:
 	static bool GetIsIcon(const CUnit* unit) { return modelDrawerData->GetUnitIsIcon(unit); }
 	static bool GetIsIcon(int unitID) { return modelDrawerData->GetUnitIsIcon(unitID); }
 
+	// SCOPE-1: drawer-owned per-unit render record (immutable header + sim-owned
+	// mutable fields the draw-window passes read); never dereference live CUnit
+	static const CUnitDrawerData::UnitRenderRecord& GetRenderRecord(const CUnit* unit) { return modelDrawerData->GetRenderRecord(unit); }
+	static const CUnitDrawerData::UnitRenderRecord& GetRenderRecord(int unitID) { return modelDrawerData->GetRenderRecord(unitID); }
+
+	// drawer-owned Lua material state + per-piece LOD display lists evicted from
+	// LocalModel/LocalModelPiece (sim/draw PR 10)
+	static LuaObjectMaterialData& GetLuaMaterialData(int unitID) { return modelDrawerData->GetLuaMaterialDataRef(unitID); }
+	static std::vector<std::vector<uint32_t>>& GetLodDispLists(int unitID) { return modelDrawerData->GetLodDispListsRef(unitID); }
+
 	static void ClearPreviousDrawFlags() { modelDrawerData->ClearPreviousDrawFlags(); }
 	static void UnitLeavesGhostChanged(const CUnit* unit, const bool leaveDeadGhost) { modelDrawerData->UnitLeavesGhostChanged(unit, leaveDeadGhost); }
 

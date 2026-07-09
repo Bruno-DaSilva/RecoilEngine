@@ -45,12 +45,11 @@ const CFeature* DrawerResolveLiveObjectByID<CFeature>(int id)
 template<>
 const CFeature* DrawerGetObjectByID<CFeature>(int id)
 {
-	// PR 27b: see the CUnit resolver
-	if (SimDrawSplit::Enabled() && CFeatureDrawer::SplitResolveCacheBuilt()) {
-		const CFeature* feature = CFeatureDrawer::ResolveSplitCachedObject(id);
-
-		assert(feature != nullptr);
-		return feature;
+	// SCOPE-1: see the CUnit resolver. Non-model features are registered in the
+	// record by RegisterNonModelFeatureRecords (replacing RegisterExtraSplitResolveIDs).
+	if (SimDrawSplit::Enabled()) {
+		if (const CFeature* feature = CFeatureDrawer::GetRenderRecord(id).obj)
+			return feature;
 	}
 
 	return DrawerResolveLiveObjectByID<CFeature>(id);
@@ -74,24 +73,66 @@ void CFeatureDrawerData::RenderFeaturePreCreated(const CFeature* feature)
 		drawAlphas.resize(feature->id + 1, 1.0f);
 
 	drawAlphas[feature->id] = 1.0f; // as the old member init was
+
+	// SCOPE-1: freeze the render record's immutable header; mutable fields are
+	// filled by UpdateRenderRecord (here + each Update pass) before any draw
+	auto& rr = RenderRecordRef(feature);
+	rr = {};
+	rr.obj   = feature;
+	rr.model = feature->model;
+	rr.def   = feature->def;
+	rr.localModel = &feature->localModel;
+	UpdateRenderRecord(feature);
 }
 
-
-void CFeatureDrawerData::RegisterExtraSplitResolveIDs()
+// SCOPE-1: register the deferred-safe handle for non-model features (trees/geo-
+// vents). RenderFeaturePreCreated early-returns for them (no model-drawer slot),
+// yet the Lua draw-payload resolvers (LuaSnapshotServe::ResolveDrawFeature) must
+// still resolve their ids to a live pointer. Producer-side sweep (Update, sim
+// quiescent) — the exact sanctioned featureHandler read RegisterExtraSplitResolveIDs
+// did, now writing the record's handle instead of the deleted splitResolveCache.
+// Dead ids drop out at RenderFeatureDestroyed (record cleared); this only ADDS
+// missing live non-model handles, so it is idempotent per frame.
+void CFeatureDrawerData::RegisterNonModelFeatureRecords()
 {
-	// non-model features (DRAWTYPE_TREE, DRAWTYPE_NONE) are never registered by
-	// RenderFeaturePreCreated, so the unsortedObjects pass misses them -- yet
-	// they are alive and LOS-visible, so the snapshot-serving feature twins
-	// (GetFeatureLuaDraw/NoDraw/EngineDrawMask/AlwaysUpdateMatrix/DrawFlag/
-	// SelectionVolumeData) resolve their ids and would otherwise hit a null
-	// pointer (and the DEBUG resolver assert). Runs at the barrier with the sim
-	// parked, so the featureHandler read is the same sanctioned class as
-	// DrawerResolveLiveObjectByID. Model features are already cached by the
-	// unsortedObjects pass; skip them (re-resolving is a redundant handler hit).
 	for (const int id: featureHandler.GetActiveFeatureIDs()) {
-		if (ResolveSplitCachedObject(id) == nullptr)
-			CacheSplitResolveID(id);
+		if (static_cast<size_t>(id) < renderRecords.size() && renderRecords[id].obj != nullptr)
+			continue;
+
+		const CFeature* feature = DrawerResolveLiveObjectByID<CFeature>(id);
+		if (feature->def->drawType == DRAWTYPE_MODEL)
+			continue; // model features register via RenderFeaturePreCreated
+
+		auto& rr = RenderRecordRef(feature);
+		rr = {};
+		rr.obj = feature;
+		rr.def = feature->def;
+		// model/localModel stay null (never drawn); scalar fields unused for
+		// non-model features (their Lua serving dereferences obj live)
 	}
+}
+
+const CFeatureDrawerData::FeatureRenderRecord& CFeatureDrawerData::GetRenderRecord(const CFeature* f) const
+{
+	return GetRenderRecord(f->id);
+}
+
+CFeatureDrawerData::FeatureRenderRecord& CFeatureDrawerData::RenderRecordRef(const CFeature* f)
+{
+	if (f->id >= renderRecords.size())
+		renderRecords.resize(f->id + 1);
+
+	return renderRecords[f->id];
+}
+
+// SCOPE-1: refresh the sim-owned mutable fields the draw-window passes read.
+// Runs producer-side (once per new sim frame, in Update), sim quiescent.
+void CFeatureDrawerData::UpdateRenderRecord(const CFeature* feature)
+{
+	FeatureRenderRecord& rr = RenderRecordRef(feature);
+	rr.team           = feature->team;
+	rr.engineDrawMask = feature->engineDrawMask;
+	rr.luaDraw        = feature->luaDraw;
 }
 
 
@@ -116,6 +157,13 @@ void CFeatureDrawerData::RenderFeatureDestroyed(const CFeature* feature)
 	// otherwise read the previous owner's fade instead of the fresh-member 1.0f
 	if (feature->id < drawAlphas.size())
 		drawAlphas[feature->id] = 1.0f;
+
+	// SCOPE-1: clear the deferred-safe handle so a dead id no longer resolves
+	// through DrawerGetObjectByID (dangling-pointer guard; the died-in-batch
+	// window is served by the ShellFallback until S7 retires it). Covers both
+	// model and non-model features.
+	if (feature->id < renderRecords.size())
+		renderRecords[feature->id] = {};
 }
 
 CFeatureDrawerData::CFeatureDrawerData(bool& mtModelDrawer_)
@@ -162,12 +210,17 @@ void CFeatureDrawerData::Update()
 	// defined extraction point: snapshot piece/object transforms once per new sim frame
 	ExtractTransforms();
 
+	// SCOPE-1: keep non-model-feature handles registered for the Lua resolvers
+	// (replaces RegisterExtraSplitResolveIDs). Producer-side, sim quiescent.
+	RegisterNonModelFeatureRecords();
+
 	if (mtModelDrawer) {
 		for_mt_chunk(0, unsortedObjects.size(), [this](const int k) {
 			const CFeature* f = DrawerGetObjectByID<CFeature>(unsortedObjects[k]);
 			UpdateDrawPos(f);
 			UpdateCommon(f);
 			UpdateUnsyncedTransform(f);
+			UpdateRenderRecord(f); // SCOPE-1: refresh draw-window record (producer-side)
 		}, CModelDrawerDataConcept::MT_CHUNK_OR_MIN_CHUNK_SIZE_UPDT);
 	}
 	else {
@@ -176,6 +229,7 @@ void CFeatureDrawerData::Update()
 			UpdateDrawPos(f);
 			UpdateCommon(f);
 			UpdateUnsyncedTransform(f);
+			UpdateRenderRecord(f); // SCOPE-1: refresh draw-window record (producer-side)
 		}
 	}
 }

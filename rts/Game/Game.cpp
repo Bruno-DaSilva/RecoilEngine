@@ -1682,8 +1682,9 @@ void CGame::SimDrawBarrier()
 	// see ModelDrawerData.h). After the drain so fresh registrations are
 	// covered, before anything downstream resolves.
 	if (SimDrawSplit::Enabled()) {
-		CUnitDrawer::BuildSplitResolveCache();
-		CFeatureDrawer::BuildSplitResolveCache();
+		// SCOPE-1 (plan PR 39): unit/feature caches DELETED — those drawers now
+		// resolve ids through their render record's deferred-safe handle (no
+		// per-barrier rebuild). The projectile drawer keeps its own cache (PR 40).
 		projectileDrawer->BuildSplitResolveCache();
 	}
 
@@ -2000,8 +2001,9 @@ void CGame::AcquireSimPause()
 		DeliverBoundaryDeaths();
 
 		// keep the resolution caches in step with the flushed registrations
-		CUnitDrawer::BuildSplitResolveCache();
-		CFeatureDrawer::BuildSplitResolveCache();
+		// SCOPE-1 (plan PR 39): unit/feature caches DELETED — those drawers now
+		// resolve ids through their render record's deferred-safe handle (no
+		// per-barrier rebuild). The projectile drawer keeps its own cache (PR 40).
 		projectileDrawer->BuildSplitResolveCache();
 
 		// generation-gated no-op today (the valve does not republish the

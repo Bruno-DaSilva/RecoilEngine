@@ -36,7 +36,6 @@ CR_REG_METADATA(LocalModelPiece, (
 
 	// reload
 	CR_IGNORED(original),
-	CR_IGNORED(lodDispLists), //FIXME GL idx!
 
 	CR_POSTLOAD(PostLoad)
 ))
@@ -285,7 +284,7 @@ void LocalModelPiece::Draw() const
 	glPopMatrix();
 }
 
-void LocalModelPiece::DrawLOD(uint32_t lod) const
+void LocalModelPiece::DrawLOD(uint32_t lod, const std::vector<uint32_t>& pieceLodLists) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (!scriptSetVisible)
@@ -296,7 +295,7 @@ void LocalModelPiece::DrawLOD(uint32_t lod) const
 
 	glPushMatrix();
 	glMultMatrixf(GetModelSpaceMatrix());
-	if (const auto ldl = lodDispLists[lod]; ldl == 0) {
+	if (const auto ldl = pieceLodLists[lod]; ldl == 0) {
 		S3DModelHelpers::BindLegacyAttrVBOs();
 		original->DrawElements();
 		S3DModelHelpers::UnbindLegacyAttrVBOs();
@@ -304,19 +303,6 @@ void LocalModelPiece::DrawLOD(uint32_t lod) const
 		glCallList(ldl);
 	}
 	glPopMatrix();
-}
-
-
-
-void LocalModelPiece::SetLODCount(uint32_t count) const
-{
-	RECOIL_DETAILED_TRACY_ZONE;
-	// any new LOD's get null-lists first
-	lodDispLists.resize(count, 0);
-
-	for (uint32_t i = 0; i < children.size(); i++) {
-		children[i]->SetLODCount(count);
-	}
 }
 
 

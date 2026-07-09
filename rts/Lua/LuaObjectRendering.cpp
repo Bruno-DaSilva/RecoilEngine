@@ -125,12 +125,13 @@ void LuaObjectRenderingImpl::PushFunction(lua_State* L, int (*fnPntr)(lua_State*
 int LuaObjectRenderingImpl::GetLODCount(lua_State* L)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	const CSolidObject* obj = ParseSolidObject(L, __func__, 1, GetObjectType());
+	const LuaObjType objType = GetObjectType();
+	const CSolidObject* obj = ParseSolidObject(L, __func__, 1, objType);
 
 	if (obj == nullptr)
 		return 0;
 
-	const LuaObjectMaterialData* lmd = obj->GetLuaMaterialData();
+	const LuaObjectMaterialData* lmd = LuaObjectDrawer::GetLuaMaterialData(objType, obj->id);
 
 	lua_pushnumber(L, lmd->GetLODCount());
 	lua_pushnumber(L, lmd->GetCurrentLOD());
@@ -154,13 +155,13 @@ int LuaObjectRenderingImpl::SetLODCount(lua_State* L)
 }
 
 
-static int SetLODLengthCommon(lua_State* L, CSolidObject* obj, float scale)
+static int SetLODLengthCommon(lua_State* L, CSolidObject* obj, LuaObjType objType, float scale)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (obj == nullptr)
 		return 0;
 
-	LuaObjectMaterialData* lmd = obj->GetLuaMaterialData();
+	LuaObjectMaterialData* lmd = LuaObjectDrawer::GetLuaMaterialData(objType, obj->id);
 
 	// actual Length-Per-Pixel
 	lmd->SetLODLength(luaL_checknumber(L, 2) - 1, luaL_checkfloat(L, 3) * scale);
@@ -171,7 +172,8 @@ int LuaObjectRenderingImpl::SetLODLength(lua_State* L)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	// args=<objID, lodLevel, lodLength>
-	return (SetLODLengthCommon(L, ParseSolidObject(L, __func__, 1, GetObjectType()), 1.0f));
+	const LuaObjType objType = GetObjectType();
+	return (SetLODLengthCommon(L, ParseSolidObject(L, __func__, 1, objType), objType, 1.0f));
 }
 
 int LuaObjectRenderingImpl::SetLODDistance(lua_State* L)
@@ -181,7 +183,8 @@ int LuaObjectRenderingImpl::SetLODDistance(lua_State* L)
 	//
 	// length adjusted for 45 degree FOV with a 1024x768 screen; the magic
 	// constant is 2.0f * math::tanf((45.0f * 0.5f) * (PI / 180.0f)) / 768.0f)
-	return (SetLODLengthCommon(L, ParseSolidObject(L, __func__, 1, GetObjectType()), 0.0010786811520132682f));
+	const LuaObjType objType = GetObjectType();
+	return (SetLODLengthCommon(L, ParseSolidObject(L, __func__, 1, objType), objType, 0.0010786811520132682f));
 }
 
 
@@ -190,12 +193,13 @@ int LuaObjectRenderingImpl::SetLODDistance(lua_State* L)
 int LuaObjectRenderingImpl::SetPieceList(lua_State* L)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	CSolidObject* obj = ParseSolidObject(L, __FUNCTION__, 1, GetObjectType());
+	const LuaObjType objType = GetObjectType();
+	CSolidObject* obj = ParseSolidObject(L, __FUNCTION__, 1, objType);
 
 	if (obj == nullptr)
 		return 0;
 
-	const LuaObjectMaterialData* lmd = obj->GetLuaMaterialData();
+	const LuaObjectMaterialData* lmd = LuaObjectDrawer::GetLuaMaterialData(objType, obj->id);
 	LocalModelPiece* lmp = ParseObjectLocalModelPiece(L, obj, 3);
 
 	if (lmp == nullptr)
@@ -214,7 +218,7 @@ int LuaObjectRenderingImpl::SetPieceList(lua_State* L)
 		dlist = displayLists.GetDList(luaL_checknumber(L, 4));
 	}
 
-	lmp->lodDispLists[lod] = dlist;
+	(*LuaObjectDrawer::GetLodDispLists(objType, obj->id))[lmp->GetLModelPieceIndex()][lod] = dlist;
 	return 0;
 }
 
@@ -239,11 +243,11 @@ static LuaMatType ParseMaterialType(const char* matName)
 }
 
 
-static LuaObjectMaterial* GetObjectMaterial(CSolidObject* obj, const char* matName)
+static LuaObjectMaterial* GetObjectMaterial(CSolidObject* obj, LuaObjType objType, const char* matName)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	LuaMatType matType = ParseMaterialType(matName);
-	LuaObjectMaterialData* lmd = obj->GetLuaMaterialData();
+	LuaObjectMaterialData* lmd = LuaObjectDrawer::GetLuaMaterialData(objType, obj->id);
 
 	if (matType < 0)
 		return nullptr;
@@ -360,7 +364,8 @@ int LuaObjectRenderingImpl::SetMaterial(lua_State* L)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	// args=<objID, lodMatNum, matName, matRef>
-	CSolidObject* obj = ParseSolidObject(L, __func__, 1, GetObjectType());
+	const LuaObjType objType = GetObjectType();
+	CSolidObject* obj = ParseSolidObject(L, __func__, 1, objType);
 
 	if (obj == nullptr)
 		return 0;
@@ -368,7 +373,7 @@ int LuaObjectRenderingImpl::SetMaterial(lua_State* L)
 	const char* matName = luaL_checkstring(L, 3);
 	const LuaMatType matType = ParseMaterialType(matName);
 
-	LuaObjectMaterial* objMat = GetObjectMaterial(obj, matName);
+	LuaObjectMaterial* objMat = GetObjectMaterial(obj, objType, matName);
 
 	if (objMat == nullptr)
 		return 0;
@@ -396,12 +401,13 @@ int LuaObjectRenderingImpl::SetMaterialLastLOD(lua_State* L)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	// args=<objID, matName, lodMatNum>
-	CSolidObject* obj = ParseSolidObject(L, __func__, 1, GetObjectType());
+	const LuaObjType objType = GetObjectType();
+	CSolidObject* obj = ParseSolidObject(L, __func__, 1, objType);
 
 	if (obj == nullptr)
 		return 0;
 
-	LuaObjectMaterial* objMat = GetObjectMaterial(obj, luaL_checkstring(L, 2));
+	LuaObjectMaterial* objMat = GetObjectMaterial(obj, objType, luaL_checkstring(L, 2));
 
 	if (objMat == nullptr)
 		return 0;
@@ -414,12 +420,13 @@ int LuaObjectRenderingImpl::SetMaterialDisplayLists(lua_State* L)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	// args=<objID, lodLevel, matName, preListID, postListID>
-	CSolidObject* obj = ParseSolidObject(L, __FUNCTION__, 1, GetObjectType());
+	const LuaObjType objType = GetObjectType();
+	CSolidObject* obj = ParseSolidObject(L, __FUNCTION__, 1, objType);
 
 	if (obj == nullptr)
 		return 0;
 
-	LuaObjectMaterial* objMat = GetObjectMaterial(obj, luaL_checkstring(L, 3));
+	LuaObjectMaterial* objMat = GetObjectMaterial(obj, objType, luaL_checkstring(L, 3));
 
 	if (objMat == nullptr)
 		return 0;
@@ -449,7 +456,7 @@ static int SetMaterialUniform(lua_State* L, LuaObjType objType, LuaMatShader::Pa
 
 	if (obj == nullptr)
 		return 0;
-	if ((objMat = GetObjectMaterial(obj, materialName)) == nullptr)
+	if ((objMat = GetObjectMaterial(obj, objType, materialName)) == nullptr)
 		return 0;
 	if ((luaObjLodMat = objMat->GetMaterial(luaL_checkint(L, 3) - 1)) == nullptr)
 		return 0;
@@ -519,7 +526,7 @@ static int ClearMaterialUniform(lua_State* L, LuaObjType objType, LuaMatShader::
 	if (obj == nullptr)
 		return 0;
 
-	if ((objMat = GetObjectMaterial(obj, materialName)) == nullptr)
+	if ((objMat = GetObjectMaterial(obj, objType, materialName)) == nullptr)
 		return 0;
 	if ((luaObjLodMat = objMat->GetMaterial(luaL_checkint(L, 3) - 1)) == nullptr)
 		return 0;
@@ -580,10 +587,10 @@ int LuaObjectRenderingImpl::SetProjectileLuaDraw(lua_State* L)
 /******************************************************************************/
 /******************************************************************************/
 
-static void PrintObjectLOD(const CSolidObject* obj, int lod)
+static void PrintObjectLOD(const CSolidObject* obj, LuaObjType objType, int lod)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	const LuaObjectMaterialData* lmd = obj->GetLuaMaterialData();
+	const LuaObjectMaterialData* lmd = LuaObjectDrawer::GetLuaMaterialData(objType, obj->id);
 	const LuaObjectMaterial* mats = lmd->GetLuaMaterials();
 
 	LOG("  LOD %i:", lod);
@@ -612,12 +619,13 @@ int LuaObjectRenderingImpl::Debug(lua_State* L)
 	}
 
 	// args=<objID>
-	const CSolidObject* obj = ParseSolidObject(L, __func__, 1, GetObjectType());
+	const LuaObjType objType = GetObjectType();
+	const CSolidObject* obj = ParseSolidObject(L, __func__, 1, objType);
 
 	if (obj == nullptr)
 		return 0;
 
-	const LuaObjectMaterialData* lmd = obj->GetLuaMaterialData();
+	const LuaObjectMaterialData* lmd = LuaObjectDrawer::GetLuaMaterialData(objType, obj->id);
 	const LuaObjectMaterial* mats = lmd->GetLuaMaterials();
 
 	LOG_L(L_DEBUG, "%s", "");
@@ -641,7 +649,7 @@ int LuaObjectRenderingImpl::Debug(lua_State* L)
 	LOG_L(L_DEBUG, "LUAMAT_SHADOW         lastLOD = %i", shadowMat.GetLastLOD());
 
 	for (unsigned lod = 0; lod < lmd->GetLODCount(); lod++) {
-		PrintObjectLOD(obj, lod);
+		PrintObjectLOD(obj, objType, lod);
 	}
 
 	return 0;

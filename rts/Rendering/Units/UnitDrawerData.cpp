@@ -55,13 +55,18 @@ const CUnit* DrawerResolveLiveObjectByID<CUnit>(int id)
 template<>
 const CUnit* DrawerGetObjectByID<CUnit>(int id)
 {
-	// PR 27b: with the split running, post-release code may not touch the
-	// sim-owned handler/shell tables -- read the boundary-built cache
-	if (SimDrawSplit::Enabled() && CUnitDrawer::SplitResolveCacheBuilt()) {
-		const CUnit* unit = CUnitDrawer::ResolveSplitCachedObject(id);
-
-		assert(unit != nullptr);
-		return unit;
+	// SCOPE-1 (plan PR 39): with the split running, post-release draw code may
+	// not walk the sim-owned handler tables. Resolve via the drawer-owned render
+	// record's deferred-safe handle (captured producer-side at RenderUnitPreCreated,
+	// NOT a handler walk) -- this replaces the boundary-built splitResolveCache.
+	// Every drawer-registered id (every id a draw pass iterates) has a live handle
+	// here. The cold-miss fallback covers only ids never registered / died-in-batch
+	// (Lua edge queries), where DrawerResolveLiveObjectByID resolves the render-
+	// event-queue shell (featureHandler returns null for a dead id) -- the same
+	// died-in-burst path as before, never the live object of an unregistered id.
+	if (SimDrawSplit::Enabled()) {
+		if (const CUnit* unit = CUnitDrawer::GetRenderRecord(id).obj)
+			return unit;
 	}
 
 	return DrawerResolveLiveObjectByID<CUnit>(id);
@@ -243,6 +248,9 @@ void CUnitDrawerData::Update()
 			UpdateUnitIconState(u);
 
 		UpdateCommon(u);
+
+		// SCOPE-1: refresh the draw-window render record (producer-side)
+		UpdateRenderRecord(u);
 	};
 
 	if (mtModelDrawer) {
@@ -647,6 +655,34 @@ void CUnitDrawerData::RenderUnitPreCreated(const CUnit* unit)
 	auto& iconState = IconStateRef(unit);
 	iconState = {};
 	iconState.definedIconName = unit->unitDef->iconName;
+
+	// SCOPE-1: freeze the render record's immutable header; the mutable fields
+	// are filled by the first UpdateRenderRecord (Update pass) before any draw
+	auto& rr = RenderRecordRef(unit);
+	rr = {};
+	rr.obj   = unit;
+	rr.model = unit->model;
+	rr.def   = unit->unitDef;
+	rr.localModel = &unit->localModel;
+	UpdateRenderRecord(unit);
+}
+
+// SCOPE-1: refresh the sim-owned mutable fields the draw-window passes read.
+// Runs producer-side (once per new sim frame, in Update), sim quiescent.
+void CUnitDrawerData::UpdateRenderRecord(const CUnit* unit)
+{
+	UnitRenderRecord& rr = RenderRecordRef(unit);
+	rr.team          = unit->team;
+	rr.allyteam      = unit->allyteam;
+	rr.engineDrawMask = unit->engineDrawMask;
+	rr.buildFacing   = unit->buildFacing;
+	rr.buildProgress = unit->buildProgress;
+	rr.radius        = unit->radius;
+	rr.pos           = unit->pos;
+	rr.beingBuilt    = unit->beingBuilt;
+	rr.luaDraw       = unit->luaDraw;
+	rr.isInVoid      = unit->IsInVoid();
+	rr.noMinimap     = unit->noMinimap;
 }
 
 void CUnitDrawerData::RenderUnitCreated(const CUnit* unit, int cloaked)
@@ -761,9 +797,15 @@ void CUnitDrawerData::RenderUnitDestroyed(const CUnit* unit)
 	// must happen after UpdateUnitGhosts()
 	IconStateRef(unit).currentIconIndex = icon::INVALID_ICON_INDEX;
 
-	DelObject(unit, true);	
+	DelObject(unit, true);
 
 	LuaObjectDrawer::SetObjectLOD(unit, LUAOBJ_UNIT, 0);
+
+	// SCOPE-1: clear the deferred-safe handle so a dead id no longer resolves
+	// through DrawerGetObjectByID (dangling-pointer guard); the died-in-batch
+	// window is served by the ShellFallback until S7 retires it.
+	if (unit->id < renderRecords.size())
+		renderRecords[unit->id] = {};
 }
 
 void CUnitDrawerData::UnitEnteredRadar(const CUnit* unit, int allyTeam)

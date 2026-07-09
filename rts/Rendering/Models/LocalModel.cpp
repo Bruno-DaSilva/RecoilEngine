@@ -10,7 +10,6 @@ CR_REG_METADATA(LocalModel, (
 	CR_MEMBER(pieces),
 
 	CR_MEMBER(boundingVolume),
-	CR_IGNORED(luaMaterialData),
 	CR_MEMBER(needsBoundariesRecalc)
 ))
 
@@ -26,24 +25,30 @@ void LocalModel::DrawPieces() const
 	}
 }
 
-void LocalModel::DrawPiecesLOD(uint32_t lod) const
+void LocalModel::DrawPiecesLOD(uint32_t lod, const LuaObjectMaterialData* lmd, const std::vector<std::vector<uint32_t>>* lodLists) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	if (!luaMaterialData.ValidLOD(lod))
+	if (!lmd->ValidLOD(lod))
 		return;
 
-	for (const auto& p: pieces) {
-		p.DrawLOD(lod);
+	for (size_t i = 0; i < pieces.size(); ++i) {
+		pieces[i].DrawLOD(lod, (*lodLists)[i]);
 	}
 }
 
-void LocalModel::SetLODCount(uint32_t lodCount) const
+void LocalModel::SetLODCount(uint32_t lodCount, LuaObjectMaterialData* lmd, std::vector<std::vector<uint32_t>>* lodLists) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(Initialized());
 
-	luaMaterialData.SetLODCount(lodCount);
-	pieces[0].SetLODCount(lodCount);
+	lmd->SetLODCount(lodCount);
+
+	// the record's lists are a flat [pieceIndex] vector sized to pieces.size(),
+	// each holding lodCount null display-list ids (replaces the old per-piece
+	// SetLODCount recursion over LocalModelPiece::lodDispLists)
+	lodLists->assign(pieces.size(), std::vector<uint32_t>());
+	for (auto& v : *lodLists)
+		v.assign(lodCount, 0u);
 }
 
 

@@ -8,8 +8,10 @@
 #include "Rendering/Common/RenderEventQueue.h"
 #include "Rendering/UnitDefImage.h"
 #include "Game/GlobalUnsynced.h"
+#include "Lua/LuaObjectMaterial.h"
 
 struct S3DModel;
+struct LocalModel;
 class CUnitDrawer;
 struct UnitDef;
 
@@ -214,6 +216,72 @@ public:
 	void SetUnitCustomIcon(const CUnit* u, size_t iconIdx) { IconStateRef(u).customIconIndex = iconIdx; }
 	void SetUnitDrawIcon(const CUnit* u, bool b) { IconStateRef(u).drawIcon = b; }
 	void SetUnitIconRadius(const CUnit* u, float r) { IconStateRef(u).iconRadius = r; }
+public:
+	// render-owned per-unit render record (sim/draw §A, SCOPE-1 / plan PR 39):
+	// the immutable header ({model, unitDef}) plus the sim-owned MUTABLE fields
+	// the DRAW-window passes read off the live CUnit. Populated producer-side
+	// (immutable at RenderUnitPreCreated; mutable in UpdateRenderRecord from the
+	// once-per-frame Update, alongside UpdateObjectDrawFlags). The draw-window
+	// passes read this by id and never dereference the live sim object — so no
+	// pass resolves through unitHandler under the flip. Keyed by unit id; stale
+	// after death until id reuse (same semantics as drawFlags/iconStates), which
+	// keeps a died-in-batch id resolvable through the deferred-record dispatch.
+	// LOS is served from SimSnapshot (its established source); interpolated
+	// position/orientation come from the already-drawer-owned drawPos/transform
+	// storage; selection (isSelected) stays live-read (draw-owned, race-free).
+	struct UnitRenderRecord {
+		// deferred-deletion-safe handle captured producer-side (NOT via a handler
+		// walk); replaces the splitResolveCache pointer. Draw passes read the
+		// scalar fields below, never this — it only backs DrawerGetObjectByID's
+		// id->pointer resolution (id-keyed SSBO offset lookups + the immediate
+		// path via `localModel`). Valid through the draw frame (DeferredObjectDeleter).
+		const CUnit*    obj   = nullptr;
+		const S3DModel* model = nullptr;   // immutable: unit->model
+		const UnitDef*  def   = nullptr;   // immutable: unit->unitDef
+		// immutable interior pointer used ONLY by the legacy immediate-mode piece
+		// path (localModel.Draw / being-built stages / Lua-material LOD draws). The
+		// memory stays valid through the draw frame via DeferredObjectDeleter (same
+		// safety class as the deleted splitResolveCache pointer, minus the handler
+		// walk). Piece transforms/scriptVisible it reads are pre-existing tolerated
+		// torn-reads (§C); the GL4 SSBO path never touches this.
+		const LocalModel* localModel = nullptr;
+		int      team          = 0;
+		int      allyteam      = 0;
+		uint8_t  engineDrawMask = 0;
+		int      buildFacing    = 0;
+		float    buildProgress  = 0.0f;
+		float    radius         = 0.0f;
+		float3   pos;
+		bool     beingBuilt     = false;
+		bool     luaDraw        = false;
+		bool     isInVoid       = false;
+		bool     noMinimap      = false;
+		// evicted from LocalModel/LocalModelPiece (sim/draw PR 10): draw/Lua-owned
+		// per-object Lua material state + per-piece LOD display lists. Never
+		// sim-touched; keyed by unit id, cleared with the record at destroy.
+		LuaObjectMaterialData luaMaterialData;
+		std::vector<std::vector<uint32_t>> lodDispLists; // [pieceIndex][lod]
+	};
+
+	const UnitRenderRecord& GetRenderRecord(const CUnit* u) const { return GetRenderRecord(u->id); }
+	const UnitRenderRecord& GetRenderRecord(int id) const {
+		static const UnitRenderRecord def = {};
+		return (static_cast<size_t>(id) < renderRecords.size()) ? renderRecords[id] : def;
+	}
+
+	// MUTABLE draw/Lua-owned eviction accessors (sim/draw PR 10); resize the
+	// record store on demand (like RenderRecordRef) so unregistered ids get a
+	// valid default-constructed slot instead of crashing
+	LuaObjectMaterialData& GetLuaMaterialDataRef(int id) {
+		if (static_cast<size_t>(id) >= renderRecords.size())
+			renderRecords.resize(id + 1);
+		return renderRecords[id].luaMaterialData;
+	}
+	std::vector<std::vector<uint32_t>>& GetLodDispListsRef(int id) {
+		if (static_cast<size_t>(id) >= renderRecords.size())
+			renderRecords.resize(id + 1);
+		return renderRecords[id].lodDispLists;
+	}
 private:
 	void UpdateTempDrawUnits(std::vector<TempDrawUnit>& tempDrawUnits);
 
@@ -254,9 +322,18 @@ private:
 	const UnitIconState& GetIconState(int id) const;
 	UnitIconState& IconStateRef(const CUnit* u);
 
+	// render-record producer-side authoring (see UnitRenderRecord above)
+	UnitRenderRecord& RenderRecordRef(const CUnit* u) {
+		if (u->id >= renderRecords.size())
+			renderRecords.resize(u->id + 1);
+		return renderRecords[u->id];
+	}
+	void UpdateRenderRecord(const CUnit* unit);
+
 	SavedData savedData;
 
 	std::vector<UnitIconState> iconStates; // indexed by unit id
+	std::vector<UnitRenderRecord> renderRecords; // indexed by unit id
 
 	std::vector<UnitDefImage> unitDefImages;
 

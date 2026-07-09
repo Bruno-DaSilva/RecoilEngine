@@ -36,6 +36,11 @@ public:
 	static void SetObjectLOD(const CSolidObject* obj, LuaObjType objType, unsigned int lodCount);
 	static bool AddObjectForLOD(const CSolidObject* obj, LuaObjType objType, bool useAlphaMat, bool useShadowMat);
 
+	// central dispatch to the drawer-owned eviction storage (sim/draw PR 10);
+	// replaces CSolidObject::GetLuaMaterialData / LocalModel::GetLuaMaterialData
+	static LuaObjectMaterialData* GetLuaMaterialData(LuaObjType objType, int id);
+	static std::vector<std::vector<uint32_t>>* GetLodDispLists(LuaObjType objType, int id);
+
 	static bool AddOpaqueMaterialObject(const CSolidObject* obj, LuaObjType objType);
 	static bool AddAlphaMaterialObject(const CSolidObject* obj, LuaObjType objType);
 	static bool AddShadowMaterialObject(const CSolidObject* obj, LuaObjType objType);

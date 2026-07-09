@@ -196,9 +196,8 @@ public:
 
 	const CollisionVolume* GetCollisionVolume(const LocalModelPiece* lmp) const;
 
-	// non-const result from a const object: forwards to LocalModel (render-owned
-	// state, see the member comment there; sim/draw PR 10)
-	LuaObjectMaterialData* GetLuaMaterialData() const;
+	// GetLuaMaterialData() evicted to the drawer render record (sim/draw PR 10):
+	// reach it via LuaObjectDrawer::GetLuaMaterialData(objType, id)
 
 	const LocalModelPiece* GetLastHitPiece(int frame, int synced = true) const {
 		if (frame == pieceHitFrames[synced])

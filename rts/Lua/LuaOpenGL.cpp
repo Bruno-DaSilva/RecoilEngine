@@ -1514,7 +1514,7 @@ static void GLObjectPieceMultMatrix(lua_State* L, const CSolidObject* obj)
 
 static bool GLObjectDrawWithLuaMat(lua_State* L, CSolidObject* obj, LuaObjType objType)
 {
-	LuaObjectMaterialData* lmd = obj->GetLuaMaterialData();
+	LuaObjectMaterialData* lmd = LuaObjectDrawer::GetLuaMaterialData(objType, obj->id);
 
 	if (!lmd->Enabled())
 		return false;
@@ -1642,7 +1642,7 @@ int LuaOpenGL::UnitCommon(lua_State* L, bool applyTransform, bool callDrawUnit)
 	if (!useLuaMat) {
 		// "scoped" draw; this prevents any Lua-assigned
 		// material(s) from being used by the call below
-		(unit->GetLuaMaterialData())->PushLODCount(0);
+		LuaObjectDrawer::GetLuaMaterialData(LUAOBJ_UNIT, unit->id)->PushLODCount(0);
 	}
 
 	if (doRawDraw) {
@@ -1654,7 +1654,7 @@ int LuaOpenGL::UnitCommon(lua_State* L, bool applyTransform, bool callDrawUnit)
 	}
 
 	if (!useLuaMat) {
-		(unit->GetLuaMaterialData())->PopLODCount();
+		LuaObjectDrawer::GetLuaMaterialData(LUAOBJ_UNIT, unit->id)->PopLODCount();
 	}
 
 	glPopAttrib();
@@ -1810,7 +1810,7 @@ int LuaOpenGL::FeatureCommon(lua_State* L, bool applyTransform, bool callDrawFea
 	if (!useLuaMat) {
 		// "scoped" draw; this prevents any Lua-assigned
 		// material(s) from being used by the call below
-		(feature->GetLuaMaterialData())->PushLODCount(0);
+		LuaObjectDrawer::GetLuaMaterialData(LUAOBJ_FEATURE, feature->id)->PushLODCount(0);
 	}
 
 	if (doRawDraw) {
@@ -1822,7 +1822,7 @@ int LuaOpenGL::FeatureCommon(lua_State* L, bool applyTransform, bool callDrawFea
 	}
 
 	if (!useLuaMat) {
-		(feature->GetLuaMaterialData())->PopLODCount();
+		LuaObjectDrawer::GetLuaMaterialData(LUAOBJ_FEATURE, feature->id)->PopLODCount();
 	}
 
 	glPopAttrib();

@@ -55,6 +55,8 @@ bool CFeatureDrawer::ShouldDrawOpaqueFeature(const CFeature* f, uint8_t thisPass
 	assert(f);
 	assert(f->model);
 
+	const auto& rr = CFeatureDrawer::GetRenderRecord(f);
+
 	if (GetDrawFlag(f) == 0)
 		return false;
 
@@ -73,7 +75,7 @@ bool CFeatureDrawer::ShouldDrawOpaqueFeature(const CFeature* f, uint8_t thisPass
 	if (LuaObjectDrawer::AddOpaqueMaterialObject(f, LUAOBJ_FEATURE))
 		return false;
 
-	if ((f->engineDrawMask & thisPassMask) != thisPassMask)
+	if ((rr.engineDrawMask & thisPassMask) != thisPassMask)
 		return false;
 
 	return true;
@@ -84,6 +86,8 @@ bool CFeatureDrawer::ShouldDrawAlphaFeature(const CFeature* f, uint8_t thisPassM
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(f);
 	assert(f->model);
+
+	const auto& rr = CFeatureDrawer::GetRenderRecord(f);
 
 	if (GetDrawFlag(f) == 0)
 		return false;
@@ -103,7 +107,7 @@ bool CFeatureDrawer::ShouldDrawAlphaFeature(const CFeature* f, uint8_t thisPassM
 	if (LuaObjectDrawer::AddAlphaMaterialObject(f, LUAOBJ_FEATURE))
 		return false;
 
-	if ((f->engineDrawMask & thisPassMask) != thisPassMask)
+	if ((rr.engineDrawMask & thisPassMask) != thisPassMask)
 		return false;
 
 	return true;
@@ -117,13 +121,15 @@ bool CFeatureDrawer::ShouldDrawFeatureShadow(const CFeature* f)
 
 	static constexpr uint8_t thisPassMask = DrawFlags::SO_SHOPAQ_FLAG;
 
+	const auto& rr = CFeatureDrawer::GetRenderRecord(f);
+
 	if (!HasDrawFlag(f, DrawFlags::SO_SHOPAQ_FLAG))
 		return false;
 
 	if (LuaObjectDrawer::AddShadowMaterialObject(f, LUAOBJ_FEATURE))
 		return false;
 
-	if ((f->engineDrawMask & thisPassMask) != thisPassMask)
+	if ((rr.engineDrawMask & thisPassMask) != thisPassMask)
 		return false;
 
 	return true;
@@ -132,9 +138,10 @@ bool CFeatureDrawer::ShouldDrawFeatureShadow(const CFeature* f)
 void CFeatureDrawer::PushIndividualState(const CFeature* feature, bool deferredPass) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	const auto& rr = CFeatureDrawer::GetRenderRecord(feature);
 	SetupOpaqueDrawing(false);
 	CModelDrawerHelper::PushModelRenderState(feature);
-	SetTeamColor(feature->team);
+	SetTeamColor(rr.team);
 }
 
 void CFeatureDrawer::PopIndividualState(const CFeature* feature, bool deferredPass) const
@@ -272,8 +279,10 @@ void CFeatureDrawerLegacy::DrawOpaqueFeature(const CFeature* f, uint8_t thisPass
 	if (!ShouldDrawOpaqueFeature(f, thisPassMask))
 		return;
 
+	const auto& rr = CFeatureDrawer::GetRenderRecord(f);
+
 	// draw the unit with the default (non-Lua) material
-	SetTeamColor(f->team);
+	SetTeamColor(rr.team);
 	DrawFeatureTrans(f, 0, 0, false, false);
 }
 
@@ -283,7 +292,9 @@ void CFeatureDrawerLegacy::DrawAlphaFeature(const CFeature* f, uint8_t thisPassM
 	if (!ShouldDrawAlphaFeature(f, thisPassMask))
 		return;
 
-	SetTeamColor(f->team, IModelDrawerState::alphaValues.x);
+	const auto& rr = CFeatureDrawer::GetRenderRecord(f);
+
+	SetTeamColor(rr.team, IModelDrawerState::alphaValues.x);
 	DrawFeatureTrans(f, 0, 0, false, false);
 }
 
@@ -297,10 +308,11 @@ void CFeatureDrawerLegacy::DrawFeatureShadow(const CFeature* f) const
 void CFeatureDrawerLegacy::DrawFeatureModel(const CFeature* feature, bool noLuaCall) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	if (!noLuaCall && feature->luaDraw && eventHandler.DrawFeature(feature))
+	const auto& rr = CFeatureDrawer::GetRenderRecord(feature);
+	if (!noLuaCall && rr.luaDraw && eventHandler.DrawFeature(feature))
 		return;
 
-	feature->localModel.Draw();
+	rr.localModel->Draw(&CFeatureDrawer::GetLuaMaterialData(feature->id), &CFeatureDrawer::GetLodDispLists(feature->id));
 }
 
 void CFeatureDrawerGL4::DrawObjectsShadow(int modelType) const

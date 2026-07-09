@@ -83,21 +83,6 @@ protected:
 	// object itself is read-only (draw code cannot mutate sim state, PR 10)
 	virtual void UpdateObjectDrawFlags(const CSolidObject* o) = 0;
 
-	// PR 27b: resolve one id into the split cache (barrier-only; the sim is
-	// parked, so DrawerResolveLiveObjectByID's handler read is sanctioned).
-	// Exposed so derived drawers can register ids their render containers do
-	// not hold (see RegisterExtraSplitResolveIDs / BuildSplitResolveCache).
-	void CacheSplitResolveID(int id) {
-		if (id < 0)
-			return;
-		if (static_cast<size_t>(id) >= splitResolveCache.size())
-			splitResolveCache.resize(id + 1, nullptr);
-
-		splitResolveCache[id] = DrawerResolveLiveObjectByID<T>(id);
-	}
-	// hook: append extra ids after the unsortedObjects pass (default none).
-	// Only the feature drawer overrides it -- every unit is model-registered.
-	virtual void RegisterExtraSplitResolveIDs() {}
 private:
 	void ExtractObjectTransforms(const T* o);
 	void UpdateObjectUniforms(const T* o);
@@ -105,28 +90,13 @@ public:
 	// object ids; resolve via DrawerGetObjectByID<T> (see above)
 	const std::vector<int>& GetUnsortedObjects() const { return unsortedObjects; }
 
-	// PR 27b: see the splitResolveCache member comment. Build point is the
-	// SimDrawBarrier (and the valve service), right after the drain, so the
-	// cache covers every id the drawer containers hold this boundary.
-	void BuildSplitResolveCache() {
-		splitResolveCacheBuilt = true;
+	// SCOPE-1 (plan PR 39): the PR-27b splitResolveCache + BuildSplitResolveCache
+	// are DELETED. Draw-window id->object resolution now goes through the drawer-
+	// owned render record's deferred-safe handle (UnitRenderRecord::obj /
+	// FeatureRenderRecord::obj), captured producer-side at creation, so no draw
+	// pass walks the sim-owned handler tables and no per-barrier cache rebuild is
+	// needed. See DrawerGetObjectByID<T> (UnitDrawerData.cpp / FeatureDrawerData.cpp).
 
-		std::fill(splitResolveCache.begin(), splitResolveCache.end(), nullptr);
-
-		for (const int id: unsortedObjects)
-			CacheSplitResolveID(id);
-
-		// derived drawers contribute ids their render containers never hold but
-		// snapshot-serving twins still resolve boundary-consistently (non-model
-		// features -- trees/geo-vents are alive + LOS-visible yet unregistered)
-		RegisterExtraSplitResolveIDs();
-	}
-
-	// nullptr for unregistered ids; only meaningful after the first build
-	bool SplitResolveCacheBuilt() const { return splitResolveCacheBuilt; }
-	const T* ResolveSplitCachedObject(int id) const {
-		return (size_t(id) < splitResolveCache.size()) ? splitResolveCache[id] : nullptr;
-	}
 	const ModelRenderContainer<T>& GetModelRenderer(int modelType) const { return modelRenderers[modelType]; }
 
 	// render-owned draw-visibility flags (sim/draw §A: these were drawFlag/previousDrawFlag
@@ -239,14 +209,8 @@ protected:
 
 	std::vector<int> unsortedObjects; // object ids (see GetUnsortedObjects)
 
-	// PR 27b: boundary-built id->object resolution cache. Post-release, the
-	// draw passes may not resolve ids through the sim-owned handlers (the
-	// sim thread mutates them mid-frame: slots null at destroy time, the
-	// pending-destroy shell map grows); with the split running, resolution
-	// reads this cache instead -- built once per barrier with the sim
-	// parked, covering exactly the drawer-registered ids the passes walk.
-	std::vector<const T*> splitResolveCache;
-	bool splitResolveCacheBuilt = false;
+	// SCOPE-1: splitResolveCache/splitResolveCacheBuilt DELETED — id->object
+	// resolution now uses the drawer-owned render record's deferred-safe handle.
 	std::vector<DrawPosition> drawPositions; // indexed by object id
 	std::vector<DrawFlagState> drawFlags;    // indexed by object id
 	spring::unordered_map<int, ScopedTransformMemAlloc> scTransMemAllocMap; // keyed by object id

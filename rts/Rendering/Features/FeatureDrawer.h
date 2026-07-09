@@ -54,6 +54,16 @@ public:
 	static bool HasDrawFlag(const CFeature* feature, DrawFlags f) { return modelDrawerData->HasDrawFlag(feature, f); }
 
 	static void ClearPreviousDrawFlags() { modelDrawerData->ClearPreviousDrawFlags(); }
+
+	// SCOPE-1: drawer-owned per-feature render record (immutable header + sim-owned
+	// mutable fields the draw-window passes read); never dereference live CFeature
+	static const CFeatureDrawerData::FeatureRenderRecord& GetRenderRecord(const CFeature* feature) { return modelDrawerData->GetRenderRecord(feature); }
+	static const CFeatureDrawerData::FeatureRenderRecord& GetRenderRecord(int featureID) { return modelDrawerData->GetRenderRecord(featureID); }
+
+	// drawer-owned Lua material state + per-piece LOD display lists evicted from
+	// LocalModel/LocalModelPiece (sim/draw PR 10)
+	static LuaObjectMaterialData& GetLuaMaterialData(int featureID) { return modelDrawerData->GetLuaMaterialDataRef(featureID); }
+	static std::vector<std::vector<uint32_t>>& GetLodDispLists(int featureID) { return modelDrawerData->GetLodDispListsRef(featureID); }
 public:
 	virtual void DrawFeatureModel(const CFeature* feature, bool noLuaCall) const = 0;
 protected:

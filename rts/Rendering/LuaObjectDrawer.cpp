@@ -406,7 +406,7 @@ void LuaObjectDrawer::DrawMaterialBin(
 
 	for (int objTeam = minObjTeam; objTeam <= maxObjTeam; objTeam++) {
 		for (const CSolidObject* obj: objectBuckets[objTeam]) {
-			const LuaObjectMaterialData* matData = obj->GetLuaMaterialData();
+			const LuaObjectMaterialData* matData = GetLuaMaterialData(objType, obj->id);
 			const LuaObjectLODMaterial* lodMat = matData->GetLuaLODMaterial(matType);
 
 			DrawBinObject(obj, objType, lodMat, currBin,  deferredPass, alphaMatBin, true, false);
@@ -419,7 +419,7 @@ void LuaObjectDrawer::DrawMaterialBin(
 	#else
 
 	for (const CSolidObject* obj: objects) {
-		const LuaObjectMaterialData* matData = obj->GetLuaMaterialData();
+		const LuaObjectMaterialData* matData = GetLuaMaterialData(objType, obj->id);
 		const LuaObjectLODMaterial* lodMat = matData->GetLuaLODMaterial(matType);
 
 		DrawBinObject(obj, objType, lodMat, currBin,  deferredPass, alphaMatBin, true, false);
@@ -541,7 +541,7 @@ void LuaObjectDrawer::DrawDeferredPass(LuaObjType objType)
 
 bool LuaObjectDrawer::DrawSingleObjectCommon(const CSolidObject* obj, LuaObjType objType, bool applyTrans)
 {
-	const LuaObjectMaterialData* matData = obj->GetLuaMaterialData();
+	const LuaObjectMaterialData* matData = GetLuaMaterialData(objType, obj->id);
 	const LuaObjectLODMaterial* lodMat = nullptr;
 
 	if (!matData->Enabled())
@@ -605,12 +605,35 @@ bool LuaObjectDrawer::DrawSingleObjectNoTrans(const CSolidObject* obj, LuaObjTyp
 
 
 
+LuaObjectMaterialData* LuaObjectDrawer::GetLuaMaterialData(LuaObjType objType, int id)
+{
+	switch (objType) {
+		case LUAOBJ_UNIT   : { return &CUnitDrawer::GetLuaMaterialData(id); } break;
+		case LUAOBJ_FEATURE: { return &CFeatureDrawer::GetLuaMaterialData(id); } break;
+		default            : { assert(false); } break;
+	}
+
+	return nullptr;
+}
+
+std::vector<std::vector<uint32_t>>* LuaObjectDrawer::GetLodDispLists(LuaObjType objType, int id)
+{
+	switch (objType) {
+		case LUAOBJ_UNIT   : { return &CUnitDrawer::GetLodDispLists(id); } break;
+		case LUAOBJ_FEATURE: { return &CFeatureDrawer::GetLodDispLists(id); } break;
+		default            : { assert(false); } break;
+	}
+
+	return nullptr;
+}
+
+
 void LuaObjectDrawer::SetObjectLOD(const CSolidObject* obj, LuaObjType objType, unsigned int lodCount)
 {
 	if (!obj->localModel.Initialized())
 		return;
 
-	obj->localModel.SetLODCount(lodCount);
+	obj->localModel.SetLODCount(lodCount, GetLuaMaterialData(objType, obj->id), GetLodDispLists(objType, obj->id));
 }
 
 bool LuaObjectDrawer::AddObjectForLOD(const CSolidObject* obj, LuaObjType objType, bool useAlphaMat, bool useShadowMat)
@@ -627,7 +650,7 @@ bool LuaObjectDrawer::AddObjectForLOD(const CSolidObject* obj, LuaObjType objTyp
 
 bool LuaObjectDrawer::AddOpaqueMaterialObject(const CSolidObject* obj, LuaObjType objType)
 {
-	LuaObjectMaterialData* matData = obj->GetLuaMaterialData();
+	LuaObjectMaterialData* matData = GetLuaMaterialData(objType, obj->id);
 
 	const LuaMatType matType = GetDrawPassOpaqueMat();
 	const float      lodDist = camera->ProjectedDistance(obj->pos);
@@ -637,7 +660,7 @@ bool LuaObjectDrawer::AddOpaqueMaterialObject(const CSolidObject* obj, LuaObjTyp
 
 bool LuaObjectDrawer::AddAlphaMaterialObject(const CSolidObject* obj, LuaObjType objType)
 {
-	LuaObjectMaterialData* matData = obj->GetLuaMaterialData();
+	LuaObjectMaterialData* matData = GetLuaMaterialData(objType, obj->id);
 
 	const LuaMatType matType = GetDrawPassAlphaMat();
 	const float      lodDist = camera->ProjectedDistance(obj->pos);
@@ -647,7 +670,7 @@ bool LuaObjectDrawer::AddAlphaMaterialObject(const CSolidObject* obj, LuaObjType
 
 bool LuaObjectDrawer::AddShadowMaterialObject(const CSolidObject* obj, LuaObjType objType)
 {
-	LuaObjectMaterialData* matData = obj->GetLuaMaterialData();
+	LuaObjectMaterialData* matData = GetLuaMaterialData(objType, obj->id);
 
 	const LuaMatType matType = GetDrawPassShadowMat();
 	const float      lodDist = camera->ProjectedDistance(obj->pos);

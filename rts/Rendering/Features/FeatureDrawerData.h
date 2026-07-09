@@ -2,9 +2,13 @@
 
 #include "System/float3.h"
 #include "Rendering/Common/ModelDrawerData.h"
+#include "Lua/LuaObjectMaterial.h"
 
 class CFeature;
 class CCamera;
+struct S3DModel;
+struct LocalModel;
+struct FeatureDef;
 
 class CFeatureDrawerData : public CFeatureDrawerDataBase {
 public:
@@ -41,19 +45,74 @@ public:
 	// features) and again after the owning feature's slot is released — each
 	// matching the old member's construction-time init.
 	float GetDrawAlpha(const CFeature* f) const;
+
+	// SCOPE-1 (plan PR 39): drawer-owned per-feature render record — the
+	// immutable header ({model, def}) plus the sim-owned mutable fields the
+	// DRAW-window passes read off the live CFeature. Populated producer-side
+	// (immutable at RenderFeaturePreCreated; mutable in UpdateRenderRecord from
+	// the once-per-frame Update). Draw passes read this by id and never
+	// dereference the live sim object. Keyed by feature id; stale after death
+	// until id reuse (same semantics as unsyncedTransforms/drawAlphas).
+	struct FeatureRenderRecord {
+		// deferred-deletion-safe handle (see UnitRenderRecord::obj). For non-model
+		// features (trees/geo-vents) that RenderFeaturePreCreated does not register
+		// with the model drawer, this is still set (RegisterNonModelFeature) so the
+		// Lua draw-payload resolvers (LuaSnapshotServe::ResolveDrawFeature) find them
+		// — replacing the deleted RegisterExtraSplitResolveIDs / splitResolveCache.
+		const CFeature*   obj   = nullptr;
+		const S3DModel*   model = nullptr; // immutable: feature->model (null for non-model)
+		const FeatureDef* def   = nullptr; // immutable: feature->def
+		// immutable interior pointer for the legacy immediate-mode piece path
+		// (see UnitRenderRecord::localModel); GL4 SSBO path never touches it
+		const LocalModel* localModel = nullptr;
+		int     team           = 0;
+		uint8_t engineDrawMask = 0;
+		bool    luaDraw        = false;
+		// evicted from LocalModel/LocalModelPiece (sim/draw PR 10): draw/Lua-owned
+		// per-object Lua material state + per-piece LOD display lists. Never
+		// sim-touched; keyed by feature id, cleared with the record at destroy.
+		LuaObjectMaterialData luaMaterialData;
+		std::vector<std::vector<uint32_t>> lodDispLists; // [pieceIndex][lod]
+	};
+
+	const FeatureRenderRecord& GetRenderRecord(const CFeature* f) const;
+	const FeatureRenderRecord& GetRenderRecord(int id) const {
+		static const FeatureRenderRecord def = {};
+		return (static_cast<size_t>(id) < renderRecords.size()) ? renderRecords[id] : def;
+	}
+
+	// MUTABLE draw/Lua-owned eviction accessors (sim/draw PR 10); resize the
+	// record store on demand so unregistered ids get a valid default-constructed
+	// slot instead of crashing
+	LuaObjectMaterialData& GetLuaMaterialDataRef(int id) {
+		if (static_cast<size_t>(id) >= renderRecords.size())
+			renderRecords.resize(id + 1);
+		return renderRecords[id].luaMaterialData;
+	}
+	std::vector<std::vector<uint32_t>>& GetLodDispListsRef(int id) {
+		if (static_cast<size_t>(id) >= renderRecords.size())
+			renderRecords.resize(id + 1);
+		return renderRecords[id].lodDispLists;
+	}
 protected:
 	void UpdateObjectDrawFlags(const CSolidObject* o) override;
-	// PR 27b: register non-model features (trees/geo-vents) in the split
-	// resolve cache -- they are alive + LOS-visible so snapshot-serving twins
-	// resolve their ids, but RenderFeaturePreCreated never registers them.
-	void RegisterExtraSplitResolveIDs() override;
 private:
+	// SCOPE-1: register the deferred-safe handle for non-model features (trees/
+	// geo-vents) so the Lua draw-payload resolvers find them. Called each Update
+	// (producer-side). Replaces the deleted RegisterExtraSplitResolveIDs.
+	void RegisterNonModelFeatureRecords();
+
 	void UpdateDrawPos(const CFeature* f);
 	void UpdateUnsyncedTransform(const CFeature* f);
+
+	// render-record producer-side authoring (see FeatureRenderRecord above)
+	FeatureRenderRecord& RenderRecordRef(const CFeature* f);
+	void UpdateRenderRecord(const CFeature* feature);
 public:
 	float featureDrawDistance;
 	float featureFadeDistance;
 private:
 	std::vector<CMatrix44f> unsyncedTransforms; // indexed by feature id
 	std::vector<float> drawAlphas; // indexed by feature id (see GetDrawAlpha)
+	std::vector<FeatureRenderRecord> renderRecords; // indexed by feature id
 };

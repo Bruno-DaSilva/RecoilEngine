@@ -40,8 +40,9 @@ struct LocalModelPiece
 	uint32_t GetScriptPieceIndex() const { return scriptPieceIndex; }
 
 	void Draw() const;
-	void DrawLOD(uint32_t lod) const;
-	void SetLODCount(uint32_t count) const;
+	// lodDispLists was evicted to the drawer render record (sim/draw PR 10); the
+	// caller threads in this piece's per-LOD display-list vector
+	void DrawLOD(uint32_t lod, const std::vector<uint32_t>& pieceLodLists) const;
 
 
 	// on-demand functions
@@ -127,9 +128,6 @@ public:
 	std::vector<LocalModelPiece*> children;
 	LocalModelPiece* parent;
 
-	// mutable: render-owned per-LOD display lists (Lua-assigned), same class
-	// as luaMaterialData on LocalModel (sim/draw PR 10)
-	mutable std::vector<uint32_t> lodDispLists;
 	const S3DModelPiece* original;
 
 	LocalModel* localModel;
