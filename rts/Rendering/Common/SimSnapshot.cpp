@@ -304,14 +304,18 @@ bool SimSnapshot::FeatureRows::IsInLosForAllyTeam(int id, int argAllyTeam) const
 	}
 }
 
-bool SimSnapshot::ProduceDue() const
+bool SimSnapshot::FramesDue() const
 {
 	const int newest = NewestIdx();
 
 	return
-		mutatedOutsideFrame ||
 		(buffers[newest].simFrame != gs->frameNum) ||
 		(buffers[newest].aliveCount != static_cast<int32_t>(unitHandler.GetActiveUnits().size()));
+}
+
+bool SimSnapshot::ProduceDue() const
+{
+	return mutatedOutsideFrame || FramesDue();
 }
 
 void SimSnapshot::Update()

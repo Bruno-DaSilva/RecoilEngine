@@ -1980,6 +1980,9 @@ static spring_time simPauseBeginTime;
 // timer for between-frames mutation classes without an explicit mark, e.g.
 // main-thread clientPaused flips); file-static, reset at SpawnSimThread
 static spring_time lastEpochPublishTime;
+// PR 44a: last producer pass that observed new sim frames -- the
+// frame-idle gate for non-frame-driven republishes (see below)
+static spring_time lastFrameAdvanceTime;
 
 // PR 44a -- THE EPOCH PRODUCER (§3.1/§3.2), sim thread, frame edges only.
 // Order: ctrl-poke drain (freshness by construction) -> pacing gate
@@ -2004,15 +2007,30 @@ void CGame::ProduceEpochAtSimEdge()
 	if (!simSnapshot.NewestEpochConsumed())
 		return;
 
-	// (p3) due-check: new frames / alive-count change / between-frames
-	// mutation (rows), pending records or deferred closures (they must ride
-	// an epoch to ever dispatch -- e.g. net-driven chat pokes while paused),
-	// or the low-rate fallback republish.
-	const bool rowsDue = simSnapshot.ProduceDue();
-	const bool recsDue = (renderEventQueue.SealedRecordCount() == 0 && !renderEventQueue.Empty()) || !UnsyncedBoundaryQueue::Empty();
-	const bool timeDue = (spring_now() - lastEpochPublishTime).toMilliSecsf() >= 250.0f;
+	// (p3) due-check. Frame-driven publishes (new frames / alive-count
+	// change) happen unconditionally. The NON-frame-driven classes --
+	// between-frames mutation marks, pending closures, the low-rate fallback
+	// -- publish only while the sim is FRAME-IDLE (paused / pregame / no
+	// frames for >100ms): while frames flow they fold into the next frame
+	// edge's natural publish (<=1 sim frame staleness, the same class as the
+	// pre-flip in-place refresh). This avoids SAME-FRAME REPUBLISHES during
+	// active play, which dispatch widget events without a perceived
+	// GetGameFrame advance -- a pattern the lockstep barrier never produced
+	// (a nonempty event batch always implied a frame advance) and one that
+	// trips BAR's instancevbotable zombie recovery (headful gate finding:
+	// unitlights/healthbar ZOMBIE echoes on Rosetta).
+	const bool framesDue = simSnapshot.FramesDue();
+	const spring_time now = spring_now();
 
-	if (!rowsDue && !recsDue && !timeDue) {
+	if (framesDue)
+		lastFrameAdvanceTime = now;
+
+	const bool frameIdle = (now - lastFrameAdvanceTime).toMilliSecsf() >= 100.0f;
+	const bool mutationDue = simSnapshot.MutatedOutsideFrameMark();
+	const bool recsDue = (renderEventQueue.SealedRecordCount() == 0 && !renderEventQueue.Empty()) || !UnsyncedBoundaryQueue::Empty();
+	const bool timeDue = (now - lastEpochPublishTime).toMilliSecsf() >= 250.0f;
+
+	if (!framesDue && !(frameIdle && (mutationDue || recsDue || timeDue))) {
 		// idle/paused query servicing: no state changed since the newest
 		// epoch, so evaluating against it is trivially §7.3-consistent
 		LuaSnapshotServe::EvaluateQueriesAtSimEdge();
@@ -2137,6 +2155,7 @@ void CGame::SpawnSimThread()
 	// set BEFORE the thread exists (see the assert in SimThreadProc)
 	SimDrawSplit::SetSimThreadRunning(true);
 	lastEpochPublishTime = spring_now();
+	lastFrameAdvanceTime = spring_now();
 	simNetThread = spring::thread(std::bind(&CGame::SimThreadProc, this));
 
 	LOG("[Game::%s] sim thread spawned (SimDrawSplit=1)", __func__);

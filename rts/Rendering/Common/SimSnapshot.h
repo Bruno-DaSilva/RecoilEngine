@@ -1226,6 +1226,12 @@ public:
 	/// mutation); Game.cpp adds the pending-records/closures + fallback-timer
 	/// conditions. Producer (sim) thread.
 	bool ProduceDue() const;
+	/// the FRAME-DRIVEN half only (new sim frames / alive-count change) --
+	/// the flip producer publishes these unconditionally, while the mutation
+	/// mark below joins the frame-idle-gated classes (see ProduceEpochAtSimEdge)
+	bool FramesDue() const;
+	/// the between-frames mutation mark, unconsumed (cleared by production)
+	bool MutatedOutsideFrameMark() const { return mutatedOutsideFrame; }
 
 	/// the epoch id the next production will stamp (counter+1) -- the producer
 	/// keys its channel refreshes (cmd/piece caches) on it pre-publish
