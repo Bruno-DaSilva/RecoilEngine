@@ -89,7 +89,13 @@ protected:
 	// consume's record dispatch (the producer covers objects registered as of
 	// the previous consume; without this a new object's first rendered frame
 	// would have a zero/stale pose). Runs under the park. No-op when empty.
-	void ExtractPendingNewObjectTransforms();
+	// resolveRecordObj resolves an id via the drawer's RENDER RECORD ONLY --
+	// live pointer | readable retained shell | nullptr, NEVER a released
+	// slot: DrawerGetObjectByID's live-resolve fallback can return null (its
+	// assert is NDEBUG-dead) or outlive an ack for ids whose lifetime ended
+	// between the push and this call (the pr44a_strict_atg f=11826 SIGSEGV).
+	template<typename RecordObjFn>
+	void ExtractPendingNewObjectTransforms(RecordObjFn&& resolveRecordObj);
 	void UpdateCommon(const T* o);
 	// authors the drawer-owned draw-flag storage (sim/draw §A, PR 4); the
 	// object itself is read-only (draw code cannot mutate sim state, PR 10)
@@ -357,7 +363,8 @@ inline void CModelDrawerDataBase<T>::UpdateObject(const T* co, bool init)
  *   pieces store Transform::Zero() in both slots.
  */
 template<typename T>
-inline void CModelDrawerDataBase<T>::ExtractPendingNewObjectTransforms()
+template<typename RecordObjFn>
+inline void CModelDrawerDataBase<T>::ExtractPendingNewObjectTransforms(RecordObjFn&& resolveRecordObj)
 {
 	for (const int id : pendingNewObjectTransformIds) {
 		// created-and-died in the same batch: DelObject already dropped the
@@ -365,7 +372,14 @@ inline void CModelDrawerDataBase<T>::ExtractPendingNewObjectTransforms()
 		if (scTransMemAllocMap.find(id) == scTransMemAllocMap.end())
 			continue;
 
-		ExtractObjectTransforms(DrawerGetObjectByID<T>(id));
+		// record-only resolution (see the declaration comment); a null record
+		// handle means the id's object is gone -- nothing to pose
+		const T* o = resolveRecordObj(id);
+
+		if (o == nullptr)
+			continue;
+
+		ExtractObjectTransforms(o);
 	}
 
 	pendingNewObjectTransformIds.clear();

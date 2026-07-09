@@ -2236,6 +2236,13 @@ void CGame::AcquireSimPause()
 	simPauseHeld = true;
 }
 
+// PR 44a telemetry: cumulative parked-window stats (the program's headline
+// number -- under the flip the parked window should shrink from ~the full
+// barrier to ~acquire+dispatch). Reported by DumpSimPauseSurvey at teardown.
+static std::atomic<uint64_t> simParkCount = {0};
+static std::atomic<uint64_t> simParkTotalUs = {0};
+static std::atomic<uint64_t> simParkMaxUs = {0};
+
 void CGame::ReleaseSimPause()
 {
 	if (!simPauseHeld)
@@ -2244,8 +2251,17 @@ void CGame::ReleaseSimPause()
 	simPauseHeld = false;
 	SimDrawSplit::ReleasePause(gs->frameNum);
 
+	const spring_time parkEnd = spring_now();
+
+	// PR 44a telemetry (relaxed counters; single writer, the draw thread)
+	const uint64_t us = uint64_t((parkEnd - simPauseBeginTime).toMilliSecsf() * 1000.0f);
+	simParkCount.fetch_add(1, std::memory_order_relaxed);
+	simParkTotalUs.fetch_add(us, std::memory_order_relaxed);
+	if (us > simParkMaxUs.load(std::memory_order_relaxed))
+		simParkMaxUs.store(us, std::memory_order_relaxed);
+
 	// gate telemetry for the /debug frame grapher (sim-row "Parked" slice)
-	eventHandler.DbgTimingInfo(TIMING_SIM_PARKED, simPauseBeginTime, spring_now());
+	eventHandler.DbgTimingInfo(TIMING_SIM_PARKED, simPauseBeginTime, parkEnd);
 }
 
 // §4.5 pause-surface telemetry: per-site count of parks that actually engaged
@@ -2255,6 +2271,15 @@ static std::array<std::atomic<uint64_t>, size_t(CGame::SimPauseSite::COUNT)> sim
 
 void CGame::DumpSimPauseSurvey()
 {
+	// PR 44a telemetry: the parked-window aggregate (headline number)
+	if (const uint64_t n = simParkCount.load(std::memory_order_relaxed); n > 0) {
+		LOG("[SimParkStats] parks=%llu totalMs=%.1f avgMs=%.3f maxMs=%.1f",
+			(unsigned long long)n,
+			simParkTotalUs.load(std::memory_order_relaxed) / 1000.0f,
+			simParkTotalUs.load(std::memory_order_relaxed) / 1000.0f / n,
+			simParkMaxUs.load(std::memory_order_relaxed) / 1000.0f);
+	}
+
 	static const char* siteNames[size_t(SimPauseSite::COUNT)] = {
 		"LIFECYCLE", "GUI_TRY_TARGET", "GUI_TEST_BUILDSQUARE", "GUI_GET_COMMAND",
 		"GUI_GET_BUILDPOS", "GUI_DRAW_MAPSTUFF", "GUI_GET_DEFAULT_CMD",

@@ -243,7 +243,7 @@ void CFeatureDrawerData::Update()
 	// degrades to the targeted catch-up for objects added by this consume's
 	// record dispatch (sim parked here, so the live reads stay legal).
 	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning())
-		ExtractPendingNewObjectTransforms();
+		ExtractPendingNewObjectTransforms([this](int id) { return GetRenderRecord(id).obj; });
 	else
 		ExtractTransforms();
 
