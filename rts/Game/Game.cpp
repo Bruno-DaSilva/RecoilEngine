@@ -1474,6 +1474,10 @@ bool CGame::UpdateUnsynced(const spring_time currentTime)
 	// SimDrawBarrier() (PR 26) -- same per-sim-frame-batch gating, same order
 	// relative to the render-event drain, now inside the one barrier function
 
+	// §8.1: apply the FPS direct-control camera-rotY nudge the sim thread deferred
+	// this batch (draw owns the camera); no-op flag-off / when nothing pending
+	camHandler->ApplyPendingFPSDirectControlRotY();
+
 	// set camera
 	camHandler->UpdateController(playerHandler.Player(gu->myPlayerNum), gu->fpsMode);
 

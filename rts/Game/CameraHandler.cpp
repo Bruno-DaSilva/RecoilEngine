@@ -255,6 +255,17 @@ void CCameraHandler::ConfigNotify(const std::string& key, const std::string& val
 	}
 }
 
+void CCameraHandler::ApplyPendingFPSDirectControlRotY()
+{
+	// §8.1 (sim|draw): apply the FPS direct-control camera-rotY nudge the sim
+	// thread deferred this batch (draw owns the camera). Additive, so the summed
+	// delta reproduces the per-sim-frame inline writes master did. No-op flag-off
+	// (accumulator stays zero -- the sim writes the camera inline there).
+	const float d = fpsDCRotYAccum.exchange(0.0f, std::memory_order_relaxed);
+	if (d != 0.0f)
+		camera->SetRotY(camera->GetRot().y + d);
+}
+
 void CCameraHandler::UpdateController(CPlayer* player, bool fpsMode)
 {
 	RECOIL_DETAILED_TRACY_ZONE;

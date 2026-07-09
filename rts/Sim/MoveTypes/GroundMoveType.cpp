@@ -7,6 +7,8 @@
 #include "Components/MoveTypesComponents.h"
 #include "ExternalAI/EngineOutHandler.h"
 #include "Game/Camera.h"
+#include "Game/CameraHandler.h"  // §8.1: defer the FPS direct-control camera nudge
+#include "System/SimDrawSplit.h"
 #include "Game/GameHelper.h"
 #include "Game/GlobalUnsynced.h"
 #include "Game/SelectedUnitsHandler.h"
@@ -3320,8 +3322,18 @@ bool CGroundMoveType::UpdateDirectControl()
 	if (unitCon.right) { ChangeHeading(owner->heading - turnRate); turnSign = -1.0f; }
 
 	// local client is controlling us
-	if (selfCon.GetControllee() == owner)
-		camera->SetRotY(camera->GetRot().y + turnRate * turnSign * TAANG2RAD);
+	if (selfCon.GetControllee() == owner) {
+		const float rotYDelta = turnRate * turnSign * TAANG2RAD;
+
+		// §8.1 (sim|draw): the camera is draw-owned; under the split the sim thread
+		// must not RMW it (races the draw thread's every-frame camera use). Defer
+		// the additive nudge to the draw side (applied before UpdateController).
+		if (!SimDrawSplit::Enabled()) {
+			camera->SetRotY(camera->GetRot().y + rotYDelta); // flag-off: identical to master
+		} else {
+			camHandler->AddFPSDirectControlRotY(rotYDelta);
+		}
+	}
 
 	return wantReverse;
 }
