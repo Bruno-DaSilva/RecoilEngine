@@ -147,7 +147,15 @@ namespace SimDrawSplit {
 	void RequestPause();
 	bool ParkedAtValve();
 	void ResumeFromValve();
+	/// PR 44b (no-park): resume a valve-parked sim WITHOUT waiting for a
+	/// follow-up park (no pause is pending -- the Draw-top valve service)
+	void ResumeFromValveNoWait();
 	void ReleasePause(int boundaryFrame);
+	/// PR 44b (no-park): the consumer publishes the backpressure boundary
+	/// frame explicitly (ReleasePause's side effect, park-free) -- the same
+	/// value at the same per-frame point (the consume-complete signal), so
+	/// the 44a pacing behavior is preserved verbatim
+	void PublishBoundaryFrame(int boundaryFrame);
 
 	/// main-thread lock-free peek: the sim thread is currently parked (edge
 	/// or valve) -- reads of sim state from the main thread are quiescent

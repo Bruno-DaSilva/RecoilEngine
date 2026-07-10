@@ -71,9 +71,15 @@ namespace LuaSplitContract {
 	/// Counts and warn-logs per the header comment. False = proceed.
 	bool DenyLiveRead(lua_State* L, const char* caller);
 
-	/// hard-error (luaL_error, does not return) when `Enforced(L)`:
-	/// unsynced->synced lua_State cross-hops have no serveable fallback
+	/// hard-error (luaL_error, does not return) when `Enforced(L)` --
+	/// EXCEPT inside the boundary dispatch window with the sim parked, where
+	/// the read is quiescent-safe and counted (PR 44b: the lazy-park engage
+	/// telemetry; the SYNCED proxy parks on-demand before falling through)
 	void ErrorOnCrossHop(lua_State* L, const char* what);
+
+	/// PR 44b (§9): count a SYNCED-proxy read served from the epoch mirror
+	/// (inventory-visible under `name`; main thread)
+	void CountCrossHopMirrorServe(const char* name);
 
 	/// LuaUnsyncedCtrl direct-sim-poke gate: under enforcement, queue `op`
 	/// for the next SimDrawBarrier and return true; otherwise return false

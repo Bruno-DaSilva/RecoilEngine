@@ -164,12 +164,36 @@ private:
 	void SimThreadProc();
 	/// PR 44a: the epoch producer -- runs on the sim thread at its frame
 	/// edges (SimThreadProc loop top); extraction+publish overlap the draw
-	/// thread's rendering instead of running under the park
-	void ProduceEpochAtSimEdge();
+	/// thread's rendering instead of running under the park. PR 44b
+	/// remainder: `force` (the valve's emergency in-place produce, MAIN
+	/// thread with the sim parked mid-frame) bypasses the due-check gating.
+	void ProduceEpochAtSimEdge(bool forceProduce = false);
 	void AcquireSimPause();
 	void ReleaseSimPause();
 	void DeliverBoundaryDeaths();
 	bool CanConsumeSimFrameNow() const;
+
+	// ---- PR 44b remainder (§9 ruling): the no-park consumer ----
+	/// consume-complete signal (§3.2 pacing + backpressure): stamped when
+	/// ALL consumer-side drawer consumption for the held epoch finished
+	/// (batch dispatch + drawer Update + SSBO upload) -- the producer's next
+	/// extraction is mutually exclusive with it by the pacing gate, which
+	/// reproduces the removed park's exclusion without blocking the sim
+	void SignalEpochConsumeComplete();
+	/// emergency pool-valve service (sim parked MID-frame out of pool
+	/// headroom): consume any published epoch, force-produce the mid-frame
+	/// tail into an epoch on this thread (sim quiescent), consume it, return
+	/// every releasable page. Draw-top form resumes without waiting.
+	void ServicePoolValve();
+	void ServicePoolValveOnce();
+
+public:
+	/// dispatch-scoped lazy park (§9 ruling, option-1 fallback): on-demand
+	/// quiescence for a dispatch-window read the epoch cannot serve (SYNCED
+	/// cross-hop first-touch / non-scalar value); held to the window close
+	/// (SimDrawBarrier's dispatch-window close releases it)
+	void AcquireLazyDispatchPark();
+private:
 
 	void DrawSkip(bool blackscreen = true);
 	void DrawInputReceivers();
@@ -250,6 +274,9 @@ public:
 	// main-thread-only: Draw currently holds the sim thread parked (PR 27b);
 	// ReleaseSimPause is idempotent so every Draw exit path may call it
 	bool simPauseHeld = false;
+	// PR 44b remainder: a dispatch-scoped lazy park engaged this window
+	// (released at the barrier's dispatch-window close)
+	bool lazyDispatchParkHeld = false;
 
 	/// Prevents spectator msgs from being seen by players
 	bool noSpectatorChat = false;

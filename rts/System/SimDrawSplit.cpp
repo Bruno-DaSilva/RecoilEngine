@@ -138,6 +138,24 @@ void ResumeFromValve()
 	cvMain.wait(lock, []() { return (parkKind != PARK_NONE || !g_simThreadRunning.load()); });
 }
 
+void ResumeFromValveNoWait()
+{
+	// PR 44b: the Draw-top valve service runs with NO pause pending -- the
+	// resumed sim will not park again (until the next valve/lifecycle
+	// event), so there is nothing to wait for
+	std::unique_lock<std::mutex> lock(hsMtx);
+
+	assert(parkKind == PARK_VALVE);
+	parkKind = PARK_NONE;
+	valveServed = true;
+	cvSim.notify_all();
+}
+
+void PublishBoundaryFrame(int boundaryFrame)
+{
+	lastBoundaryFrame.store(boundaryFrame);
+}
+
 void ReleasePause(int boundaryFrame)
 {
 	lastBoundaryFrame.store(boundaryFrame);
@@ -145,7 +163,12 @@ void ReleasePause(int boundaryFrame)
 	{
 		std::unique_lock<std::mutex> lock(hsMtx);
 		pauseRequested.store(false);
-		parkKind = PARK_NONE;
+		// PR 44b: a lazy/lifecycle park can catch (and release over) a
+		// VALVE-parked sim -- the valve park state must survive the release
+		// (the sim still waits for the valve service; ParkedAtValve() / the
+		// Draw-top ServicePoolValve key on it). Edge parks resume as before.
+		if (parkKind == PARK_EDGE)
+			parkKind = PARK_NONE;
 	}
 
 	cvSim.notify_all();

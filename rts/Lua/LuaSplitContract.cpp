@@ -414,6 +414,12 @@ bool QueueBoundaryApply(lua_State* L, const char* caller, std::function<void()>&
 }
 
 
+void CountCrossHopMirrorServe(const char* name)
+{
+	tripStats[name].liveReads++;
+}
+
+
 void QueueEngineBoundaryApply(const char* name, std::function<void()>&& op)
 {
 	TripStat& stat = tripStats[name];

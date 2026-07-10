@@ -8,6 +8,8 @@
 #include "LuaHashString.h"
 #include "LuaSplitContract.h"
 #include "LuaUtils.h"
+#include "Game/Game.h"        // PR 44b: the dispatch-scoped lazy park
+#include "System/SimDrawSplit.h"
 
 
 static int SyncTableIndex(lua_State* L);
@@ -21,12 +23,34 @@ static int SyncTableIndex(lua_State* dstL)
 	if (lua_isnoneornil(dstL, -1))
 		return 0;
 
-	// cross-hop ban (PR 27a): the read below walks the synced lua_State's
-	// globals and allocates in its heap -- the state the sim thread owns
-	// under the split. This is THE unsynced->synced hop (single entry point,
-	// see the research doc cross-hop audit); there is no serveable fallback.
-	// TODO(27b): decide a replacement story (SendToUnsynced mirroring is the
-	// documented alternative games already use).
+	// cross-hop handling (PR 27a ban -> PR 44b §9 BINDING ruling, option 3+1
+	// hybrid): the read below walks the synced lua_State's globals and
+	// allocates in its heap -- the state the sim thread owns and RUNS under
+	// the no-park split. A DISPATCH-WINDOW read (a deferred sim-fired
+	// handler; master ran these same-thread mid-frame) is served from the
+	// HELD EPOCH's SYNCED-globals mirror when the key's value is a scalar
+	// (read-set-driven; first touch registers the key for the producer's
+	// next edge). FIDELITY: the mirrored value is the epoch edge's -- it
+	// matches the deferred events' frame window, MORE master-faithful than
+	// the live read the parked dispatch used to make. Reads the mirror
+	// cannot serve (first touch, non-scalar values) engage the dispatch-
+	// scoped LAZY PARK: the sim parks at its next edge, the live copy below
+	// is quiescent-safe, and ErrorOnCrossHop's parked-window branch COUNTS
+	// the engage instead of erroring (~a handful per game, the §9 gate
+	// telemetry). Draw-context reads OUTSIDE the dispatch window keep the
+	// hard error (strict-gate-proven unused by stock games).
+	if (LuaSplitContract::Enforced(dstL) && SimDrawSplit::BoundaryShellWindowActive()) {
+		CSplitLuaHandle* pair = CSplitLuaHandle::GetSplitHandle(dstL);
+
+		if (pair->ServeSyncedGlobalFromMirror(dstL) == 1) {
+			LuaSplitContract::CountCrossHopMirrorServe("SYNCED table read (mirror)");
+			return 1;
+		}
+
+		if (game != nullptr)
+			game->AcquireLazyDispatchPark();
+	}
+
 	LuaSplitContract::ErrorOnCrossHop(dstL, "SYNCED table read");
 
 	auto slh = CSplitLuaHandle::GetSyncedHandle(dstL);

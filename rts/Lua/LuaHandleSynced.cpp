@@ -30,6 +30,8 @@
 #include "LuaOpenGL.h"
 #include "LuaVFS.h"
 #include "LuaZip.h"
+#include "LuaRules.h" // PR 44b: MirrorAll/CommitAll iterate luaRules + luaGaia
+#include "LuaGaia.h"
 
 #include "Game/Game.h"
 #include "Game/WordCompletion.h"
@@ -2448,6 +2450,123 @@ CSplitLuaHandle::CSplitLuaHandle(const std::string& _name, int _order)
 	: syncedLuaHandle(this, _name, _order)
 	, unsyncedLuaHandle(this, _name, _order + 1)
 {
+}
+
+
+// ---- PR 44b remainder (§9 ruling): SYNCED-globals epoch mirror ----
+// (see the header comment block; the SYNCED proxy in LuaSyncedTable.cpp is
+// the sole consumer of ServeSyncedGlobalFromMirror)
+
+int CSplitLuaHandle::ServeSyncedGlobalFromMirror(lua_State* dstL)
+{
+	// string keys are the whole observed demand; anything else always takes
+	// the lazy-park path (and is not registered)
+	if (lua_type(dstL, -1) != LUA_TSTRING)
+		return 0;
+
+	size_t keyLen = 0;
+	const char* keyPtr = lua_tolstring(dstL, -1, &keyLen);
+	const std::string key(keyPtr, keyLen);
+
+	std::lock_guard<std::mutex> lock(syncedMirrorMtx);
+
+	// read-set registration (first touch schedules the key for the
+	// producer's next edge; idempotent afterwards)
+	if (syncedMirrorReadSet.insert(key).second)
+		syncedMirrorReadSetDirty = true;
+
+	const auto it = syncedMirrorServed.find(key);
+
+	if (it == syncedMirrorServed.end())
+		return 0;
+
+	switch (it->second.type) {
+		case SyncedGlobalMirrorValue::NIL : { lua_pushnil(dstL);                              } return 1;
+		case SyncedGlobalMirrorValue::BOOL: { lua_pushboolean(dstL, it->second.b);            } return 1;
+		case SyncedGlobalMirrorValue::NUM : { lua_pushnumber(dstL, it->second.n);             } return 1;
+		case SyncedGlobalMirrorValue::STR : { lua_pushlstring(dstL, it->second.s.data(), it->second.s.size()); } return 1;
+		default: {
+			// UNSERVABLE (table/function/userdata): the caller lazy-parks and
+			// the live read below it copies the real value
+		} return 0;
+	}
+}
+
+
+void CSplitLuaHandle::MirrorSyncedGlobalsAtSimEdge(bool onlyIfDirty)
+{
+	if (!syncedLuaHandle.IsValid())
+		return;
+
+	std::lock_guard<std::mutex> lock(syncedMirrorMtx);
+
+	if (syncedMirrorReadSet.empty())
+		return;
+	if (onlyIfDirty && !syncedMirrorReadSetDirty)
+		return;
+
+	syncedMirrorReadSetDirty = false;
+
+	lua_State* srcL = syncedLuaHandle.GetLuaState();
+	const int srcTop = lua_gettop(srcL);
+
+	syncedMirrorStaged.clear();
+
+	for (const std::string& key: syncedMirrorReadSet) {
+		SyncedGlobalMirrorValue v;
+
+		lua_pushvalue(srcL, LUA_GLOBALSINDEX);
+		lua_pushlstring(srcL, key.data(), key.size());
+		lua_rawget(srcL, -2);
+
+		switch (lua_type(srcL, -1)) {
+			case LUA_TNIL    : { v.type = SyncedGlobalMirrorValue::NIL;                                  } break;
+			case LUA_TBOOLEAN: { v.type = SyncedGlobalMirrorValue::BOOL; v.b = lua_toboolean(srcL, -1);  } break;
+			case LUA_TNUMBER : { v.type = SyncedGlobalMirrorValue::NUM;  v.n = lua_tonumber(srcL, -1);   } break;
+			case LUA_TSTRING : {
+				size_t len = 0;
+				const char* p = lua_tolstring(srcL, -1, &len);
+				v.type = SyncedGlobalMirrorValue::STR;
+				v.s.assign(p, len);
+			} break;
+			default: { v.type = SyncedGlobalMirrorValue::UNSERVABLE; } break;
+		}
+
+		lua_settop(srcL, srcTop);
+		syncedMirrorStaged[key] = std::move(v);
+	}
+
+	syncedMirrorStagedValid = true;
+}
+
+
+void CSplitLuaHandle::CommitSyncedGlobalsMirror()
+{
+	std::lock_guard<std::mutex> lock(syncedMirrorMtx);
+
+	if (!syncedMirrorStagedValid)
+		return;
+
+	syncedMirrorStagedValid = false;
+	syncedMirrorServed.swap(syncedMirrorStaged);
+}
+
+
+void CSplitLuaHandle::MirrorAllSyncedGlobalsAtSimEdge(bool onlyIfDirty)
+{
+	if (luaRules != nullptr)
+		luaRules->MirrorSyncedGlobalsAtSimEdge(onlyIfDirty);
+	if (luaGaia != nullptr)
+		luaGaia->MirrorSyncedGlobalsAtSimEdge(onlyIfDirty);
+}
+
+
+void CSplitLuaHandle::CommitAllSyncedGlobalsMirrors()
+{
+	if (luaRules != nullptr)
+		luaRules->CommitSyncedGlobalsMirror();
+	if (luaGaia != nullptr)
+		luaGaia->CommitSyncedGlobalsMirror();
 }
 
 
