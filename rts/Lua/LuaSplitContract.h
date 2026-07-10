@@ -88,6 +88,14 @@ namespace LuaSplitContract {
 	/// shows up in the dump so the classification stays measured.
 	void CountSanctionedPoke(lua_State* L, const char* caller);
 
+	/// PR 44b: ENGINE-side boundary apply -- same queue/drain as the Lua ctrl
+	/// pokes but with no lua_State/enforcement gate (the caller gates on the
+	/// running split). Used by draw-context engine code whose sim writes must
+	/// land on the sim thread (CWaitCommandsAI's queued-command wait re-key).
+	/// `name` shows in the inventory dump (static storage). Ops capture ids,
+	/// never pointers, and re-resolve at apply time.
+	void QueueEngineBoundaryApply(const char* name, std::function<void()>&& op);
+
 	/// apply everything queued since the last barrier; called from
 	/// CGame::SimDrawBarrier (the pause window). No-op when empty. Returns
 	/// the number of applied ops: a nonzero count mutated sim state OUTSIDE

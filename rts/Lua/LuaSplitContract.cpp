@@ -368,6 +368,25 @@ void ErrorOnCrossHop(lua_State* L, const char* what)
 	if (!Enforced(L))
 		return;
 
+	// PR 44b: deferred sim-fired handlers (RecvFromSynced, the unsynced
+	// gadget halves' GameFrame, ...) legitimately read the SYNCED proxy on
+	// master -- they ran synchronously in the sim call stack there (stock
+	// BAR: cus_gl4 reads SYNCED.itsXmas every GameFrame; system_info /
+	// gui_awards read SYNCED tables pre-game / at game end). Under the split
+	// they dispatch inside the epoch window; with the sim PARKED there (the
+	// 44b residual park) the cross-state read is quiescent-safe, so count it
+	// as a live read instead of erroring. This is DEMAND DATA for the
+	// parkless resolution of the cross-hop surface (operator escalation --
+	// see doc/sim-draw-pr44b-noport-park-design.md): once the dispatch runs
+	// concurrent with the sim, these reads need a ruled mechanism (dispatch-
+	// scoped park / synced-exec lock / synced-globals mirror). Draw-callin
+	// cross-hops stay hard errors (unchanged, strict-gate proven).
+	if (SimDrawSplit::BoundaryShellWindowActive() && SimDrawSplit::IsSimParked()) {
+		TripStat& stat = tripStats[what];
+		stat.liveReads++;
+		return;
+	}
+
 	TripStat& stat = tripStats[what];
 	stat.denials++;
 	stat.warned = true; // the error is its own report
@@ -388,6 +407,17 @@ bool QueueBoundaryApply(lua_State* L, const char* caller, std::function<void()>&
 		queuedOps.push_back({caller, std::move(op)});
 	}
 	return true;
+}
+
+
+void QueueEngineBoundaryApply(const char* name, std::function<void()>&& op)
+{
+	TripStat& stat = tripStats[name];
+	stat.queuedPokes++;
+	{
+		std::lock_guard<std::mutex> lock(queuedOpsMtx);
+		queuedOps.push_back({name, std::move(op)});
+	}
 }
 
 
