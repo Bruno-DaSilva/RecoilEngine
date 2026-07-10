@@ -1736,10 +1736,33 @@ void CGame::SimDrawBarrier()
 	// drawer containers. Flip: exactly the acquired epoch's SEALED slot
 	// batch -- records fired after the epoch's edge stay pending (sim-owned
 	// live container) and ride the next epoch (§1.3); lockstep: everything.
-	if (producerFlip)
+	if (producerFlip) {
 		renderEventQueue.DispatchSealedBatch(simSnapshot.HeldSlot());
-	else
+	} else {
+		// PR 44b: a flip->lockstep transition (the sim thread joined at
+		// quit/teardown) can leave a published-but-unacquired epoch whose
+		// sealed batches sit in a ring slot -- the live-container Drain
+		// below never touches them, so the tail's closures would dispatch
+		// against objects whose destroy records never ran (gate-found: the
+		// healthbars invalid-feature-id teardown storm). Acquire + dispatch
+		// the leftover sealed batch FIRST (fire order: it precedes the
+		// tail); every call here no-ops in the ordinary pre-spawn lockstep
+		// (no seals ever happened).
+		if (SimDrawSplit::Enabled()) {
+			const uint64_t retiredEpoch = simSnapshot.AcquireNewestEpoch();
+
+			if (retiredEpoch != 0) {
+				deferredObjectDeleter.ReleaseRetired(retiredEpoch);
+				deferredObjectDeleter.ServiceRetiredReleases();
+			}
+
+			drawMapMirrors.SetServingSlot(simSnapshot.HeldSlot());
+			simSnapshot.MarkNewestEpochConsumed();
+			renderEventQueue.DispatchSealedBatch(simSnapshot.HeldSlot());
+		}
+
 		renderEventQueue.Drain();
+	}
 
 	// (1b) split only: deliver the drained destroys to the draw-owned death
 	// dependents (selection, wait-AI, tracked lights) -- they skip
@@ -1952,6 +1975,15 @@ void CGame::SimDrawBarrier()
 		// reusable (see the rotation note at the producer's seal)
 		CSplitLuaHandle::RecycleSendToUnsyncedMailbox(simSnapshot.HeldSlot());
 	} else {
+		// PR 44b: flip->lockstep leftovers first (see step 1) -- the sealed
+		// closures precede the live tail in fire order; no-ops pre-spawn
+		if (SimDrawSplit::Enabled()) {
+			if (UnsyncedBoundaryQueue::DrainSealedBatch(simSnapshot.HeldSlot()) > 0)
+				simSnapshot.MarkMutatedOutsideFrame();
+
+			CSplitLuaHandle::RecycleSendToUnsyncedMailbox(simSnapshot.HeldSlot());
+		}
+
 		if (UnsyncedBoundaryQueue::Drain() > 0)
 			simSnapshot.MarkMutatedOutsideFrame();
 	}
@@ -1981,10 +2013,15 @@ void CGame::SimDrawBarrier()
 		// deaths after the epoch's edge have undispatched destroy records (the
 		// next epoch's batch) and must stay readable. The key is the HELD
 		// epoch id (EpochId() can already be the next epoch mid-frame).
-		if (producerFlip)
+		if (producerFlip) {
 			deferredObjectDeleter.AckSealedDestroysEpoch(simSnapshot.HeldSlot(), simSnapshot.HeldEpochId());
-		else
+		} else {
+			// PR 44b: flip->lockstep leftovers (see step 1) -- the sealed
+			// shell batch's destroy records dispatched above; ack it first
+			// (no-op pre-spawn / when empty)
+			deferredObjectDeleter.AckSealedDestroysEpoch(simSnapshot.HeldSlot(), simSnapshot.HeldEpochId());
 			deferredObjectDeleter.AckDrainedDestroysEpoch(simSnapshot.HeldEpochId());
+		}
 	}
 
 	// PR 44b §9: release the dispatch-scoped lazy park, if a window read
