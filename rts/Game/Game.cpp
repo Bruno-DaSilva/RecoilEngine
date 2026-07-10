@@ -2505,6 +2505,25 @@ CGame::ScopedExternalSimPause::~ScopedExternalSimPause()
 bool CGame::Draw() {
 	const spring_time currentTimePreBarrier = spring_now();
 
+	// PR 47: under the split the draw thread free-runs, so the unsynced
+	// lua_States produce garbage per DRAW frame at an uncapped rate (measured
+	// ~40x master's draw-frame rate under headless FF), while their ONLY
+	// collector was the fixed 30Hz timed job with master's per-call budget.
+	// The imbalance let BAR's LuaUI heap balloon to its 1.2GB emergency-
+	// collect valve (42 emergency collects over one Rosetta replay; zero
+	// flag-off). Master ties collection to the loop that produces the
+	// garbage (SimFrame, whose call rate scales with sim speed); restore
+	// that coupling for the DRAW-owned states by stepping their skip-gated,
+	// budget-bounded incremental GC once per draw frame, on the thread that
+	// owns them and OUTSIDE the draw window (before the barrier, so no
+	// dispatch or draw callin is running). spring_lua_alloc_skip_gc() keeps
+	// the per-call cost self-balancing: the run probability scales with the
+	// global heap-load ratio, so a low heap skips almost every call. The
+	// 30Hz timed job remains as the backstop for non-drawing periods
+	// (menus, parked saves, minimized). Flag-off pacing is untouched.
+	if (SimDrawSplit::Enabled())
+		eventHandler.CollectGarbage(false, CEventHandler::GC_UNSYNCED_ONLY);
+
 	// PR 44b remainder (§9 ruling): THE PER-FRAME CONSUME-PARK IS GONE --
 	// the barrier below consumes the published epoch CONCURRENT with the
 	// running sim (the producer/consumer exclusion is the §3.2 pacing gate,
