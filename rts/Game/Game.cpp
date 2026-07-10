@@ -1947,6 +1947,10 @@ void CGame::SimDrawBarrier()
 		// only the engine-side closures that still poke sim state directly.
 		if (UnsyncedBoundaryQueue::DrainSealedBatch(simSnapshot.HeldSlot()) > 0)
 			simSnapshot.MarkMutatedOutsideFrame();
+
+		// the batch fully drained -- its SendToUnsynced mailbox is empty and
+		// reusable (see the rotation note at the producer's seal)
+		CSplitLuaHandle::RecycleSendToUnsyncedMailbox(simSnapshot.HeldSlot());
 	} else {
 		if (UnsyncedBoundaryQueue::Drain() > 0)
 			simSnapshot.MarkMutatedOutsideFrame();
@@ -2166,6 +2170,9 @@ void CGame::ProduceEpochAtSimEdge(bool forceProduce)
 	renderEventQueue.SealEpochBatch(slot);
 	UnsyncedBoundaryQueue::SealEpochBatch(slot);
 	deferredObjectDeleter.SealPendingBatch(slot);
+	// PR 44b: the sealed closures own their fire-time mailbox from here on
+	// (the fire/drain sides run concurrently under the no-park split)
+	CSplitLuaHandle::RotateSendToUnsyncedMailbox(slot);
 
 	// (p9) publish (channel versions sealed into the slot's meta first)
 	simSnapshot.PublishEpoch(slot,

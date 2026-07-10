@@ -62,23 +62,89 @@ LuaRulesParams::Params  CSplitLuaHandle::gameParams;
 
 
 /**
- * PR 27b: the SendToUnsynced boundary mailbox -- a bare lua_State used only
- * as a value buffer between the sim phase (which parks each message's args
- * in a registry-ref'd table) and the barrier drain (which unpacks and
- * dispatches them). Touched exclusively from those two contexts, which never
- * overlap under the split's handshake; owns a private non-shared LuaMemPool
- * so its allocations cannot race either thread's handle pools.
+ * PR 27b -> PR 44b: the SendToUnsynced boundary mailbox(es) -- bare
+ * lua_States used only as value buffers between the sim phase (which parks
+ * each message's args in a registry-ref'd table) and the barrier drain
+ * (which unpacks and dispatches them). Each owns a private non-shared
+ * LuaMemPool so its allocations cannot race either thread's handle pools.
+ *
+ * PR 44b (no-park): the fire side (sim thread) and the drain side (the
+ * barrier, main thread) RUN CONCURRENTLY now -- one shared state raced
+ * (GATE-FOUND: a registry resize under a concurrent luaL_ref / lua_rawgeti
+ * pair SIGSEGV'd the first no-park strict run at load end). The mailbox
+ * therefore ROTATES PER EPOCH BATCH: fires go into the CURRENT mailbox
+ * (sim-side exclusive; closures capture THEIR mailbox at fire time); the
+ * seal hands the current mailbox to the sealed batch and installs a
+ * recycled/fresh one (RotateSendToUnsyncedMailbox); the consumer drains the
+ * batch's mailbox exclusively -- fenced by the epoch publish/acquire -- and
+ * recycles it once the batch fully drained (RecycleSendToUnsyncedMailbox).
+ * Lockstep never rotates (single-threaded, one mailbox). The tiny recycle
+ * pool is the only lock (uncontended). A dropped closure (client died
+ * between defer and drain) leaks its ref slot inside the recycled state --
+ * bounded by the handle-death rate, accepted.
+ *
+ * States are deliberately leaked at exit: an atexit destructor would run
+ * after LuaMemPool::KillStatic and release into a freed pool (TSan-found
+ * exit-order use-after-free); they live for the process lifetime by design.
  */
+namespace {
+	std::mutex mailboxPoolMtx;
+	std::vector<lua_State*> mailboxPool;
+	lua_State* currentMailbox = nullptr;
+	lua_State* slotMailboxes[UnsyncedBoundaryQueue::MAX_EPOCH_BATCH_SLOTS] = {nullptr, nullptr, nullptr};
+}
+
+static lua_State* NewSendToUnsyncedMailbox()
+{
+	luaContextData* mailboxLcd = new luaContextData(false, true); // leaked by design (see above)
+	return LUA_OPEN(mailboxLcd);
+}
+
 static lua_State* GetSendToUnsyncedMailbox()
 {
-	// deliberately leaked: a function-static lcd's atexit destructor would
-	// run after LuaMemPool::KillStatic and release into a freed pool
-	// (TSan-found exit-order use-after-free); the mailbox lives for the
-	// process lifetime by design
-	static luaContextData* mailboxLcd = new luaContextData(false, true);
-	static lua_State* mailbox = LUA_OPEN(mailboxLcd);
+	// fire-side / lockstep use only: the current mailbox belongs to the
+	// firing side (the sim thread under the flip) until the next rotation
+	if (currentMailbox == nullptr)
+		currentMailbox = NewSendToUnsyncedMailbox();
 
-	return mailbox;
+	return currentMailbox;
+}
+
+void CSplitLuaHandle::RotateSendToUnsyncedMailbox(int slot)
+{
+	// producer, at the epoch seal (sim thread; or main at the valve's
+	// in-place produce, sim parked): the sealed batch's closures own the
+	// current mailbox from here on
+	assert(slot >= 0 && slot < UnsyncedBoundaryQueue::MAX_EPOCH_BATCH_SLOTS);
+
+	std::lock_guard<std::mutex> lock(mailboxPoolMtx);
+
+	// a stale slot mailbox (teardown dropped its batch unconsumed) recycles
+	if (slotMailboxes[slot] != nullptr)
+		mailboxPool.push_back(slotMailboxes[slot]);
+
+	slotMailboxes[slot] = currentMailbox; // may be nullptr (no fires yet)
+
+	if (!mailboxPool.empty()) {
+		currentMailbox = mailboxPool.back();
+		mailboxPool.pop_back();
+	} else {
+		currentMailbox = nullptr; // lazily created on the next fire
+	}
+}
+
+void CSplitLuaHandle::RecycleSendToUnsyncedMailbox(int slot)
+{
+	// consumer, after the held slot's closure batch fully drained (every
+	// dispatched closure unref'd its message table)
+	assert(slot >= 0 && slot < UnsyncedBoundaryQueue::MAX_EPOCH_BATCH_SLOTS);
+
+	if (slotMailboxes[slot] == nullptr)
+		return;
+
+	std::lock_guard<std::mutex> lock(mailboxPoolMtx);
+	mailboxPool.push_back(slotMailboxes[slot]);
+	slotMailboxes[slot] = nullptr;
 }
 
 
@@ -2059,10 +2125,12 @@ int CSyncedLuaHandle::SendToUnsynced(lua_State* L)
 
 	// PR 27b: RecvFromSynced runs unsynced Lua synchronously in this call
 	// stack; under the split the args park in a neutral mailbox lua_State
-	// (owned below; touched only from the sim phase and the barrier drain,
-	// never concurrently) and the dispatch replays at the boundary. The
-	// entry is tagged with the receiving handle so a handle disabled before
-	// the boundary drops its pending messages instead of dangling.
+	// and the dispatch replays at the boundary. PR 44b: the closure captures
+	// ITS mailbox at fire time -- the seal rotates the current mailbox into
+	// the epoch batch, so the drain side owns it exclusively (see the
+	// mailbox block above). The entry is tagged with the receiving handle so
+	// a handle disabled before the boundary drops its pending messages
+	// instead of dangling.
 	if (SimDrawSplit::DeferUnsyncedNow()) {
 		lua_State* mb = GetSendToUnsyncedMailbox();
 
@@ -2079,9 +2147,7 @@ int CSyncedLuaHandle::SendToUnsynced(lua_State* L)
 
 		const int msgRef = luaL_ref(mb, LUA_REGISTRYINDEX);
 
-		UnsyncedBoundaryQueue::DeferFor(ulh, [ulh, msgRef, args]() {
-			lua_State* mb = GetSendToUnsyncedMailbox();
-
+		UnsyncedBoundaryQueue::DeferFor(ulh, [ulh, mb, msgRef, args]() {
 			lua_rawgeti(mb, LUA_REGISTRYINDEX, msgRef);
 
 			const int tblIdx = lua_gettop(mb);

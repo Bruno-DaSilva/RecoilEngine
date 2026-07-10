@@ -274,6 +274,13 @@ class CSplitLuaHandle
 		static void MirrorAllSyncedGlobalsAtSimEdge(bool onlyIfDirty);
 		static void CommitAllSyncedGlobalsMirrors();
 
+		// PR 44b: the SendToUnsynced mailbox rotates per epoch batch (the
+		// fire and drain sides run concurrently under the no-park split; see
+		// the mailbox block in the .cpp). Rotate at the producer's seal,
+		// recycle after the consumer drained the held slot's closures.
+		static void RotateSendToUnsyncedMailbox(int slot);
+		static void RecycleSendToUnsyncedMailbox(int slot);
+
 		bool ReloadUnsynced() { return (FreeUnsynced(), LoadUnsynced()); }
 		bool SwapSyncedHandle(lua_State* L, lua_State* L_GC);
 		bool InitUnsynced();
