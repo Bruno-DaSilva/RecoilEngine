@@ -50,7 +50,8 @@ enum DbgTimingInfoType {
 	TIMING_UNSYNCED,
 	TIMING_GC_SIM,    // TIMING_GC emitted from the sim phase (synced-handle GC)
 	TIMING_BARRIER,   // sim|draw gate: pause-wait + valve service + barrier (main thread)
-	TIMING_SIM_PARKED // sim|draw gate: window the sim thread is held parked
+	TIMING_SIM_PARKED, // sim|draw gate: window the sim thread is held parked
+	TIMING_EPOCH_PRODUCE // sim|draw split: epoch extraction+publish on the sim thread (PR 46)
 };
 
 

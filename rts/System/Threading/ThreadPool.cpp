@@ -23,6 +23,7 @@
 #undef unlikely
 #endif
 
+#include <bit>
 #include <utility>
 #include <functional>
 #include <cinttypes>
@@ -629,10 +630,34 @@ void SetDefaultThreadCount()
 	return;
 	#endif
 
-	const int threadCount = GetDefaultNumWorkers();
+	// PR 46 (sim|draw split): the split adds a second full-time orchestrator
+	// thread (the sim thread) that the pre-split topology never budgeted a
+	// core for -- unpinned, it preempts whichever pinned worker it lands on
+	// and every for_mt in flight waits on that worker's chunk (the
+	// TickAllAnims straggler class). Under the per-perf-core pin policy with
+	// the AUTO worker count: spawn one fewer worker and reserve the freed
+	// core for the sim thread below (an explicit WorkerThreadCount is
+	// respected verbatim -- no reservation, exactly the old layout).
+	// Config read directly: this runs at app init, before CGame's ctor caches
+	// the flag into SimDrawSplit::Enabled().
+	#ifndef UNIT_TEST
+	const bool reserveSimCore =
+		(configHandler->GetInt("SimDrawSplit") != 0) &&
+		(Threading::GetChosenThreadPinPolicy() == cpu_topology::THREAD_PIN_POLICY_PER_PERF_CORE) &&
+		(GetConfigNumWorkers() < 0);
+	#else
+	const bool reserveSimCore = false;
+	#endif
+
+	int threadCount = GetDefaultNumWorkers();
+
+	if (reserveSimCore)
+		threadCount = std::max(2, threadCount - 1);
+
 	SetThreadCount(threadCount);
 
-	std::uint32_t systemCores = Threading::GetSystemAffinityMask(threadCount);
+	// size the shared-cache mask for every busy thread, including the sim one
+	std::uint32_t systemCores = Threading::GetSystemAffinityMask(threadCount + reserveSimCore);
 	std::uint32_t mainAffinity = systemCores;
 
 	const cpu_topology::ThreadPinPolicy threadPinPolicy = Threading::GetChosenThreadPinPolicy();
@@ -647,6 +672,17 @@ void SetDefaultThreadCount()
 	#endif
 
 	std::uint32_t workerAvailCores = systemCores & ~mainAffinity;
+
+	// PR 46: carve the sim thread's core out of the worker set (the top core,
+	// i.e. the slot the dropped worker would have taken); the sim thread pins
+	// itself to it at spawn (CGame::SimThreadProc)
+	if (reserveSimCore && workerAvailCores != 0) {
+		const std::uint32_t simAffinity = 0x80000000u >> std::countl_zero(workerAvailCores);
+
+		workerAvailCores &= ~simAffinity;
+		Threading::SetReservedSimAffinityMask(simAffinity);
+		LOG("[ThreadPool] Sim thread affinity reserved as 0x%08x", simAffinity);
+	}
 
 	{
 		// parallel_reduce now folds over shared_ptrs to futures

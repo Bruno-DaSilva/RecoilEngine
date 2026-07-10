@@ -21,6 +21,7 @@
 #include "Sim/Units/Unit.h"                // PR 29: blocking cell[0] classification
 #include "System/Log/ILog.h"
 #include "System/SpringMath.h"
+#include "System/TimeProfiler.h"
 
 // PR 44a: one mirror payload per epoch-ring slot
 static_assert(DrawMapMirrors::MIRROR_SLOTS == SimSnapshot::EPOCH_RING_SLOTS, "mirror slots must match the epoch ring depth");
@@ -44,6 +45,33 @@ void DrawMapMirrors::MarkLosDirty(int type, int ally)
 		++losFullVersion;
 }
 
+// PR 46: bound on the blocking dirty-rect log. Rects accumulate while no
+// drain runs (production skipped: draw not consuming, pause); past the cap a
+// blockingVersion bump reverts the affected slots to the whole-map walk,
+// which is what the log exists to avoid but is always correct.
+static constexpr size_t MAX_BLOCKING_RECTS = 1 << 16;
+
+void DrawMapMirrors::MarkBlockingDirty(int x1, int z1, int x2, int z2)
+{
+	x1 = std::max(x1, 0);
+	z1 = std::max(z1, 0);
+	x2 = std::min(x2, mapDims.mapx);
+	z2 = std::min(z2, mapDims.mapy);
+
+	if (x1 >= x2 || z1 >= z2)
+		return;
+
+	if (blockingRects.size() >= MAX_BLOCKING_RECTS) {
+		++blockingVersion;
+		blockingRectBaseSerial = (blockingRectNextSerial += 1);
+		blockingRects.clear();
+		return;
+	}
+
+	blockingRects.push_back({x1, z1, x2, z2});
+	blockingRectNextSerial += 1;
+}
+
 // ---------------------------------------------------------------------------
 // producer drain (PR 44a: per-slot; the flip's sim frame edge, or the
 // lockstep barrier under the park)
@@ -55,57 +83,67 @@ void DrawMapMirrors::DrainAtBarrier(int slot)
 	if (losHandler == nullptr || readMap == nullptr || mapInfo == nullptr)
 		return;
 
+	// PR 46: attribution (see LuaSnapshotServe::RefreshCommandQueues)
+	SCOPED_TIMER("Sim::EpochProduce::MapMirrors");
+
 	assert(slot >= 0 && slot < MIRROR_SLOTS);
 	Payload& pl = payloads[slot];
 
-	// --- LOS layers (whole-map version per type/ally) ---
-	// map the ILosType members onto the mirror's fixed enum order
-	const ILosType* lts[LOS_MIRROR_TYPE_COUNT];
-	lts[LOS_MIRROR_TYPE_LOS]          = &losHandler->los;
-	lts[LOS_MIRROR_TYPE_AIRLOS]       = &losHandler->airLos;
-	lts[LOS_MIRROR_TYPE_RADAR]        = &losHandler->radar;
-	lts[LOS_MIRROR_TYPE_SONAR]        = &losHandler->sonar;
-	lts[LOS_MIRROR_TYPE_JAMMER]       = &losHandler->jammer;
-	lts[LOS_MIRROR_TYPE_SEISMIC]      = &losHandler->seismic;
-	lts[LOS_MIRROR_TYPE_SONAR_JAMMER] = &losHandler->sonarJammer;
-
 	const int liveAllyTeams = teamHandler.ActiveAllyTeams();
 
-	// this slot needs a full LOS re-copy when an unsized/out-of-range mark
-	// arrived since it last caught up (pre-first-drain marks, resizes)
-	bool slotLosAllDirty = (pl.losFullDrained != losFullVersion);
+	// --- LOS layers (whole-map version per type/ally) ---
+	{
+		// PR 46: sub-attribution -- the LOS copies are the other candidate
+		// bulk of this drain's cost besides the (now incremental) blocking
+		// walk; scoped to exactly this section
+		SCOPED_TIMER("Sim::EpochProduce::MirrorLos");
 
-	// detect a resize (new game / allyteam count change) -> full re-copy
-	for (int t = 0; !slotLosAllDirty && t < LOS_MIRROR_TYPE_COUNT; ++t) {
-		if (static_cast<int>(pl.los[t].maps.size()) != int(lts[t]->losMaps.size()))
-			slotLosAllDirty = true;
-	}
+		// map the ILosType members onto the mirror's fixed enum order
+		const ILosType* lts[LOS_MIRROR_TYPE_COUNT];
+		lts[LOS_MIRROR_TYPE_LOS]          = &losHandler->los;
+		lts[LOS_MIRROR_TYPE_AIRLOS]       = &losHandler->airLos;
+		lts[LOS_MIRROR_TYPE_RADAR]        = &losHandler->radar;
+		lts[LOS_MIRROR_TYPE_SONAR]        = &losHandler->sonar;
+		lts[LOS_MIRROR_TYPE_JAMMER]       = &losHandler->jammer;
+		lts[LOS_MIRROR_TYPE_SEISMIC]      = &losHandler->seismic;
+		lts[LOS_MIRROR_TYPE_SONAR_JAMMER] = &losHandler->sonarJammer;
 
-	for (int t = 0; t < LOS_MIRROR_TYPE_COUNT; ++t) {
-		LosMirror& m = pl.los[t];
-		const ILosType* lt = lts[t];
-		const int nAlly = static_cast<int>(lt->losMaps.size());
+		// this slot needs a full LOS re-copy when an unsized/out-of-range mark
+		// arrived since it last caught up (pre-first-drain marks, resizes)
+		bool slotLosAllDirty = (pl.losFullDrained != losFullVersion);
 
-		m.invDiv = lt->invDiv;
-		m.size = lt->size;
-
-		if (static_cast<int>(m.maps.size()) != nAlly)
-			m.maps.resize(nAlly);
-		// producing-thread-owned version array (shared across slots)
-		if (static_cast<int>(losVersions[t].size()) != nAlly)
-			losVersions[t].assign(nAlly, 1);
-		if (static_cast<int>(pl.losDrained[t].size()) != nAlly)
-			pl.losDrained[t].assign(nAlly, 0);
-
-		for (int at = 0; at < nAlly; ++at) {
-			if (!slotLosAllDirty && pl.losDrained[t][at] == losVersions[t][at])
-				continue;
-
-			m.maps[at] = lt->losMaps[at].GetLosMap(); // vector copy
-			pl.losDrained[t][at] = losVersions[t][at];
+		// detect a resize (new game / allyteam count change) -> full re-copy
+		for (int t = 0; !slotLosAllDirty && t < LOS_MIRROR_TYPE_COUNT; ++t) {
+			if (static_cast<int>(pl.los[t].maps.size()) != int(lts[t]->losMaps.size()))
+				slotLosAllDirty = true;
 		}
+
+		for (int t = 0; t < LOS_MIRROR_TYPE_COUNT; ++t) {
+			LosMirror& m = pl.los[t];
+			const ILosType* lt = lts[t];
+			const int nAlly = static_cast<int>(lt->losMaps.size());
+
+			m.invDiv = lt->invDiv;
+			m.size = lt->size;
+
+			if (static_cast<int>(m.maps.size()) != nAlly)
+				m.maps.resize(nAlly);
+			// producing-thread-owned version array (shared across slots)
+			if (static_cast<int>(losVersions[t].size()) != nAlly)
+				losVersions[t].assign(nAlly, 1);
+			if (static_cast<int>(pl.losDrained[t].size()) != nAlly)
+				pl.losDrained[t].assign(nAlly, 0);
+
+			for (int at = 0; at < nAlly; ++at) {
+				if (!slotLosAllDirty && pl.losDrained[t][at] == losVersions[t][at])
+					continue;
+
+				m.maps[at] = lt->losMaps[at].GetLosMap(); // vector copy
+				pl.losDrained[t][at] = losVersions[t][at];
+			}
+		}
+		pl.losFullDrained = losFullVersion;
 	}
-	pl.losFullDrained = losFullVersion;
 
 	// --- global-LOS + jammer config (tiny, unconditional) ---
 	pl.numAllyTeams = liveAllyTeams;
@@ -209,34 +247,83 @@ void DrawMapMirrors::DrainAtBarrier(int slot)
 	}
 
 	// --- blocking map (PR 29): per-square cell[0] id + kind ---
-	// Whole-map re-walk when a blocking mutation moved the version since this
-	// slot last copied (or on the slot's first drain / a map-size change).
 	// GroundBlockedUnsafe(sq) returns the same cell[0] object the live
 	// placement callouts read; classify it once here so the served twins never
-	// dereference a live CSolidObject.
+	// dereference a live CSolidObject. PR 46: incremental -- the choke points
+	// log each mutation's footprint rect, and a caught-up slot re-scans ONLY
+	// the rects appended since its cursor (the whole-map walk was ~all of the
+	// measured 6.65ms/epoch drain cost). The whole-map path remains for the
+	// slot's first drain, a map-size change, and a version bump (log
+	// overflow / Clear); the armed SnapshotDiffGate memcmp pass is the
+	// deterministic detector for a rect this misses.
 	{
+		SCOPED_TIMER("Sim::EpochProduce::MirrorBlocking");
+
+		const auto classifySquare = [&pl](size_t sq) {
+			const CSolidObject* s = groundBlockingObjectMap.GroundBlockedUnsafe(static_cast<unsigned int>(sq));
+
+			// live GetGroundBlocked order: feature cast first, then unit;
+			// anything else -> NONE (the twin's "neither" fall-through)
+			if (s == nullptr) {
+				pl.blockId[sq] = -1;
+				pl.blockKind[sq] = BLOCK_KIND_NONE;
+			} else if (const CFeature* f = dynamic_cast<const CFeature*>(s)) {
+				pl.blockId[sq] = f->id;
+				pl.blockKind[sq] = BLOCK_KIND_FEATURE;
+			} else if (const CUnit* u = dynamic_cast<const CUnit*>(s)) {
+				pl.blockId[sq] = u->id;
+				pl.blockKind[sq] = BLOCK_KIND_UNIT;
+			} else {
+				pl.blockId[sq] = -1;
+				pl.blockKind[sq] = BLOCK_KIND_NONE;
+			}
+		};
+
 		const size_t nSquares = static_cast<size_t>(mapDims.mapx) * static_cast<size_t>(mapDims.mapy);
+
 		if (pl.blockingDrained != blockingVersion || pl.blockId.size() != nSquares) {
+			// full path: this slot cannot trust its arrays (first drain,
+			// resize, or an overflow-class version bump)
 			pl.blockId.assign(nSquares, -1);
 			pl.blockKind.assign(nSquares, BLOCK_KIND_NONE);
 
-			for (size_t sq = 0; sq < nSquares; ++sq) {
-				const CSolidObject* s = groundBlockingObjectMap.GroundBlockedUnsafe(static_cast<unsigned int>(sq));
-				if (s == nullptr)
-					continue;
+			for (size_t sq = 0; sq < nSquares; ++sq)
+				classifySquare(sq);
 
-				// live GetGroundBlocked order: feature cast first, then unit;
-				// anything else stays NONE (the twin's "neither" fall-through)
-				if (const CFeature* f = dynamic_cast<const CFeature*>(s)) {
-					pl.blockId[sq] = f->id;
-					pl.blockKind[sq] = BLOCK_KIND_FEATURE;
-				} else if (const CUnit* u = dynamic_cast<const CUnit*>(s)) {
-					pl.blockId[sq] = u->id;
-					pl.blockKind[sq] = BLOCK_KIND_UNIT;
+			pl.blockingDrained = blockingVersion;
+			pl.blockingRectsDrained = blockingRectNextSerial; // log subsumed by the walk
+		} else if (pl.blockingRectsDrained != blockingRectNextSerial) {
+			// incremental path: apply the footprint rects logged since this
+			// slot's cursor (rects were clamped at the choke point; overlaps
+			// are idempotent -- classifySquare reads current live state)
+			size_t idx = 0;
+			if (pl.blockingRectsDrained > blockingRectBaseSerial)
+				idx = static_cast<size_t>(pl.blockingRectsDrained - blockingRectBaseSerial);
+
+			for (; idx < blockingRects.size(); ++idx) {
+				const BlockingRect& r = blockingRects[idx];
+
+				for (int z = r.z1; z < r.z2; ++z) {
+					size_t sq = static_cast<size_t>(z) * static_cast<size_t>(mapDims.mapx) + static_cast<size_t>(r.x1);
+
+					for (int x = r.x1; x < r.x2; ++x, ++sq)
+						classifySquare(sq);
 				}
 			}
 
-			pl.blockingDrained = blockingVersion;
+			pl.blockingRectsDrained = blockingRectNextSerial;
+		}
+
+		// prune the log prefix every slot has applied (slots that never
+		// drained hold cursor 0 and block pruning only until their first
+		// drain, which takes the full path above within the first frames)
+		uint64_t minCursor = blockingRectNextSerial;
+		for (const Payload& q : payloads)
+			minCursor = std::min(minCursor, q.blockingRectsDrained);
+
+		while (blockingRectBaseSerial < minCursor && !blockingRects.empty()) {
+			blockingRects.pop_front();
+			blockingRectBaseSerial += 1;
 		}
 	}
 
@@ -263,6 +350,11 @@ void DrawMapMirrors::Clear()
 	metalMapVersion = 0;
 	extractionVersion = 1;
 	blockingVersion = 1;
+
+	// PR 46: blocking dirty-rect log
+	blockingRects.clear();
+	blockingRectNextSerial = 1;
+	blockingRectBaseSerial = 1;
 }
 
 // PR 29: cell[0] id + kind at map square (x, z). Mirrors

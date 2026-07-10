@@ -58,8 +58,9 @@ void CGroundBlockingObjectMap::AddGroundBlockingObject(CSolidObject* object)
 		}
 	}
 
-	// sim|draw PR 29: cell[0] may have changed -> re-walk the blocking mirror
-	drawMapMirrors.MarkBlockingDirty();
+	// sim|draw PR 29: cell[0] may have changed -> re-scan the footprint's
+	// squares in the blocking mirror (PR 46: rect-incremental)
+	drawMapMirrors.MarkBlockingDirty(xminSqr, zminSqr, xmaxSqr, zmaxSqr);
 
 	// FIXME: needs dependency injection (observer pattern?)
 	if (object->moveDef != nullptr)
@@ -110,8 +111,9 @@ void CGroundBlockingObjectMap::AddGroundBlockingObject(CSolidObject* object, con
 		}
 	}
 
-	// sim|draw PR 29: cell[0] may have changed -> re-walk the blocking mirror
-	drawMapMirrors.MarkBlockingDirty();
+	// sim|draw PR 29: cell[0] may have changed -> re-scan the footprint's
+	// squares in the blocking mirror (PR 46: rect-incremental)
+	drawMapMirrors.MarkBlockingDirty(xminSqr, zminSqr, xmaxSqr, zmaxSqr);
 
 	// FIXME: needs dependency injection (observer pattern?)
 	if (object->moveDef != nullptr)
@@ -155,8 +157,9 @@ void CGroundBlockingObjectMap::RemoveGroundBlockingObject(CSolidObject* object)
 		}
 	}
 
-	// sim|draw PR 29: cell[0] may have changed -> re-walk the blocking mirror
-	drawMapMirrors.MarkBlockingDirty();
+	// sim|draw PR 29: cell[0] may have changed -> re-scan the footprint's
+	// squares in the blocking mirror (PR 46: rect-incremental)
+	drawMapMirrors.MarkBlockingDirty(bx, bz, bx + sx, bz + sz);
 
 	// FIXME: needs dependency injection (observer pattern?)
 	if (object->moveDef != nullptr)

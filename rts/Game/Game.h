@@ -132,6 +132,8 @@ public:
 		                     // telemetry-id stability, no longer counted)
 		LUA_SEND_COMMANDS,   // LuaUnsyncedCtrl::SendCommands (console-action batch)
 		LUA_GIVE_ORDER,      // LuaUnsyncedCtrl::GiveOrder family
+		PIECE_FIRST_TOUCH,   // PR 46: read-set piece serving, first query of an
+		                     // unregistered object (rare; registered thereafter)
 		COUNT
 	};
 	static void DumpSimPauseSurvey();
@@ -172,6 +174,10 @@ private:
 	void ReleaseSimPause();
 	void DeliverBoundaryDeaths();
 	bool CanConsumeSimFrameNow() const;
+	/// PR 46: split-only pacing bypass -- true when the sim thread should
+	/// consume net messages at full capacity (no msgProcTimeLeft budget, no
+	/// per-call wall cap): local/replay server, raised speed, or catch-up.
+	bool SplitFullThrottleConsume() const;
 
 	// ---- PR 44b remainder (§9 ruling): the no-park consumer ----
 	/// consume-complete signal (§3.2 pacing): stamped when ALL consumer-side

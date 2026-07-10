@@ -132,6 +132,16 @@ namespace Threading {
 	uint32_t GetPreferredMainThreadMask(uint32_t affinityMask);
 	uint32_t GetOptimalThreadCount();
 
+	// PR 46 (sim|draw split): the core reserved for the split's sim thread
+	// (0 = no reservation). Set by ThreadPool::SetDefaultThreadCount when the
+	// split is configured on and the per-perf-core pin policy is active;
+	// applied by CGame::SimThreadProc at spawn. Without this the sim thread
+	// has NO affinity: it floats across the pinned workers' cores (or, on
+	// Linux, inherits the spawning main thread's mask) and preempts whichever
+	// worker it lands on -- the for_mt straggler class.
+	void     SetReservedSimAffinityMask(uint32_t mask);
+	uint32_t GetReservedSimAffinityMask();
+
 	/**
 	 * Inform the OS kernel that we are a cpu-intensive task
 	 */

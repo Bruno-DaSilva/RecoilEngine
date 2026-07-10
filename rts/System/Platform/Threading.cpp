@@ -309,6 +309,12 @@ namespace Threading {
 	#endif
 	}
 
+	// PR 46: the sim thread's reserved core (see Threading.h)
+	static std::uint32_t reservedSimAffinityMask = 0;
+
+	void     SetReservedSimAffinityMask(std::uint32_t mask) { reservedSimAffinityMask = mask; }
+	std::uint32_t GetReservedSimAffinityMask() { return reservedSimAffinityMask; }
+
 	void SetAffinityHelper(const char* threadName, std::uint32_t affinity) {
 		const std::uint32_t cpuMask = Threading::SetAffinity(affinity);
 

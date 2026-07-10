@@ -426,6 +426,9 @@ public:
 		// fold buys only marginal desync localization); correctness is covered by
 		// the SnapshotDiffGate unit:rules field pass + the serving dual-run.
 		std::vector<LuaRulesParams::Params> unitRulesParams; // [maxUnits]
+		// PR 46: modParamsVersion the slot's map copy reflects (0 = none/
+		// always-recopy); extraction skips the copy when unchanged
+		std::vector<uint64_t> unitRulesParamsVersion; // [maxUnits]
 
 		// ===== PR 38g (Batch-4 P1): GetUnitEstimatedPath serving =====
 		// The unit's own estimated path waypoints, exactly as
@@ -871,6 +874,8 @@ public:
 		// id) as the per-unit mirror above -- see the UnitRows comment for the
 		// id-reuse-hazard and SnapshotHash-exclusion rationale.
 		std::vector<LuaRulesParams::Params> featureRulesParams; // [MaxSlots()]
+		// PR 46: see UnitRows::unitRulesParamsVersion
+		std::vector<uint64_t> featureRulesParamsVersion; // [MaxSlots()]
 
 		bool Valid(int id) const {
 			// PR 43 tri-state: see UnitRows::Valid

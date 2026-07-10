@@ -16,6 +16,10 @@
 #include "System/Misc/TracyDefs.h"
 
 int CSolidObject::deletingRefID = -1;
+// PR 46: global serial source for modParamsVersion (synced-code/sim-thread
+// mutations only, so a plain counter suffices; never reset -- uniqueness
+// across the whole game session is the aliasing guard)
+uint64_t CSolidObject::modParamsVersionSource = 0;
 
 
 CR_BIND_DERIVED_INTERFACE(CSolidObject, CWorldObject)
@@ -78,6 +82,9 @@ CR_REG_METADATA(CSolidObject,
 
 	CR_MEMBER(buildFacing),
 	CR_MEMBER(modParams),
+	// PR 46: deliberately unserialized -- 0 after load means "unversioned",
+	// which forces the snapshot extraction to recopy (always safe)
+	CR_IGNORED(modParamsVersion),
 
 	CR_POSTLOAD(PostLoad)
 ))

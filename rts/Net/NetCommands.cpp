@@ -132,8 +132,16 @@ void CGame::SendClientProcUsage()
 			// LOG("%s: simProcUsage=%f, drawProcUsage=%f, maxCpuAdjust=%f, totalProcUsage=%f, lowThreshold=%f, highThreshold=%f"
 			// 		, __func__, simProcUsage, drawProcUsage, cpuUsageAdjust, totalProcUsage, lowThreshold, highThreshold);
 
+			// PR 46 (split only): draw no longer competes with the sim for a
+			// thread, and the drawProcUsage fold-in (Draw%/FPS * minDrawFPS)
+			// inflates at low FPS -- a remote server would throttle sim speed
+			// on draw load that cannot delay the split sim. Report the pure
+			// sim share (the "Sim" scope's wall fraction approximates the sim
+			// thread's busy share under the split).
+			const bool simOnlyUsage = SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning();
+
 			// take the minimum drawframes into account, too
-			clientNet->Send(CBaseNetProtocol::Get().SendCPUUsage(totalProcUsage));
+			clientNet->Send(CBaseNetProtocol::Get().SendCPUUsage(simOnlyUsage ? simProcUsage : totalProcUsage));
 		} else {
 			// the CPU-load percentage is undefined prior to SimFrame()
 			clientNet->Send(CBaseNetProtocol::Get().SendCPUUsage(0.0f));
@@ -315,6 +323,24 @@ bool CGame::CanConsumeSimFrameNow() const
 	return false;
 }
 
+// PR 46 (split only): consume net messages at full capacity -- no
+// msgProcTimeLeft budget, no per-call wall cap. Scoped to where throughput
+// can actually be gained: the local/replay server host (replays, SP), a
+// server-raised speed, or catch-up -- the same carve-out family as
+// CanConsumeSimFrameNow's free-run set. Remote-server 1x play deliberately
+// keeps master's budget pacing (the net-smoothing trailing buffer exists to
+// absorb link jitter; bypassing it there gains nothing, the sim is
+// supply-bound at 30 frames/sec). The pre-spawn lockstep window keeps master
+// pacing too: there ClientReadNet still shares the main thread with
+// rendering, so master's caps ARE the draw-starvation protection.
+bool CGame::SplitFullThrottleConsume() const
+{
+	if (!SimDrawSplit::Enabled() || !SimDrawSplit::SimThreadRunning())
+		return false;
+
+	return (gameServer != nullptr || gs->speedFactor > 1.01f || IsSimLagging());
+}
+
 void CGame::ClientReadNet()
 {
 	// first look ahead so we can adapt consumeSpeedMult to network fluctuations
@@ -328,12 +354,38 @@ void CGame::ClientReadNet()
 	const bool haveServerDemo = (gameServer != nullptr && gameServer->GetDemoReader() != nullptr);
 	const bool haveClientDemo = (clientNet->GetDemoRecorder() != nullptr);
 
+	// PR 46 (split only): under full throttle the budget/wall exits are
+	// replaced by (a) "the draw side consumed the last published epoch and a
+	// new frame edge exists" -- returning then lets SimThreadProc's
+	// ProduceEpochAtSimEdge publish immediately (NewestEpochConsumed()
+	// guarantees the §3.2 pacing gate will not skip), so publish cadence
+	// tracks the draw acquire rate with zero sim idle -- and (b) a coarse
+	// hygiene backstop so the SimThreadProc loop top (watchdog clear, pause
+	// yield, retired-pool servicing) runs even when draw stops acquiring.
+	const bool fullThrottle = SplitFullThrottleConsume();
+	const spring_time splitBackstopEndTime = spring_gettime() + spring_msecs(250.0f);
+	bool consumedSimFrame = false;
+
 	// now really process the messages
 	while (true) {
-		if (msgProcTimeLeft <= 0.0f)
-			break;
-		if (spring_gettime() > msgProcEndTime)
-			break;
+		if (fullThrottle) {
+			if (consumedSimFrame && simSnapshot.NewestEpochConsumed())
+				break;
+			if (spring_gettime() > splitBackstopEndTime) {
+				SimDrawSplit::g_ffBackstopExitCount.fetch_add(1, std::memory_order_relaxed);
+				break;
+			}
+			// no deficit carry-over: NEWFRAME consumption still costs 1000
+			// below, and a deeply negative budget would stall the sim for
+			// seconds when the bypass condition next turns off (master
+			// pacing resumes from a clean zero instead)
+			msgProcTimeLeft = std::max(msgProcTimeLeft, 0.0f);
+		} else {
+			if (msgProcTimeLeft <= 0.0f)
+				break;
+			if (spring_gettime() > msgProcEndTime)
+				break;
+		}
 
 		// PR 27b (split only): park promptly at a frame edge when the draw
 		// side requested the barrier, and hold the sim at most N-1 unretired
@@ -735,6 +787,7 @@ void CGame::ClientReadNet()
 				
 				msgProcTimeLeft -= 1000.0f;
 				lastSimFrameNetPacketTime = spring_gettime();
+				consumedSimFrame = true; // PR 46: full-throttle exit predicate
 
 				SimFrame();
 

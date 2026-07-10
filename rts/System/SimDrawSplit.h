@@ -175,6 +175,12 @@ namespace SimDrawSplit {
 	/// [BackpressureStats]. Header-inline like the flags above.
 	inline std::atomic<uint64_t> g_ringBlockCount = {0};
 
+	/// PR 46 telemetry: full-throttle ClientReadNet passes ended by the 250ms
+	/// hygiene backstop instead of the epoch-consumed exit; teardown-logged
+	/// with [BackpressureStats]. Small nonzero under FF is normal (draw
+	/// hitches); a huge count means the draw side stopped acquiring epochs.
+	inline std::atomic<uint64_t> g_ffBackstopExitCount = {0};
+
 	// sim-thread lifecycle (main sets running BEFORE spawning -- the pause
 	// handshake must see the thread from the very first Draw -- and exit+join
 	// at teardown; the thread proc clears running on exit).

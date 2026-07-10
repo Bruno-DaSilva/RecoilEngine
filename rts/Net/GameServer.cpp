@@ -39,6 +39,7 @@
 #include "System/CRC.h"
 #include "System/GlobalConfig.h"
 #include "System/MsgStrings.h"
+#include "System/SimDrawSplit.h"
 #include "System/SpringMath.h"
 #include "System/SpringExitCode.h"
 #include "System/SpringFormat.h"
@@ -878,6 +879,24 @@ void CGameServer::Update()
 
 
 
+// PR 46: the complement of "local + demo-sourced/AI only" -- true iff a live
+// remote client exists that the CPU speed controller must protect. Uses
+// exactly LagProtection's refCpuUsage counting rule (sans isLocal), so a live
+// spectator joining a hosted replay flips this true and protection resumes.
+bool CGameServer::HasRemotePacedClient() const
+{
+	for (const GameParticipant& player: players) {
+		if (player.myState != GameParticipant::INGAME)
+			continue;
+		if (player.isLocal)
+			continue;
+		if (demoReader ? !player.isFromDemo : !player.spectator)
+			return true;
+	}
+
+	return false;
+}
+
 void CGameServer::LagProtection()
 {
 	std::vector<float> cpu;
@@ -927,6 +946,20 @@ void CGameServer::LagProtection()
 
 	// adjust game speed
 	if (refCpuUsage > 0.0f && !isPaused) {
+		// PR 46 (split only): with no live remote client to protect, the
+		// CPU-usage throttle is pure self-pacing -- under the split the sim
+		// no longer shares a thread with draw, so hold the user's wanted
+		// speed instead (skips both the refCpuUsage reduction and the
+		// host maxSimFrameRate clamp below). The snap-up is needed because
+		// UserSpeedChange's insta-raise does not cover the already-throttled
+		// case (internalSpeed below the OLD userSpeedFactor).
+		if (SimDrawSplit::Enabled() && !HasRemotePacedClient()) {
+			if (internalSpeed != userSpeedFactor)
+				InternalSpeedChange(userSpeedFactor);
+
+			return;
+		}
+
 		//userSpeedFactor holds the wanted speed adjusted manually by user ( normally 1)
 		//internalSpeed holds the current speed the sim is running
 		//refCpuUsage holds the highest cpu if curSpeedCtrl == 0 or median if curSpeedCtrl == 1
@@ -3129,6 +3162,13 @@ void CGameServer::InternalSpeedChange(float newSpeed)
 {
 	if (internalSpeed == newSpeed)
 		return;
+
+	// PR 46 diagnostics (split only; ~LagProtection cadence, a few lines/min
+	// at most): every internalSpeed change names its origin -- an unexpected
+	// decay during a local replay must be attributable from the infolog
+	if (SimDrawSplit::Enabled())
+		LOG("[GameServer] internalSpeed %.2f -> %.2f (user %.2f, remotePaced=%d)",
+				internalSpeed, newSpeed, userSpeedFactor, HasRemotePacedClient());
 
 	Broadcast(CBaseNetProtocol::Get().SendInternalSpeed(internalSpeed = newSpeed));
 }

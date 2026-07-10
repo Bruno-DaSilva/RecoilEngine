@@ -49,6 +49,7 @@ static std::deque<TimeSlice> swpFrames;
 static std::deque<TimeSlice> uusFrames;
 static std::deque<TimeSlice> gteFrames;
 static std::deque<TimeSlice> prkFrames;
+static std::deque<TimeSlice> eppFrames;
 
 
 ProfileDrawer::ProfileDrawer()
@@ -291,6 +292,7 @@ static void DrawFrameBarcode(TypedRenderBuffer<VA_TYPE_C   >& rb)
 		"\xff\x01\x01\xff  Swap"
 		"\xff\x01\xff\x01  Video"
 		"\xff\xff\x01\x01  Sim"
+		"\xff\x01\xff\xff  Epoch"
 		"\xff\xff\x80\x01  Gate"
 		"\xff\xb4\xb4\xb4  Parked";
 
@@ -327,6 +329,7 @@ static void DrawFrameBarcode(TypedRenderBuffer<VA_TYPE_C   >& rb)
 	// else when the split is off. The parked slice is the pause window the
 	// gate holds the sim thread for -- any remaining gap is genuinely idle.
 	DrawTimeSlices(prkFrames, maxTime,  simRow, {0.7f, 0.7f, 0.7f, 0.35f}); // sim parked at the gate
+	DrawTimeSlices(eppFrames, maxTime,  simRow, {0.0f, 1.0f, 1.0f, 0.55f}); // epoch extraction+publish (PR 46)
 	DrawTimeSlices(sgcFrames, maxTime,  simRow, {1.0f, 0.5f, 1.0f, 0.55f}); // gc frames (sim phase)
 	DrawTimeSlices(simFrames, maxTime,  simRow, {1.0f, 0.0f, 0.0f, 0.55f}); // sim frames
 
@@ -693,6 +696,9 @@ void ProfileDrawer::DbgTimingInfo(DbgTimingInfoType type, const spring_time star
 		case TIMING_SIM_PARKED: {
 			prkFrames.emplace_back(start, end);
 		} break;
+		case TIMING_EPOCH_PRODUCE: {
+			eppFrames.emplace_back(start, end);
+		} break;
 		case TIMING_SWAP: {
 			swpFrames.emplace_back(start, end);
 		} break;
@@ -731,6 +737,7 @@ void ProfileDrawer::Update()
 	DiscardOldTimeSlices(simFrames, curTime, maxTime);
 	DiscardOldTimeSlices(gteFrames, curTime, maxTime);
 	DiscardOldTimeSlices(prkFrames, curTime, maxTime);
+	DiscardOldTimeSlices(eppFrames, curTime, maxTime);
 
 	// old ThreadProfile records get cleaned up inside TimeProfiler and DrawThreadBarcode
 }

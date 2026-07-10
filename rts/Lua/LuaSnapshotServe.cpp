@@ -6565,6 +6565,10 @@ uint64_t LuaSnapshotServe::CmdQueueCacheEpoch(int slot) { return cmdQueueCacheEp
 
 void LuaSnapshotServe::RefreshCommandQueues(int ringSlot, uint64_t targetEpoch)
 {
+	// PR 46: attribution -- this walk was the largest unzoned span of the
+	// epoch producer (Tracy showed it as a multi-ms gap on the sim thread)
+	SCOPED_TIMER("Sim::EpochProduce::CmdQueues");
+
 	// producer-only (the flip's sim frame edge, or the lockstep barrier with
 	// the sim parked): walks unitHandler and reads live queues. Epoch-gated so
 	// the copies always describe the same boundary as the target slot's rows
@@ -7207,6 +7211,21 @@ namespace {
 	// PR 43 §2.5: keyed by the u64 EpochId (was the u32 Generation); per-slot
 	std::array<uint64_t, SimSnapshot::EPOCH_RING_SLOTS> pieceCacheEpochs = {};
 
+	// PR 46: READ-SET-DRIVEN capture (operator-ruled) -- RefreshPieces
+	// captures ONLY objects the draw side has actually queried; the eager
+	// all-objects capture measured ~4ms/epoch mid-game while stock games
+	// query pieces rarely. First touch of a valid-but-unregistered object is
+	// served via a counted lazy park + inline live capture into the HELD
+	// slot (the SYNCED-mirror first-touch precedent, [SimPauseSurvey] site
+	// PIECE_FIRST_TOUCH), and registers the id so the producer captures it
+	// at every subsequent edge until the object dies (then pruned; an id
+	// reused by a new object re-registers on its own first touch).
+	std::vector<uint8_t> unitPieceReadSet;      // [maxUnits]; producer-owned
+	std::vector<uint8_t> featurePieceReadSet;   // grow-only; producer-owned
+	std::mutex pieceRegMtx;                     // guards the two pending lists
+	std::vector<int> pendingUnitPieceRegs;      // draw -> producer mailbox
+	std::vector<int> pendingFeaturePieceRegs;
+
 	// build (once) the immutable metadata for o's model from a live LocalModel
 	const ModelPieceMeta& GetOrBuildModelMeta(const void* key, const LocalModel& lm)
 	{
@@ -7303,20 +7322,67 @@ namespace {
 
 	const ObjectPieceSlot* GetUnitPieceSlot(int unitID)
 	{
-		const std::vector<ObjectPieceSlot>& cache = unitPieceCaches[simSnapshot.HeldSlot()];
-		if (unitID < 0 || static_cast<size_t>(unitID) >= cache.size())
+		std::vector<ObjectPieceSlot>& cache = unitPieceCaches[simSnapshot.HeldSlot()];
+
+		if (unitID < 0 || static_cast<size_t>(unitID) >= unitHandler.MaxUnits())
 			return nullptr;
-		const ObjectPieceSlot& s = cache[unitID];
-		return s.present ? &s : nullptr;
+
+		if (static_cast<size_t>(unitID) < cache.size() && cache[unitID].present)
+			return &cache[unitID];
+
+		// PR 46 first touch (draw thread; the Parse* gates validated the id
+		// against the held epoch's rows): register for the producer's future
+		// edges, then capture live under a counted park to serve THIS query.
+		// A null live object means the unit died after the epoch's edge --
+		// serve a miss for that dispatch window (enumerated deviation: the
+		// eager cache would have served its edge-time capture for one window).
+		{
+			std::lock_guard<std::mutex> lk(pieceRegMtx);
+			pendingUnitPieceRegs.push_back(unitID);
+		}
+
+		CGame::ScopedExternalSimPause park{CGame::SimPauseSite::PIECE_FIRST_TOUCH};
+
+		const CUnit* u = unitHandler.GetUnit(unitID);
+		if (u == nullptr || u->isDead)
+			return nullptr;
+
+		if (cache.size() < unitHandler.MaxUnits())
+			cache.resize(unitHandler.MaxUnits());
+
+		ObjectPieceSlot& s = cache[unitID];
+		RefreshObjectPieceSlot(s, u, /*script*/true, /*colVol*/true, /*lastHit*/true);
+		return &s;
 	}
 
 	const ObjectPieceSlot* GetFeaturePieceSlot(int featureID)
 	{
-		const std::vector<ObjectPieceSlot>& cache = featurePieceCaches[simSnapshot.HeldSlot()];
-		if (featureID < 0 || static_cast<size_t>(featureID) >= cache.size())
+		std::vector<ObjectPieceSlot>& cache = featurePieceCaches[simSnapshot.HeldSlot()];
+
+		if (featureID < 0)
 			return nullptr;
-		const ObjectPieceSlot& s = cache[featureID];
-		return s.present ? &s : nullptr;
+
+		if (static_cast<size_t>(featureID) < cache.size() && cache[featureID].present)
+			return &cache[featureID];
+
+		// PR 46 first touch -- see GetUnitPieceSlot
+		{
+			std::lock_guard<std::mutex> lk(pieceRegMtx);
+			pendingFeaturePieceRegs.push_back(featureID);
+		}
+
+		CGame::ScopedExternalSimPause park{CGame::SimPauseSite::PIECE_FIRST_TOUCH};
+
+		const CFeature* f = featureHandler.GetFeature(featureID);
+		if (f == nullptr)
+			return nullptr;
+
+		if (cache.size() <= static_cast<size_t>(featureID))
+			cache.resize(featureID + 1);
+
+		ObjectPieceSlot& s = cache[featureID];
+		RefreshObjectPieceSlot(s, f, /*script*/false, /*colVol*/true, /*lastHit*/true);
+		return &s;
 	}
 
 	// ParseTypedUnit mirror (rows.Valid + PovUnitTyped) + piece-slot lookup
@@ -7604,6 +7670,9 @@ void LuaSnapshotServe::EpochChannelBytes(size_t& cmdQueueBytes, size_t& pieceByt
 
 void LuaSnapshotServe::RefreshPieces(int ringSlot, uint64_t targetEpoch)
 {
+	// PR 46: attribution (see RefreshCommandQueues)
+	SCOPED_TIMER("Sim::EpochProduce::Pieces");
+
 	// producer-only (the flip's sim frame edge, or the lockstep barrier with
 	// the sim parked). Epoch-gated so the copies always describe the same
 	// boundary as the target slot's rows, and so the walk is free when
@@ -7626,28 +7695,65 @@ void LuaSnapshotServe::RefreshPieces(int ringSlot, uint64_t targetEpoch)
 	const size_t maxUnits = unitHandler.MaxUnits();
 	if (unitPieceCache.size() != maxUnits)
 		unitPieceCache.resize(maxUnits);
+	if (unitPieceReadSet.size() != maxUnits)
+		unitPieceReadSet.resize(maxUnits, 0);
+
+	// PR 46: drain the first-touch registrations (draw -> producer mailbox)
+	{
+		std::lock_guard<std::mutex> lk(pieceRegMtx);
+
+		for (const int id: pendingUnitPieceRegs) {
+			if (id >= 0 && static_cast<size_t>(id) < maxUnits)
+				unitPieceReadSet[id] = 1;
+		}
+		pendingUnitPieceRegs.clear();
+
+		for (const int id: pendingFeaturePieceRegs) {
+			if (id < 0)
+				continue;
+			if (static_cast<size_t>(id) >= featurePieceReadSet.size())
+				featurePieceReadSet.resize(id + 1, 0);
+			featurePieceReadSet[id] = 1;
+		}
+		pendingFeaturePieceRegs.clear();
+	}
+
 	for (ObjectPieceSlot& s: unitPieceCache)
 		s.present = false;
 
-	// PR 32: units now also capture colVol + lastHit (GetUnitCollisionVolumeData /
-	// GetUnitPieceCollisionVolumeData / GetUnitLastAttackedPiece), like features
-	for (const CUnit* u: unitHandler.GetActiveUnits())
-		RefreshObjectPieceSlot(unitPieceCache[u->id], u, /*script*/true, /*colVol*/true, /*lastHit*/true);
+	// PR 32: units also capture colVol + lastHit (GetUnitCollisionVolumeData /
+	// GetUnitPieceCollisionVolumeData / GetUnitLastAttackedPiece), like features.
+	// PR 46: registered ids only; a dead id prunes (a reused id re-registers
+	// through its own first touch)
+	for (size_t id = 0; id < maxUnits; ++id) {
+		if (!unitPieceReadSet[id])
+			continue;
 
-	const auto& activeFeatureIDs = featureHandler.GetActiveFeatureIDs();
-	int maxFeatureID = -1;
-	for (const int id: activeFeatureIDs)
-		maxFeatureID = std::max(maxFeatureID, id);
-	const size_t wantFeatSlots = static_cast<size_t>(maxFeatureID + 1);
-	if (featurePieceCache.size() < wantFeatSlots)
-		featurePieceCache.resize(std::max(wantFeatSlots, featurePieceCache.size()));
+		const CUnit* u = unitHandler.GetUnit(id);
+		if (u == nullptr || u->isDead) {
+			unitPieceReadSet[id] = 0;
+			continue;
+		}
+
+		RefreshObjectPieceSlot(unitPieceCache[id], u, /*script*/true, /*colVol*/true, /*lastHit*/true);
+	}
+
+	if (featurePieceCache.size() < featurePieceReadSet.size())
+		featurePieceCache.resize(featurePieceReadSet.size());
 	for (ObjectPieceSlot& s: featurePieceCache)
 		s.present = false;
 
-	for (const int id: activeFeatureIDs) {
+	for (size_t id = 0; id < featurePieceReadSet.size(); ++id) {
+		if (!featurePieceReadSet[id])
+			continue;
+
 		const CFeature* f = featureHandler.GetFeature(id);
-		if (f != nullptr)
-			RefreshObjectPieceSlot(featurePieceCache[id], f, /*script*/false, /*colVol*/true, /*lastHit*/true);
+		if (f == nullptr) {
+			featurePieceReadSet[id] = 0;
+			continue;
+		}
+
+		RefreshObjectPieceSlot(featurePieceCache[id], f, /*script*/false, /*colVol*/true, /*lastHit*/true);
 	}
 }
 
@@ -7877,6 +7983,15 @@ void LuaSnapshotServe::ClearCaches()
 		modelMetaCache.clear();
 	}
 	pieceCacheEpochs.fill(0);
+
+	// PR 46: the piece read-set restarts with the next game (ids alias)
+	{
+		std::lock_guard<std::mutex> lk(pieceRegMtx);
+		unitPieceReadSet.clear();
+		featurePieceReadSet.clear();
+		pendingUnitPieceRegs.clear();
+		pendingFeaturePieceRegs.clear();
+	}
 
 	// PR 35 weapon trace-query channel state is self-pruning (the reply map is
 	// rebuilt from the pending set every barrier, and is keyed by the full query

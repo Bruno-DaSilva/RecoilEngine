@@ -1636,6 +1636,9 @@ int LuaSyncedCtrl::SetUnitRulesParam(lua_State* L)
 		return 0;
 
 	SetRulesParam(L, __func__, 1, unit->modParams);
+	// PR 46: version-skip choke -- the SimSnapshot extraction skips the
+	// per-unit map copy while this version is unchanged
+	unit->BumpModParamsVersion();
 	return 0;
 }
 
@@ -1655,6 +1658,8 @@ int LuaSyncedCtrl::SetFeatureRulesParam(lua_State* L)
 		return 0;
 
 	SetRulesParam(L, __func__, 1, feature->modParams);
+	// PR 46: version-skip choke (see SetUnitRulesParam)
+	feature->BumpModParamsVersion();
 	return 0;
 }
 

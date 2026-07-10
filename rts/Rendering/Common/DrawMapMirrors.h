@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <deque>
 #include <string>
 #include <vector>
 
@@ -134,8 +135,14 @@ public:
 	/// PR 29: CGroundBlockingObjectMap {Add,Remove}GroundBlockingObject (and
 	/// thus Open/CloseBlockingYard, which call Remove+Add) -- the object-move
 	/// funnels through which every cell[0] change flows. Blocking state churns
-	/// most frames.
-	void MarkBlockingDirty() { ++blockingVersion; }
+	/// most frames. PR 46: takes the mutation's footprint rect (map squares,
+	/// exclusive max -- exactly the caller's cell loop bounds) and appends it
+	/// to a dirty-rect log; the drain re-scans only the logged rects instead
+	/// of the whole map (the PR-28 header's sanctioned "later cost
+	/// optimisation"; measured 6.65ms/epoch, dominated by this layer's
+	/// every-frame whole-map rewalk). A log overflow falls back to the
+	/// whole-map path via a blockingVersion bump.
+	void MarkBlockingDirty(int x1, int z1, int x2, int z2);
 
 	// ---- producer + consumer + lifecycle ----
 
@@ -310,6 +317,9 @@ private:
 		std::vector<int32_t> blockId;                // [mapx*mapy], -1 == empty
 		std::vector<uint8_t> blockKind;              // [mapx*mapy], BLOCK_KIND_*
 		uint32_t blockingDrained = 0xffffffffu;
+		// PR 46: dirty-rect log cursor -- the serial this slot has applied the
+		// log up to (everything below it is reflected in blockId/blockKind)
+		uint64_t blockingRectsDrained = 0;
 
 		bool ready = false;
 	};
@@ -342,6 +352,17 @@ private:
 	uint32_t metalMapVersion = 0;
 	uint32_t extractionVersion = 1;
 	uint32_t blockingVersion = 1;
+
+	// ---- PR 46: blocking dirty-rect log (producing-thread-owned, like the
+	// versions above: the choke points and the drain run on the same thread).
+	// Rect i in the deque has serial blockingRectBaseSerial + i; the next
+	// appended rect gets blockingRectNextSerial. A slot's drain applies
+	// [its cursor, blockingRectNextSerial) and the fully-applied prefix is
+	// pruned once every slot's cursor has passed it. ----
+	struct BlockingRect { int32_t x1, z1, x2, z2; }; // squares, exclusive max
+	std::deque<BlockingRect> blockingRects;
+	uint64_t blockingRectNextSerial = 1;
+	uint64_t blockingRectBaseSerial = 1;
 };
 
 extern DrawMapMirrors drawMapMirrors;

@@ -2102,9 +2102,20 @@ void CGame::ProduceEpochAtSimEdge(bool forceProduce)
 {
 	assert(SimDrawSplit::Enabled());
 
+	// PR 46: own /debug timer -- producer time on the sim thread is NOT part
+	// of the "Sim" special timer (SimFrame only), so without this the whole
+	// extraction/publish cost reads as sim-thread idle in the profiler
+	SCOPED_TIMER("Sim::EpochProduce");
+	// frame-grapher slice, emitted at the publish below (skipped passes are
+	// microseconds and would only flood the deque)
+	const spring_time produceStartTime = spring_now();
+
 	// (p0) PR 44b: return retired-epoch pool pages (the consumer's
 	// ReleaseRetired only marks them releasable -- pools are sim-owned)
-	deferredObjectDeleter.ServiceRetiredReleases();
+	{
+		SCOPED_TIMER("Sim::EpochProduce::PoolService");
+		deferredObjectDeleter.ServiceRetiredReleases();
+	}
 
 	// (p1) drain the draw side's queued ctrl pokes BEFORE the due-check +
 	// extraction (barrier step 2b's successor, §1.8): applied pokes mutate
@@ -2173,28 +2184,40 @@ void CGame::ProduceEpochAtSimEdge(bool forceProduce)
 	// (p6) §7.6 ruling A: transformsMemStorage production moves here (the
 	// PR-8 extraction is camera-independent); the SSBO upload consumes it at
 	// the consumer's park (see UpdateUnsynced). Forced-serial on this thread.
-	CUnitDrawer::ExtractTransformsAtSimEdge();
-	CFeatureDrawer::ExtractTransformsAtSimEdge();
+	{
+		SCOPED_TIMER("Sim::EpochProduce::Transforms");
+		CUnitDrawer::ExtractTransformsAtSimEdge();
+		CFeatureDrawer::ExtractTransformsAtSimEdge();
+	}
 
 	// (p7) evaluate pending trace/placement queries at the SAME edge the rows
 	// were extracted (§7.3: replies consistent with the epoch's rows)
-	LuaSnapshotServe::EvaluateQueriesAtSimEdge();
+	{
+		SCOPED_TIMER("Sim::EpochProduce::Queries");
+		LuaSnapshotServe::EvaluateQueriesAtSimEdge();
 
-	// PR 44b: the re-hosted default-cmd query evaluates at the same edge
-	// (its reply commits at the consumer's barrier -- CommitDefaultCmdReply)
-	if (guihandler != nullptr)
-		guihandler->EvaluateDefaultCmdQueryAtSimEdge();
+		// PR 44b: the re-hosted default-cmd query evaluates at the same edge
+		// (its reply commits at the consumer's barrier -- CommitDefaultCmdReply)
+		if (guihandler != nullptr)
+			guihandler->EvaluateDefaultCmdQueryAtSimEdge();
+	}
 
 	// (p7c) PR 44b §9: mirror the registered SYNCED-globals read-set at the
 	// same edge (scalar _G values; the SYNCED proxy serves them inside the
 	// dispatch window -- the epoch-window value, MORE master-faithful than
 	// the live read the parked dispatch used to make)
-	CSplitLuaHandle::MirrorAllSyncedGlobalsAtSimEdge(false);
+	{
+		SCOPED_TIMER("Sim::EpochProduce::SyncedMirror");
+		CSplitLuaHandle::MirrorAllSyncedGlobalsAtSimEdge(false);
+	}
 
 	// (p7b) PR 44b: stage the effect-container copies (ground flashes /
 	// flying pieces) -- the sim owns the source containers at this edge; the
 	// consumer swaps them into the serving members at the barrier
-	projectileDrawer->StageEffectContainersAtSimEdge();
+	{
+		SCOPED_TIMER("Sim::EpochProduce::EffectStage");
+		projectileDrawer->StageEffectContainersAtSimEdge();
+	}
 
 	// (p8) seal the epoch's record/closure/shell batches INTO THE RING SLOT
 	// (PR 44b: physically per-slot): the consumer dispatches exactly these;
@@ -2204,20 +2227,27 @@ void CGame::ProduceEpochAtSimEdge(bool forceProduce)
 	static_assert(RenderEventQueue::MAX_EPOCH_BATCH_SLOTS == SimSnapshot::EPOCH_RING_SLOTS);
 	static_assert(DeferredObjectDeleter::MAX_EPOCH_BATCH_SLOTS == SimSnapshot::EPOCH_RING_SLOTS);
 	static_assert(UnsyncedBoundaryQueue::MAX_EPOCH_BATCH_SLOTS == SimSnapshot::EPOCH_RING_SLOTS);
-	renderEventQueue.SealEpochBatch(slot);
-	UnsyncedBoundaryQueue::SealEpochBatch(slot);
-	deferredObjectDeleter.SealPendingBatch(slot);
-	// PR 44b: the sealed closures own their fire-time mailbox from here on
-	// (the fire/drain sides run concurrently under the no-park split)
-	CSplitLuaHandle::RotateSendToUnsyncedMailbox(slot);
+	{
+		SCOPED_TIMER("Sim::EpochProduce::SealPublish");
+		renderEventQueue.SealEpochBatch(slot);
+		UnsyncedBoundaryQueue::SealEpochBatch(slot);
+		deferredObjectDeleter.SealPendingBatch(slot);
+		// PR 44b: the sealed closures own their fire-time mailbox from here on
+		// (the fire/drain sides run concurrently under the no-park split)
+		CSplitLuaHandle::RotateSendToUnsyncedMailbox(slot);
 
-	// (p9) publish (channel versions sealed into the slot's meta first)
-	simSnapshot.PublishEpoch(slot,
-		LuaSnapshotServe::CmdQueueCacheEpoch(slot),
-		LuaSnapshotServe::PieceCacheEpoch(slot),
-		drawMapMirrors.DrainSerial());
+		// (p9) publish (channel versions sealed into the slot's meta first)
+		simSnapshot.PublishEpoch(slot,
+			LuaSnapshotServe::CmdQueueCacheEpoch(slot),
+			LuaSnapshotServe::PieceCacheEpoch(slot),
+			drawMapMirrors.DrainSerial());
+	}
 
 	lastEpochPublishTime = spring_now();
+
+	// PR 46: /debug frame-grapher attribution (the cyan "Epoch" slice on the
+	// sim-thread row); same emit pattern as TIMING_SIM at SimFrame's end
+	eventHandler.DbgTimingInfo(TIMING_EPOCH_PRODUCE, produceStartTime, lastEpochPublishTime);
 }
 
 __FORCE_ALIGN_STACK__
@@ -2226,6 +2256,13 @@ void CGame::SimThreadProc()
 	Threading::SetThreadName("sim");
 	// registers thread controls so watchdog/crash dumps can suspend us
 	Threading::SetSimThread();
+
+	// PR 46: pin to the core SetDefaultThreadCount reserved (0 = none
+	// reserved: non-pinning policies, or flag off). Without an explicit pin
+	// this thread floats over the pinned workers' cores (Linux: inherits the
+	// spawning main thread's mask) and creates for_mt stragglers.
+	if (const uint32_t simAffinity = Threading::GetReservedSimAffinityMask(); simAffinity != 0)
+		Threading::SetAffinityHelper("Sim", simAffinity);
 
 	// not needed to maintain sync (precision flags are per-process) but fpu
 	// exceptions are per-thread (the GameLoadThread pattern; sync risk #1)
@@ -2258,6 +2295,10 @@ void CGame::SimThreadProc()
 
 			good_fpu_control_registers("CGame::SimThreadProc");
 
+			// PR 46: frame progress across the ClientReadNet call decides
+			// whether a full-throttle pass may hot-continue (see below)
+			const int preNetFrameNum = gs->frameNum;
+
 			{
 				// exactly the bracket the single-threaded path wraps around
 				// ClientReadNet in CGame::Update
@@ -2271,9 +2312,17 @@ void CGame::SimThreadProc()
 
 			// keep consuming without a nap while budget and packets remain
 			// (ClientReadNet returns on its per-call wall-time cap during
-			// catch-up; napping there throttles fast-forward to ~half speed)
-			if (msgProcTimeLeft > 0.0f && clientNet->Peek(0) != nullptr)
+			// catch-up; napping there throttles fast-forward to ~half speed).
+			// PR 46 full throttle: no budget -- hot-continue only when the
+			// pass made frame progress; a ring-blocked or dry pass naps (a
+			// bare packets-remain check would busy-spin a core against the
+			// backpressure gate at 1x while draw catches up)
+			if (SplitFullThrottleConsume()) {
+				if (gs->frameNum != preNetFrameNum && clientNet->Peek(0) != nullptr)
+					continue;
+			} else if (msgProcTimeLeft > 0.0f && clientNet->Peek(0) != nullptr) {
 				continue;
+			}
 
 			// bounded nap; woken early by a pause request or exit
 			SimDrawSplit::SimIdleWait();
@@ -2452,10 +2501,17 @@ void CGame::DumpSimPauseSurvey()
 	if (const uint64_t n = SimDrawSplit::g_ringBlockCount.load(std::memory_order_relaxed); n > 0)
 		LOG("[BackpressureStats] ringBlocked=%llu", (unsigned long long)n);
 
+	// PR 46 telemetry: full-throttle passes ended by the hygiene backstop
+	// instead of the epoch-consumed exit (zero-suppressed; small counts under
+	// FF are normal, huge counts mean draw stopped acquiring epochs)
+	if (const uint64_t n = SimDrawSplit::g_ffBackstopExitCount.load(std::memory_order_relaxed); n > 0)
+		LOG("[BackpressureStats] ffBackstopExits=%llu", (unsigned long long)n);
+
 	static const char* siteNames[size_t(SimPauseSite::COUNT)] = {
 		"LIFECYCLE", "GUI_TRY_TARGET", "GUI_TEST_BUILDSQUARE", "GUI_GET_COMMAND",
 		"GUI_GET_BUILDPOS", "GUI_DRAW_MAPSTUFF", "GUI_GET_DEFAULT_CMD",
 		"MOUSE_RELEASE", "MINIMAP_FRUSTUM", "LUA_SEND_COMMANDS", "LUA_GIVE_ORDER",
+		"PIECE_FIRST_TOUCH",
 	};
 
 	uint64_t total = 0;

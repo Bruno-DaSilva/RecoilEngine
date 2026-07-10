@@ -431,6 +431,21 @@ public:
 	 */
 	LuaRulesParams::Params  modParams;
 
+	// PR 46: version-skip key for the SimSnapshot rules-params row copy (the
+	// per-object full map copy dominated the Units extraction cost). Set to a
+	// fresh globally-unique serial by BumpModParamsVersion() at every
+	// modParams mutation (choke: LuaSyncedCtrl::SetRulesParam call sites --
+	// the only runtime writers). 0 (creation / creg-load default; deliberately
+	// NOT serialized) means "no version": extraction always copies. Global
+	// uniqueness ensures an id reused by a new object can never alias a
+	// stale slot copy.
+	uint64_t modParamsVersion = 0;
+
+	void BumpModParamsVersion() { modParamsVersion = ++modParamsVersionSource; }
+
+private:
+	static uint64_t modParamsVersionSource;
+
 public:
 	static constexpr float DEFAULT_MASS = 1e5f;
 	static constexpr float MINIMUM_MASS = 1e0f; // 1.0f

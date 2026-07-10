@@ -405,12 +405,26 @@ int SimSnapshot::ProduceSlotInternal()
 			minProjSlots = std::max(minProjSlots, static_cast<size_t>(id + 1));
 	}
 
-	Extract(buffers[target]);
-	ExtractProjectiles(projBuffers[target], minProjSlots);
-	ExtractFeatures(featBuffers[target], minFeatSlots);
-	ExtractTeams(teamBuffers[target]);
-	ExtractPlayers(playerBuffers[target]);
-	ExtractGlobals(globBuffers[target]);
+	// PR 46: per-family sub-zones (Tracy + /debug) -- the row extraction was a
+	// single opaque ~2ms span on the sim thread
+	{
+		SCOPED_TIMER("Update::SimSnapshot::Units");
+		Extract(buffers[target]);
+	}
+	{
+		SCOPED_TIMER("Update::SimSnapshot::Projectiles");
+		ExtractProjectiles(projBuffers[target], minProjSlots);
+	}
+	{
+		SCOPED_TIMER("Update::SimSnapshot::Features");
+		ExtractFeatures(featBuffers[target], minFeatSlots);
+	}
+	{
+		SCOPED_TIMER("Update::SimSnapshot::TeamsPlayersGlobals");
+		ExtractTeams(teamBuffers[target]);
+		ExtractPlayers(playerBuffers[target]);
+		ExtractGlobals(globBuffers[target]);
+	}
 
 	// PR 43 §7.7 (producer side): extract the batch's dying ids from their
 	// deferred-deletion shells into the publishing slot, marked
@@ -418,8 +432,10 @@ int SimSnapshot::ProduceSlotInternal()
 	// 38b genuineness-guard class). The barrier dispatches still read live
 	// (barrierLive) under 43/44a, so only the id-coverage gate consumes these
 	// until 44b.
-	if (SimDrawSplit::Enabled())
+	if (SimDrawSplit::Enabled()) {
+		SCOPED_TIMER("Update::SimSnapshot::DeadRows");
 		ExtractDeadRowsFromShells(buffers[target], featBuffers[target], projBuffers[target], deadUnits, deadFeatures, deadProjectiles);
+	}
 
 	EpochSlotMeta& meta = slotMeta[target];
 	meta.epochId = epochCounter.load(std::memory_order_relaxed) + 1;
@@ -942,6 +958,7 @@ void SimSnapshot::Resize(UnitRows& rows, size_t maxUnits, int numAllyTeams)
 	rows.unitInJammerAll.resize(size_t(numAllyTeams) * maxUnits);
 	// ---- PR 38c: per-unit rules-params mirror (same maxUnits sizing) ----
 	rows.unitRulesParams.resize(maxUnits);
+	rows.unitRulesParamsVersion.resize(maxUnits, 0); // PR 46 version-skip
 	// ---- PR 38g: GetUnitEstimatedPath est-path block (same maxUnits sizing) ----
 	rows.estPathHasPath.resize(maxUnits);
 	rows.estPathPoints.resize(maxUnits);
@@ -1173,10 +1190,6 @@ void SimSnapshot::Extract(UnitRows& rows)
 		ExtractUnitBuildState(rows, id, u);
 		ExtractUnitMoveType(rows, id, u);
 
-		// ---- PR 38c: per-unit rules-params (values only; the Param variant is a
-		// bool/float/std::string, no pointer/sim-owned container) ----
-		rows.unitRulesParams[id] = u->modParams;
-
 		for (int at = 0; at < numAllyTeams; ++at) {
 			rows.losStatusAll[at * maxUnits + id] = u->losStatus[at];
 			rows.posErrorBits[at * maxUnits + id] = u->GetPosErrorBit(at);
@@ -1186,6 +1199,26 @@ void SimSnapshot::Extract(UnitRows& rows)
 			rows.unitInLosAll[at * maxUnits + id] = losHandler->InLos(u, at);
 			rows.unitInAirLosAll[at * maxUnits + id] = losHandler->InAirLos(u, at);
 			rows.unitInJammerAll[at * maxUnits + id] = losHandler->InJammer(u, at);
+		}
+	}
+
+	// ---- PR 38c: per-unit rules-params (values only; the Param variant is a
+	// bool/float/std::string, no pointer/sim-owned container). PR 46: own
+	// pass + timer (the full map copies dominated Units extraction) and
+	// version-skipped -- the slot's existing copy for this id is current
+	// while the object's modParamsVersion is unchanged since this slot last
+	// copied it (serials are globally unique; 0 = unversioned, always copy)
+	{
+		SCOPED_TIMER("Update::SimSnapshot::UnitsRules");
+
+		for (const CUnit* u : activeUnits) {
+			const int id = u->id;
+
+			if (u->modParamsVersion != 0 && rows.unitRulesParamsVersion[id] == u->modParamsVersion)
+				continue;
+
+			rows.unitRulesParams[id] = u->modParams;
+			rows.unitRulesParamsVersion[id] = u->modParamsVersion;
 		}
 	}
 
@@ -1543,6 +1576,7 @@ void SimSnapshot::ExtractFeatures(FeatureRows& rows, size_t minSlots)
 		rows.inLosAll.resize(size_t(numAllyTeams) * n);
 		// ---- PR 38c: per-feature rules-params mirror (grow-only like the rest) ----
 		rows.featureRulesParams.resize(n);
+		rows.featureRulesParamsVersion.resize(n, 0); // PR 46 version-skip
 	}
 
 	std::fill(rows.valid.begin(), rows.valid.end(), 0);
@@ -1592,8 +1626,12 @@ void SimSnapshot::ExtractFeatures(FeatureRows& rows, size_t minSlots)
 		rows.fireTime[id] = f->fireTime;   // PR 38g (GetFeatureFireTime)
 		rows.smokeTime[id] = f->smokeTime; // PR 38g (GetFeatureSmokeTime)
 
-		// ---- PR 38c: per-feature rules-params (values only, like the unit copy) ----
-		rows.featureRulesParams[id] = f->modParams;
+		// ---- PR 38c: per-feature rules-params (values only, like the unit copy).
+		// PR 46: version-skipped like the unit pass ----
+		if (f->modParamsVersion == 0 || rows.featureRulesParamsVersion[id] != f->modParamsVersion) {
+			rows.featureRulesParams[id] = f->modParams;
+			rows.featureRulesParamsVersion[id] = f->modParamsVersion;
+		}
 
 		for (int at = 0; at < numAllyTeams; ++at)
 			rows.inLosAll[at * slots + id] = losHandler->InLos(f->pos, at);
