@@ -118,6 +118,15 @@ end
 function widget:GameFrame(f)
 	lastAdvanceTime = os.clock()
 
+	-- DiffGateForce1x=1 (env DG_FORCE_1X) pins the demo to 1x even when the
+	-- recorded stream carries a setspeed (both gate replays were recorded
+	-- fast-forwarded at 20x, so any "1x" visual/timing observation without
+	-- this was silently FF'd -- the PR-46 lesson). Re-pinned periodically in
+	-- case the stream re-issues a speed change.
+	if Spring.GetConfigInt("DiffGateForce1x", 0) ~= 0 and (f % 150) == 30 then
+		Spring.SendCommands("setspeed 1")
+	end
+
 	if not armed and f >= 1 then
 		armed = true
 		if armGate ~= 0 then

@@ -83,6 +83,7 @@ DiffGatePovFrame = ${DG_POV_FRAME:-6000}
 DiffGatePovSpan = ${DG_POV_SPAN:-6000}
 DiffGatePovTeam = ${DG_POV_TEAM:--1}
 DiffGateCtrlPokes = ${DG_CTRL_POKES:-0}
+DiffGateForce1x = ${DG_FORCE_1X:-0}
 SplitDrawContract = ${DG_SPLIT_CONTRACT:-0}
 SplitDrawContractWarn = ${DG_SPLIT_CONTRACT_WARN:-1}
 WorkerThreadCount = ${WORKERS:--1}
