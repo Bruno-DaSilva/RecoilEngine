@@ -2033,8 +2033,8 @@ void CGame::SimDrawBarrier()
 	}
 }
 
-// PR 27b: see barrier step (1b). Also used by the pool-pressure valve
-// service in AcquireSimPause, which flushes destroys mid-frame.
+// PR 27b: see barrier step (1b). PR 44c: barrier-only again -- the valve's
+// tail epochs are consumed through the normal barrier (no in-place service).
 void CGame::DeliverBoundaryDeaths()
 {
 	if (!SimDrawSplit::Enabled())
@@ -2332,73 +2332,38 @@ void CGame::AcquireSimPause()
 		SimDrawSplit::RequestPause();
 	}
 
-	// the sim thread is parked (frame edge or valve) from here to ReleasePause
+	// the sim thread is parked from here to ReleasePause: at a frame edge,
+	// or MID-frame at the pool valve (PR 44c §3.4: the valve wait presents
+	// as a park and holds fully quiescent while a pause is pending; there is
+	// no main-thread valve service to run -- the sim resumes itself once the
+	// draw side's ordinary consume+retire returns pool pages). Enumerated
+	// deviation: a lifecycle park that catches a valve-parked sim gets
+	// MID-frame quiescence (pre-44c the acquire serviced the valve in place
+	// and waited for the frame edge) -- rare^2 (a near-pool-cap game AND a
+	// concurrent lifecycle event), flagged in the 44c design record.
 	simPauseBeginTime = spring_now();
-
-	// pool-pressure valve service: the sim parked MID-frame out of pool
-	// headroom -- run the emergency consume+produce-in-place, then wait for
-	// the follow-up frame-edge park (the pause is still pending). Skipped
-	// while a dispatch window is open (a lazy/GiveOrder-class park engaged
-	// from INSIDE the barrier's dispatch may not re-enter the barrier; a
-	// valve-parked sim is quiescent, which is all such a caller needs -- the
-	// Draw-top ServicePoolValve handles the pressure next frame).
-	while (SimDrawSplit::ParkedAtValve() && !SimDrawSplit::BoundaryShellWindowActive()) {
-		ServicePoolValveOnce();
-		SimDrawSplit::ResumeFromValve();
-	}
-
 	simPauseHeld = true;
 }
 
-// PR 44b §9: the Draw-top emergency valve service (no pause pending)
-void CGame::ServicePoolValve()
+// PR 44c (§3.4): the pool valve's forced mid-frame tail publish -- runs on
+// the SIM thread from DeferredObjectDeleter::WaitForEpochRetirementAtValve.
+// A normal producer pass: the §3.2 pacing gate inside still applies (at most
+// one unconsumed published epoch), so repeated valve rounds publish at the
+// draw side's consume rate. The mid-frame rows/records are the same value-
+// consistent momentary state the PR-44b main-thread valve produced; §7.7
+// dead rows come from the pending ledger, so §3.6a id coverage holds for the
+// tail batch by construction.
+void CGame::ProduceEpochForPoolValve()
 {
-	if (!SimDrawSplit::Enabled() || !SimDrawSplit::SimThreadRunning())
-		return;
-
-	while (SimDrawSplit::ParkedAtValve()) {
-		ServicePoolValveOnce();
-		SimDrawSplit::ResumeFromValveNoWait();
-	}
-}
-
-// PR 44b §9: the valve's in-place service body -- replaces the pre-44b
-// valveLive Flush/Drain (whose live-exception tail drain the no-park serving
-// could not keep). The sim is parked MID-frame out of pool headroom, i.e.
-// quiescent: consume any published-unacquired epoch through the NORMAL
-// barrier (its sealed batch dispatches with full epoch serving), then
-// FORCE-PRODUCE the mid-frame tail into an emergency epoch ON THIS THREAD
-// (the produce contract explicitly allows main-with-sim-quiescent; the §7.7
-// dead rows come from the pending ledger, so the §3.6a id-coverage invariant
-// holds for the tail batch by construction -- no live exception anywhere),
-// consume that too, and return every releasable page. Mid-frame rows are a
-// value-consistent momentary state -- CLOSER to master's mid-frame dispatch
-// than the parked live reads the old valve made. The full valve rekey ("sim
-// waits for epoch retirement", no in-place service at all) is PR 44c's §3.4.
-void CGame::ServicePoolValveOnce()
-{
-	// 1) consume the published-unacquired epoch, if any (normal semantics)
-	SimDrawBarrier();
-	simSnapshot.MarkNewestEpochConsumed();
-
-	// 2) seal + publish the mid-frame tail as an emergency epoch, in place
+	assert(Threading::IsSimThread());
 	ProduceEpochAtSimEdge(true);
-
-	// 3) consume it (fire order: the tail follows the sealed batch of (1))
-	SimDrawBarrier();
-	simSnapshot.MarkNewestEpochConsumed();
-
-	// 4) the valve must free pages IMMEDIATELY: return every poisoned /
-	// retirement-pending slot (address-blind -- poisoned shells are never
-	// legally read; the sim is parked, so the pool ops are safe here)
-	deferredObjectDeleter.ReleaseAcked();
 }
 
 // PR 44b §9 (option-1 fallback): on-demand quiescence for a dispatch-window
 // read the epoch cannot serve (SYNCED cross-hop first-touch / non-scalar
-// value). Held to the barrier's window close. Deliberately NO valve service
-// (see AcquireSimPause: this runs INSIDE the barrier's dispatch; a
-// valve-parked sim is quiescent, which is all the read needs).
+// value). Held to the barrier's window close. A valve-parked sim satisfies
+// this park too (quiescence is all the read needs; PR 44c: no caller
+// services the valve -- the sim resumes itself after the release).
 void CGame::AcquireLazyDispatchPark()
 {
 	if (simPauseHeld)
@@ -2481,6 +2446,9 @@ void CGame::DumpSimPauseSurvey()
 			simParkMaxUs.load(std::memory_order_relaxed) / 1000.0f);
 	}
 
+	// PR 44c: valve engage/wait aggregates (zero-line suppressed)
+	deferredObjectDeleter.DumpValveStats();
+
 	static const char* siteNames[size_t(SimPauseSite::COUNT)] = {
 		"LIFECYCLE", "GUI_TRY_TARGET", "GUI_TEST_BUILDSQUARE", "GUI_GET_COMMAND",
 		"GUI_GET_BUILDPOS", "GUI_DRAW_MAPSTUFF", "GUI_GET_DEFAULT_CMD",
@@ -2530,11 +2498,12 @@ bool CGame::Draw() {
 	// PR 44b remainder (§9 ruling): THE PER-FRAME CONSUME-PARK IS GONE --
 	// the barrier below consumes the published epoch CONCURRENT with the
 	// running sim (the producer/consumer exclusion is the §3.2 pacing gate,
-	// stamped at SignalEpochConsumeComplete). The only per-frame check left
-	// is the emergency pool-valve service (sim parked MID-frame out of pool
-	// headroom -- rare); parks otherwise remain for lifecycle events, the
-	// input-gated narrow parks and the dispatch-scoped lazy park.
-	ServicePoolValve();
+	// stamped at SignalEpochConsumeComplete). PR 44c (§3.4): the Draw-top
+	// pool-valve service is gone too -- a pool-pressured sim publishes its
+	// mid-frame tail itself and waits for epoch retirement (this loop's
+	// ordinary consume+retire is what releases it). Parks remain only for
+	// lifecycle events, the input-gated narrow parks and the dispatch-scoped
+	// lazy park.
 
 	// PR 44b: the barrierLive ScopedLiveException is GONE -- the barrier's
 	// deferred dispatches (the a0 closures' Lua handlers) read PUBLISHED

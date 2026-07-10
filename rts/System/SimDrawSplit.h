@@ -122,34 +122,29 @@ namespace SimDrawSplit {
 	 * ClientReadNet) and the main thread runs the SimDrawBarrier + the drawer
 	 * extraction with the sim quiescent, then ReleasePause(boundaryFrame).
 	 *
-	 * The pool-pressure valve (DeferredObjectDeleter) may instead park the
-	 * sim MID-frame via ParkAtValve() when the object pools run out of
-	 * headroom; RequestPause() then returns with ParkedAtValve() true and the
-	 * caller must service it (flush records + drain deferred dispatches +
-	 * ack + release the slots) and call ResumeFromValve(), which waits for
-	 * the eventual frame-edge park. A valve park with no pause pending is
-	 * serviced by the next Draw's RequestPause().
+	 * The pool-pressure valve (DeferredObjectDeleter, PR 44c §3.4): when the
+	 * pools run out of headroom MID-frame, the sim thread SERVICES ITSELF --
+	 * it publishes the mid-frame tail as a normal (pacing-gated) epoch and
+	 * waits for EPOCH RETIREMENT in ValveParkWait() rounds, re-checking pool
+	 * headroom after each round (the draw side's consume+retire makes the
+	 * shells releasable; ServiceRetiredReleases returns the pages). While
+	 * waiting it presents as a parked sim (PARK_VALVE), so a concurrent
+	 * RequestPause is satisfied and gets genuine quiescence -- the wait
+	 * holds parked while a pause is pending, and only the sim itself ever
+	 * resumes from the valve. There is NO main-thread valve service anymore
+	 * (the pre-44c in-place consume+produce is deleted).
 	 *
-	 * Deadlock argument: the main thread only blocks waiting for `parked !=
-	 * NONE || !simRunning`; the sim thread only blocks parked (released by
-	 * ReleasePause / ResumeFromValve / exit). A valve-parked sim satisfies
-	 * the main thread's wait immediately, and the valve service frees the
-	 * pages the sim needs to reach its frame edge.
-	 *
-	 * Backpressure: ReleasePause records the boundary's sim frame;
-	 * ClientReadNet consumes a NEWFRAME only while `frameNum <
-	 * LastBoundaryFrame()+1` unless free-running (fast-forward / catch-up /
-	 * skip / video capture) -- interpolation stays within one frame of the
-	 * published boundary at 1x.
+	 * Deadlock argument (§3.4): the draw side never waits on the sim -- the
+	 * epoch acquire is non-blocking and RequestPause is satisfied by an edge
+	 * OR valve park. The sim's only waits are the epoch-ring backpressure
+	 * gate (released by the draw side's acquire retiring an epoch), the
+	 * valve wait (released by the draw side's consume+retire returning pool
+	 * pages -- neither needs anything from the sim) and the pause park
+	 * (released by ReleasePause).
 	 */
 
 	// main-thread side
 	void RequestPause();
-	bool ParkedAtValve();
-	void ResumeFromValve();
-	/// PR 44b (no-park): resume a valve-parked sim WITHOUT waiting for a
-	/// follow-up park (no pause is pending -- the Draw-top valve service)
-	void ResumeFromValveNoWait();
 	void ReleasePause(int boundaryFrame);
 	/// PR 44b (no-park): the consumer publishes the backpressure boundary
 	/// frame explicitly (ReleasePause's side effect, park-free) -- the same
@@ -164,7 +159,13 @@ namespace SimDrawSplit {
 	// sim-thread side
 	bool PauseRequested();
 	void YieldIfPauseRequested();
-	void ParkAtValve();
+	/// PR 44c (§3.4): one pool-valve wait round -- present as a parked sim
+	/// (PARK_VALVE), nap ~1ms (woken early by ReleasePause / a pause request
+	/// / exit), then hold parked while a pause is pending. Returns false when
+	/// sim-thread exit was requested (the caller abandons the valve wait).
+	/// The caller (DeferredObjectDeleter::WaitForEpochRetirementAtValve)
+	/// re-checks pool headroom between rounds and resumes itself.
+	bool ValveParkWait();
 	void SimIdleWait();
 	int  LastBoundaryFrame();
 

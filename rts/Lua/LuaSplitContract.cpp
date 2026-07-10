@@ -299,9 +299,11 @@ bool Enforced(lua_State* L)
 	// non-sim thread is draw-thread context -- input callins included, not
 	// just the CGame::Draw window. PR 44b: the barrier's deferred dispatches
 	// are ENFORCED too (barrierLive removed -- their handlers read published
-	// epoch state through the serving twins, §3.6); only the valve service
-	// and the audited LuaSnapshotServe brackets still suspend enforcement
-	// via ScopedLiveException (sim provably parked there).
+	// epoch state through the serving twins, §3.6); only the audited
+	// LuaSnapshotServe brackets still suspend enforcement via
+	// ScopedLiveException (sim provably parked / pre-publish there). PR 44c:
+	// the valve has no dispatches of its own anymore (its tail epochs are
+	// consumed through the normal barrier).
 	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
 		if (tlLiveExceptionDepth > 0 || Threading::IsSimThread())
 			return false;
@@ -338,9 +340,10 @@ bool DenyLiveRead(lua_State* L, const char* caller)
 	// sim mutates concurrently (the quadfield/team-list/command-queue
 	// families are crash-class, not timing edges). Every unserved live read
 	// denies deterministically until its family is snapshot-served; the
-	// valve service's dispatches run under ScopedLiveException (sim parked
-	// mid-frame) and never get here -- the barrier's deferred dispatches DO
-	// since PR 44b, serving via the twins.
+	// barrier's deferred dispatches get here since PR 44b, serving via the
+	// twins (PR 44c: the valve's tail epochs dispatch through that same
+	// barrier -- no live-exception dispatches remain outside the audited
+	// LuaSnapshotServe brackets).
 	// (Decision 5: the boundary serves everything it claims to serve.)
 	//
 	// EXCEPT the value-safe subset: pure scalar/grid reads with no sim-owned

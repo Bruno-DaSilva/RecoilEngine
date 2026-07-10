@@ -116,9 +116,6 @@ public:
 	// consume-complete -- serialized by the epoch pacing gate.
 	void StageEffectContainersAtSimEdge();
 	void CommitStagedEffectContainers();
-	// the valve service takes a FRESHER live mid-frame copy; drop any staged
-	// (epoch-edge) pair so the next barrier cannot regress the serving copy
-	void InvalidateStagedEffectContainers() { stagedEffectContainersValid = false; }
 
 	uint8_t GetDrawFlag(const CProjectile* p) const {
 		const auto& v = drawFlags[p->synced];

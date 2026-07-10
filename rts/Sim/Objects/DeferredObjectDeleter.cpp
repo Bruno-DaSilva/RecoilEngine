@@ -5,6 +5,7 @@
 #include <cassert>
 #include <cstring> // memset
 
+#include "Game/Game.h" // PR 44c: the valve's forced tail publish (ProduceEpochForPoolValve)
 #include "Rendering/Common/RenderEventQueue.h"
 #include "Sim/Features/Feature.h"
 #include "Sim/Features/FeatureMemPool.h"
@@ -15,7 +16,9 @@
 #include "Sim/Units/UnitMemPool.h"
 #include "System/Log/ILog.h"
 #include "System/MainDefines.h"
+#include "System/Misc/SpringTime.h"
 #include "System/Platform/Threading.h"
+#include "System/Platform/Watchdog.h"
 #include "System/SimDrawSplit.h"
 
 DeferredObjectDeleter deferredObjectDeleter;
@@ -49,31 +52,92 @@ static size_t FreePoolPages(const FixedDynMemPool<S, N, K, A>& pool)
 #endif
 
 
-void DeferredObjectDeleter::Park(ObjKind kind, void* obj)
+size_t DeferredObjectDeleter::FreePoolHeadroom(ObjKind kind) const
 {
-	size_t freePages = 0;
-
 	switch (kind) {
-		case ObjKind::Unit       : { freePages = FreePoolPages(unitMemPool   ); } break;
-		case ObjKind::Feature    : { freePages = FreePoolPages(featureMemPool); } break;
+		case ObjKind::Unit       : return FreePoolPages(unitMemPool   );
+		case ObjKind::Feature    : return FreePoolPages(featureMemPool);
 		case ObjKind::Projectile :
-		case ObjKind::GroundFlash: { freePages = FreePoolPages(projMemPool   ); } break;
+		case ObjKind::GroundFlash: return FreePoolPages(projMemPool   );
 	}
 
-	if (freePages < EMERGENCY_HEADROOM_PAGES && !(pending.empty() && poisoned.empty())) {
+	return 0;
+}
+
+void DeferredObjectDeleter::WaitForEpochRetirementAtValve(ObjKind kind)
+{
+	// PR 44c (§3.4): the pool valve is "sim WAITS for epoch retirement".
+	// Sim thread, MID-frame, out of pool headroom. Per round:
+	//  - reclaim the pages of every epoch the draw side retired since the
+	//    last check (ServiceRetiredReleases -- pools are sim-owned, and this
+	//    IS the sim thread);
+	//  - if headroom is back, resume the frame;
+	//  - if nothing reclaimable remains anywhere in the pipeline
+	//    (outstandingShells == 0), resume too -- the pool is near its cap
+	//    with LIVE objects and waiting cannot help (the flag-off branch
+	//    proceeds identically after its flush);
+	//  - otherwise publish the mid-frame tail as a NORMAL producer epoch
+	//    (ProduceEpochForPoolValve -> ProduceEpochAtSimEdge(force), pacing-
+	//    gated inside: at most one publish per draw consume). The mid-frame
+	//    rows/records are the same value-consistent momentary state the
+	//    PR-44b valve produced; the §7.7 dead rows come from the pending
+	//    ledger, so §3.6a id coverage holds for the tail batch. Once the
+	//    tail (or an empty retirement-advancing epoch) is published, the
+	//    draw side's ordinary consume -> ack -> next-acquire-retires flow
+	//    makes its shells releasable -- it needs NOTHING from the sim, which
+	//    is the §3.4 deadlock argument;
+	//  - park for ~1ms (SimDrawSplit::ValveParkWait). The wait presents as a
+	//    parked sim, so a concurrent RequestPause (lifecycle/lazy/input
+	//    parks) is satisfied and holds full quiescence until its release.
+	valveEngages += 1;
+
+	const spring_time t0 = spring_gettime();
+
+	for (;;) {
+		ServiceRetiredReleases();
+
+		if (FreePoolHeadroom(kind) >= EMERGENCY_HEADROOM_PAGES)
+			break;
+		if (outstandingShells.load(std::memory_order_relaxed) == 0)
+			break;
+
+		if (game != nullptr) {
+			game->ProduceEpochForPoolValve();
+			valveProducePasses += 1;
+		}
+
+		valveRounds += 1;
+		Watchdog::ClearTimer(WDT_SIM);
+
+		if (!SimDrawSplit::ValveParkWait())
+			break; // sim-thread exit requested
+	}
+
+	valveWaitMs += (spring_gettime() - t0).toMilliSecsf();
+}
+
+void DeferredObjectDeleter::Park(ObjKind kind, void* obj)
+{
+	const size_t freePages = FreePoolHeadroom(kind);
+
+	if (freePages < EMERGENCY_HEADROOM_PAGES) {
 		// pool-pressure valve: a game near a pool cap must not run out of
-		// pages just because shells wait for a drain that has not happened
+		// pages just because shells wait for a dispatch that has not happened
 		// yet (long catch-up burst)
 		if (SimDrawSplit::Enabled() && Threading::IsSimThread()) {
 			// under the split the queue and the drawer containers belong to
-			// the draw side -- "sim waits for the boundary" (the PR-13 plan):
-			// park mid-frame; CGame::AcquireSimPause services the park by
-			// flushing + acking + releasing on the main thread, then resumes
-			// us with fresh pages
-			LOG_L(L_WARNING, "[DeferredObjectDeleter::%s] pool pressure (kind=%d, freePages=" _STPF_ "), parking for the boundary", __func__, int(kind), freePages);
+			// the draw side -- PR 44c (§3.4): publish the mid-frame tail and
+			// wait for epoch retirement to return pages (no main-thread
+			// valve service exists). The reclaimable check is the cross-stage
+			// atomic: pending/poisoned are split across threads and the
+			// backlog can sit in the sealed slot batches or the releasable
+			// list, both invisible to the flag-off containers' emptiness.
+			if (outstandingShells.load(std::memory_order_relaxed) > 0) {
+				LOG_L(L_WARNING, "[DeferredObjectDeleter::%s] pool pressure (kind=%d, freePages=" _STPF_ "), waiting for epoch retirement", __func__, int(kind), freePages);
 
-			SimDrawSplit::ParkAtValve();
-		} else {
+				WaitForEpochRetirementAtValve(kind);
+			}
+		} else if (!(pending.empty() && poisoned.empty())) {
 			// dispatch the queued records in order right here -- exactly what
 			// the queue did for every destroy before PR 13 -- and give all
 			// slots back
@@ -85,6 +149,7 @@ void DeferredObjectDeleter::Park(ObjKind kind, void* obj)
 		}
 	}
 
+	outstandingShells.fetch_add(1, std::memory_order_relaxed);
 	pending.push_back({kind, obj});
 }
 
@@ -164,6 +229,8 @@ void DeferredObjectDeleter::ReleaseSlot(const Entry& e) const
 		case ObjKind::Projectile :
 		case ObjKind::GroundFlash: { projMemPool.freeMem(e.obj);    } break;
 	}
+
+	outstandingShells.fetch_sub(1, std::memory_order_relaxed);
 }
 
 
@@ -308,4 +375,18 @@ void DeferredObjectDeleter::Clear()
 	}
 
 	ReleaseAcked();
+}
+
+void DeferredObjectDeleter::DumpValveStats() const
+{
+	// PR 44c telemetry (quiescent teardown read; zero-line suppressed --
+	// the valve never engages unless a pool nears its cap)
+	if (valveEngages == 0)
+		return;
+
+	LOG("[PoolValveStats] engages=%llu rounds=%llu producePasses=%llu totalWaitMs=%.1f",
+	    (unsigned long long)valveEngages,
+	    (unsigned long long)valveRounds,
+	    (unsigned long long)valveProducePasses,
+	    valveWaitMs);
 }

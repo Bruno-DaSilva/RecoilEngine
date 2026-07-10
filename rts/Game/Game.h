@@ -164,9 +164,9 @@ private:
 	void SimThreadProc();
 	/// PR 44a: the epoch producer -- runs on the sim thread at its frame
 	/// edges (SimThreadProc loop top); extraction+publish overlap the draw
-	/// thread's rendering instead of running under the park. PR 44b
-	/// remainder: `force` (the valve's emergency in-place produce, MAIN
-	/// thread with the sim parked mid-frame) bypasses the due-check gating.
+	/// thread's rendering instead of running under the park. PR 44c: `force`
+	/// (the pool valve's mid-frame tail publish, sim thread) bypasses the
+	/// due-check gating; the §3.2 pacing gate still applies.
 	void ProduceEpochAtSimEdge(bool forceProduce = false);
 	void AcquireSimPause();
 	void ReleaseSimPause();
@@ -180,14 +180,13 @@ private:
 	/// extraction is mutually exclusive with it by the pacing gate, which
 	/// reproduces the removed park's exclusion without blocking the sim
 	void SignalEpochConsumeComplete();
-	/// emergency pool-valve service (sim parked MID-frame out of pool
-	/// headroom): consume any published epoch, force-produce the mid-frame
-	/// tail into an epoch on this thread (sim quiescent), consume it, return
-	/// every releasable page. Draw-top form resumes without waiting.
-	void ServicePoolValve();
-	void ServicePoolValveOnce();
 
 public:
+	/// PR 44c (§3.4): the pool valve's forced mid-frame tail publish --
+	/// called by DeferredObjectDeleter::WaitForEpochRetirementAtValve on the
+	/// SIM thread; a thin ProduceEpochAtSimEdge(force) wrapper (there is no
+	/// main-thread valve service anymore)
+	void ProduceEpochForPoolValve();
 	/// dispatch-scoped lazy park (§9 ruling, option-1 fallback): on-demand
 	/// quiescence for a dispatch-window read the epoch cannot serve (SYNCED
 	/// cross-hop first-touch / non-scalar value); held to the window close

@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <vector>
@@ -56,10 +57,19 @@ class CGroundFlash;
  * Pool pressure: the pools are fixed-size (MAX_UNITS/MAX_FEATURES/
  * MAX_PROJECTILES pages) and parked shells keep their pages, so a game
  * running at the cap could exhaust a pool during a long catch-up burst.
- * Defer() checks headroom and, below EMERGENCY_HEADROOM_PAGES, flushes the
- * render-event queue in place (same in-order dispatch the queue used for
- * every destroy before PR 13) and releases everything immediately. Under
- * the future sim/draw split this valve becomes "sim waits for the boundary".
+ * Defer() checks headroom; below EMERGENCY_HEADROOM_PAGES:
+ *  - flag-off (single-threaded): flush the render-event queue in place (same
+ *    in-order dispatch the queue used for every destroy before PR 13) and
+ *    release everything immediately -- byte-identical PR-13 behavior.
+ *  - under the running split (PR 44c §3.4): the sim WAITS FOR EPOCH
+ *    RETIREMENT (WaitForEpochRetirementAtValve): it publishes the mid-frame
+ *    tail as a normal pacing-gated epoch (so the shells can flow through the
+ *    draw side's consume -> ack -> retire pipeline) and parks in
+ *    SimDrawSplit::ValveParkWait rounds, reclaiming the pages of every
+ *    retired epoch (ServiceRetiredReleases) until headroom returns or
+ *    nothing reclaimable remains. There is NO main-thread valve service --
+ *    the draw side never blocks on the sim, and its ordinary consume+retire
+ *    is what releases the wait (the §3.4 deadlock argument).
  *
  * Single-threaded like the queue it pairs with; not creg-serialized (shells
  * are severed from every sim container before Defer(), so no save can reach
@@ -126,13 +136,17 @@ public:
 	// return the releasable slots to their pools
 	void ServiceRetiredReleases();
 
-	// returns ALL poisoned slots to their pools; flag-off end of CGame::Draw,
-	// the valve service (which must free pages immediately -- the documented
-	// lockstep-degenerate "epoch retires in place"), and teardown
+	// returns ALL poisoned slots to their pools; flag-off end of CGame::Draw
+	// and teardown (callers guarantee sim quiescence)
 	void ReleaseAcked();
 
 	// teardown/reload only: destruct and free everything immediately
 	void Clear();
+
+	// PR 44c telemetry: [PoolValveStats] engage/round/wait aggregates of the
+	// retirement-wait valve (zero-line suppressed); teardown-dumped alongside
+	// [SimParkStats] (CGame::DumpSimPauseSurvey)
+	void DumpValveStats() const;
 
 	bool Empty() const {
 		if (!pending.empty() || !poisoned.empty() || !releasable.empty())
@@ -168,6 +182,17 @@ private:
 	void DestructAndPoison(const Entry& e) const;
 	void ReleaseSlot(const Entry& e) const;
 
+	/// free page headroom of the pool backing `kind` (see FreePoolPages)
+	size_t FreePoolHeadroom(ObjKind kind) const;
+
+	/// PR 44c (§3.4): the running-split pool valve -- sim thread, mid-frame.
+	/// Publishes the mid-frame tail as a normal epoch and waits (in
+	/// SimDrawSplit::ValveParkWait rounds) for the draw side's consume+retire
+	/// to make pages releasable, reclaiming them via ServiceRetiredReleases.
+	/// Returns when headroom is restored, nothing reclaimable remains, or
+	/// sim-thread exit was requested.
+	void WaitForEpochRetirementAtValve(ObjKind kind);
+
 public:
 	// PR 44b: mirrors SimSnapshot::EPOCH_RING_SLOTS (static-asserted at the
 	// Game.cpp seal site)
@@ -188,6 +213,18 @@ private:
 
 	// PR 44b: the per-epoch sealed shell batches (see SealPendingBatch)
 	std::vector<Entry> slotBatches[MAX_EPOCH_BATCH_SLOTS];
+
+	// PR 44c: shells parked but not yet returned to their pools, across ALL
+	// stages (pending / sealed / poisoned / releasable). ++ at Park, -- at
+	// ReleaseSlot; the valve wait's "nothing reclaimable remains" break reads
+	// it cross-stage without touching the main-owned containers.
+	mutable std::atomic<size_t> outstandingShells = {0};
+
+	// PR 44c valve telemetry (sim-thread-written; read at quiescent teardown)
+	uint64_t valveEngages = 0;
+	uint64_t valveRounds = 0;
+	uint64_t valveProducePasses = 0;
+	float valveWaitMs = 0.0f;
 
 	uint64_t epoch = 0; // completed ack cycles, diagnostics only
 };

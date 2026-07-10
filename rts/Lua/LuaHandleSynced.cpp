@@ -112,9 +112,9 @@ static lua_State* GetSendToUnsyncedMailbox()
 
 void CSplitLuaHandle::RotateSendToUnsyncedMailbox(int slot)
 {
-	// producer, at the epoch seal (sim thread; or main at the valve's
-	// in-place produce, sim parked): the sealed batch's closures own the
-	// current mailbox from here on
+	// producer, at the epoch seal (sim thread -- PR 44c: the valve's forced
+	// tail produce runs on the sim thread too): the sealed batch's closures
+	// own the current mailbox from here on
 	assert(slot >= 0 && slot < UnsyncedBoundaryQueue::MAX_EPOCH_BATCH_SLOTS);
 
 	std::lock_guard<std::mutex> lock(mailboxPoolMtx);

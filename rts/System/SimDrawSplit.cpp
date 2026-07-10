@@ -100,7 +100,6 @@ namespace {
 
 	// transitions under hsMtx; atomic so IsSimParked can peek lock-free
 	std::atomic<int> parkKind = {PARK_NONE};
-	bool valveServed = false;    // guarded by hsMtx
 
 	std::atomic<int> lastBoundaryFrame = {-1};
 	std::atomic<bool> simExit = {false};
@@ -119,38 +118,6 @@ void RequestPause()
 	cvMain.wait(lock, []() { return (parkKind != PARK_NONE || !g_simThreadRunning.load()); });
 }
 
-bool ParkedAtValve()
-{
-	std::unique_lock<std::mutex> lock(hsMtx);
-	return (parkKind == PARK_VALVE);
-}
-
-void ResumeFromValve()
-{
-	std::unique_lock<std::mutex> lock(hsMtx);
-
-	assert(parkKind == PARK_VALVE);
-	parkKind = PARK_NONE;
-	valveServed = true;
-	cvSim.notify_all();
-	// pauseRequested is still set; wait for the frame-edge park (or a
-	// repeat valve park, which the caller's loop services again)
-	cvMain.wait(lock, []() { return (parkKind != PARK_NONE || !g_simThreadRunning.load()); });
-}
-
-void ResumeFromValveNoWait()
-{
-	// PR 44b: the Draw-top valve service runs with NO pause pending -- the
-	// resumed sim will not park again (until the next valve/lifecycle
-	// event), so there is nothing to wait for
-	std::unique_lock<std::mutex> lock(hsMtx);
-
-	assert(parkKind == PARK_VALVE);
-	parkKind = PARK_NONE;
-	valveServed = true;
-	cvSim.notify_all();
-}
-
 void PublishBoundaryFrame(int boundaryFrame)
 {
 	lastBoundaryFrame.store(boundaryFrame);
@@ -163,10 +130,10 @@ void ReleasePause(int boundaryFrame)
 	{
 		std::unique_lock<std::mutex> lock(hsMtx);
 		pauseRequested.store(false);
-		// PR 44b: a lazy/lifecycle park can catch (and release over) a
+		// PR 44c: a lazy/lifecycle park can catch (and release over) a
 		// VALVE-parked sim -- the valve park state must survive the release
-		// (the sim still waits for the valve service; ParkedAtValve() / the
-		// Draw-top ServicePoolValve key on it). Edge parks resume as before.
+		// (only the sim itself resumes from the valve, in ValveParkWait,
+		// once pool headroom returns). Edge parks resume as before.
 		if (parkKind == PARK_EDGE)
 			parkKind = PARK_NONE;
 	}
@@ -193,15 +160,32 @@ void YieldIfPauseRequested()
 	parkKind = PARK_NONE;
 }
 
-void ParkAtValve()
+bool ValveParkWait()
 {
+	// PR 44c (§3.4): one self-servicing pool-valve wait round, sim thread,
+	// mid-frame. Present as a parked sim so a concurrent RequestPause is
+	// satisfied (a valve-parked sim IS quiescent), nap briefly to give the
+	// draw side time to consume+retire, then -- crucially -- hold parked for
+	// as long as a pause is pending: the pause holder's park-time reads need
+	// quiescence until ReleasePause. parkKind returns to PARK_NONE before the
+	// caller goes active again (ServiceRetiredReleases / the forced tail
+	// publish), so a RequestPause landing mid-round simply waits for the next
+	// round's re-park (~ms). Only the sim itself resumes from the valve.
 	std::unique_lock<std::mutex> lock(hsMtx);
 
 	parkKind = PARK_VALVE;
-	valveServed = false;
 	cvMain.notify_all();
-	cvSim.wait(lock, []() { return (valveServed || simExit.load()); });
-	valveServed = false;
+
+	// bounded nap; woken early by ReleasePause, a new pause request, or exit
+	cvSim.wait_for(lock, std::chrono::milliseconds(1));
+
+	// a pause holder observed PARK_VALVE and is reading sim state -- stay
+	// parked (fully quiescent) until it releases
+	while (pauseRequested.load() && !simExit.load())
+		cvSim.wait(lock);
+
+	parkKind = PARK_NONE;
+	return !simExit.load();
 }
 
 void SimIdleWait()
