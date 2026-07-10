@@ -27,10 +27,15 @@ namespace {
 	// drained batch kept separate so a closure firing new deferrable work
 	// cannot invalidate the iteration
 	std::vector<Entry> draining;
-	// PR 44a: entries [0, sealedEntries) belong to the newest published epoch
-	// (sealed by the producer at its frame edge, dispatched by the consumer
-	// under the park; park-fenced like RenderEventQueue::sealedRecords)
-	size_t sealedEntries = 0;
+	// PR 44b: the sealed batch MOVES into the epoch's ring slot at seal time
+	// (sim thread; `entries` keeps only the post-seal tail), and the consumer
+	// dispatches its HELD slot's batch -- so the producer's appends and the
+	// consumer's dispatch never touch the same container, fenced by the
+	// epoch publish/acquire pair (no lock needed). Replaces the 44a
+	// sealedEntries prefix index, which required the park to steal safely.
+	// Slot count mirrors SimSnapshot::EPOCH_RING_SLOTS (static-asserted at
+	// the Game.cpp seal site; the constant lives in the header).
+	std::vector<Entry> slotBatches[MAX_EPOCH_BATCH_SLOTS];
 }
 
 bool ShouldDefer(const CEventClient* ec)
@@ -70,9 +75,6 @@ size_t Drain()
 	}
 
 	draining.clear();
-	// PR 44a: a full drain (lockstep barrier / valve service) consumed any
-	// sealed-but-undispatched epoch batch along with the tail
-	sealedEntries = 0;
 
 	// nonzero: some handler may have poked sim state directly (the barrier's
 	// live exception applies class-C ctrl writes immediately, and the drain
@@ -82,30 +84,36 @@ size_t Drain()
 	return numDispatched;
 }
 
-void SealEpochBatch() { sealedEntries = entries.size(); }
-
-size_t DrainSealedBatch()
+void SealEpochBatch(int slot)
 {
-	// PR 44a consumer half: replay exactly the producer-sealed batch in fire
-	// order, keep the post-seal tail for the next epoch. Unlike Drain() this
+	// PR 44b: sim thread, at the produce edge -- move the pending closures
+	// into the epoch's slot batch. The slot's previous batch was consumed
+	// (cleared) when that epoch was dispatched; produce-after-consume pacing
+	// guarantees no still-pending batch is overwritten.
+	assert(slot >= 0 && slot < MAX_EPOCH_BATCH_SLOTS);
+	assert(slotBatches[slot].empty());
+
+	slotBatches[slot].swap(entries);
+	entries.clear();
+}
+
+size_t DrainSealedBatch(int slot)
+{
+	// PR 44a/44b consumer half: replay exactly the producer-sealed batch (the
+	// held epoch's slot batch) in fire order; the post-seal tail lives in
+	// `entries` (sim-owned) and rides the next epoch. Unlike Drain() this
 	// does NOT loop-to-empty: work a dispatched closure defers anew belongs
-	// to the next epoch by construction (the sim phase never ends under the
-	// flip, so re-deferral is the steady state, not a corner).
+	// to the next epoch by construction.
 	assert(!SimDrawSplit::InSimPhase());
+	assert(slot >= 0 && slot < MAX_EPOCH_BATCH_SLOTS);
 
-	if (sealedEntries == 0)
+	if (slotBatches[slot].empty())
 		return 0;
-
-	assert(sealedEntries <= entries.size());
 
 	size_t numDispatched = 0;
 
 	draining.clear();
-	draining.insert(draining.end(),
-		std::make_move_iterator(entries.begin()),
-		std::make_move_iterator(entries.begin() + sealedEntries));
-	entries.erase(entries.begin(), entries.begin() + sealedEntries);
-	sealedEntries = 0;
+	std::swap(draining, slotBatches[slot]);
 
 	for (auto& e: draining) {
 		if (e.tag != nullptr && !eventHandler.HasClient(const_cast<CEventClient*>(e.tag)))
@@ -123,11 +131,18 @@ size_t DrainSealedBatch()
 
 bool Empty() { return entries.empty(); }
 
+bool SlotBatchEmpty(int slot)
+{
+	assert(slot >= 0 && slot < MAX_EPOCH_BATCH_SLOTS);
+	return slotBatches[slot].empty();
+}
+
 void Clear()
 {
 	entries.clear();
 	draining.clear();
-	sealedEntries = 0;
+	for (auto& b: slotBatches)
+		b.clear();
 }
 
 }

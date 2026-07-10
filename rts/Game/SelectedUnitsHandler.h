@@ -28,6 +28,9 @@ public:
 	// widget callin -- true reproduces the live behaviour (widget cursor
 	// overrides), false is the raw engine answer used by the armed diff-gate.
 	int GetDefaultCmd(const CUnit* unit, const CFeature* feature, bool fireEvent = true);
+	// PR 44b: sim-thread evaluation half of GetDefaultCmd over a captured
+	// selection-id snapshot, no widget callin (see the .cpp comment)
+	int GetDefaultCmdEval(const std::vector<int>& unitIDs, const CUnit* unit, const CFeature* feature, bool& leaderFound);
 
 	void NetOrder(Command& c, int playerId);
 	void NetSelect(std::vector<int>& s, int playerId);

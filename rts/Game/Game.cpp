@@ -1730,11 +1730,11 @@ void CGame::SimDrawBarrier()
 
 	// (1) apply the queued render-event records (object creation,
 	// destruction, LOS transitions) before any draw-side code reads the
-	// drawer containers. Flip: exactly the acquired epoch's SEALED batch --
-	// records fired after the epoch's edge stay pending and fold into the
-	// next epoch (§1.3); lockstep: everything, as before.
+	// drawer containers. Flip: exactly the acquired epoch's SEALED slot
+	// batch -- records fired after the epoch's edge stay pending (sim-owned
+	// live container) and ride the next epoch (§1.3); lockstep: everything.
 	if (producerFlip)
-		renderEventQueue.DispatchSealedBatch();
+		renderEventQueue.DispatchSealedBatch(simSnapshot.HeldSlot());
 	else
 		renderEventQueue.Drain();
 
@@ -1744,17 +1744,17 @@ void CGame::SimDrawBarrier()
 	// (SimDrawSplit.h), and this is their replacement notification
 	DeliverBoundaryDeaths();
 
-	// (1c) split only: snapshot the sim-owned effect containers the draw passes
-	// iterate (the draw passes may not touch the sim-owned tables post-release;
-	// see ModelDrawerData.h). After the drain so fresh registrations are
-	// covered, before anything downstream resolves.
+	// (1c) split only: the sim-owned effect containers the draw passes
+	// iterate (the draw passes may not touch the sim-owned tables post-
+	// release; see ModelDrawerData.h). Flip (PR 44b): the PRODUCER staged the
+	// copies at its edge (it owns the containers there); swap them into the
+	// serving members. Lockstep: barrier copy as before, after the drain so
+	// fresh registrations are covered.
 	if (SimDrawSplit::Enabled()) {
-		// SCOPE-1 (plan PR 39) + PR 40: the unit/feature/projectile id->object
-		// resolution caches are all DELETED — those drawers now resolve ids
-		// through a producer-captured deferred-safe handle (no per-barrier
-		// rebuild). The projectile drawer still needs a boundary copy of the
-		// ground-flash / flying-piece containers it iterates live.
-		projectileDrawer->SnapshotEffectContainers();
+		if (producerFlip)
+			projectileDrawer->CommitStagedEffectContainers();
+		else
+			projectileDrawer->SnapshotEffectContainers();
 	}
 
 	// (2) the drain dispatched every queued destroy record: the draw side has
@@ -1797,13 +1797,22 @@ void CGame::SimDrawBarrier()
 	if (!producerFlip) {
 		const uint64_t retiredEpoch = simSnapshot.AcquireNewestEpoch();
 
-		if (SimDrawSplit::Enabled() && retiredEpoch != 0)
+		if (SimDrawSplit::Enabled() && retiredEpoch != 0) {
 			deferredObjectDeleter.ReleaseRetired(retiredEpoch);
+			// PR 44b: ReleaseRetired only marks releasable (pools are
+			// sim-owned under the flip); the lockstep runs single-threaded /
+			// sim-quiescent, so return the pages in place
+			deferredObjectDeleter.ServiceRetiredReleases();
+		}
 
 		// point the map-mirror serving side at the acquired epoch's slot
 		// (the mirrors became true per-slot copies; the producer fills the
 		// slot of the epoch being produced, the draw side reads the held one)
 		drawMapMirrors.SetServingSlot(simSnapshot.HeldSlot());
+
+		// PR 44b: the pacing stamp moved out of AcquireNewestEpoch; the
+		// lockstep consume is complete at the acquire (produce-at-barrier)
+		simSnapshot.MarkNewestEpochConsumed();
 	}
 
 	// (3a') PR 43 §2.6 -- THE ARMED ID-COVERAGE GATE: every id the batch's
@@ -1855,14 +1864,20 @@ void CGame::SimDrawBarrier()
 		LuaSnapshotServe::CommitStagedQueryReplies();
 	}
 
-	// (3e) evaluate the context-cursor default-command query (sim|draw PR 44,
-	// Gap B). Sim parked, so the deep-CAI GetDefaultCmd + GuiTraceRay run against
-	// valid boundary-N sim state -- the same sanctioned live-read class as
-	// RefreshCommandQueues / EvaluateTraceQueries; the reply publishes for the
-	// next draw frame so guihandler->Update can read it sim-live. No-op unless
-	// SetCursorIcon requested a re-eval since the last barrier.
-	if (guihandler != nullptr)
-		guihandler->EvaluateDefaultCmdQuery();
+	// (3e) the context-cursor default-command query (sim|draw PR 44, Gap B).
+	// Lockstep: evaluate at the barrier (sim quiescent) -- the deep-CAI
+	// GetDefaultCmd + GuiTraceRay run against valid boundary-N sim state.
+	// Flip (PR 44b re-host): the SIM thread evaluated the staged query at its
+	// frame edge; COMMIT the staged result here -- fire the main-thread-bound
+	// DefaultCommand widget callin and publish the index reply. Runs before
+	// the step-8 ack so staged pointers of died-since-eval objects are still
+	// readable shells.
+	if (guihandler != nullptr) {
+		if (producerFlip)
+			guihandler->CommitDefaultCmdReply();
+		else
+			guihandler->EvaluateDefaultCmdQuery();
+	}
 
 	// (4) TEST-ONLY (PR 17): when armed via /snapshotdiffgate, verify every
 	// value the snapshot would serve bit-matches the live sim read at this
@@ -1918,10 +1933,12 @@ void CGame::SimDrawBarrier()
 	// directly (live exception, post-snapshot) -- mark, or a no-new-frame
 	// boundary serves stale rows.
 	if (producerFlip) {
-		// the epoch's SEALED closure batch only (the post-seal tail belongs to
-		// the next epoch); still reads live under barrierLive, exactly as the
-		// lockstep drain (44a does not convert the deferred serving -- 44b)
-		if (UnsyncedBoundaryQueue::DrainSealedBatch() > 0)
+		// the held epoch's SEALED closure batch only (the post-seal tail
+		// rides the next epoch). PR 44b: the handlers read PUBLISHED epoch
+		// state through the serving twins (§3.6); their ctrl pokes queue to
+		// the producer instead of applying live, so the mark below covers
+		// only the engine-side closures that still poke sim state directly.
+		if (UnsyncedBoundaryQueue::DrainSealedBatch(simSnapshot.HeldSlot()) > 0)
 			simSnapshot.MarkMutatedOutsideFrame();
 	} else {
 		if (UnsyncedBoundaryQueue::Drain() > 0)
@@ -1954,7 +1971,7 @@ void CGame::SimDrawBarrier()
 		// next epoch's batch) and must stay readable. The key is the HELD
 		// epoch id (EpochId() can already be the next epoch mid-frame).
 		if (producerFlip)
-			deferredObjectDeleter.AckSealedDestroysEpoch(simSnapshot.HeldEpochId());
+			deferredObjectDeleter.AckSealedDestroysEpoch(simSnapshot.HeldSlot(), simSnapshot.HeldEpochId());
 		else
 			deferredObjectDeleter.AckDrainedDestroysEpoch(simSnapshot.HeldEpochId());
 	}
@@ -2029,6 +2046,10 @@ void CGame::ProduceEpochAtSimEdge()
 {
 	assert(SimDrawSplit::Enabled());
 
+	// (p0) PR 44b: return retired-epoch pool pages (the consumer's
+	// ReleaseRetired only marks them releasable -- pools are sim-owned)
+	deferredObjectDeleter.ServiceRetiredReleases();
+
 	// (p1) drain the draw side's queued ctrl pokes BEFORE the due-check +
 	// extraction (barrier step 2b's successor, §1.8): applied pokes mutate
 	// sim state outside any frame, so they force a republish via the mark
@@ -2061,13 +2082,20 @@ void CGame::ProduceEpochAtSimEdge()
 
 	const bool frameIdle = (now - lastFrameAdvanceTime).toMilliSecsf() >= 100.0f;
 	const bool mutationDue = simSnapshot.MutatedOutsideFrameMark();
-	const bool recsDue = (renderEventQueue.SealedRecordCount() == 0 && !renderEventQueue.Empty()) || !UnsyncedBoundaryQueue::Empty();
+	// PR 44b: sealed batches live in the ring slots now; the live containers
+	// hold exactly the unsealed pending records/closures
+	const bool recsDue = !renderEventQueue.Empty() || !UnsyncedBoundaryQueue::Empty();
 	const bool timeDue = (now - lastEpochPublishTime).toMilliSecsf() >= 250.0f;
 
 	if (!framesDue && !(frameIdle && (mutationDue || recsDue || timeDue))) {
 		// idle/paused query servicing: no state changed since the newest
 		// epoch, so evaluating against it is trivially §7.3-consistent
 		LuaSnapshotServe::EvaluateQueriesAtSimEdge();
+
+		// PR 44b: service the standing default-cmd query too, so the context
+		// cursor stays live while the game is paused (no frame edges fire)
+		if (guihandler != nullptr)
+			guihandler->EvaluateDefaultCmdQueryAtSimEdge();
 		return;
 	}
 
@@ -2090,13 +2118,27 @@ void CGame::ProduceEpochAtSimEdge()
 	// were extracted (§7.3: replies consistent with the epoch's rows)
 	LuaSnapshotServe::EvaluateQueriesAtSimEdge();
 
-	// (p8) seal the epoch's record/closure/shell batches: the consumer
-	// dispatches exactly these; anything fired later folds into the next
-	// epoch (§1.3). No sim frame can run between the extraction above and
-	// this seal (same thread), so the seal scope == the extraction scope.
-	renderEventQueue.SealEpochBatch();
-	UnsyncedBoundaryQueue::SealEpochBatch();
-	deferredObjectDeleter.SealPendingBatch();
+	// PR 44b: the re-hosted default-cmd query evaluates at the same edge
+	// (its reply commits at the consumer's barrier -- CommitDefaultCmdReply)
+	if (guihandler != nullptr)
+		guihandler->EvaluateDefaultCmdQueryAtSimEdge();
+
+	// (p7b) PR 44b: stage the effect-container copies (ground flashes /
+	// flying pieces) -- the sim owns the source containers at this edge; the
+	// consumer swaps them into the serving members at the barrier
+	projectileDrawer->StageEffectContainersAtSimEdge();
+
+	// (p8) seal the epoch's record/closure/shell batches INTO THE RING SLOT
+	// (PR 44b: physically per-slot): the consumer dispatches exactly these;
+	// anything fired later rides the next epoch (§1.3). No sim frame can run
+	// between the extraction above and this seal (same thread), so the seal
+	// scope == the extraction scope.
+	static_assert(RenderEventQueue::MAX_EPOCH_BATCH_SLOTS == SimSnapshot::EPOCH_RING_SLOTS);
+	static_assert(DeferredObjectDeleter::MAX_EPOCH_BATCH_SLOTS == SimSnapshot::EPOCH_RING_SLOTS);
+	static_assert(UnsyncedBoundaryQueue::MAX_EPOCH_BATCH_SLOTS == SimSnapshot::EPOCH_RING_SLOTS);
+	renderEventQueue.SealEpochBatch(slot);
+	UnsyncedBoundaryQueue::SealEpochBatch(slot);
+	deferredObjectDeleter.SealPendingBatch(slot);
 
 	// (p9) publish (channel versions sealed into the slot's meta first)
 	simSnapshot.PublishEpoch(slot,
@@ -2230,13 +2272,34 @@ void CGame::AcquireSimPause()
 	// then destruct + release. Loops in case pressure recurs before the
 	// frame edge.
 	while (SimDrawSplit::ParkedAtValve()) {
-		// same live-read legality as the barrier (sim parked mid-frame)
+		// live-read legality: the sim is parked mid-frame, so the valve's
+		// dispatches read live sim exactly as under 44a (the deferred-serving
+		// conversion applies at the BARRIER; the valve keeps the live
+		// exception because its mid-frame tail has no epoch rows to serve --
+		// the documented valve limitation, dropped coverage refs included)
 		LuaSplitContract::ScopedLiveException valveLive;
 
 		// same drain-window bracket as the barrier (steps 0 / 8)
 		SimDrawSplit::SetBoundaryShellWindow(true);
 
 		modelLoader.ServiceQueuedUploads();
+
+		// PR 44b: the sealed batches live in the ring slots now and no longer
+		// fold into Flush()/Drain() -- a published-unacquired epoch must be
+		// consumed properly here (acquire + slot dispatch, ahead of the
+		// mid-frame tail = global fire order) or its batch would double-
+		// dispatch at the next barrier and its shells would never free.
+		{
+			const uint64_t retiredEpoch = simSnapshot.AcquireNewestEpoch();
+
+			if (retiredEpoch != 0)
+				deferredObjectDeleter.ReleaseRetired(retiredEpoch);
+
+			drawMapMirrors.SetServingSlot(simSnapshot.HeldSlot());
+			simSnapshot.MarkNewestEpochConsumed();
+		}
+		renderEventQueue.DispatchSealedBatch(simSnapshot.HeldSlot());
+
 		renderEventQueue.Flush();
 		DeliverBoundaryDeaths();
 
@@ -2245,28 +2308,38 @@ void CGame::AcquireSimPause()
 		// projectile id->object caches are DELETED — those drawers resolve ids
 		// through a producer-captured deferred-safe handle (no per-barrier
 		// rebuild); the projectile drawer still needs the ground-flash /
-		// flying-piece container copies.
+		// flying-piece container copies. PR 44b: this live mid-frame copy is
+		// FRESHER than any producer staging -- invalidate the staged pair so
+		// the next barrier does not regress the serving copy to the epoch edge.
 		projectileDrawer->SnapshotEffectContainers();
+		projectileDrawer->InvalidateStagedEffectContainers();
 
 		// PR 44a: the cmd-queue/piece cache refreshes are producer-owned and
 		// per-slot now; the valve does not republish, so there is nothing to
 		// refresh here (the pre-44a call was a generation-gated no-op)
 
-		// see barrier step 7: a non-empty drain may have poked sim state
-		if (UnsyncedBoundaryQueue::Drain() > 0)
+		// see barrier step 7: the held epoch's sealed closures first (fire
+		// order), then the mid-frame tail; a non-empty drain may have poked
+		// sim state
+		size_t numDrained = UnsyncedBoundaryQueue::DrainSealedBatch(simSnapshot.HeldSlot());
+		numDrained += UnsyncedBoundaryQueue::Drain();
+
+		if (numDrained > 0)
 			simSnapshot.MarkMutatedOutsideFrame();
 
 		SimDrawSplit::SetBoundaryShellWindow(false);
 		// PR 43 (3b): the valve's Flush dispatched destroy records too -- the
 		// drawers retained those records; clear them before the ack poisons
-		// their shell handles (the valve does not republish, so no
-		// DEAD_THIS_BATCH marks exist here)
+		// their shell handles. PR 44b: the valve may have ACQUIRED a
+		// published epoch above -- revert its DEAD_THIS_BATCH marks with the
+		// window close, like barrier step 8.
+		simSnapshot.ClearDeadThisBatch();
 		CUnitDrawer::ClearDeadRetainedRecords();
 		CFeatureDrawer::ClearDeadRetainedRecords();
 		renderEventQueue.ClearBoundaryDeadShells();
-		// the valve cannot coverage-check (it does not publish an epoch);
-		// its flushed records' ids are dropped unchecked -- the next barrier
-		// checks its own batch
+		// the valve cannot coverage-check (its mid-frame tail has no epoch);
+		// its dispatched records' ids are dropped unchecked -- the next
+		// barrier checks its own batch
 		renderEventQueue.ClearBatchCoverageRefs();
 
 		// PR 43: the valve must free pages IMMEDIATELY (the sim is parked
@@ -2275,12 +2348,13 @@ void CGame::AcquireSimPause()
 		// epoch retirement" (§2.2: the epoch retires in place). Poisoned
 		// shells are never legally read, so releasing shells whose epoch has
 		// not formally retired only changes pool-return timing (address-blind).
-		// PR 44a: the Flush/Drain above dispatched any SEALED-but-unconsumed
-		// epoch batch along with the tail (and reset the seal marks), so the
-		// later barrier acquire of that epoch dispatches/acks nothing twice;
-		// its coverage refs are dropped unchecked exactly as documented for
-		// the valve. The full valve rekey ("sim waits for epoch retirement",
-		// no in-place drain) is PR 44c's §3.4 work.
+		// PR 44b: the sealed slot batch consumed above acks per-epoch first;
+		// the mid-frame tail acks + releases in place (the valve must free
+		// pages IMMEDIATELY -- the documented lockstep-degenerate "epoch
+		// retires in place"; poisoned shells are never legally read, so the
+		// early pool return is address-blind). The full valve rekey ("sim
+		// waits for epoch retirement", no in-place drain) is PR 44c's §3.4.
+		deferredObjectDeleter.AckSealedDestroysEpoch(simSnapshot.HeldSlot(), simSnapshot.HeldEpochId());
 		deferredObjectDeleter.AckDrainedDestroys();
 		deferredObjectDeleter.ReleaseAcked();
 		SimDrawSplit::ResumeFromValve();
@@ -2300,6 +2374,15 @@ void CGame::ReleaseSimPause()
 {
 	if (!simPauseHeld)
 		return;
+
+	// PR 44b: the consume-complete signal (§3.2 pacing) -- every consumer-
+	// side drawer read/mutation for the held epoch (batch dispatch, drawer
+	// Update, the SSBO upload) precedes this release, so stamping here keeps
+	// the producer's next extraction mutually exclusive with them (the
+	// park's exclusion, reproduced by the pacing gate). Idempotent; also
+	// covers the early-out Draw paths, which release through here.
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning())
+		simSnapshot.MarkNewestEpochConsumed();
 
 	simPauseHeld = false;
 	SimDrawSplit::ReleasePause(gs->frameNum);

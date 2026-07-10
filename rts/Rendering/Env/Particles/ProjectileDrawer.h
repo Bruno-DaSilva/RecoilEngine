@@ -106,6 +106,20 @@ public:
 	// sim frame edge under the flip.
 	void SnapshotEffectContainers();
 
+	// PR 44b (flip): producer-side staging + consumer swap. The SIM thread
+	// copies the containers at its produce edge (it owns them there) into the
+	// staged pair; the barrier swaps the staged copies into the serving
+	// split* members BEFORE the draw passes run and before the batch ack
+	// (staged flash shells stay readable exactly like the barrier-copy ones).
+	// No lock: the producer only stages between a consume-complete signal and
+	// the next publish, the consumer only swaps between acquire and its
+	// consume-complete -- serialized by the epoch pacing gate.
+	void StageEffectContainersAtSimEdge();
+	void CommitStagedEffectContainers();
+	// the valve service takes a FRESHER live mid-frame copy; drop any staged
+	// (epoch-edge) pair so the next barrier cannot regress the serving copy
+	void InvalidateStagedEffectContainers() { stagedEffectContainersValid = false; }
+
 	uint8_t GetDrawFlag(const CProjectile* p) const {
 		const auto& v = drawFlags[p->synced];
 		return (size_t(p->id) < v.size()) ? v[p->id] : DrawFlags::SO_NODRAW_FLAG;
@@ -248,6 +262,11 @@ private:
 	// dead flashes are shells until the next barrier ack)
 	GroundFlashContainer splitGroundFlashes;
 	std::array<FlyingPieceContainer, MODELTYPE_CNT> splitFlyingPieces;
+	// PR 44b: the producer-written staging pair (see StageEffectContainers-
+	// AtSimEdge); swapped into the serving members at the barrier
+	GroundFlashContainer stagedGroundFlashes;
+	std::array<FlyingPieceContainer, MODELTYPE_CNT> stagedFlyingPieces;
+	bool stagedEffectContainersValid = false;
 
 	/// position of a handle in renderHandles, keyed [synced][id]; -1u when
 	/// not registered (replaces the old CProjectile::renderIndex backref)

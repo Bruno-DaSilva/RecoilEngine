@@ -508,10 +508,15 @@ uint64_t SimSnapshot::AcquireNewestEpoch()
 	heldSlot.store(newest, std::memory_order_relaxed);
 	holdingRef = true;
 
-	// PR 44a pacing signal (§3.2): the newest epoch is now CONSUMED -- release
-	// order so the producer's next publish (which recycles ring slots) can
-	// only proceed after our ref++/held update above is visible
-	consumedEpochId.store(slotMeta[newest].epochId, std::memory_order_release);
+	// PR 44b: the §3.2 pacing signal ("newest epoch CONSUMED") moved from
+	// here to MarkNewestEpochConsumed(), stamped when the consumer finishes
+	// ALL drawer-side consumption for this epoch (batch dispatch + drawer
+	// Update + the SSBO upload) -- the producer's next extraction walks
+	// drawer containers (unsortedObjects, the transform alloc map, the
+	// transforms storage), so the stamp is what keeps producer extraction
+	// and consumer-side drawer mutation mutually exclusive once the park is
+	// gone (it reproduces the park's exclusion without blocking the sim:
+	// production is skipped, simulation continues).
 
 	if (!hadRef || prev == newest)
 		return 0;

@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstdint>
+#include <mutex>
 #include <vector>
 
 class CUnit;
@@ -96,24 +97,34 @@ public:
 	// coincide (the epoch retires at the next barrier's acquire).
 	void AckDrainedDestroysEpoch(uint64_t epochId);
 
-	// ---- PR 44a (producer flip): per-epoch shell batches ----
-	// The producer (sim thread, frame edge) seals the current pending shells
-	// into the epoch about to publish -- pending order is death order, so the
-	// prefix is exactly the sealed batch's deaths (the tail died after the
-	// seal; its destroy records ride the NEXT epoch and its shells must stay
-	// readable through that epoch's dispatch).
-	void SealPendingBatch() { sealedPending = pending.size(); }
+	// ---- PR 44a/44b (producer flip): per-epoch shell batches ----
+	// The producer (sim thread, frame edge) MOVES the pending shells into the
+	// epoch ring slot about to publish (PR 44b: physically per-slot, fenced
+	// by the epoch publish/acquire -- the consumer's ack and the sim's Park
+	// appends never share a container). Pending order is death order and
+	// produce-after-consume pacing makes the moved set exactly the batch's
+	// deaths; the post-seal tail dies after the seal, its destroy records
+	// ride the NEXT epoch and its shells stay readable through that epoch's
+	// dispatch.
+	void SealPendingBatch(int slot);
 
-	// consumer ack under the flip: destruct + poison ONLY the sealed prefix
-	// (whose destroy records just dispatched via DispatchSealedBatch), tagged
-	// with that epoch; the post-seal tail stays parked/readable. No-op when
-	// nothing is sealed.
-	void AckSealedDestroysEpoch(uint64_t epochId);
+	// consumer ack under the flip: destruct + poison exactly the held
+	// epoch's sealed batch (whose destroy records just dispatched via
+	// DispatchSealedBatch), tagged with that epoch. No-op when empty.
+	void AckSealedDestroysEpoch(int slot, uint64_t epochId);
 
-	// PR 43: epoch-retirement release -- return every poisoned slot whose ack
-	// epoch is <= retiredEpochId to its pool. Called from the barrier when
-	// AcquireNewestEpoch retires a slot.
+	// PR 43: epoch-retirement release -- every poisoned slot whose ack epoch
+	// is <= retiredEpochId becomes releasable. PR 44b: the POOLS ARE
+	// SIM-OWNED and the sim runs concurrently with the barrier now, so this
+	// only moves the entries to a mutex-guarded releasable list; the actual
+	// pool return happens on the sim thread (ServiceRetiredReleases, called
+	// at the produce edge) or wherever the sim is provably quiescent
+	// (ReleaseAcked: lockstep barrier / valve service / teardown).
 	void ReleaseRetired(uint64_t retiredEpochId);
+
+	// sim thread (produce edge) / main thread with the sim quiescent:
+	// return the releasable slots to their pools
+	void ServiceRetiredReleases();
 
 	// returns ALL poisoned slots to their pools; flag-off end of CGame::Draw,
 	// the valve service (which must free pages immediately -- the documented
@@ -123,7 +134,17 @@ public:
 	// teardown/reload only: destruct and free everything immediately
 	void Clear();
 
-	bool Empty() const { return (pending.empty() && poisoned.empty()); }
+	bool Empty() const {
+		if (!pending.empty() || !poisoned.empty() || !releasable.empty())
+			return false;
+
+		for (const auto& b: slotBatches) {
+			if (!b.empty())
+				return false;
+		}
+
+		return true;
+	}
 
 private:
 	enum class ObjKind : uint8_t {
@@ -147,15 +168,26 @@ private:
 	void DestructAndPoison(const Entry& e) const;
 	void ReleaseSlot(const Entry& e) const;
 
+public:
+	// PR 44b: mirrors SimSnapshot::EPOCH_RING_SLOTS (static-asserted at the
+	// Game.cpp seal site)
+	static constexpr int MAX_EPOCH_BATCH_SLOTS = 3;
+
 private:
 	// PreDestruct()ed shells whose destroy records have not drained yet
+	// (sim-owned under the flip; the sealed batches move to slotBatches)
 	std::vector<Entry> pending;
-	// destructed + poisoned slots awaiting return to their pool
+	// destructed + poisoned slots awaiting epoch retirement (main-owned
+	// under the flip; flag-off it is the per-Draw ack/release set)
 	std::vector<Entry> poisoned;
+	// PR 44b: retired-epoch slots awaiting the sim-side pool return
+	// (ReleaseRetired appends on the main thread, ServiceRetiredReleases
+	// frees on the sim thread; the mutex covers both)
+	std::mutex releasableMtx;
+	std::vector<Entry> releasable;
 
-	// PR 44a: pending[0, sealedPending) belong to the newest published epoch
-	// (see SealPendingBatch); reset by every all-shells ack (valve/lockstep)
-	size_t sealedPending = 0;
+	// PR 44b: the per-epoch sealed shell batches (see SealPendingBatch)
+	std::vector<Entry> slotBatches[MAX_EPOCH_BATCH_SLOTS];
 
 	uint64_t epoch = 0; // completed ack cycles, diagnostics only
 };

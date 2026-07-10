@@ -1143,11 +1143,12 @@ void CGuiHandler::SetCursorIcon() const
 		} else if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() && !SimDrawSplit::IsSimParked()) {
 			// sim|draw PR 44 (Gap B): under the running split the deep-CAI
 			// GetDefaultCmd + GuiTraceRay cannot run from draw context. Read the
-			// last barrier's reply (the context cursor is one draw frame stale)
-			// and request a re-eval for the next barrier. This is the only reason
-			// guihandler->Update can fold sim-live (see EvaluateDefaultCmdQuery).
+			// last committed reply (the context cursor is one draw frame stale)
+			// and stage a re-eval query for the sim thread (PR 44b re-host:
+			// evaluation at the sim's frame edges, presentation at the barrier
+			// commit -- see StageDefaultCmdQuery).
 			defcmd = defaultCmdReplyValid ? defaultCmdReplyCmd : -1;
-			defaultCmdQueryPending = true;
+			StageDefaultCmdQuery();
 		} else {
 			// flag-off / sim parked / pregame: live inline (byte-identical).
 			defcmd = GetDefaultCommand(mouse->lastx, mouse->lasty);
@@ -1770,7 +1771,7 @@ int CGuiHandler::GetDefaultCommandServed(int x, int y, const float3& cameraPos, 
 	// parking path -- byte-identical, and the only case that engages the park.
 	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() && !SimDrawSplit::IsSimParked()
 	    && x == mouse->lastx && y == mouse->lasty) {
-		defaultCmdQueryPending = true;
+		StageDefaultCmdQuery();
 		return defaultCmdReplyValid ? defaultCmdReplyCmd : -1;
 	}
 
@@ -1823,14 +1824,152 @@ int CGuiHandler::GetDefaultCommandImpl(int x, int y, const float3& cameraPos, co
 void CGuiHandler::EvaluateDefaultCmdQuery()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	// SimDrawBarrier hook (sim parked). Recompute the requested context-cursor
-	// default command against live sim and publish it for the next draw frame.
-	// No-op unless SetCursorIcon requested a re-eval since the last barrier.
+	// LOCKSTEP SimDrawBarrier hook (sim quiescent). Recompute the requested
+	// context-cursor default command against live sim and publish it for the
+	// next draw frame. No-op unless a re-eval was requested since the last
+	// barrier. (The flip uses the re-hosted Stage/EvaluateAtSimEdge/Commit
+	// channel below instead.)
 	if (!defaultCmdQueryPending)
 		return;
 
 	defaultCmdQueryPending = false;
 	defaultCmdReplyCmd = GetDefaultCommandImpl(mouse->lastx, mouse->lasty, camera->GetPos(), mouse->dir, true);
+	defaultCmdReplyValid = true;
+}
+
+
+// PR 44b: DRAW side, at request time (SetCursorIcon / GetDefaultCommandServed,
+// once per draw frame). Captures the main-thread-bound half of
+// GetDefaultCommandImpl -- the input-receiver early-out, the minimap-proxy
+// mapping, the camera/mouse ray and the selection-id snapshot -- into the
+// standing query slot the sim thread evaluates at its next frame edge.
+void CGuiHandler::StageDefaultCmdQuery() const
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	DefaultCmdQueryInput in;
+	in.pending = true;
+
+	CInputReceiver* ir = nullptr;
+
+	if (!game->hideInterface && !mouse->offscreen)
+		ir = GetReceiverAt(mouse->lastx, mouse->lasty);
+
+	if ((ir != nullptr) && (ir != minimap)) {
+		// the live impl returns -1 here without firing the widget callin
+		in.noCommand = true;
+	} else if ((ir == minimap) && (minimap->FullProxy())) {
+		in.minimapProxy = true;
+		in.mapPos = minimap->GetMapPosition(mouse->lastx, mouse->lasty);
+		in.selectRadius = minimap->GetUnitSelectRadius();
+	} else {
+		in.cameraPos = camera->GetPos();
+		in.mouseDir = mouse->dir;
+		in.viewRange = camera->GetFarPlaneDist() * 1.4f;
+	}
+
+	if (!in.noCommand)
+		in.selectedIDs.assign(selectedUnitsHandler.selectedUnits.begin(), selectedUnitsHandler.selectedUnits.end());
+
+	std::lock_guard<std::mutex> lock(defaultCmdQueryMtx);
+	defaultCmdQueryIn = std::move(in);
+}
+
+
+// PR 44b: SIM thread, at its frame edges + the paused-idle query servicing
+// (ProduceEpochAtSimEdge). Runs the sim-read half: the trace / closest-unit
+// pick and the deep-CAI leader walk, against live sim state the sim thread
+// owns. Stages {unit, feature, raw cmd} for the consumer's commit.
+void CGuiHandler::EvaluateDefaultCmdQueryAtSimEdge()
+{
+	DefaultCmdQueryInput in;
+	{
+		std::lock_guard<std::mutex> lock(defaultCmdQueryMtx);
+
+		if (!defaultCmdQueryIn.pending)
+			return;
+
+		in = std::move(defaultCmdQueryIn);
+		defaultCmdQueryIn = DefaultCmdQueryInput();
+	}
+
+	DefaultCmdEvalResult out;
+	out.valid = true;
+
+	if (!in.noCommand) {
+		const CUnit* unit = nullptr;
+		const CFeature* feature = nullptr;
+		bool miss = false;
+
+		if (in.minimapProxy) {
+			// the CMiniMap::GetSelectUnit pick, sim-side: closest unit + the
+			// local-allyteam LOS/radar gate (live losStatus -- the sim thread
+			// owns it; the draw-side variant reads the snapshot row instead)
+			const CUnit* pick = CGameHelper::GetClosestUnit(in.mapPos, in.selectRadius);
+
+			if (pick != nullptr && (gu->spectatingFullView || (pick->losStatus[gu->myAllyTeam] & (LOS_INLOS | LOS_INRADAR))))
+				unit = pick;
+		} else {
+			const float dist = TraceRay::GuiTraceRay(in.cameraPos, in.mouseDir, in.viewRange, nullptr, unit, feature, true);
+			const float3 hit = in.cameraPos + in.mouseDir * dist;
+
+			// make sure the ray hit in the map (the live impl's -1 early-out)
+			if (unit == nullptr && feature == nullptr && !hit.IsInBounds())
+				miss = true;
+		}
+
+		if (!miss) {
+			out.fireCallin = true;
+			out.unit = unit;
+			out.feature = feature;
+			out.rawCmdID = selectedUnitsHandler.GetDefaultCmdEval(in.selectedIDs, unit, feature, out.leaderFound);
+		}
+	}
+
+	std::lock_guard<std::mutex> lock(defaultCmdQueryMtx);
+	defaultCmdEvalOut = out;
+}
+
+
+// PR 44b: DRAW side, at the barrier (before the batch ack -- staged pointers
+// of objects that died since the eval are parked shells, readable until then).
+// The PRESENTATION half: fire the DefaultCommand widget callin with the
+// staged eval results (cursor overrides apply exactly as on the live path,
+// which fires only when the leader walk ran), map the command id to its
+// commands[] index and publish the reply.
+void CGuiHandler::CommitDefaultCmdReply()
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	DefaultCmdEvalResult out;
+	{
+		std::lock_guard<std::mutex> lock(defaultCmdQueryMtx);
+
+		if (!defaultCmdEvalOut.valid)
+			return;
+
+		out = defaultCmdEvalOut;
+		defaultCmdEvalOut = DefaultCmdEvalResult();
+	}
+
+	int index = -1;
+
+	if (out.fireCallin) {
+		int cmdID = out.rawCmdID;
+
+		// live fires the event only when a leader was found (GetDefaultCmd's
+		// early CMD_STOP returns skip it); widget overrides mutate cmdID
+		if (out.leaderFound)
+			eventHandler.DefaultCommand(out.unit, out.feature, cmdID);
+
+		// make sure the command is currently available (the live impl's tail)
+		for (int c = 0; c < (int)commands.size(); c++) {
+			if (cmdID == commands[c].id) {
+				index = c;
+				break;
+			}
+		}
+	}
+
+	defaultCmdReplyCmd = index;
 	defaultCmdReplyValid = true;
 }
 

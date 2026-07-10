@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <functional> // PR 44b: ForEachServedCommand's scan callback
 #include <memory> // PR 38f: CaptureCmdQueueEvent's opaque shared_ptr<void>
 #include <vector> // sim|draw PR 44: GetServedAvailableCommands out-vector
 
@@ -291,6 +292,17 @@ namespace LuaSnapshotServe {
 	// is refreshed at the barrier); no POV gate (the live body reads the owner's
 	// commandAI directly regardless of allyteam -- selection is the local player's).
 	bool GetServedAvailableCommands(int unitID, std::vector<SCommandDescription>& outDescs, int& outPage);
+
+	// PR 44b: C++ view over the served (consumer-held) command-queue copy for
+	// engine-side draw-context readers -- CWaitCommandsAI's wait scans under
+	// the running split (walking live commandAI->commandQue from the movers
+	// would be a structural race once the sim runs concurrently). Invokes
+	// fn(cmdID, numParams, param0, param1) per queued command in queue order
+	// until fn returns false; param0/1 are 0.0f when numParams < 1/2.
+	// Returns false when unitID has no served slot (dead / never copied) --
+	// the caller treats that as an empty queue, exactly like the live path's
+	// null-unit skip. Main thread (the cache is the held slot's).
+	bool ForEachServedCommand(int unitID, const std::function<bool(int, int, float, float)>& fn);
 
 	// ---- PR 34 (spatial/list remainder) ----
 	// The remainder of the spatial/list family: per-team plane test + table

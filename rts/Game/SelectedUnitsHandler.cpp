@@ -1032,6 +1032,68 @@ int CSelectedUnitsHandler::GetDefaultCmd(const CUnit* unit, const CFeature* feat
 }
 
 
+// PR 44b: the SIM-THREAD evaluation half of GetDefaultCmd -- the identical
+// leader walk over a REQUEST-TIME selection snapshot (ids captured by the
+// draw side), with NO widget callin: the DefaultCommand event is the
+// presentation half, fired by the consumer's commit on the main thread
+// (CGuiHandler::CommitDefaultCmdReply) with this walk's results as its args.
+// leaderFound=false reproduces the no-selection / all-dead CMD_STOP shape,
+// where the live path fires no event either. Uses the same file-static
+// IsBetterLeader target context as the live body: safe because every
+// main-thread GetDefaultCmd caller holds a ScopedExternalSimPause (the sim is
+// at its yield point, never inside this eval) -- the two walks are mutually
+// exclusive by construction.
+int CSelectedUnitsHandler::GetDefaultCmdEval(const std::vector<int>& unitIDs, const CUnit* unit, const CFeature* feature, bool& leaderFound)
+{
+	leaderFound = false;
+
+	// return the default if there are no units selected
+	if (unitIDs.empty())
+		return CMD_STOP;
+
+	// setup the locals for IsBetterLeader()
+	targetUnit = unit;
+	targetFeature = feature;
+
+	if (targetUnit != nullptr)
+		targetIsEnemy = !teamHandler.Ally(gu->myAllyTeam, targetUnit->allyteam);
+
+	// find the best leader to pick the command (the GetDefaultCmd walk over
+	// the captured ids; this runs on the sim thread, so unitHandler reads are
+	// legal and a stale id simply resolves to null and is skipped)
+	const CUnit* leaderUnit = nullptr;
+	const UnitDef* leaderDef = nullptr;
+
+	for (const int unitID: unitIDs) {
+		const CUnit* testUnit = unitHandler.GetUnit(unitID);
+		if (testUnit == nullptr)
+			continue;
+		const UnitDef* testDef = testUnit->unitDef;
+
+		if (leaderUnit == nullptr) {
+			leaderUnit = testUnit;
+			leaderDef = testDef;
+			continue;
+		}
+
+		if (testDef == leaderDef)
+			continue;
+
+		if (!IsBetterLeader(testDef, leaderDef))
+			continue;
+
+		leaderDef = testDef;
+		leaderUnit = testUnit;
+	}
+
+	if (leaderUnit == nullptr)
+		return CMD_STOP;
+
+	leaderFound = true;
+	return leaderUnit->commandAI->GetDefaultCmd(unit, feature);
+}
+
+
 /******************************************************************************/
 
 void CSelectedUnitsHandler::PossibleCommandChange(CUnit* sender)

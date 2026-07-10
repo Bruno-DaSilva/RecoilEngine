@@ -4,6 +4,7 @@
 #define READ_MAP_H
 
 #include <array>
+#include <mutex>
 #include <vector>
 
 #include "MapTexture.h"
@@ -281,6 +282,15 @@ protected:
 
 
 	CRectangleOverlapHandler unsyncedHeightMapUpdates;
+	// PR 44b: the rect queue became a real cross-thread channel -- the sim
+	// thread appends (terraform / LOS-driven height updates) while the draw
+	// side drains WITHOUT the park. UpdateDraw steals the queue under the
+	// mutex into this draw-local handler and processes it lock-free (the
+	// synced-heightmap float reads during the copy are the tolerated
+	// torn-word class, same as the splitRunningValueSafe grids); leftover
+	// rects beyond the per-frame budget stay here.
+	std::mutex unsyncedHeightMapUpdatesMtx;
+	CRectangleOverlapHandler unsyncedHeightMapUpdatesDrain;
 
 	std::vector<float3> unsyncedHeightInfo; // per 128x128 HM patch
 private:

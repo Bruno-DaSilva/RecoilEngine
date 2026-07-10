@@ -178,7 +178,6 @@ void DeferredObjectDeleter::AckDrainedDestroys()
 	}
 
 	poisoned.swap(pending);
-	sealedPending = 0; // PR 44a: an all-shells ack consumes any sealed batch
 	epoch += 1;
 }
 
@@ -194,49 +193,95 @@ void DeferredObjectDeleter::AckDrainedDestroysEpoch(uint64_t epochId)
 
 	poisoned.insert(poisoned.end(), pending.begin(), pending.end());
 	pending.clear();
-	sealedPending = 0; // PR 44a: an all-shells ack consumes any sealed batch
 	epoch += 1;
 }
 
-void DeferredObjectDeleter::AckSealedDestroysEpoch(uint64_t epochId)
+void DeferredObjectDeleter::SealPendingBatch(int slot)
 {
-	// PR 44a: ack ONLY the producer-sealed prefix -- the tail's destroy
-	// records have not dispatched (they ride the next epoch), so those shells
-	// must stay readable
-	if (sealedPending == 0)
+	// PR 44b: sim thread, at the produce edge -- move the batch's shells into
+	// the epoch's slot (see the header); the slot's previous batch was acked
+	// and cleared when that epoch dispatched
+	assert(slot >= 0 && slot < MAX_EPOCH_BATCH_SLOTS);
+	assert(slotBatches[slot].empty());
+
+	slotBatches[slot].swap(pending);
+	pending.clear();
+}
+
+void DeferredObjectDeleter::AckSealedDestroysEpoch(int slot, uint64_t epochId)
+{
+	// PR 44a/44b: ack ONLY the held epoch's sealed batch -- the tail's
+	// destroy records have not dispatched (they ride the next epoch), so
+	// those shells must stay readable. Runs on the main thread; destruct +
+	// poison touch only the shells' own memory (PreDestruct already ran all
+	// sync-observable teardown on the sim side), the pool return is deferred
+	// to the sim (ReleaseRetired -> ServiceRetiredReleases).
+	assert(slot >= 0 && slot < MAX_EPOCH_BATCH_SLOTS);
+
+	std::vector<Entry>& batch = slotBatches[slot];
+
+	if (batch.empty())
 		return;
 
-	assert(sealedPending <= pending.size());
-
-	for (size_t i = 0; i < sealedPending; ++i) {
-		Entry& e = pending[i];
+	for (Entry& e: batch) {
 		DestructAndPoison(e);
 		e.ackEpoch = epochId;
 	}
 
-	poisoned.insert(poisoned.end(), pending.begin(), pending.begin() + sealedPending);
-	pending.erase(pending.begin(), pending.begin() + sealedPending);
-	sealedPending = 0;
+	poisoned.insert(poisoned.end(), batch.begin(), batch.end());
+	batch.clear();
 	epoch += 1;
 }
 
 void DeferredObjectDeleter::ReleaseRetired(uint64_t retiredEpochId)
 {
+	// PR 44b: pools are sim-owned and the sim may be running -- move the
+	// retired slots to the releasable list; the pool return happens on the
+	// sim thread (ServiceRetiredReleases) or at a provably-quiescent
+	// ReleaseAcked (lockstep / valve / teardown)
 	size_t kept = 0;
+	{
+		std::lock_guard<std::mutex> lock(releasableMtx);
 
-	for (Entry& e: poisoned) {
-		if (e.ackEpoch <= retiredEpochId) {
-			ReleaseSlot(e);
-			continue;
+		for (Entry& e: poisoned) {
+			if (e.ackEpoch <= retiredEpochId) {
+				releasable.push_back(e);
+				continue;
+			}
+			poisoned[kept++] = e;
 		}
-		poisoned[kept++] = e;
 	}
 
 	poisoned.resize(kept);
 }
 
+void DeferredObjectDeleter::ServiceRetiredReleases()
+{
+	// swap out under the lock, free outside it (pool ops are the caller's
+	// thread's own -- sim thread at its edge, or quiescent main)
+	static std::vector<Entry> draining;
+	{
+		std::lock_guard<std::mutex> lock(releasableMtx);
+
+		if (releasable.empty())
+			return;
+
+		std::swap(draining, releasable);
+	}
+
+	for (const Entry& e: draining) {
+		ReleaseSlot(e);
+	}
+
+	draining.clear();
+}
+
 void DeferredObjectDeleter::ReleaseAcked()
 {
+	// caller guarantees sim quiescence (flag-off end-of-Draw, valve service,
+	// lockstep, teardown) -- give back the retired backlog too
+	ServiceRetiredReleases();
+
 	for (const Entry& e: poisoned) {
 		ReleaseSlot(e);
 	}
@@ -252,7 +297,15 @@ void DeferredObjectDeleter::Clear()
 
 	poisoned.insert(poisoned.end(), pending.begin(), pending.end());
 	pending.clear();
-	sealedPending = 0;
+
+	for (auto& batch: slotBatches) {
+		for (const Entry& e: batch) {
+			DestructAndPoison(e);
+		}
+
+		poisoned.insert(poisoned.end(), batch.begin(), batch.end());
+		batch.clear();
+	}
 
 	ReleaseAcked();
 }

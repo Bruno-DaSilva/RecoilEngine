@@ -7074,6 +7074,32 @@ bool LuaSnapshotServe::GetServedAvailableCommands(int unitID, std::vector<SComma
 }
 
 
+// PR 44b: engine-side C++ scan over the served queue copy (see the header;
+// CWaitCommandsAI's wait scans). Serves commandQue -- the surface the live
+// wait scans walk (unit->commandAI->commandQue) for factories too.
+bool LuaSnapshotServe::ForEachServedCommand(int unitID, const std::function<bool(int, int, float, float)>& fn)
+{
+	const std::vector<UnitCmdQueueSlot>& cache = ServedCmdCache();
+
+	if (unitID < 0 || static_cast<size_t>(unitID) >= cache.size())
+		return false;
+
+	const UnitCmdQueueSlot& slot = cache[unitID];
+	if (!slot.present)
+		return false;
+
+	for (const SnapCommand& c: slot.commandQue) {
+		const float p0 = (c.numParams >= 1) ? slot.commandQueParams[c.paramOffset + 0] : 0.0f;
+		const float p1 = (c.numParams >= 2) ? slot.commandQueParams[c.paramOffset + 1] : 0.0f;
+
+		if (!fn(c.id, static_cast<int>(c.numParams), p0, p1))
+			break;
+	}
+
+	return true;
+}
+
+
 /******************************************************************************
  * BEGIN PR 33 (pieces/scripts family) -- serving section
  *

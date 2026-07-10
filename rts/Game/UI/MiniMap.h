@@ -54,6 +54,9 @@ public:
 
 	bool  FullProxy()   const { return fullProxy; }
 	bool  ProxyMode()   const { return proxyMode; }
+	// PR 44b: the default-cmd query captures the pick radius at request time
+	// (the sim-side eval may not read minimap state)
+	float GetUnitSelectRadius() const { return unitSelectRadius; }
 	float CursorScale() const { return cursorScale; }
 
 	void SetMinimized(bool state);

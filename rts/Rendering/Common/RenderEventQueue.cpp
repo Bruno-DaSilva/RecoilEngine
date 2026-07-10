@@ -38,7 +38,7 @@ void RenderEventQueue::Push(const Record& record)
 		// immediate mode is only ever active with an empty queue (Drain is
 		// what ends the sim phase), so dispatching in place preserves order
 		assert(records.empty());
-		Dispatch(record);
+		Dispatch(record, ghostMasks);
 		ghostMasks.clear();
 		return;
 	}
@@ -52,24 +52,41 @@ void RenderEventQueue::Flush()
 		return;
 
 	DispatchRange(records.size());
-
-	// PR 44a: a full flush (valve service / lockstep drain) consumed any
-	// sealed-but-undispatched epoch batch along with the tail; the later
-	// consume of that epoch must not re-dispatch
-	sealedRecords = 0;
 }
 
-void RenderEventQueue::DispatchSealedBatch()
+void RenderEventQueue::SealEpochBatch(int slot)
 {
-	// PR 44a consumer half: dispatch exactly the producer-sealed batch, keep
-	// the post-seal tail (it belongs to the next epoch) and the deferral
-	// window (the sim phase never ends under the flip)
-	if (sealedRecords == 0)
+	// PR 44b: sim thread, at the produce edge -- MOVE the pending records +
+	// their ghost-mask pool into the epoch's slot batch (the slot's previous
+	// batch was consumed when that epoch dispatched; produce-after-consume
+	// pacing guarantees no still-pending batch is overwritten). New pushes
+	// start a fresh live container (mask indices restart at 0 with it).
+	assert(slot >= 0 && slot < MAX_EPOCH_BATCH_SLOTS);
+	assert(epochBatches[slot].records.empty());
+
+	epochBatches[slot].records.swap(records);
+	epochBatches[slot].ghostMasks.swap(ghostMasks);
+	records.clear();
+	ghostMasks.clear();
+}
+
+void RenderEventQueue::DispatchSealedBatch(int slot)
+{
+	// PR 44a/44b consumer half: dispatch exactly the held epoch's sealed
+	// batch; the post-seal tail (sim-owned live container) belongs to the
+	// next epoch, and the deferral window stays open (the sim phase never
+	// ends under the flip)
+	assert(slot >= 0 && slot < MAX_EPOCH_BATCH_SLOTS);
+
+	EpochBatch& batch = epochBatches[slot];
+
+	if (batch.records.empty())
 		return;
 
-	assert(sealedRecords <= records.size());
-	DispatchRange(sealedRecords);
-	sealedRecords = 0;
+	DispatchSpan(batch.records, batch.ghostMasks);
+
+	batch.records.clear();
+	batch.ghostMasks.clear();
 }
 
 void RenderEventQueue::DispatchRange(const size_t numRecords)
@@ -81,36 +98,7 @@ void RenderEventQueue::DispatchRange(const size_t numRecords)
 	// events today, but stay safe against appends invalidating iterators
 	for (size_t i = 0; i < numRecords; ++i) {
 		const Record record = records[i];
-
-		// PR 43 §2.6: collect the batch's referenced ids for the epoch
-		// id-coverage gate (checked after the publish; see BatchCoverageRefs).
-		// Unsynced projectile records are excluded (no row namespace).
-		if (SimDrawSplit::Enabled()) {
-			switch (record.type) {
-				case Record::Type::UnitPreCreated:
-				case Record::Type::UnitCreated:
-				case Record::Type::UnitDestroyed:
-				case Record::Type::UnitEnteredLos:
-				case Record::Type::UnitLeftLos:
-				case Record::Type::UnitEnteredRadar:
-				case Record::Type::UnitLeftRadar:
-				case Record::Type::UnitLeavesGhostChanged:
-					batchCoverageRefs.push_back({0, record.id});
-					break;
-				case Record::Type::FeaturePreCreated:
-				case Record::Type::FeatureCreated:
-				case Record::Type::FeatureDestroyed:
-					batchCoverageRefs.push_back({1, record.id});
-					break;
-				case Record::Type::ProjectileCreated:
-				case Record::Type::ProjectileDestroyed:
-					if (record.syncedProj)
-						batchCoverageRefs.push_back({2, record.id});
-					break;
-			}
-		}
-
-		Dispatch(record);
+		DispatchOne(record, ghostMasks);
 	}
 
 	records.erase(records.begin(), records.begin() + numRecords);
@@ -121,14 +109,62 @@ void RenderEventQueue::DispatchRange(const size_t numRecords)
 	draining = false;
 }
 
+void RenderEventQueue::DispatchSpan(const std::vector<Record>& span, const std::vector<GhostAllyMask>& masks)
+{
+	assert(!draining);
+	draining = true;
+
+	for (const Record& record: span)
+		DispatchOne(record, masks);
+
+	draining = false;
+}
+
+// per-record coverage-ref collection + dispatch (shared by the live-range
+// and slot-batch loops)
+void RenderEventQueue::DispatchOne(const Record& record, const std::vector<GhostAllyMask>& masks)
+{
+	// PR 43 §2.6: collect the batch's referenced ids for the epoch
+	// id-coverage gate (checked after the publish; see BatchCoverageRefs).
+	// Unsynced projectile records are excluded (no row namespace).
+	if (SimDrawSplit::Enabled()) {
+		switch (record.type) {
+			case Record::Type::UnitPreCreated:
+			case Record::Type::UnitCreated:
+			case Record::Type::UnitDestroyed:
+			case Record::Type::UnitEnteredLos:
+			case Record::Type::UnitLeftLos:
+			case Record::Type::UnitEnteredRadar:
+			case Record::Type::UnitLeftRadar:
+			case Record::Type::UnitLeavesGhostChanged:
+				batchCoverageRefs.push_back({0, record.id});
+				break;
+			case Record::Type::FeaturePreCreated:
+			case Record::Type::FeatureCreated:
+			case Record::Type::FeatureDestroyed:
+				batchCoverageRefs.push_back({1, record.id});
+				break;
+			case Record::Type::ProjectileCreated:
+			case Record::Type::ProjectileDestroyed:
+				if (record.syncedProj)
+					batchCoverageRefs.push_back({2, record.id});
+				break;
+		}
+	}
+
+	Dispatch(record, masks);
+}
+
 
 void RenderEventQueue::PushDestroyShell(uint64_t key, const void* obj)
 {
+	std::lock_guard<std::mutex> lock(shellMtx);
 	pendingDestroyShells[key].push_back(obj);
 }
 
 const void* RenderEventQueue::FindDestroyShell(uint64_t key) const
 {
+	std::lock_guard<std::mutex> lock(shellMtx);
 	const auto it = pendingDestroyShells.find(key);
 
 	if (it == pendingDestroyShells.end())
@@ -140,6 +176,7 @@ const void* RenderEventQueue::FindDestroyShell(uint64_t key) const
 
 const void* RenderEventQueue::PopDestroyShell(uint64_t key)
 {
+	std::lock_guard<std::mutex> lock(shellMtx);
 	const auto it = pendingDestroyShells.find(key);
 
 	// immediate mode: the destroy dispatched at the fire site, before
@@ -164,6 +201,10 @@ void RenderEventQueue::CollectPendingDeadShells(
 	std::vector<std::pair<int, const CFeature*>>& outFeatures,
 	std::vector<std::pair<int, const CProjectile*>>& outProjectiles) const
 {
+	// PR 44b: sim thread at the produce edge; the main thread pops/reads
+	// concurrently (destroy-record dispatch / resolution cold-misses)
+	std::lock_guard<std::mutex> lock(shellMtx);
+
 	for (const auto& [key, fifo] : pendingDestroyShells) {
 		assert(!fifo.empty());
 
@@ -229,7 +270,7 @@ const CProjectile* RenderEventQueue::ResolveProjectile(int32_t id, bool synced) 
 }
 
 
-void RenderEventQueue::Dispatch(const Record& record)
+void RenderEventQueue::Dispatch(const Record& record, const std::vector<GhostAllyMask>& masks)
 {
 	using T = Record::Type;
 
@@ -306,8 +347,8 @@ void RenderEventQueue::Dispatch(const Record& record)
 			CUnitDrawer::ApplyUnitRadarChanged(ResolveUnit(record.id), record.arg1);
 		} break;
 		case T::UnitLeavesGhostChanged: {
-			assert(size_t(record.arg1) < ghostMasks.size());
-			CUnitDrawer::ApplyUnitLeavesGhostChanged(ResolveUnit(record.id), ghostMasks[record.arg1]);
+			assert(size_t(record.arg1) < masks.size());
+			CUnitDrawer::ApplyUnitLeavesGhostChanged(ResolveUnit(record.id), masks[record.arg1]);
 		} break;
 	}
 }

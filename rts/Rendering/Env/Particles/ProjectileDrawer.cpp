@@ -85,6 +85,38 @@ void CProjectileDrawer::SnapshotEffectContainers()
 	}
 }
 
+void CProjectileDrawer::StageEffectContainersAtSimEdge()
+{
+	// PR 44b: the SIM thread owns the source containers at its produce edge;
+	// copy into the staging pair (assignment recycles capacity)
+	stagedGroundFlashes = projectileHandler.groundFlashes;
+
+	for (int mt = 0; mt < MODELTYPE_CNT; ++mt) {
+		stagedFlyingPieces[mt] = projectileHandler.flyingPieces[mt];
+	}
+
+	stagedEffectContainersValid = true;
+}
+
+void CProjectileDrawer::CommitStagedEffectContainers()
+{
+	// PR 44b consumer half (barrier): swap the staged copies into the serving
+	// members the draw passes read. Swap (not assign) hands the old serving
+	// buffers back as staging capacity. A no-publish barrier keeps serving
+	// the previous copies (their flash shells are epoch-pinned until their
+	// destroy records' batch acks, which cannot precede this commit).
+	if (!stagedEffectContainersValid)
+		return;
+
+	stagedEffectContainersValid = false;
+
+	splitGroundFlashes.swap(stagedGroundFlashes);
+
+	for (int mt = 0; mt < MODELTYPE_CNT; ++mt) {
+		splitFlyingPieces[mt].swap(stagedFlyingPieces[mt]);
+	}
+}
+
 CProjectileDrawer* projectileDrawer = nullptr;
 
 // can not be a CProjectileDrawer; destruction in global

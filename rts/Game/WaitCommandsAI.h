@@ -50,6 +50,9 @@ class CWaitCommandsAI {
 
 		/// search a new unit's queue and add it to its wait commands
 		void AddLocalUnit(CUnit* unit, const CUnit* builder);
+		/// PR 44b: the split's boundary-drain form of AddLocalUnit's body
+		/// (served queue scan + engine-queued command re-key; see the .cpp)
+		void AddLocalUnitAtBoundary(CUnit* unit);
 
 		void ClearUnitQueue(CUnit* unit, const CCommandQueue& queue);
 		void RemoveWaitCommand(CUnit* unit, const Command& cmd);

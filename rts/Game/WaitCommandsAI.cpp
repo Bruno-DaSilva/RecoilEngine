@@ -3,6 +3,8 @@
 
 #include "WaitCommandsAI.h"
 
+#include "Lua/LuaSnapshotServe.h"
+#include "Lua/LuaSplitContract.h"
 #include "System/SimDrawSplit.h"
 #include "System/UnsyncedBoundaryQueue.h"
 #include "SelectedUnitsHandler.h"
@@ -34,6 +36,25 @@ CWaitCommandsAI waitCommandsAI;
 static const int maxNetDelay = 30;  // in seconds
 
 static const int updatePeriod = 3;  // in GAME_SPEED, 100 ms
+
+
+// PR 44b: with the split running, the wait machinery executes on the draw
+// side while the sim advances -- unit resolution and command-queue scans must
+// read draw-owned / epoch-served state (SimDrawSplit.h §3.8; the live
+// commandQue walk from the movers would be a structural race). Flag-off (and
+// pre-spawn) keeps the live paths byte-identical.
+static inline bool WaitServedMode()
+{
+	return (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning());
+}
+
+static inline CUnit* WaitResolveUnit(int unitID)
+{
+	if (WaitServedMode())
+		return SimDrawSplit::BoundaryLiveUnit(unitID);
+
+	return unitHandler.GetUnit(unitID);
+}
 
 
 CR_BIND(CWaitCommandsAI, )
@@ -252,9 +273,11 @@ void CWaitCommandsAI::AddLocalUnit(CUnit* unit, const CUnit* builder)
 	if (SimDrawSplit::DeferUnsyncedNow()) {
 		const int unitID = unit->id;
 		UnsyncedBoundaryQueue::Defer([this, unit, unitID]() {
-			// PR 44b §3.8: liveness via draw-owned state (see SimDrawSplit.h)
+			// PR 44b §3.8: liveness via draw-owned state (see SimDrawSplit.h);
+			// the boundary body scans the SERVED queue copy and routes its
+			// queued-command re-key through the engine boundary-apply
 			if (SimDrawSplit::BoundaryUnitAliveAtDrain(unitID, unit))
-				AddLocalUnit(unit, nullptr);
+				AddLocalUnitAtBoundary(unit);
 		});
 		return;
 	}
@@ -300,6 +323,87 @@ void CWaitCommandsAI::AddLocalUnit(CUnit* unit, const CUnit* builder)
 			}
 		}
 	}
+}
+
+
+// PR 44b: the split's boundary form of AddLocalUnit's body -- runs at the
+// deferred drain (draw side, sim possibly advancing). The queue SCAN reads
+// the served (epoch) copy; the wait-map mutations are draw-owned; the one SIM
+// write the live body performs (re-keying the queued CMD_WAIT to the fresh
+// per-unit TimeWait key) routes through the engine boundary-apply queue and
+// lands on the sim thread at its next produce edge (<=1 boundary late, the
+// contracted poke class; the wait scan reads the served copy, which reflects
+// the re-key after the same edge).
+void CWaitCommandsAI::AddLocalUnitAtBoundary(CUnit* unit)
+{
+	if (waitMap.empty())
+		return;
+
+	LuaSnapshotServe::ForEachServedCommand(unit->id,
+		[&](int cmdID, int numParams, float p0, float p1) {
+			if ((cmdID != CMD_WAIT) || (numParams != 2))
+				return true;
+
+			const KeyType key = Wait::GetKeyFromFloat(p1);
+			WaitMap::iterator wit = waitMap.find(key);
+			if (wit == waitMap.end())
+				return true;
+
+			Wait* wait = wit->second;
+			if (p0 != wait->GetCode())
+				return true;
+
+			const float code = p0;
+
+			if (code != CMD_WAITCODE_TIMEWAIT) {
+				wait->AddUnit(unit);
+				return true;
+			}
+
+			// add a unit-specific TimeWait (straight into the waitMap, no
+			// net ack required), exactly like the live body
+			const int duration = static_cast<TimeWait*>(wait)->GetDuration();
+			TimeWait* tw = TimeWait::New(duration, unit);
+
+			if (tw == nullptr)
+				return true;
+
+			if (waitMap.find(tw->GetKey()) != waitMap.end()) {
+				delete tw;
+				return true;
+			}
+
+			waitMap[tw->GetKey()] = tw;
+
+			// the live body's in-place SetParam+BumpVersion on the queued
+			// command is a sim write -- queue it for the sim thread
+			const int unitID = unit->id;
+			const float oldKeyFloat = p1;
+			const float newKeyFloat = Wait::GetFloatFromKey(tw->GetKey());
+
+			LuaSplitContract::QueueEngineBoundaryApply("WaitCmdTimeWaitRekey",
+				[unitID, code, oldKeyFloat, newKeyFloat]() {
+					CUnit* u = unitHandler.GetUnit(unitID);
+
+					if (u == nullptr || u->commandAI == nullptr)
+						return; // died between drain and apply -- drop
+
+					const CCommandQueue& dq = u->commandAI->commandQue;
+
+					for (const Command& qcmd: dq) {
+						if ((qcmd.GetID() == CMD_WAIT) && (qcmd.GetNumParams() == 2) &&
+						    (qcmd.GetParam(0) == code) && (qcmd.GetParam(1) == oldKeyFloat)) {
+							// should not affect the sync state (the live
+							// body's own claim for this exact write)
+							const_cast<Command&>(qcmd).SetParam(1, newKeyFloat);
+							const_cast<CCommandQueue&>(dq).BumpVersion();
+							break;
+						}
+					}
+				});
+
+			return true;
+		});
 }
 
 
@@ -351,7 +455,8 @@ void CWaitCommandsAI::ClearUnitQueue(CUnit* unit, const CCommandQueue& queue)
 
 		const int unitID = unit->id;
 		UnsyncedBoundaryQueue::Defer([this, unit, unitID, waitCmds = std::move(waitCmds)]() {
-			if (unitHandler.GetUnit(unitID) != unit)
+			// PR 44b Â§3.8: liveness via draw-owned state (see SimDrawSplit.h)
+			if (!SimDrawSplit::BoundaryUnitAliveAtDrain(unitID, unit))
 				return;
 
 			// RemoveWaitCommand per entry == the body's per-entry action
@@ -491,6 +596,33 @@ CWaitCommandsAI::Wait::~Wait()
 CWaitCommandsAI::Wait::WaitState
 	CWaitCommandsAI::Wait::GetWaitState(const CUnit* unit) const
 {
+	// PR 44b: a wait-set id whose unit died after the epoch edge resolves
+	// null under the split (boundary pruning lags one epoch); Missing is the
+	// state a dead unit's empty queue produces. Flag-off never passes null
+	// (real death dependences prune at death time).
+	if (unit == nullptr)
+		return Missing;
+
+	if (WaitServedMode()) {
+		// scan the served (epoch) queue copy -- <=1 boundary stale, the §3.3
+		// contract; invisible at the 3-frame wait-update granularity
+		WaitState state = Missing;
+		bool front = true;
+
+		LuaSnapshotServe::ForEachServedCommand(unit->id,
+			[&](int cmdID, int numParams, float p0, float p1) {
+				if ((cmdID == CMD_WAIT) && (numParams == 2) &&
+				    (p0 == code) && (GetKeyFromFloat(p1) == key)) {
+					state = front ? Active : Queued;
+					return false;
+				}
+				front = false;
+				return true;
+			});
+
+		return state;
+	}
+
 	const CCommandQueue& dq = unit->commandAI->commandQue;
 
 	if (dq.empty())
@@ -519,6 +651,23 @@ CWaitCommandsAI::Wait::WaitState
 
 bool CWaitCommandsAI::Wait::IsWaitingOn(const CUnit* unit) const
 {
+	// PR 44b: see GetWaitState
+	if (unit == nullptr)
+		return false;
+
+	if (WaitServedMode()) {
+		bool waiting = false;
+
+		LuaSnapshotServe::ForEachServedCommand(unit->id,
+			[&](int cmdID, int numParams, float p0, float p1) {
+				waiting = ((cmdID == CMD_WAIT) && (numParams == 2) &&
+				           (p0 == code) && (GetKeyFromFloat(p1) == key));
+				return false; // front only
+			});
+
+		return waiting;
+	}
+
 	const CCommandQueue& dq = unit->commandAI->commandQue;
 	if (dq.empty())
 		return false;
@@ -846,16 +995,16 @@ void CWaitCommandsAI::DeathWait::Update()
 	std::vector<int> voidWaitUnitIDs;
 
 	for (const int unitID: waitUnits) {
-		const WaitState state = GetWaitState(unitHandler.GetUnit(unitID));
+		const WaitState state = GetWaitState(WaitResolveUnit(unitID));
 
 		if (state == Active) {
 			unblockSet.insert(unitID);
-			DelWaitDependence(unitHandler.GetUnit(unitID));
+			DelWaitDependence(WaitResolveUnit(unitID));
 			voidWaitUnitIDs.push_back(unitID);
 		}
 		else if (state == Queued) {} // do nothing
 		else if (state == Missing) {
-			DelWaitDependence(unitHandler.GetUnit(unitID));
+			DelWaitDependence(WaitResolveUnit(unitID));
 			voidWaitUnitIDs.push_back(unitID);
 		}
 	}
@@ -1035,7 +1184,7 @@ void CWaitCommandsAI::SquadWait::Update()
 		std::vector<int> voidWaitUnitIDs;
 
 		for (const int unitID: waitUnits) {
-			const WaitState state = GetWaitState(unitHandler.GetUnit(unitID));
+			const WaitState state = GetWaitState(WaitResolveUnit(unitID));
 
 			if (state == Active) {
 				unblockSet.insert(unitID);
@@ -1045,7 +1194,7 @@ void CWaitCommandsAI::SquadWait::Update()
 			}
 			else if (state == Queued) {} // do nothing
 			else if (state == Missing) {
-				DelWaitDependence(unitHandler.GetUnit(unitID));
+				DelWaitDependence(WaitResolveUnit(unitID));
 				voidWaitUnitIDs.push_back(unitID);
 			}
 		}
@@ -1061,7 +1210,7 @@ void CWaitCommandsAI::SquadWait::Update()
 
 			for (const int unitID: unblockSet) {
 				if (waitUnits.erase(unitID))
-					DelWaitDependence(unitHandler.GetUnit(unitID));
+					DelWaitDependence(WaitResolveUnit(unitID));
 			}
 		}
 	}
@@ -1167,7 +1316,7 @@ void CWaitCommandsAI::GatherWait::Update()
 	std::vector<int> voidWaitUnitIDs;
 
 	for (const int unitID: waitUnits) {
-		const WaitState state = GetWaitState(unitHandler.GetUnit(unitID));
+		const WaitState state = GetWaitState(WaitResolveUnit(unitID));
 
 		if (state == Active) {} // do nothing
 		else if (state == Queued) {
@@ -1178,7 +1327,7 @@ void CWaitCommandsAI::GatherWait::Update()
 			return;
 		}
 		else if (state == Missing) {
-			DelWaitDependence(unitHandler.GetUnit(unitID));
+			DelWaitDependence(WaitResolveUnit(unitID));
 			voidWaitUnitIDs.push_back(unitID);
 		}
 	}

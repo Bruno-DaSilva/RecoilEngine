@@ -49,6 +49,10 @@ class CEventClient;
  * access and takes no lock; the asserts in the .cpp enforce the discipline.
  */
 namespace UnsyncedBoundaryQueue {
+	/// PR 44b: mirrors SimSnapshot::EPOCH_RING_SLOTS (static-asserted at the
+	/// Game.cpp seal site)
+	inline constexpr int MAX_EPOCH_BATCH_SLOTS = 3;
+
 	/// the per-client deferral predicate for event dispatch loops:
 	/// SimDrawSplit::DeferUnsyncedNow() && client is unsynced. Fire-time
 	/// capture clients (CEventClient::IsSimPhaseCaptureClient) are exempted
@@ -70,16 +74,19 @@ namespace UnsyncedBoundaryQueue {
 	/// caller marks the snapshot mutated-outside-frame
 	size_t Drain();
 
-	// ---- PR 44a (producer flip): per-epoch closure batches ----
-	/// producer (sim thread, frame edge): seal the pending closures into the
-	/// epoch about to publish
-	void SealEpochBatch();
-	/// consumer (barrier, sim parked): replay exactly the sealed batch in
-	/// fire order, keeping the post-seal tail for the next epoch; same
-	/// return-count contract as Drain()
-	size_t DrainSealedBatch();
+	// ---- PR 44a/44b (producer flip): per-epoch closure batches ----
+	/// producer (sim thread, frame edge): MOVE the pending closures into the
+	/// epoch ring slot about to publish (PR 44b: physically per-slot, so the
+	/// consumer's dispatch and the sim's appends never share a container --
+	/// fenced by the epoch publish/acquire, no lock)
+	void SealEpochBatch(int slot);
+	/// consumer (barrier): replay exactly the held epoch's sealed batch in
+	/// fire order; same return-count contract as Drain()
+	size_t DrainSealedBatch(int slot);
 
 	bool Empty();
+	/// true when the slot holds no sealed-undispatched batch
+	bool SlotBatchEmpty(int slot);
 
 	/// teardown: drop anything queued (game is going away; the callin
 	/// targets are being destroyed)

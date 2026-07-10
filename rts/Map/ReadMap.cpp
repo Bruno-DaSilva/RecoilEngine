@@ -510,25 +510,35 @@ void CReadMap::UpdateDraw(bool firstCall)
 {
 	SCOPED_TIMER("Update::ReadMap::UHM");
 
-	if (unsyncedHeightMapUpdates.empty())
+	// PR 44b: steal the sim-appended queue under the lock into the draw-local
+	// drain handler, then process lock-free (see the member comment); the
+	// per-frame budget's leftovers stay in the drain for the next call
+	{
+		std::lock_guard<std::mutex> lock(unsyncedHeightMapUpdatesMtx);
+
+		if (!unsyncedHeightMapUpdates.empty())
+			unsyncedHeightMapUpdatesDrain.append(unsyncedHeightMapUpdates);
+	}
+
+	if (unsyncedHeightMapUpdatesDrain.empty())
 		return;
 
 	//optimize layout
-	unsyncedHeightMapUpdates.Process(firstCall);
+	unsyncedHeightMapUpdatesDrain.Process(firstCall);
 
-	const int N = static_cast<int>(std::min(MAX_UHM_RECTS_PER_FRAME, unsyncedHeightMapUpdates.size()));
+	const int N = static_cast<int>(std::min(MAX_UHM_RECTS_PER_FRAME, unsyncedHeightMapUpdatesDrain.size()));
 
 	for (int i = 0; i < N; i++) {
-		UpdateHeightMapUnsynced(*(unsyncedHeightMapUpdates.begin() + i));
+		UpdateHeightMapUnsynced(*(unsyncedHeightMapUpdatesDrain.begin() + i));
 	};
 	UpdateHeightMapUnsyncedPost();
 
 	for (int i = 0; i < N; i++) {
-		eventHandler.UnsyncedHeightMapUpdate(*(unsyncedHeightMapUpdates.begin() + i));
+		eventHandler.UnsyncedHeightMapUpdate(*(unsyncedHeightMapUpdatesDrain.begin() + i));
 	}
 
 	for (int i = 0; i < N; i++) {
-		unsyncedHeightMapUpdates.pop_front();
+		unsyncedHeightMapUpdatesDrain.pop_front();
 	}
 }
 
@@ -556,6 +566,7 @@ void CReadMap::UpdateHeightMapSynced(const SRectangle& hgtMapRect)
 
 	// push the unsynced update; initial one without LOS check
 	if (initialize) {
+		std::lock_guard<std::mutex> lock(unsyncedHeightMapUpdatesMtx);
 		unsyncedHeightMapUpdates.push_back(cornerRect);
 	} else {
 		#ifdef USE_HEIGHTMAP_DIGESTS
@@ -807,6 +818,10 @@ void CReadMap::HeightMapUpdateLOSCheck(const SRectangle& hgtMapRect)
 	const SRectangle losMapRect = hgtMapRect * (SQUARE_SIZE * losHandler->los.invDiv); // LOS space
 
 	const float* ctrHgtMap = readMap->GetCenterHeightMapSynced();
+
+	// PR 44b: the queue is cross-thread (sim appends, draw drains); one lock
+	// for the whole per-rect push loop
+	std::lock_guard<std::mutex> lock(unsyncedHeightMapUpdatesMtx);
 
 	const auto PushRect = [&](SRectangle& subRect, int hmx, int hmz) {
 		if (subRect.GetArea() > 0) {

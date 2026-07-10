@@ -5,6 +5,7 @@
 #include <array>
 #include <cassert>
 #include <cstdint>
+#include <mutex>
 #include <utility>
 #include <vector>
 
@@ -124,21 +125,28 @@ public:
 		deferring = false;
 	}
 
-	// ---- PR 44a (producer flip): per-epoch record batches ----
-	// The PRODUCER (sim thread, at its frame edge) seals the current pending
-	// records into the epoch it is about to publish; the CONSUMER (the
-	// barrier, sim parked) dispatches EXACTLY that sealed batch and leaves the
-	// post-seal tail for the next epoch (the §1.3 records-fold rule). At most
-	// one sealed-unconsumed batch exists at a time (publish is gated on the
-	// previous epoch's consumption). deferring stays TRUE across the sealed
-	// dispatch -- under the flip the sim phase never ends mid-game.
-	void SealEpochBatch() { sealedRecords = records.size(); }
-	size_t SealedRecordCount() const { return sealedRecords; }
+	// ---- PR 44a/44b (producer flip): per-epoch record batches ----
+	// The PRODUCER (sim thread, at its frame edge) MOVES the pending records
+	// (+ their ghost-mask side pool) into the epoch ring slot it is about to
+	// publish; the CONSUMER (the barrier) dispatches EXACTLY its held epoch's
+	// slot batch and the post-seal tail stays in the sim-owned live container
+	// for the next epoch (the §1.3 records-fold rule). PR 44b: physically
+	// per-slot so the consumer's dispatch never shares a container with the
+	// sim's concurrent appends -- fenced by the epoch publish/acquire pair,
+	// no lock. At most one sealed-unconsumed batch exists at a time (publish
+	// is gated on the previous epoch's consumption). deferring stays TRUE
+	// across the sealed dispatch -- the sim phase never ends under the flip.
+	void SealEpochBatch(int slot);
 
-	/// dispatch the sealed batch in order (collecting coverage refs exactly
-	/// like Flush); erases the dispatched prefix, keeps the tail + deferral
-	/// window. No-op when nothing is sealed. Main thread, sim parked.
-	void DispatchSealedBatch();
+	/// dispatch the held epoch's sealed batch in order (collecting coverage
+	/// refs exactly like Flush); clears the slot batch. Main thread.
+	void DispatchSealedBatch(int slot);
+
+	/// true when the slot holds no sealed-undispatched batch
+	bool SlotBatchEmpty(int slot) const {
+		assert(slot >= 0 && slot < MAX_EPOCH_BATCH_SLOTS);
+		return epochBatches[slot].records.empty();
+	}
 
 	/// drops all pending records without applying them; game teardown only
 	/// (CGame::KillRendering), where the referenced objects and the drawers
@@ -146,8 +154,14 @@ public:
 	void Clear() {
 		records.clear();
 		ghostMasks.clear();
-		sealedRecords = 0;
-		pendingDestroyShells.clear();
+		for (auto& b: epochBatches) {
+			b.records.clear();
+			b.ghostMasks.clear();
+		}
+		{
+			std::lock_guard<std::mutex> lock(shellMtx);
+			pendingDestroyShells.clear();
+		}
 		boundaryDestroyedUnits.clear();
 		boundaryDestroyedProjectiles.clear();
 		boundaryDeadUnits.clear();
@@ -274,13 +288,24 @@ public:
 	void UnitEnteredRadar(const CUnit* unit, int allyTeam);
 	void UnitLeftRadar(const CUnit* unit, int allyTeam);
 	void UnitLeavesGhostChanged(const CUnit* unit, const GhostAllyMask& deadGhostAllyMask);
+public:
+	// PR 44b: mirrors SimSnapshot::EPOCH_RING_SLOTS (static-asserted at the
+	// Game.cpp seal site; kept local so this header stays SimSnapshot-free)
+	static constexpr int MAX_EPOCH_BATCH_SLOTS = 3;
+
 private:
 	void Push(const Record& record);
-	void Dispatch(const Record& record);
-	// shared body of Flush()/DispatchSealedBatch(): dispatch the first
-	// numRecords pending records in order (coverage-ref collection included)
-	// and erase them
+	// masks = the ghost-mask side pool the record's arg1 indexes into (the
+	// live container in immediate/lockstep mode, the slot batch's under the
+	// flip -- PR 44b)
+	void Dispatch(const Record& record, const std::vector<GhostAllyMask>& masks);
+	// shared body of Flush()/Drain(): dispatch the first numRecords pending
+	// records in order (coverage-ref collection included) and erase them
 	void DispatchRange(size_t numRecords);
+	// shared per-record dispatch loop over an explicit span (PR 44b)
+	void DispatchSpan(const std::vector<Record>& span, const std::vector<GhostAllyMask>& masks);
+	// per-record coverage-ref collection + dispatch (shared loop body)
+	void DispatchOne(const Record& record, const std::vector<GhostAllyMask>& masks);
 
 	// dispatch-time id -> object resolution (PR 14). Keyed by object kind +
 	// (for projectiles) id namespace + id; the value is the FIFO of parked
@@ -306,10 +331,16 @@ private:
 	const CProjectile* ResolveProjectile(int32_t id, bool synced) const;
 private:
 	std::vector<Record> records;
-	// PR 44a: records [0, sealedRecords) belong to the newest published epoch
-	// (see SealEpochBatch); 0 = nothing sealed. Written by the producer at the
-	// frame edge, read/reset by the consumer under the park (park-fenced).
-	size_t sealedRecords = 0;
+	// PR 44b: the per-epoch sealed batches (see SealEpochBatch); slot-indexed
+	// so producer appends (live containers) and consumer dispatch (held
+	// slot's batch) never share a container. A record and its ghost mask are
+	// always pushed together on the sim thread, so a batch's mask indices
+	// stay self-contained under the wholesale move.
+	struct EpochBatch {
+		std::vector<Record> records;
+		std::vector<GhostAllyMask> ghostMasks;
+	};
+	EpochBatch epochBatches[MAX_EPOCH_BATCH_SLOTS];
 	// PR 27b boundary death relay (see BoundaryDestroyedUnits)
 	std::vector<const CUnit*> boundaryDestroyedUnits;
 	std::vector<const CProjectile*> boundaryDestroyedProjectiles;
@@ -326,7 +357,14 @@ private:
 	std::vector<GhostAllyMask> ghostMasks;
 
 	// parked shells (DeferredObjectDeleter) with a queued destroy record, in
-	// fire order per key; see the resolution comment above
+	// fire order per key; see the resolution comment above.
+	// PR 44b: cross-thread -- the sim thread pushes at destroy-fire time and
+	// reads at produce time (CollectPendingDeadShells) while the main thread
+	// pops at destroy-record dispatch and reads on resolution cold-misses
+	// (FindPendingDestroy*), CONCURRENTLY now that the consume runs without
+	// the park. All accesses go through the mutex (uncontended in practice:
+	// pushes/pops are per-death, finds are dead-id misses only).
+	mutable std::mutex shellMtx;
 	spring::unordered_map<uint64_t, std::vector<const void*>> pendingDestroyShells;
 
 	bool deferring = false;

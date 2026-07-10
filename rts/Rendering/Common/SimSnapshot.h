@@ -1216,9 +1216,19 @@ public:
 	// ---- PR 44a: the producer flip (extraction on the sim thread) ----
 
 	/// pacing gate (§3.2 skip-if-unconsumed): true when the newest published
-	/// epoch has been acquired by the consumer. Producer (sim) thread.
+	/// epoch has been FULLY consumed by the draw side. Producer (sim) thread.
 	bool NewestEpochConsumed() const {
 		return consumedEpochId.load(std::memory_order_acquire) == epochCounter.load(std::memory_order_relaxed);
+	}
+
+	/// PR 44b: the consumer's consume-complete signal (moved out of
+	/// AcquireNewestEpoch -- see the comment there): stamped after the batch
+	/// dispatch AND the drawer Update/upload consumption finished, so the
+	/// producer's next extraction (which walks drawer containers) is mutually
+	/// exclusive with all consumer-side drawer mutation. Main thread;
+	/// idempotent (re-stamps the held epoch id).
+	void MarkNewestEpochConsumed() {
+		consumedEpochId.store(slotMeta[HeldIdx()].epochId, std::memory_order_release);
 	}
 
 	/// the row-namespace half of the flip's produce due-check (new sim frames
