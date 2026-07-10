@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "GameHelper.h"
+#include "PlacementPredicates.h" // PLACEMENT REHOST (stage 2): templated predicate stack
 
 #include "Camera.h"
 #include "GameSetup.h"
@@ -13,6 +14,7 @@
 #include "Rendering/Common/SnapshotPickGrid.h"
 #include "Sim/Features/Feature.h"
 #include "Sim/Features/FeatureDef.h"
+#include "Sim/Features/FeatureHandler.h" // PLACEMENT REHOST: resolve served featureId -> CFeature*
 #include "Sim/Misc/BuildingMaskMap.h"
 #include "Sim/Misc/CollisionHandler.h"
 #include "Sim/Misc/CollisionVolume.h"
@@ -1373,78 +1375,53 @@ CGameHelper::BuildSquareStatus CGameHelper::TestUnitBuildSquare(
 	RECOIL_DETAILED_TRACY_ZONE;
 	feature = nullptr;
 
-	const int xsize = buildInfo.GetXSize();
-	const int zsize = buildInfo.GetZSize();
+	// PLACEMENT REHOST (stage 2): the build-preview UI path (commands != nullptr,
+	// unsynced ShowUnitBuildSquare) is kept as live code -- it still routes each
+	// square through the templated TestBuildSquare wrapper. It is templatized in
+	// stage 3 when the C++ preview park sites are converted.
+	if (commands != nullptr) {
+		assert(!synced);
 
-	const float3 testPos = buildInfo.pos;
-	      float3 sqrPos;
+		const int xsize = buildInfo.GetXSize();
+		const int zsize = buildInfo.GetZSize();
 
-	const int x1 = int(testPos.x / SQUARE_SIZE) - (xsize >> 1), x2 = x1 + xsize;
-	const int z1 = int(testPos.z / SQUARE_SIZE) - (zsize >> 1), z2 = z1 + zsize;
-	const int2 xrange = int2(x1, x2);
-	const int2 zrange = int2(z1, z2);
+		const float3 testPos = buildInfo.pos;
+		      float3 sqrPos;
 
-	const MoveDef* moveDef = (buildInfo.def->pathType != -1U) ? moveDefHandler.GetMoveDefByPathType(buildInfo.def->pathType) : nullptr;
+		const int x1 = int(testPos.x / SQUARE_SIZE) - (xsize >> 1), x2 = x1 + xsize;
+		const int z1 = int(testPos.z / SQUARE_SIZE) - (zsize >> 1), z2 = z1 + zsize;
+		const int2 xrange = int2(x1, x2);
+		const int2 zrange = int2(z1, z2);
 
-	// const float buildHeight = GetBuildHeight(testPos, buildInfo.def, synced);
-	// const float modelHeight = (model != nullptr) ? math::fabs(model->height) : 10.0f;
+		const MoveDef* moveDef = (buildInfo.def->pathType != -1U) ? moveDefHandler.GetMoveDefByPathType(buildInfo.def->pathType) : nullptr;
 
-	sqrPos.y = GetBuildHeight(testPos, buildInfo.def, synced);
+		sqrPos.y = GetBuildHeight(testPos, buildInfo.def, synced);
 
-	BuildSquareStatus testStatus = BUILDSQUARE_OPEN;
+		BuildSquareStatus testStatus = BUILDSQUARE_OPEN;
 
-	if (buildInfo.def->needGeo) {
-		testStatus = BUILDSQUARE_BLOCKED;
+		if (buildInfo.def->needGeo) {
+			testStatus = BUILDSQUARE_BLOCKED;
 
-		QuadFieldQuery qfQuery;
-		qfQuery.threadOwner = threadOwner;
-		quadField.GetFeaturesExact(qfQuery, testPos, std::max(xsize, zsize) * 6);
+			QuadFieldQuery qfQuery;
+			qfQuery.threadOwner = threadOwner;
+			quadField.GetFeaturesExact(qfQuery, testPos, std::max(xsize, zsize) * 6);
 
-		const int mindx = xsize * (SQUARE_SIZE >> 1) - (SQUARE_SIZE >> 1);
-		const int mindz = zsize * (SQUARE_SIZE >> 1) - (SQUARE_SIZE >> 1);
+			const int mindx = xsize * (SQUARE_SIZE >> 1) - (SQUARE_SIZE >> 1);
+			const int mindz = zsize * (SQUARE_SIZE >> 1) - (SQUARE_SIZE >> 1);
 
-		// look for a nearby geothermal feature if we need one
-		for (const CFeature* f: *qfQuery.features) {
-			if (!f->def->geoThermal)
-				continue;
+			for (const CFeature* f: *qfQuery.features) {
+				if (!f->def->geoThermal)
+					continue;
 
-			const float dx = math::fabs(f->pos.x - testPos.x);
-			const float dz = math::fabs(f->pos.z - testPos.z);
+				const float dx = math::fabs(f->pos.x - testPos.x);
+				const float dz = math::fabs(f->pos.z - testPos.z);
 
-			if (dx < mindx && dz < mindz) {
-				testStatus = BUILDSQUARE_OPEN;
-				break;
+				if (dx < mindx && dz < mindz) {
+					testStatus = BUILDSQUARE_OPEN;
+					break;
+				}
 			}
 		}
-	}
-
-	// Units update their positions on slow update. Synced code must avoid building and trapping
-	// units - so check that all nearby mobile units have correctly accurate positions up to date.
-	if (synced)
-	{
-		assert(!ThreadPool::IsInMultiThreadedSection());
-
-		// buffer should be the maximum distance given by the movetype using the formula:
-		// maxspeed * modInfo.unitQuadPositionUpdateRate + half footStep + 1
-		// +1 on end is a safety buffer against rounding issues with square placement.
-		// placeholder values are given here for the moment.
-		const int largestMoveTypSizeH = moveDefHandler.GetLargestFootPrintSizeH() + 1;
-		const int bufferSize = SQUARE_SIZE * modInfo.unitQuadPositionUpdateRate * 2 + largestMoveTypSizeH + 1;
-		const float3 min((x1 - bufferSize) * SQUARE_SIZE, 0.f, (z1 - bufferSize) * SQUARE_SIZE);
-		const float3 max((x2 + bufferSize) * SQUARE_SIZE, 0.f, (z2 + bufferSize) * SQUARE_SIZE);
-
-		QuadFieldQuery qfQuery;
-		qfQuery.threadOwner = threadOwner;
-		quadField.GetUnitsExact(qfQuery, min, max);
-		for (const CUnit* unit: *qfQuery.units) {
-			if (unit->moveDef != nullptr) 
-				unit->moveType->UpdateGroundBlockMap();
-		}
-	}
-
-	if (commands != nullptr) {
-		// this is only called in unsynced context (ShowUnitBuildSquare)
-		assert(!synced);
 
 		for (int z = z1; z < z2; z++) {
 			for (int x = x1; x < x2; x++) {
@@ -1490,29 +1467,43 @@ CGameHelper::BuildSquareStatus CGameHelper::TestUnitBuildSquare(
 				testStatus = std::min(testStatus, sqrStatus);
 			}
 		}
-	} else {
-		// out of map?
-		if (static_cast<unsigned>(x1) > mapDims.mapx || static_cast<unsigned>(x2) > mapDims.mapx ||
-			static_cast<unsigned>(z1) > mapDims.mapy || static_cast<unsigned>(z2) > mapDims.mapy) {
-			return BUILDSQUARE_BLOCKED;
-		}
 
-		// this can be called in either context
-		for (int z = z1; z < z2; z++) {
-			for (int x = x1; x < x2; x++) {
-				sqrPos.x = x * SQUARE_SIZE;
-				sqrPos.z = z * SQUARE_SIZE;
+		return testStatus;
+	}
 
-				const BuildSquareStatus sqrStatus = TestBuildSquare(sqrPos, xrange, zrange, buildInfo, moveDef, feature, allyteam, synced);
+	// Served/synced test path (commands == nullptr). The synced slow-update (the
+	// only synced mutation in this function -- it refreshes nearby mobile units'
+	// blocking-map positions) stays here, before the read-only templated test.
+	if (synced) {
+		assert(!ThreadPool::IsInMultiThreadedSection());
 
-				if ((testStatus = std::min(testStatus, sqrStatus)) == BUILDSQUARE_BLOCKED) {
-					return BUILDSQUARE_BLOCKED;
-				}
-			}
+		const int xsize = buildInfo.GetXSize();
+		const int zsize = buildInfo.GetZSize();
+		const int x1 = int(buildInfo.pos.x / SQUARE_SIZE) - (xsize >> 1), x2 = x1 + xsize;
+		const int z1 = int(buildInfo.pos.z / SQUARE_SIZE) - (zsize >> 1), z2 = z1 + zsize;
+
+		// buffer should be the maximum distance given by the movetype using the formula:
+		// maxspeed * modInfo.unitQuadPositionUpdateRate + half footStep + 1
+		const int largestMoveTypSizeH = moveDefHandler.GetLargestFootPrintSizeH() + 1;
+		const int bufferSize = SQUARE_SIZE * modInfo.unitQuadPositionUpdateRate * 2 + largestMoveTypSizeH + 1;
+		const float3 min((x1 - bufferSize) * SQUARE_SIZE, 0.f, (z1 - bufferSize) * SQUARE_SIZE);
+		const float3 max((x2 + bufferSize) * SQUARE_SIZE, 0.f, (z2 + bufferSize) * SQUARE_SIZE);
+
+		QuadFieldQuery qfQuery;
+		qfQuery.threadOwner = threadOwner;
+		quadField.GetUnitsExact(qfQuery, min, max);
+		for (const CUnit* unit: *qfQuery.units) {
+			if (unit->moveDef != nullptr)
+				unit->moveType->UpdateGroundBlockMap();
 		}
 	}
 
-	return testStatus;
+	int featureId = -1;
+	placement::LiveView view;
+	view.threadOwner = threadOwner;
+	const BuildSquareStatus ret = placement::TestUnitBuildSquareT(view, buildInfo, featureId, allyteam, synced);
+	feature = (featureId >= 0) ? featureHandler.GetFeature(featureId) : nullptr;
+	return ret;
 }
 
 CGameHelper::BuildSquareStatus CGameHelper::TestBuildSquare(
@@ -1526,97 +1517,12 @@ CGameHelper::BuildSquareStatus CGameHelper::TestBuildSquare(
 	bool synced
 ) {
 	RECOIL_DETAILED_TRACY_ZONE;
-	assert(pos.IsInBounds());
-
-	const int sqx = unsigned(pos.x) / SQUARE_SIZE;
-	const int sqz = unsigned(pos.z) / SQUARE_SIZE;
-
-	const float groundHeight = CGround::GetApproximateHeightUnsafe(sqx, sqz, synced);
-	const UnitDef* unitDef = buildInfo.def;
-
-	if (!CheckTerrainConstraints(unitDef, moveDef, pos.y, groundHeight, CGround::GetSlope(pos.x, pos.z, synced)))
-		return BUILDSQUARE_BLOCKED;
-
-	if (!buildingMaskMap.TestTileMaskUnsafe(sqx >> 1, sqz >> 1, unitDef->buildingMask))
-		return BUILDSQUARE_BLOCKED;
-
-	BuildSquareStatus ret = BUILDSQUARE_OPEN;
-	const int yardxpos = unsigned(pos.x) / SQUARE_SIZE;
-	const int yardypos = unsigned(pos.z) / SQUARE_SIZE;
-	const int2 yardpos = { yardxpos, yardypos };
-	const int ymIdx = GetYardMapIndex(buildInfo.buildFacing, yardpos, xrange, zrange);
-
-	if (yardmapStatusEffectsMap.AreAnyFlagsSet(sqx, sqz, YardmapStatusEffectsMap::BLOCK_BUILDING)) {
-		bool isStackable = (!unitDef->yardmap.empty() && unitDef->yardmap[ymIdx] <= YardmapStates::YARDMAP_STACKABLE);
-		if ( !isStackable && (synced || ((allyteam < 0) || losHandler->InLos(pos, allyteam))) ) {
-			return BUILDSQUARE_BLOCKED;
-		}
-	}
-
-	CSolidObject* so = groundBlockingObjectMap.GroundBlocked(yardxpos, yardypos);
-
-	if (so != nullptr) {
-		CFeature* f = dynamic_cast<CFeature*>(so);
-		CUnit* u = dynamic_cast<CUnit*>(so);
-
-		// blocking-map can lag behind because it is not updated every frame
-		assert(true || (so->pos.x >= xrange.x && so->pos.x <= xrange.y)); // NOLINT{misc-static-assert}
-		assert(true || (so->pos.z >= zrange.x && so->pos.z <= zrange.y)); // NOLINT{misc-static-assert}
-
-		if (f != nullptr) {
-			if ((allyteam < 0) || f->IsInLosForAllyTeam(allyteam)) {
-				if (!f->def->reclaimable) {
-					ret = BUILDSQUARE_BLOCKED;
-				} else {
-					ret = BUILDSQUARE_RECLAIMABLE;
-					feature = f;
-				}
-			}
-		} else {
-			assert(u);
-			if ((allyteam < 0) || (u->losStatus[allyteam] & LOS_INLOS)) {
-				if (so->immobile) {
-					bool isStackable = (!unitDef->yardmap.empty() && unitDef->yardmap[ymIdx] <= YardmapStates::YARDMAP_GEOSTACKABLE);
-					ret = isStackable ? BUILDSQUARE_OPEN :
-							(TestBlockSquareForBuildOnly(so, yardpos) ? BUILDSQUARE_OPEN : BUILDSQUARE_BLOCKED);
-				} else {
-					ret = BUILDSQUARE_OCCUPIED;
-				}
-			}
-		}
-
-		if (ret == BUILDSQUARE_BLOCKED || ret == BUILDSQUARE_OCCUPIED) {
-			// if the to-be-buildee has a MoveDef, test if <so> would block it
-			// note:
-			//   <so> might be another new buildee and if that happens to be located
-			//   on sloped ground, then so->pos.y will equal Builder::StartBuild -->
-			//   ::Pos2BuildPos --> ::GetBuildHeight which can differ from the actual
-			//   ground height at so->pos (s.t. !so->IsOnGround() and the object will
-			//   be non-blocking)
-			//   fixed: no longer true for mobile units
-			#if 0
-			if (synced) {
-				so->PushPhysicalStateBit(CSolidObject::PSTATE_BIT_ONGROUND);
-				so->UpdatePhysicalStateBit(CSolidObject::PSTATE_BIT_ONGROUND, (math::fabs(so->pos.y - groundHeight) <= 0.5f));
-			}
-			#endif
-
-			if (moveDef != nullptr) {
-				MoveTypes::CheckCollisionQuery collisionQuery(moveDef, pos);
-				if (CMoveMath::IsNonBlocking(so, &collisionQuery))
-					ret = BUILDSQUARE_OPEN;
-			}
-
-			#if 0
-			if (synced)
-				so->PopPhysicalStateBit(CSolidObject::PSTATE_BIT_ONGROUND);
-			#endif
-		}
-
-		if (ret == BUILDSQUARE_BLOCKED)
-			return ret;
-	}
-
+	// PLACEMENT REHOST (stage 2): LiveView instantiation of the templated predicate.
+	// The feature out-param is threaded as an id (init from the incoming feature so
+	// the "unchanged unless a reclaimable blocker is found" semantics are preserved).
+	int featureId = (feature != nullptr) ? feature->id : -1;
+	const BuildSquareStatus ret = placement::TestBuildSquareT(placement::LiveView{}, pos, xrange, zrange, buildInfo, moveDef, featureId, allyteam, synced);
+	feature = (featureId >= 0) ? featureHandler.GetFeature(featureId) : nullptr;
 	return ret;
 }
 
@@ -1626,24 +1532,10 @@ bool CGameHelper::TestBlockSquareForBuildOnly(
 )
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	bool ret = false;
-	auto so = blockingObject;
-	
-	// check whether the current building allows for building in the given square.
-	auto soYardMap = so->GetBlockMap();
-	if (soYardMap != nullptr) {
-		const int sox1 = int(so->pos.x / SQUARE_SIZE) - (so->xsize >> 1), sox2 = sox1 + so->xsize;
-		const int soz1 = int(so->pos.z / SQUARE_SIZE) - (so->zsize >> 1), soz2 = soz1 + so->zsize;
-		const int2 soxrange = int2(sox1, sox2);
-		const int2 sozrange = int2(soz1, soz2);
-
-		auto soYmIdx = GetYardMapIndex(so->buildFacing, yardpos, soxrange, sozrange);
-		if (soYardMap[soYmIdx] == YardmapStates::YARDMAP_BUILDONLY)
-			// While the square is blocked for walking, it is open for building.
-			ret = true;
-	}
-
-	return ret;
+	// PLACEMENT REHOST (stage 2): the body is now a templated pure function over a
+	// state view (placement::TestBlockSquareForBuildOnlyT); this is the LiveView
+	// instantiation, byte-identical to the previous inline body.
+	return placement::TestBlockSquareForBuildOnlyT(placement::LiveView{}, blockingObject, yardpos);
 }
 
 /**
