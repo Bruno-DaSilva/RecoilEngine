@@ -45,7 +45,10 @@ namespace MoveTypes {
 class CMoveMath {
 	CR_DECLARE(CMoveMath)
 
-protected:
+public:
+	// PLACEMENT REHOST: exposed (were protected) so the templated GetPosSpeedModT
+	// (movemath::, one implementation over a live/epoch state view) can call them.
+	// Pure terrain-speed math; no globals.
 	static float GroundSpeedMod(const MoveDef& moveDef, float height, float slope);
 	static float GroundSpeedMod(const MoveDef& moveDef, float height, float slope, float dirSlopeMod);
 	static float HoverSpeedMod(const MoveDef& moveDef, float height, float slope);

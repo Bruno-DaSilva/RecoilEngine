@@ -226,6 +226,8 @@ CGameHelper::BuildSquareStatus TestUnitBuildSquareT(
 // bodies), so only the two TUs that instantiate placement predicates pull them in.
 // ---------------------------------------------------------------------------
 
+#include "Map/MapInfo.h"
+#include "Map/ReadMap.h"
 #include "Sim/Features/Feature.h"
 #include "Sim/Features/FeatureDef.h"
 #include "Sim/Misc/BuildingMaskMap.h"
@@ -233,6 +235,7 @@ CGameHelper::BuildSquareStatus TestUnitBuildSquareT(
 #include "Sim/Misc/LosHandler.h"
 #include "Sim/Misc/QuadField.h"
 #include "Sim/Misc/YardmapStatusEffectsMap.h"
+#include "Sim/MoveTypes/MoveType.h"
 #include "Sim/Units/Unit.h"
 
 namespace placement {
@@ -286,8 +289,30 @@ struct LiveView {
 	int OccZsize(Occupant o) const { return o->zsize; }
 	int OccBuildFacing(Occupant o) const { return o->buildFacing; }
 
-	// ---- CMoveMath leaf (not templatized on the build path; forwards live) ----
+	// ---- CMoveMath leaf (build path uses this view method; forwards to the
+	// member, which is itself a wrapper over movemath::IsNonBlockingT<LiveView>) ----
 	bool IsNonBlocking(Occupant o, const MoveTypes::CheckCollisionQuery* q) const { return CMoveMath::IsNonBlocking(o, q); }
+
+	// ---- move-path occupant attributes (movemath:: leaf templates) ----
+	bool OccIsColliderSelf(Occupant o, const MoveTypes::CheckCollisionQuery* collider) const { return collider->unit == o; }
+	bool OccHasSolidObjectsBit(Occupant o) const { return o->HasCollidableStateBit(CSolidObject::CSTATE_BIT_SOLIDOBJECTS); }
+	bool OccIsBlocking(Occupant o) const { return o->IsBlocking(); }
+	bool OccIsUnderWater(Occupant o) const { return o->IsUnderWater(); }
+	bool OccIsInWater(Occupant o) const { return o->IsInWater(); }
+	const MoveDef* OccMoveDef(Occupant o) const { return o->moveDef; }
+	float OccHeight(Occupant o) const { return o->height; }
+	bool OccCrushable(Occupant o) const { return o->crushable; }
+	float OccCrushResistance(Occupant o) const { return o->crushResistance; }
+	bool OccIsMoving(Occupant o) const { return o->IsMoving(); }
+	bool OccIsPushResistant(Occupant o) const { return static_cast<const CUnit*>(o)->moveType->IsPushResistant(); }
+	bool OccIsIdle(Occupant o) const { return static_cast<const CUnit*>(o)->IsIdle(); }
+
+	// ---- move-path terrain reads (GetPosSpeedModT) ----
+	int   TypeMapAt(int square) const { return readMap->GetTypeMapSynced()[square]; }
+	float MaxHeightAtSquare(int square) const { return readMap->GetMaxHeightMapSynced()[square]; }
+	float SlopeAtIndex(int square) const { return readMap->GetSlopeMapSynced()[square]; }
+	float3 CenterNormal2DAtIndex(int idx) const { return readMap->GetCenterNormals2DSynced()[idx]; }
+	const CMapInfo::TerrainType& TerrainType(int idx) const { return mapInfo->terrainTypes[idx]; }
 };
 
 } // namespace placement

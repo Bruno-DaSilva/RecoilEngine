@@ -1,6 +1,8 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "MoveMath.h"
+#include "MoveMathPredicates.h"          // PLACEMENT REHOST: templated leaf verdicts
+#include "Game/PlacementPredicates.h"    // PLACEMENT REHOST: placement::LiveView
 
 #include "Map/Ground.h"
 #include "Map/MapInfo.h"
@@ -81,64 +83,14 @@ float CMoveMath::yLevel(const MoveDef& moveDef, const float3& pos)
 float CMoveMath::GetPosSpeedMod(const MoveDef& moveDef, unsigned xSquare, unsigned zSquare)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	if (xSquare >= mapDims.mapx || zSquare >= mapDims.mapy)
-		return 0.0f;
-
-	const int accurateSquare = xSquare + (zSquare * mapDims.mapx);
-	const int square = (xSquare >> 1) + ((zSquare >> 1) * mapDims.hmapx);
-	const int squareTerrType = readMap->GetTypeMapSynced()[square];
-
-	const float height = readMap->GetMaxHeightMapSynced()[accurateSquare];
-	const float slope   = readMap->GetSlopeMapSynced()[square];
-
-	const CMapInfo::TerrainType& tt = mapInfo->terrainTypes[squareTerrType];
-
-	switch (moveDef.speedModClass) {
-		case MoveDef::Tank:  { return (GroundSpeedMod(moveDef, height, slope) * tt.tankSpeed ); } break;
-		case MoveDef::KBot:  { return (GroundSpeedMod(moveDef, height, slope) * tt.kbotSpeed ); } break;
-		case MoveDef::Hover: { return ( HoverSpeedMod(moveDef, height, slope) * tt.hoverSpeed); } break;
-		case MoveDef::Ship:  { return (  ShipSpeedMod(moveDef, height, slope) * tt.shipSpeed ); } break;
-		default: {} break;
-	}
-
-	return 0.0f;
+	// PLACEMENT REHOST (stage 2b): LiveView instantiation of the templated leaf.
+	return movemath::GetPosSpeedModT(placement::LiveView{}, moveDef, xSquare, zSquare);
 }
 
 float CMoveMath::GetPosSpeedMod(const MoveDef& moveDef, unsigned xSquare, unsigned zSquare, float3 moveDir)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	if (xSquare >= mapDims.mapx || zSquare >= mapDims.mapy)
-		return 0.0f;
-
-	const int accurateSquare = xSquare + (zSquare * mapDims.mapx);
-	const int square = (xSquare >> 1) + ((zSquare >> 1) * mapDims.hmapx);
-	const int squareTerrType = readMap->GetTypeMapSynced()[square];
-
-	const float height = readMap->GetMaxHeightMapSynced()[accurateSquare];
-	const float slope  = readMap->GetSlopeMapSynced()[square];
-
-	const CMapInfo::TerrainType& tt = mapInfo->terrainTypes[squareTerrType];
-
-	const float3 sqrNormal = readMap->GetCenterNormals2DSynced()[xSquare + zSquare * mapDims.mapx];
-
-	// with a flat normal, only consider the normalized xz-direction
-	// (the actual steepness is represented by the "slope" variable)
-	// we verify that it was normalized in advance
-	assert(float3(moveDir).SafeNormalize2D() == moveDir);
-
-	// note: moveDir is (or should be) a unit vector in the xz-plane, y=0
-	// scale is negative for "downhill" slopes, positive for "uphill" ones
-	const float dirSlopeMod = -moveDir.dot(sqrNormal);
-
-	switch (moveDef.speedModClass) {
-		case MoveDef::Tank:  { return (GroundSpeedMod(moveDef, height, slope, dirSlopeMod) * tt.tankSpeed ); } break;
-		case MoveDef::KBot:  { return (GroundSpeedMod(moveDef, height, slope, dirSlopeMod) * tt.kbotSpeed ); } break;
-		case MoveDef::Hover: { return ( HoverSpeedMod(moveDef, height, slope, dirSlopeMod) * tt.hoverSpeed); } break;
-		case MoveDef::Ship:  { return (  ShipSpeedMod(moveDef, height, slope, dirSlopeMod) * tt.shipSpeed ); } break;
-		default: {} break;
-	}
-
-	return 0.0f;
+	return movemath::GetPosSpeedModT(placement::LiveView{}, moveDef, xSquare, zSquare, moveDir);
 }
 
 /* Check if a given square-position is accessible by the MoveDef footprint. */
@@ -209,114 +161,20 @@ CMoveMath::BlockType CMoveMath::IsBlockedNoSpeedModCheckDiff(const MoveDef& move
 bool CMoveMath::CrushResistant(const MoveDef& colliderMD, const CSolidObject* collidee)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	if (!collidee->HasCollidableStateBit(CSolidObject::CSTATE_BIT_SOLIDOBJECTS))
-		return false;
-	if (!collidee->crushable)
-		return true;
-
-	return (collidee->crushResistance > colliderMD.crushStrength);
+	// PLACEMENT REHOST (stage 2b): LiveView instantiation of the templated leaf.
+	return movemath::CrushResistantT(placement::LiveView{}, colliderMD, collidee);
 }
 
 bool CMoveMath::IsNonBlocking(const CSolidObject* collidee, const MoveTypes::CheckCollisionQuery* collider)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	if (collider->unit == collidee)
-		return true;
-	if (!collidee->HasCollidableStateBit(CSolidObject::CSTATE_BIT_SOLIDOBJECTS))
-		return true;
-	// if obstacle is out of map bounds, it cannot block us
-	if (!collidee->pos.IsInBounds())
-		return true;
-	// same if obstacle is not currently marked on blocking-map
-	if (!collidee->IsBlocking())
-		return true;
-
-	// remaining conditions under which obstacle does NOT block unit
-	// only reachable from stand-alone PE invocations or GameHelper
-	//   1.
-	//      unit is a submarine, obstacle sticks out above-water
-	//      (and not itself flagged as a submarine) *OR* unit is
-	//      not a submarine and obstacle is (fully under-water or
-	//      flagged as a submarine)
-	//
-	//      NOTE:
-	//        do we want to allow submarines to pass underneath
-	//        any obstacle even if it is 99% submerged already?
-	//
-	//        will cause stacking for submarines that are *not*
-	//        explicitly flagged as such in their MoveDefs
-	//
-	// note that these condition(s) can lead to a certain degree of
-	// clipping: for full 3D accuracy the height of the MoveDef's
-	// owner would need to be accessible, but the path-estimator
-	// defs are not tied to any collider instances
-	//
-	if ( !collider->IsHeightChecksEnabled() ) {
-		const bool colliderIsSub = collider->moveDef->isSubmarine;
-		const bool collideeIsSub = collidee->moveDef != nullptr && collidee->moveDef->isSubmarine;
-
-		if (colliderIsSub)
-			return (!collidee->IsUnderWater() && !collideeIsSub);
-
-		// we don't have height information here so everything above and below water is going to be
-		// considered blocking when the unit moveDef is amphibious.
-		if (collider->moveDef->followGround)
-			return false;
-
-		return (collidee->IsUnderWater() || collideeIsSub);
-	}
-
-	// simple case: if unit and obstacle have non-zero
-	// vertical separation as measured by their (model)
-	// heights, unit can in theory always pass obstacle
-	//
-	// this allows (units marked as) submarines to both
-	// *pass* and *short-range path* underneath floating
-	// DT, or ships to P&SRP over underwater structures
-	//
-	// specifically restricted to units *inside* water
-	// because it can have the unwanted side-effect of
-	// enabling the PFS to generate paths for units on
-	// steep slopes *through* obstacles, either higher
-	// up or lower down
-	//
-	if (collider->IsInWater() && collidee->IsInWater()) {
-		float colliderHeight = (collider->moveDef != nullptr) ? collider->moveDef->height : math::fabs(collider->unit->height);
-		if ((collider->pos.y + colliderHeight) < collidee->pos.y)
-			return true;
-
-		float collideeHeight = (collidee->moveDef != nullptr) ? collidee->moveDef->height : math::fabs(collidee->height);
-		if ((collidee->pos.y + collideeHeight) < collider->pos.y)
-			return true;
-	}
-	return false;
+	return movemath::IsNonBlockingT(placement::LiveView{}, collidee, collider);
 }
 
 CMoveMath::BlockType CMoveMath::ObjectBlockType(const CSolidObject* collidee, const MoveTypes::CheckCollisionQuery* collider)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	if (IsNonBlocking(collidee, collider))
-		return BLOCK_NONE;
-
-	if (collidee->immobile)
-		return ((CrushResistant(*(collider->moveDef), collidee))? BLOCK_STRUCTURE: BLOCK_NONE);
-
-	// mobile obstacle, must be a unit
-	const CUnit* u = static_cast<const CUnit*>(collidee);
-	const AMoveType* mt = u->moveType;
-
-	// if moving, unit is probably following a path
-	if (u->IsMoving())
-		return BLOCK_MOVING;
-
-	// not moving and not pushable, treat as blocking
-	if (mt->IsPushResistant())
-		return BLOCK_STRUCTURE;
-
-	// otherwise, unit is idling (no orders) or busy with a command
-	// being-built units never count as idle, but should perhaps be
-	// considered BLOCK_STRUCTURE
-	return ((u->IsIdle())? BLOCK_MOBILE: BLOCK_MOBILE_BUSY);
+	return movemath::ObjectBlockTypeT(placement::LiveView{}, collidee, collider);
 }
 
 CMoveMath::BlockType CMoveMath::SquareIsBlocked(const MoveDef& moveDef, int xSquare, int zSquare, MoveTypes::CheckCollisionQuery* collider)
