@@ -507,6 +507,20 @@ bool LuaSnapshotServe::ShouldServe(lua_State* L)
 }
 
 
+int LuaSnapshotServe::RoutePieceCache(lua_State* L, const char* caller, ServeFn liveFn, ServeFn snapFn)
+{
+	// PR 47 (see the .h comment): the piece caches are captured under exactly
+	// this predicate (EnsurePieceCacheCaptured's flag-off skip); when capture
+	// is skipped the twins MUST NOT be picked -- the flag-off draw-callin
+	// rehearsal would serve NIL from the empty cache where the base branch
+	// serves real values. Flag-off single-threaded draw context makes the
+	// live leg trivially safe (the sim cannot advance mid-callin).
+	if (!LuaSplitContract::Enabled() && !snapshotDiffGate.Armed())
+		return liveFn(L, caller);
+
+	return Route(L, caller, liveFn, snapFn);
+}
+
 int LuaSnapshotServe::Route(lua_State* L, const char* caller, ServeFn liveFn, ServeFn snapFn)
 {
 	if (!ShouldServe(L))

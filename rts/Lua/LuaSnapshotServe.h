@@ -62,6 +62,17 @@ namespace LuaSnapshotServe {
 	/// `caller` doubles as the gate's per-callout counter name.
 	int Route(lua_State* L, const char* caller, ServeFn liveFn, ServeFn snapFn);
 
+	/// PR 47: Route variant for the piece-slot-cache-backed twins. The piece
+	/// caches are captured only when the split contract is enabled or the
+	/// diff gate is armed (EnsurePieceCacheCaptured's flag-off skip), but
+	/// Route's flag-off draw-callin rehearsal still picked the twin -- which
+	/// then found an empty cache and returned NIL where the base branch
+	/// returned real values (probe-found: flag-off DrawGenesis
+	/// GetUnitPieceMap == nil while GameFrame == 40-piece table). Serve the
+	/// LIVE leg whenever the capture is skipped; identical predicate, so twin
+	/// and capture can never disagree again. Flag-on behavior unchanged.
+	int RoutePieceCache(lua_State* L, const char* caller, ServeFn liveFn, ServeFn snapFn);
+
 	// serving twins (positions/status family, E.1b order: first family)
 	int GetUnitPosition(lua_State* L, const char* caller);      // also GetUnitBasePosition
 	int GetUnitHealth(lua_State* L, const char* caller);
