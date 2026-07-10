@@ -25,7 +25,9 @@
 #include "Map/MetalMap.h" // PR 38d: metal distribution mirror compare
 #include "Map/ReadMap.h"
 #include "Sim/Misc/GlobalSynced.h"
+#include "Sim/Misc/BuildingMaskMap.h"         // PLACEMENT REHOST: build-mask mirror compare
 #include "Sim/Misc/GroundBlockingObjectMap.h" // sim|draw PR 29: blocking-mirror compare
+#include "Sim/Misc/YardmapStatusEffectsMap.h" // PLACEMENT REHOST: yard-status mirror compare
 #include "Sim/Misc/LosHandler.h"
 #include "Sim/Misc/ModInfo.h"
 #include "Sim/Misc/SmoothHeightMesh.h"
@@ -239,6 +241,16 @@ static constexpr const char* FIELD_NAMES[] = {
 	// sim|draw PR 44 (Gap B): appended to match the enum tail CQ_LASTPAGE, DEFCMD
 	"cq:lastPage",
 	"defCmd",
+	// PLACEMENT REHOST: appended to match the enum tail MM_CENTERHEIGHT..MM_YARDSTATUS
+	"map:centerHeight",
+	"map:maxHeight",
+	"map:slope",
+	"map:centerNormal2D",
+	"map:buildMask",
+	"map:yardStatus",
+	"map:fullCell",
+	"unit:placement",
+	"feat:placement",
 };
 
 // structural compare for the copied customOpts maps (emilib::HashMap has no
@@ -665,6 +677,20 @@ void SnapshotDiffGate::CheckBoundary()
 			if (Bump(fields[F_BLOCKINGBITS], rows.blockingBits[i] == PackBlockingBits(u)))
 				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=blockingBits snap=0x%02x live=0x%02x",
 					gs->frameNum, id, int(rows.blockingBits[i]), int(PackBlockingBits(u)));
+
+			// PLACEMENT REHOST occupant scalars (isPushResistant guarded like extraction)
+			const bool livePushResist = (u->moveType != nullptr) && u->moveType->IsPushResistant();
+			const bool placementEqual =
+				(bool(rows.immobile[i]) == u->immobile) &&
+				(bool(rows.yardOpen[i]) == u->yardOpen) &&
+				(rows.physicalState[i] == static_cast<uint16_t>(u->physicalState)) &&
+				BitEqual(rows.crushResistance[i], u->crushResistance) &&
+				(bool(rows.isIdle[i]) == u->IsIdle()) &&
+				(bool(rows.isPushResistant[i]) == livePushResist);
+			if (Bump(fields[U_PLACEMENT], placementEqual))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=unit:placement mismatch (imm snap=%d live=%d pstate snap=0x%x live=0x%x)",
+					gs->frameNum, id, int(rows.immobile[i]), int(u->immobile),
+					int(rows.physicalState[i]), int(static_cast<uint16_t>(u->physicalState)));
 		}
 
 		// ---- PR 32 (deep per-unit state) field pass ----
@@ -1147,6 +1173,14 @@ void SnapshotDiffGate::CheckFeatureRows()
 			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d feat=%d field=feat:blockingBits snap=0x%02x live=0x%02x",
 				gs->frameNum, id, int(rows.blockingBits[id]), int(PackBlockingBits(f)));
 
+		// PLACEMENT REHOST feature occupant scalars
+		const bool featPlacementEqual =
+			(rows.physicalState[id] == static_cast<uint16_t>(f->physicalState)) &&
+			BitEqual(rows.crushResistance[id], f->crushResistance);
+		if (Bump(fields[FT_PLACEMENT], featPlacementEqual))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d feat=%d field=feat:placement mismatch (pstate snap=0x%x live=0x%x)",
+				gs->frameNum, id, int(rows.physicalState[id]), int(static_cast<uint16_t>(f->physicalState)));
+
 		if (Bump(fields[FT_RESURRECT], rows.resurrectDefID[id] == ((f->udef != nullptr) ? f->udef->id : -1)))
 			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d feat=%d field=feat:resurrect snap=%d live=%d",
 				gs->frameNum, id, rows.resurrectDefID[id], (f->udef != nullptr) ? f->udef->id : -1);
@@ -1605,6 +1639,128 @@ void SnapshotDiffGate::CheckMapMirrors()
 			(mm.empty() || std::memcmp(mm.data(), metalMap.GetExtractionMap(), n * sizeof(float)) == 0);
 		if (Bump(fields[MM_EXTRACTIONMAP], eq))
 			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=map:extractionMap mismatch", gs->frameNum);
+	}
+
+	// --- PLACEMENT REHOST: height-derived layers ---
+	// The mirror is an assign() copy of the synced arrays (no draw-side recompute),
+	// so bit-exact float memcmp is correct, exactly like the extraction-map pass.
+	// A mismatch means a missed MarkHeightDirty choke (a terraform path that did not
+	// route through UpdateHeightMapSynced).
+	{
+		const size_t nFull = static_cast<size_t>(mapDims.mapx) * static_cast<size_t>(mapDims.mapy);
+		const size_t nHalf = static_cast<size_t>(mapDims.hmapx) * static_cast<size_t>(mapDims.hmapy);
+
+		const std::vector<float>& ch = drawMapMirrors.CenterHeightData();
+		const bool chEq = (ch.size() == nFull) &&
+			(ch.empty() || std::memcmp(ch.data(), readMap->GetCenterHeightMapSynced(), nFull * sizeof(float)) == 0);
+		if (Bump(fields[MM_CENTERHEIGHT], chEq))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=map:centerHeight mismatch", gs->frameNum);
+
+		const std::vector<float>& mh = drawMapMirrors.MaxHeightData();
+		const bool mhEq = (mh.size() == nFull) &&
+			(mh.empty() || std::memcmp(mh.data(), readMap->GetMaxHeightMapSynced(), nFull * sizeof(float)) == 0);
+		if (Bump(fields[MM_MAXHEIGHT], mhEq))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=map:maxHeight mismatch", gs->frameNum);
+
+		const std::vector<float>& sl = drawMapMirrors.SlopeData();
+		const bool slEq = (sl.size() == nHalf) &&
+			(sl.empty() || std::memcmp(sl.data(), readMap->GetSlopeMapSynced(), nHalf * sizeof(float)) == 0);
+		if (Bump(fields[MM_SLOPE], slEq))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=map:slope mismatch", gs->frameNum);
+
+		const std::vector<float3>& cn = drawMapMirrors.CenterNormal2DData();
+		const bool cnEq = (cn.size() == nFull) &&
+			(cn.empty() || std::memcmp(cn.data(), readMap->GetCenterNormals2DSynced(), nFull * sizeof(float3)) == 0);
+		if (Bump(fields[MM_CENTERNORMAL2D], cnEq))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=map:centerNormal2D mismatch", gs->frameNum);
+	}
+
+	// --- PLACEMENT REHOST: building-mask (half-res uint16) ---
+	// A mismatch means a missed MarkBuildMaskDirty choke (a maskMap writer that did
+	// not bump the version). Compare each tile against the live raw value.
+	{
+		const std::vector<uint16_t>& mm = drawMapMirrors.BuildMaskData();
+		const size_t n = static_cast<size_t>(mapDims.hmapx) * static_cast<size_t>(mapDims.hmapy);
+		// live map not yet Init'd -> mirror is intentionally empty; treat as pass
+		bool eq = (buildingMaskMap.GetNumTiles() != n) || (mm.size() == n);
+		for (size_t i = 0; eq && buildingMaskMap.GetNumTiles() == n && i < n; ++i)
+			eq = (mm[i] == buildingMaskMap.GetTileMaskUnsafe(static_cast<unsigned int>(i)));
+		if (Bump(fields[MM_BUILDMASK], eq))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=map:buildMask mismatch", gs->frameNum);
+	}
+
+	// --- PLACEMENT REHOST: yard-status (full-res uint8, flat logical (x,z)) ---
+	// A mismatch means a missed MarkYardStatusDirty choke. The mirror flattens the
+	// live 8x8-tile layout, so compare per (x,z) against GetMapState.
+	{
+		const std::vector<uint8_t>& ys = drawMapMirrors.YardStatusData();
+		const size_t n = static_cast<size_t>(mapDims.mapx) * static_cast<size_t>(mapDims.mapy);
+		// live map not yet Init'd -> mirror is intentionally empty; treat as pass
+		const bool liveInit = yardmapStatusEffectsMap.IsInitialized();
+		bool eq = !liveInit || (ys.size() == n);
+		size_t badSq = 0;
+		for (int z = 0; liveInit && eq && z < mapDims.mapy; ++z) {
+			for (int x = 0; x < mapDims.mapx; ++x) {
+				const size_t sq = static_cast<size_t>(z) * mapDims.mapx + x;
+				if (ys[sq] != yardmapStatusEffectsMap.GetMapState(x, z)) {
+					eq = false;
+					badSq = sq;
+					break;
+				}
+			}
+		}
+		if (Bump(fields[MM_YARDSTATUS], eq))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=map:yardStatus mismatch (square=%zu)", gs->frameNum, badSq);
+	}
+
+	// --- PLACEMENT REHOST: full-cell blocking mirror (CSR) ---
+	// A mismatch means the full-cell mirror drifted from the live cell (a missed
+	// MarkBlockingDirty, or a classification/order divergence). Compare each square's
+	// object list in cell-iteration order with the same feature-first classification.
+	{
+		const std::vector<int32_t>& off = drawMapMirrors.FullCellOffsets();
+		const std::vector<int32_t>& fid = drawMapMirrors.FullCellIds();
+		const std::vector<uint8_t>& fkind = drawMapMirrors.FullCellKinds();
+		const size_t nSquares = static_cast<size_t>(mapDims.mapx) * static_cast<size_t>(mapDims.mapy);
+		bool eq = (off.size() == nSquares + 1);
+		size_t badSq = 0;
+
+		for (size_t sq = 0; eq && sq < nSquares; ++sq) {
+			const int base = off[sq];
+			const int mcount = off[sq + 1] - base;
+
+			const auto cell = groundBlockingObjectMap.GetCellUnsafeConst(static_cast<unsigned int>(sq));
+			int mi = 0;
+			bool sqEq = true;
+			for (size_t i = 0, n = cell.size(); sqEq && i < n; ++i) {
+				const CSolidObject* s = cell[i];
+				if (s == nullptr)
+					continue;
+				int32_t lid = -1;
+				uint8_t lkind = DrawMapMirrors::BLOCK_KIND_NONE;
+				if (const CFeature* f = dynamic_cast<const CFeature*>(s)) {
+					lid = f->id; lkind = DrawMapMirrors::BLOCK_KIND_FEATURE;
+				} else if (const CUnit* u = dynamic_cast<const CUnit*>(s)) {
+					lid = u->id; lkind = DrawMapMirrors::BLOCK_KIND_UNIT;
+				} else {
+					continue; // matches the drain's skip of a non-unit/feature object
+				}
+				if (mi >= mcount || fid[base + mi] != lid || fkind[base + mi] != lkind) {
+					sqEq = false;
+					break;
+				}
+				++mi;
+			}
+			if (sqEq && mi != mcount) // mirror had extra objects the live cell did not
+				sqEq = false;
+			if (!sqEq) {
+				eq = false;
+				badSq = sq;
+			}
+		}
+
+		if (Bump(fields[MM_FULLCELL], eq))
+			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=map:fullCell mismatch (square=%zu)", gs->frameNum, badSq);
 	}
 }
 

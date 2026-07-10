@@ -274,6 +274,17 @@ private:
 		// field index stable (FIELD_NAMES appended in lockstep)
 		CQ_LASTPAGE,    // CCommandAI::lastSelectedCommandPage serving-cache copy
 		DEFCMD,         // GetDefaultCommand sim-side query reply vs live GetDefaultCmd
+		// PLACEMENT REHOST: appended at the enum tail to keep every prior field
+		// index stable (FIELD_NAMES appended in lockstep)
+		MM_CENTERHEIGHT, // center heightmap mirror (float per map square)
+		MM_MAXHEIGHT,    // max-corner heightmap mirror (float per map square)
+		MM_SLOPE,        // slopemap mirror (float per half-res square)
+		MM_CENTERNORMAL2D, // centerNormals2D mirror (float3 per map square)
+		MM_BUILDMASK,    // buildingMaskMap mirror (uint16 per half-res square)
+		MM_YARDSTATUS,   // yardmapStatusEffectsMap mirror (uint8 per map square)
+		MM_FULLCELL,     // full per-square blocking-cell object list (CSR mirror)
+		U_PLACEMENT,     // unit occupant scalars (immobile/yardOpen/physicalState/crush/idle/pushResist)
+		FT_PLACEMENT,    // feature occupant scalars (physicalState/crushResistance)
 		F_COUNT
 	};
 

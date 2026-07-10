@@ -764,6 +764,9 @@ void SimSnapshot::Clear()
 			// PR 27a rows
 			r.isDead.size() + r.neutral.size() + r.activated.size() +
 			r.isCloaked.size() + r.armoredState.size() + r.blockingBits.size() +
+			// PLACEMENT REHOST occupant scalars
+			r.immobile.size() + r.yardOpen.size() + r.isIdle.size() + r.isPushResistant.size() +
+			r.physicalState.size() * sizeof(uint16_t) + r.crushResistance.size() * sizeof(float) +
 			(r.heading.size() + r.buildFacing.size()) * sizeof(int16_t) +
 			(r.armoredMultiple.size() + r.height.size() + r.mass.size() +
 			 r.maxRange.size() + r.seismicSignature.size() + r.experience.size() +
@@ -891,6 +894,13 @@ void SimSnapshot::Resize(UnitRows& rows, size_t maxUnits, int numAllyTeams)
 	rows.cost.resize(maxUnits);
 	rows.buildTime.resize(maxUnits);
 	rows.blockingBits.resize(maxUnits);
+	// PLACEMENT REHOST occupant scalars
+	rows.immobile.resize(maxUnits);
+	rows.yardOpen.resize(maxUnits);
+	rows.physicalState.resize(maxUnits);
+	rows.crushResistance.resize(maxUnits);
+	rows.isIdle.resize(maxUnits);
+	rows.isPushResistant.resize(maxUnits);
 	rows.relMidPos.resize(maxUnits);
 	rows.frontdir.resize(maxUnits);
 	rows.updir.resize(maxUnits);
@@ -1158,6 +1168,14 @@ void SimSnapshot::Extract(UnitRows& rows)
 		rows.cost[id] = u->cost;
 		rows.buildTime[id] = u->buildTime;
 		rows.blockingBits[id] = PackBlockingBits(u);
+		// PLACEMENT REHOST occupant scalars (isPushResistant guarded: immobile
+		// units have a null moveType and never reach the mobile ObjectBlockType branch)
+		rows.immobile[id] = u->immobile;
+		rows.yardOpen[id] = u->yardOpen;
+		rows.physicalState[id] = static_cast<uint16_t>(u->physicalState);
+		rows.crushResistance[id] = u->crushResistance;
+		rows.isIdle[id] = u->IsIdle();
+		rows.isPushResistant[id] = (u->moveType != nullptr) && u->moveType->IsPushResistant();
 		rows.relMidPos[id] = u->relMidPos;
 		rows.frontdir[id] = u->frontdir;
 		rows.updir[id] = u->updir;
@@ -1570,6 +1588,8 @@ void SimSnapshot::ExtractFeatures(FeatureRows& rows, size_t minSlots)
 		rows.reclaimLeft.resize(n);
 		rows.reclaimTime.resize(n);
 		rows.blockingBits.resize(n);
+		rows.physicalState.resize(n);   // PLACEMENT REHOST
+		rows.crushResistance.resize(n); // PLACEMENT REHOST
 		rows.resurrectDefID.resize(n);
 		rows.fireTime.resize(n);  // PR 38g (GetFeatureFireTime)
 		rows.smokeTime.resize(n); // PR 38g (GetFeatureSmokeTime)
@@ -1622,6 +1642,8 @@ void SimSnapshot::ExtractFeatures(FeatureRows& rows, size_t minSlots)
 		rows.reclaimLeft[id] = f->reclaimLeft;
 		rows.reclaimTime[id] = f->reclaimTime;
 		rows.blockingBits[id] = PackBlockingBits(f);
+		rows.physicalState[id] = static_cast<uint16_t>(f->physicalState);   // PLACEMENT REHOST
+		rows.crushResistance[id] = f->crushResistance;                     // PLACEMENT REHOST
 		rows.resurrectDefID[id] = (f->udef != nullptr) ? f->udef->id : -1;
 		rows.fireTime[id] = f->fireTime;   // PR 38g (GetFeatureFireTime)
 		rows.smokeTime[id] = f->smokeTime; // PR 38g (GetFeatureSmokeTime)
@@ -1721,6 +1743,13 @@ void SimSnapshot::ExtractDeadRowsFromShells(UnitRows& urows, FeatureRows& frows,
 		urows.cost[id] = u->cost;
 		urows.buildTime[id] = u->buildTime;
 		urows.blockingBits[id] = PackBlockingBits(u);
+		// PLACEMENT REHOST occupant scalars (dead-shell copy; same guards)
+		urows.immobile[id] = u->immobile;
+		urows.yardOpen[id] = u->yardOpen;
+		urows.physicalState[id] = static_cast<uint16_t>(u->physicalState);
+		urows.crushResistance[id] = u->crushResistance;
+		urows.isIdle[id] = u->IsIdle();
+		urows.isPushResistant[id] = (u->moveType != nullptr) && u->moveType->IsPushResistant();
 		urows.relMidPos[id] = u->relMidPos;
 		urows.frontdir[id] = u->frontdir;
 		urows.updir[id] = u->updir;
@@ -1836,6 +1865,8 @@ void SimSnapshot::ExtractDeadRowsFromShells(UnitRows& urows, FeatureRows& frows,
 		frows.reclaimLeft[id] = f->reclaimLeft;
 		frows.reclaimTime[id] = f->reclaimTime;
 		frows.blockingBits[id] = PackBlockingBits(f);
+		frows.physicalState[id] = static_cast<uint16_t>(f->physicalState);  // PLACEMENT REHOST
+		frows.crushResistance[id] = f->crushResistance;                    // PLACEMENT REHOST
 		frows.resurrectDefID[id] = (f->udef != nullptr) ? f->udef->id : -1;
 		frows.fireTime[id] = f->fireTime;
 		frows.smokeTime[id] = f->smokeTime;

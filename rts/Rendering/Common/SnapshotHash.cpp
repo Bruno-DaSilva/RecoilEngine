@@ -51,7 +51,7 @@ static inline uint64_t HashUnitRow(const SimSnapshot::UnitRows& r, int id)
 
 	// PR 27a tail ends at w[70]; PR 31 weapon fold occupies w[71];
 	// PR 32 deep-state words occupy w[72]..w[97].
-	uint32_t w[98];
+	uint32_t w[101]; // +3 PLACEMENT REHOST occupant words (w[98..100])
 	w[0]  = static_cast<uint32_t>(id);
 	f3(&w[1], r.pos[id]);
 	w[4]  = std::bit_cast<uint32_t>(r.speed[id].x);
@@ -246,6 +246,14 @@ static inline uint64_t HashUnitRow(const SimSnapshot::UnitRows& r, int id)
 		w[97] = losVarAcc;
 	}
 
+	// PLACEMENT REHOST occupant scalars (all synced state)
+	w[98] = static_cast<uint32_t>(r.immobile[id])
+	      | (static_cast<uint32_t>(r.yardOpen[id]) << 8)
+	      | (static_cast<uint32_t>(r.physicalState[id]) << 16);
+	w[99] = std::bit_cast<uint32_t>(r.crushResistance[id]);
+	w[100] = static_cast<uint32_t>(r.isIdle[id])
+	       | (static_cast<uint32_t>(r.isPushResistant[id]) << 8);
+
 	return Mix(w, sizeof(w), UNIT_SEED);
 }
 
@@ -259,7 +267,7 @@ static inline uint64_t HashFeatureRow(const SimSnapshot::FeatureRows& r, int id)
 		w[2] = std::bit_cast<uint32_t>(v.z);
 	};
 
-	uint32_t w[48];
+	uint32_t w[50]; // +2 PLACEMENT REHOST occupant words (w[48..49])
 	w[0]  = static_cast<uint32_t>(id);
 	w[1]  = std::bit_cast<uint32_t>(r.pos[id].x);
 	w[2]  = std::bit_cast<uint32_t>(r.pos[id].y);
@@ -310,6 +318,9 @@ static inline uint64_t HashFeatureRow(const SimSnapshot::FeatureRows& r, int id)
 	// PR 38g feature fire/smoke timers, appended in fixed order; synced state
 	w[46] = static_cast<uint32_t>(r.fireTime[id]);
 	w[47] = static_cast<uint32_t>(r.smokeTime[id]);
+	// PLACEMENT REHOST occupant scalars (synced state)
+	w[48] = static_cast<uint32_t>(r.physicalState[id]);
+	w[49] = std::bit_cast<uint32_t>(r.crushResistance[id]);
 
 	return Mix(w, sizeof(w), UNIT_SEED);
 }

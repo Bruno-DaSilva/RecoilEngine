@@ -11,8 +11,10 @@
 #include "Map/ReadMap.h"
 #include "Rendering/Common/SimSnapshot.h"  // PR 44a: ring-depth static_assert
 #include "Sim/Features/Feature.h"          // PR 29: blocking cell[0] classification
+#include "Sim/Misc/BuildingMaskMap.h"      // PLACEMENT REHOST: build-mask mirror source
 #include "Sim/Misc/GlobalConstants.h"
 #include "Sim/Misc/GroundBlockingObjectMap.h" // PR 29: blocking-map source
+#include "Sim/Misc/YardmapStatusEffectsMap.h" // PLACEMENT REHOST: yard-status mirror source
 #include "Sim/Misc/LosHandler.h"
 #include "Sim/Misc/ModInfo.h"
 #include "Sim/Misc/SmoothHeightMesh.h"
@@ -60,6 +62,10 @@ void DrawMapMirrors::MarkBlockingDirty(int x1, int z1, int x2, int z2)
 
 	if (x1 >= x2 || z1 >= z2)
 		return;
+
+	// PLACEMENT REHOST: the full-cell mirror (move path) does a whole-map re-walk
+	// rather than applying the rect log, so bump its version on every mutation.
+	++fullCellVersion;
 
 	if (blockingRects.size() >= MAX_BLOCKING_RECTS) {
 		++blockingVersion;
@@ -327,6 +333,105 @@ void DrawMapMirrors::DrainAtBarrier(int slot)
 		}
 	}
 
+	// --- PLACEMENT REHOST: full-cell blocking mirror (CSR) ---
+	// Every object per square (not just cell[0]) for the move-placement OR-fold.
+	// Gated on fullCellVersion (bumped by MarkBlockingDirty on EVERY blocking
+	// mutation) -- unlike the PR 46 cell[0] mirror, the full-cell mirror does a
+	// whole-map re-walk rather than applying the rect log (correctness over the
+	// producer-cost optimisation; the move path is rare).
+	{
+		const size_t nSquares = static_cast<size_t>(mapDims.mapx) * static_cast<size_t>(mapDims.mapy);
+		if (pl.fullCellDrained != fullCellVersion || pl.fullCellOffset.size() != nSquares + 1) {
+			pl.fullCellOffset.assign(nSquares + 1, 0);
+			pl.fullCellId.clear();
+			pl.fullCellKind.clear();
+
+			for (size_t sq = 0; sq < nSquares; ++sq) {
+				pl.fullCellOffset[sq] = static_cast<int32_t>(pl.fullCellId.size());
+
+				const auto cell = groundBlockingObjectMap.GetCellUnsafeConst(static_cast<unsigned int>(sq));
+				const size_t n = cell.size();
+				for (size_t i = 0; i < n; ++i) {
+					const CSolidObject* s = cell[i];
+					if (s == nullptr)
+						continue;
+					// same feature-first/unit classification as cell[0]; the blocking
+					// map only ever holds units/features, so "neither" never occurs
+					if (const CFeature* f = dynamic_cast<const CFeature*>(s)) {
+						pl.fullCellId.push_back(f->id);
+						pl.fullCellKind.push_back(BLOCK_KIND_FEATURE);
+					} else if (const CUnit* u = dynamic_cast<const CUnit*>(s)) {
+						pl.fullCellId.push_back(u->id);
+						pl.fullCellKind.push_back(BLOCK_KIND_UNIT);
+					}
+				}
+			}
+			pl.fullCellOffset[nSquares] = static_cast<int32_t>(pl.fullCellId.size());
+			pl.fullCellDrained = fullCellVersion;
+		}
+	}
+
+	// --- PLACEMENT REHOST: height-derived layers (one shared version) ---
+	// centerHeightMap / maxHeightMap / centerNormals2D are [mapx*mapy]; slopeMap
+	// is [hmapx*hmapy]. All four are recomputed together by UpdateHeightMapSynced
+	// (the MarkHeightDirty choke), so one version gate copies the set. Whole copy
+	// (the plan sanctions whole-map granularity; terraform is the only churn and
+	// the version gate makes a static map a first-drain-only cost).
+	{
+		const size_t nFull = static_cast<size_t>(mapDims.mapx) * static_cast<size_t>(mapDims.mapy);
+		const size_t nHalf = static_cast<size_t>(mapDims.hmapx) * static_cast<size_t>(mapDims.hmapy);
+		if (pl.heightDrained != heightVersion || pl.centerHeight.size() != nFull || pl.slope.size() != nHalf) {
+			const float*  ch = readMap->GetCenterHeightMapSynced();
+			const float*  mh = readMap->GetMaxHeightMapSynced();
+			const float3* cn = readMap->GetCenterNormals2DSynced();
+			const float*  sl = readMap->GetSlopeMapSynced();
+			pl.centerHeight.assign(ch, ch + nFull);
+			pl.maxHeight.assign(mh, mh + nFull);
+			pl.centerNormals2D.assign(cn, cn + nFull);
+			pl.slope.assign(sl, sl + nHalf);
+			pl.heightDrained = heightVersion;
+		}
+	}
+
+	// --- PLACEMENT REHOST: building-mask (half-res uint16, all-ones default) ---
+	{
+		const size_t n = static_cast<size_t>(mapDims.hmapx) * static_cast<size_t>(mapDims.hmapy);
+		if (pl.buildMaskDrained != buildMaskVersion || pl.buildMask.size() != n) {
+			// guard against a barrier that drains before BuildingMaskMap::Init
+			// (leave the mirror empty -> the accessor returns pass, matching the
+			// load-time all-ones fill); the size-mismatch clause re-drains once filled
+			if (buildingMaskMap.GetNumTiles() == n) {
+				pl.buildMask.resize(n);
+				for (size_t i = 0; i < n; ++i)
+					pl.buildMask[i] = buildingMaskMap.GetTileMaskUnsafe(static_cast<unsigned int>(i));
+				pl.buildMaskDrained = buildMaskVersion;
+			} else {
+				pl.buildMask.clear();
+			}
+		}
+	}
+
+	// --- PLACEMENT REHOST: yard-status (full-res uint8, flat logical (x,z)) ---
+	// The live map stores 8x8 tiles; we flatten to z*mapx+x so the mirror accessor
+	// is a plain index. Low churn (factory yard open/close); version-gated whole copy.
+	{
+		const size_t n = static_cast<size_t>(mapDims.mapx) * static_cast<size_t>(mapDims.mapy);
+		if (pl.yardStatusDrained != yardStatusVersion || pl.yardStatus.size() != n) {
+			// guard against a barrier before InitNewYardmapStatusEffectsMap (leave
+			// empty -> accessor returns false, matching an all-clear map); the
+			// size-mismatch clause re-drains once the map is sized
+			if (yardmapStatusEffectsMap.IsInitialized()) {
+				pl.yardStatus.resize(n);
+				for (int z = 0; z < mapDims.mapy; ++z)
+					for (int x = 0; x < mapDims.mapx; ++x)
+						pl.yardStatus[static_cast<size_t>(z) * mapDims.mapx + x] = yardmapStatusEffectsMap.GetMapState(x, z);
+				pl.yardStatusDrained = yardStatusVersion;
+			} else {
+				pl.yardStatus.clear();
+			}
+		}
+	}
+
 	pl.ready = true;
 	drainSerial += 1; // PR 43 §2.1 (per-slot channel-version scalar)
 }
@@ -355,6 +460,12 @@ void DrawMapMirrors::Clear()
 	blockingRects.clear();
 	blockingRectNextSerial = 1;
 	blockingRectBaseSerial = 1;
+
+	// PLACEMENT REHOST
+	heightVersion = 1;
+	buildMaskVersion = 1;
+	yardStatusVersion = 1;
+	fullCellVersion = 1;
 }
 
 // PR 29: cell[0] id + kind at map square (x, z). Mirrors
@@ -375,6 +486,118 @@ int DrawMapMirrors::BlockedAt(int x, int z, uint8_t& kindOut) const
 
 	kindOut = pl.blockKind[sq];
 	return pl.blockId[sq];
+}
+
+// PLACEMENT REHOST: full-cell mirror queries (CSR over fullCellOffset/Id/Kind).
+int DrawMapMirrors::FullCellCount(int x, int z) const
+{
+	if (static_cast<unsigned int>(x) >= static_cast<unsigned int>(mapDims.mapx) ||
+	    static_cast<unsigned int>(z) >= static_cast<unsigned int>(mapDims.mapy))
+		return 0;
+	const Payload& pl = P();
+	const size_t sq = static_cast<size_t>(z) * mapDims.mapx + x;
+	if (sq + 1 >= pl.fullCellOffset.size())
+		return 0;
+	return pl.fullCellOffset[sq + 1] - pl.fullCellOffset[sq];
+}
+
+int DrawMapMirrors::FullCellObj(int x, int z, int i, uint8_t& kindOut) const
+{
+	kindOut = BLOCK_KIND_NONE;
+	if (static_cast<unsigned int>(x) >= static_cast<unsigned int>(mapDims.mapx) ||
+	    static_cast<unsigned int>(z) >= static_cast<unsigned int>(mapDims.mapy))
+		return -1;
+	const Payload& pl = P();
+	const size_t sq = static_cast<size_t>(z) * mapDims.mapx + x;
+	if (sq + 1 >= pl.fullCellOffset.size())
+		return -1;
+	const int base = pl.fullCellOffset[sq];
+	const int cnt = pl.fullCellOffset[sq + 1] - base;
+	if (i < 0 || i >= cnt)
+		return -1;
+	kindOut = pl.fullCellKind[base + i];
+	return pl.fullCellId[base + i];
+}
+
+// ---------------------------------------------------------------------------
+// PLACEMENT REHOST: height-derived + build-mask + yard-status queries. Each
+// reproduces the live accessor's formula VERBATIM over the mirrored array.
+// ---------------------------------------------------------------------------
+
+// CGround::GetApproximateHeightUnsafe(x, z, synced): centerHeightMap[z*mapx + x],
+// no clamp (caller guarantees the square is in range). Defensive 0 out of range.
+float DrawMapMirrors::ApproxHeightUnsafe(int sqx, int sqz) const
+{
+	const Payload& pl = P();
+	if (static_cast<unsigned int>(sqx) >= static_cast<unsigned int>(mapDims.mapx) ||
+	    static_cast<unsigned int>(sqz) >= static_cast<unsigned int>(mapDims.mapy))
+		return 0.0f;
+	const size_t idx = static_cast<size_t>(sqz) * mapDims.mapx + sqx;
+	return (idx < pl.centerHeight.size()) ? pl.centerHeight[idx] : 0.0f;
+}
+
+// CGround::GetSlope(x, z, synced): slopeMap[xh + zh*hmapx] over the half-res map.
+float DrawMapMirrors::Slope(float x, float z) const
+{
+	const Payload& pl = P();
+	const int xhsquare = std::clamp(int(x) / (2 * SQUARE_SIZE), 0, mapDims.hmapx - 1);
+	const int zhsquare = std::clamp(int(z) / (2 * SQUARE_SIZE), 0, mapDims.hmapy - 1);
+	const size_t idx = static_cast<size_t>(zhsquare) * mapDims.hmapx + xhsquare;
+	return (idx < pl.slope.size()) ? pl.slope[idx] : 0.0f;
+}
+
+// readMap->GetMaxHeightMapSynced()[square]
+float DrawMapMirrors::MaxHeightAtSquare(int square) const
+{
+	const Payload& pl = P();
+	return (static_cast<size_t>(square) < pl.maxHeight.size()) ? pl.maxHeight[square] : 0.0f;
+}
+
+// readMap->GetCenterNormals2DSynced()[square]
+float3 DrawMapMirrors::CenterNormal2DAtSquare(int square) const
+{
+	const Payload& pl = P();
+	return (static_cast<size_t>(square) < pl.centerNormals2D.size()) ? pl.centerNormals2D[square] : UpVector;
+}
+
+// BuildingMaskMap::TestTileMaskUnsafe(hx, hz, mask): (maskMap[hx + hz*hmapx] & mask) == mask.
+// Empty / out-of-range mirror -> pass (the load-time all-ones fill), so an undrained
+// mirror never spuriously blocks placement.
+bool DrawMapMirrors::BuildingMaskTest(int hx, int hz, uint16_t mask) const
+{
+	const Payload& pl = P();
+	if (pl.buildMask.empty())
+		return true;
+	if (static_cast<unsigned int>(hx) >= static_cast<unsigned int>(mapDims.hmapx) ||
+	    static_cast<unsigned int>(hz) >= static_cast<unsigned int>(mapDims.hmapy))
+		return true;
+	const size_t idx = static_cast<size_t>(hz) * mapDims.hmapx + hx;
+	if (idx >= pl.buildMask.size())
+		return true;
+	return (pl.buildMask[idx] & mask) == mask;
+}
+
+// YardmapStatusEffectsMap::GetMapState(x, z) clamps to mapxm1/mapym1; reproduce it.
+bool DrawMapMirrors::YardStatusAnyFlags(int x, int z, uint8_t flags) const
+{
+	const Payload& pl = P();
+	if (pl.yardStatus.empty())
+		return false;
+	const int cx = std::clamp(x, 0, mapDims.mapxm1);
+	const int cz = std::clamp(z, 0, mapDims.mapym1);
+	const size_t idx = static_cast<size_t>(cz) * mapDims.mapx + cx;
+	return (idx < pl.yardStatus.size()) && ((pl.yardStatus[idx] & flags) != 0);
+}
+
+bool DrawMapMirrors::YardStatusAllFlags(int x, int z, uint8_t flags) const
+{
+	const Payload& pl = P();
+	if (pl.yardStatus.empty())
+		return false;
+	const int cx = std::clamp(x, 0, mapDims.mapxm1);
+	const int cz = std::clamp(z, 0, mapDims.mapym1);
+	const size_t idx = static_cast<size_t>(cz) * mapDims.mapx + cx;
+	return (idx < pl.yardStatus.size()) && ((pl.yardStatus[idx] & flags) == flags);
 }
 
 // ---------------------------------------------------------------------------

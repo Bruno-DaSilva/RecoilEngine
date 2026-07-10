@@ -334,6 +334,19 @@ public:
 		// raySegmentsCollidable, crushable, blockEnemyPushing, blockHeightChanges
 		std::vector<uint8_t> blockingBits;
 
+		// PLACEMENT REHOST: the mutable occupant scalars the build/move placement
+		// predicates read through a blocking CSolidObject*/CUnit* (footprint dims,
+		// yardmap, reclaimable are immutable def data -> read defs directly, not rows).
+		// physicalState covers IsInWater/IsUnderWater/IsMoving (all PSTATE bits);
+		// isIdle/isPushResistant are the two computed CUnit/AMoveType answers
+		// ObjectBlockType needs (isPushResistant guarded null-moveType -> 0).
+		std::vector<uint8_t> immobile;         // CSolidObject::immobile
+		std::vector<uint8_t> yardOpen;         // CSolidObject::yardOpen
+		std::vector<uint16_t> physicalState;   // CSolidObject::physicalState bitfield
+		std::vector<float> crushResistance;    // CSolidObject::crushResistance
+		std::vector<uint8_t> isIdle;           // CUnit::IsIdle()
+		std::vector<uint8_t> isPushResistant;  // moveType ? IsPushResistant() : 0
+
 		// object-space basis + relative midpoint (drawer midpos math, GetUnitVectors-class reads)
 		std::vector<float3> relMidPos;
 		std::vector<float3> frontdir;
@@ -529,6 +542,15 @@ public:
 		SResourcePack Cost(int unitID) const { return Valid(unitID) ? cost[unitID] : SResourcePack{}; }
 		float BuildTime(int unitID) const { return Valid(unitID) ? buildTime[unitID] : 0.0f; }
 		uint8_t BlockingBits(int unitID) const { return Valid(unitID) ? blockingBits[unitID] : uint8_t(0); }
+
+		// PLACEMENT REHOST occupant accessors (stale/nil contract: invalid id -> the
+		// "does not block" default: immobile=false, closed yard, clear state).
+		bool     Immobile(int unitID) const { return Valid(unitID) && immobile[unitID] != 0; }
+		bool     YardOpen(int unitID) const { return Valid(unitID) && yardOpen[unitID] != 0; }
+		uint16_t PhysicalState(int unitID) const { return Valid(unitID) ? physicalState[unitID] : uint16_t(0); }
+		float    CrushResistance(int unitID) const { return Valid(unitID) ? crushResistance[unitID] : 0.0f; }
+		bool     IsIdle(int unitID) const { return Valid(unitID) && isIdle[unitID] != 0; }
+		bool     IsPushResistant(int unitID) const { return Valid(unitID) && isPushResistant[unitID] != 0; }
 
 		// PR 32 LOS-variant accessors: the computed per-(unit,allyteam) answer
 		// (stale/nil contract: invalid ids / out-of-range allyteams read false).
@@ -859,6 +881,11 @@ public:
 		std::vector<float> reclaimLeft;
 		std::vector<float> reclaimTime;
 		std::vector<uint8_t> blockingBits;   // same bit layout as UnitRows::blockingBits
+		// PLACEMENT REHOST: a feature occupant is always immobile, so the placement
+		// predicate reaches only the CrushResistant branch (crushable is in
+		// blockingBits); physicalState carries IsInWater/IsUnderWater for IsNonBlocking.
+		std::vector<uint16_t> physicalState; // CSolidObject::physicalState bitfield
+		std::vector<float> crushResistance;  // CSolidObject::crushResistance
 		std::vector<int32_t> resurrectDefID; // udef ? udef->id : -1 (the name is immutable UnitDef data)
 		// ===== PR 38g (Batch-4 P1): GetFeatureFireTime/GetFeatureSmokeTime =====
 		// CFeature::fireTime/smokeTime (int frame counts); the twins push
@@ -917,6 +944,9 @@ public:
 		float ReclaimLeft(int id) const { return Valid(id) ? reclaimLeft[id] : 0.0f; }
 		float ReclaimTime(int id) const { return Valid(id) ? reclaimTime[id] : 0.0f; }
 		uint8_t BlockingBits(int id) const { return Valid(id) ? blockingBits[id] : uint8_t(0); }
+		// PLACEMENT REHOST feature occupant accessors (stale/nil -> clear state)
+		uint16_t PhysicalState(int id) const { return Valid(id) ? physicalState[id] : uint16_t(0); }
+		float    CrushResistance(int id) const { return Valid(id) ? crushResistance[id] : 0.0f; }
 		int ResurrectDefID(int id) const { return Valid(id) ? resurrectDefID[id] : -1; }
 		// PR 38g stale/nil contract defaults (invalid ids read 0)
 		int FireTime(int id) const { return Valid(id) ? fireTime[id] : 0; }

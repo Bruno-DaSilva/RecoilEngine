@@ -1,5 +1,6 @@
 #include "BuildingMaskMap.h"
 #include "Map/ReadMap.h"
+#include "Rendering/Common/DrawMapMirrors.h" // PLACEMENT REHOST: build-mask mirror choke
 
 #include "System/Misc/TracyDefs.h"
 
@@ -25,6 +26,8 @@ bool BuildingMaskMap::SetTileMask(unsigned int x, unsigned int z, std::uint16_t 
 		return false;
 
 	maskMap[x + z * mapDims.hmapx] = value;
+	// PLACEMENT REHOST: sole runtime writer of the build-mask -> re-copy the mirror
+	drawMapMirrors.MarkBuildMaskDirty();
 	return true;
 }
 

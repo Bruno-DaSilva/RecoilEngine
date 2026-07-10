@@ -144,6 +144,23 @@ public:
 	/// whole-map path via a blockingVersion bump.
 	void MarkBlockingDirty(int x1, int z1, int x2, int z2);
 
+	/// PLACEMENT REHOST: CReadMap::UpdateHeightMapSynced -- the SINGLE terraform
+	/// choke that recomputes centerHeightMap, maxHeightMap, the mip heightmaps,
+	/// centerNormals2D and slopeMap together (ReadMap.cpp:562-565). One bump here
+	/// covers all four height-derived mirror layers below. The load-time full-map
+	/// call (ReadMap.cpp:408) is the first bump. The corner heightmap itself has a
+	/// draw-owned unsynced variant (GetCornerHeightMapUnsynced) so it is NOT
+	/// mirrored -- only the SYNCED-only derived arrays are.
+	void MarkHeightDirty() { ++heightVersion; }
+	/// PLACEMENT REHOST: BuildingMaskMap::SetTileMask (Spring.SetBuildingMask) --
+	/// the sole runtime writer of buildingMaskMap's maskMap. The load-time
+	/// Init fill is picked up by the first drain (size-mismatch clause).
+	void MarkBuildMaskDirty() { ++buildMaskVersion; }
+	/// PLACEMENT REHOST: YardmapStatusEffectsMap SetFlags/ClearFlags/ClearTile --
+	/// the BLOCK_BUILDING/EXIT_ONLY writers driven by factory yard open/close and
+	/// the exit-only setup. Low churn; version-gated whole copy.
+	void MarkYardStatusDirty() { ++yardStatusVersion; }
+
 	// ---- producer + consumer + lifecycle ----
 
 	/// copy layers whose version moved since slot `slot` was last produced
@@ -206,6 +223,46 @@ public:
 	// square (GroundBlocked/GroundBlockedUnsafe both return cell[0]).
 	int BlockedAt(int x, int z, uint8_t& kindOut) const;
 
+	// ---- PLACEMENT REHOST: full-cell blocking mirror ----
+	// The move-placement path (MoveDef::TestMoveSquare -> RangeIsBlocked ->
+	// SquareIsBlocked) OR-folds ObjectBlockType over EVERY object in a blocking
+	// cell, not just cell[0]. The mirror stores the full per-square object list in
+	// CSR form (fullCellOffset prefix-sums into the flat fullCellId/fullCellKind).
+	// It shares blockingVersion with the cell[0] mirror (same choke points). The
+	// live mtTempNum cross-square dedup is a pure perf optimisation (ObjectBlockType
+	// is OR-idempotent), so the epoch consumer just ORs over each square's objects.
+
+	// number of blocking objects in the cell at map square (x, z); 0 out of range
+	int FullCellCount(int x, int z) const;
+	// the i-th object's id (>=0) + kind at square (x, z); -1 / NONE if out of range
+	int FullCellObj(int x, int z, int i, uint8_t& kindOut) const;
+
+	// ---- PLACEMENT REHOST: height-derived + build-mask + yard-status queries ----
+	// Each mirrors the live accessor's formula VERBATIM over the copied array so a
+	// draw-side placement predicate reads the mirror where the live code reads the
+	// sim singleton.
+
+	// CGround::GetApproximateHeightUnsafe(sqx, sqz, synced) mirror: the center
+	// heightmap value at map square (sqx, sqz). Bounds-safe (0 for out-of-range /
+	// not-yet-drained). NB the live "Unsafe" variant does no clamping; the caller
+	// guarantees the square is in range, but we clamp defensively to the mirror.
+	float ApproxHeightUnsafe(int sqx, int sqz) const;
+	// CGround::GetSlope(x, z, synced) mirror over the copied slopemap (half-res).
+	float Slope(float x, float z) const;
+	// readMap->GetMaxHeightMapSynced()[square] mirror (per-face max-corner height;
+	// GetPosSpeedMod + CheckCollisionQuery::UpdateElevationForPos read it).
+	float MaxHeightAtSquare(int square) const;
+	// readMap->GetCenterNormals2DSynced()[square] mirror (GetPosSpeedMod directional).
+	float3 CenterNormal2DAtSquare(int square) const;
+	// BuildingMaskMap::TestTileMaskUnsafe(hx, hz, mask) mirror (half-res). Returns
+	// true (tile passes) when the mirror is empty / out of range, matching the
+	// load-time all-ones fill so an undrained mirror never spuriously blocks.
+	bool BuildingMaskTest(int hx, int hz, uint16_t mask) const;
+	// YardmapStatusEffectsMap::AreAnyFlagsSet / AreAllFlagsSet(x, z, flags) mirror
+	// (full-res, clamped exactly like the live GetMapState).
+	bool YardStatusAnyFlags(int x, int z, uint8_t flags) const;
+	bool YardStatusAllFlags(int x, int z, uint8_t flags) const;
+
 	// terrain-type mirror access (the serving twin reads these; count is the
 	// fixed CMapInfo::NUM_TERRAIN_TYPES)
 	struct TerrainType {
@@ -266,6 +323,20 @@ public:
 	const std::vector<int32_t>& BlockIds() const { return P().blockId; }
 	const std::vector<uint8_t>& BlockKinds() const { return P().blockKind; }
 
+	// PLACEMENT REHOST full-cell mirror diff-gate accessors (CSR form)
+	const std::vector<int32_t>& FullCellOffsets() const { return P().fullCellOffset; }
+	const std::vector<int32_t>& FullCellIds()     const { return P().fullCellId; }
+	const std::vector<uint8_t>& FullCellKinds()   const { return P().fullCellKind; }
+
+	// PLACEMENT REHOST diff-gate accessors (SnapshotDiffGate::CheckMapMirrors
+	// memcmps these against the live sim arrays)
+	const std::vector<float>&   CenterHeightData() const { return P().centerHeight; }
+	const std::vector<float>&   MaxHeightData()    const { return P().maxHeight; }
+	const std::vector<float>&   SlopeData()        const { return P().slope; }
+	const std::vector<float3>&  CenterNormal2DData() const { return P().centerNormals2D; }
+	const std::vector<uint16_t>& BuildMaskData()   const { return P().buildMask; }
+	const std::vector<uint8_t>& YardStatusData()   const { return P().yardStatus; }
+
 private:
 	struct LosMirror {
 		float invDiv = 0.0f;
@@ -321,6 +392,29 @@ private:
 		// log up to (everything below it is reflected in blockId/blockKind)
 		uint64_t blockingRectsDrained = 0;
 
+		// PLACEMENT REHOST full-cell mirror (CSR): fullCellOffset has mapx*mapy+1
+		// entries; the objects of square sq are fullCellId[off[sq] .. off[sq+1]).
+		// Shares blockingVersion with the cell[0] mirror above.
+		std::vector<int32_t> fullCellOffset;         // [mapx*mapy + 1] prefix offsets
+		std::vector<int32_t> fullCellId;             // flat object ids
+		std::vector<uint8_t> fullCellKind;           // flat BLOCK_KIND_*
+		uint32_t fullCellDrained = 0xffffffffu;
+
+		// PLACEMENT REHOST: the four height-derived SYNCED-only layers (all
+		// recomputed together by UpdateHeightMapSynced -> one shared version)
+		std::vector<float> centerHeight;             // [mapx*mapy]   center heightmap
+		std::vector<float> maxHeight;                // [mapx*mapy]   per-face max-corner
+		std::vector<float> slope;                    // [hmapx*hmapy] slopemap
+		std::vector<float3> centerNormals2D;         // [mapx*mapy]   interpolated 2D normal
+		uint32_t heightDrained = 0xffffffffu;
+
+		// PLACEMENT REHOST: building-mask (half-res) + yard-status (full-res,
+		// stored flat in logical (x,z) order, NOT the live 8x8-tile layout)
+		std::vector<uint16_t> buildMask;             // [hmapx*hmapy]
+		uint32_t buildMaskDrained = 0xffffffffu;
+		std::vector<uint8_t> yardStatus;             // [mapx*mapy]
+		uint32_t yardStatusDrained = 0xffffffffu;
+
 		bool ready = false;
 	};
 
@@ -363,6 +457,16 @@ private:
 	std::deque<BlockingRect> blockingRects;
 	uint64_t blockingRectNextSerial = 1;
 	uint64_t blockingRectBaseSerial = 1;
+
+	// PLACEMENT REHOST: one shared version for the four height-derived layers
+	// (bumped by MarkHeightDirty from UpdateHeightMapSynced) + the two
+	// low-churn layer versions. fullCellVersion is bumped by MarkBlockingDirty
+	// (every blocking mutation) so the full-cell mirror (move path) whole-map
+	// re-walks -- the PR 46 rect log optimises the cell[0] mirror only.
+	uint32_t heightVersion = 1;
+	uint32_t buildMaskVersion = 1;
+	uint32_t yardStatusVersion = 1;
+	uint32_t fullCellVersion = 1;
 };
 
 extern DrawMapMirrors drawMapMirrors;

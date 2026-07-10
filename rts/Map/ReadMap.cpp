@@ -564,6 +564,11 @@ void CReadMap::UpdateHeightMapSynced(const SRectangle& hgtMapRect)
 	UpdateFaceNormals(centerRect, initialize);
 	UpdateSlopemap(centerRect, initialize); // must happen after UpdateFaceNormals()!
 
+	// PLACEMENT REHOST: the single terraform choke -- centerHeightMap, maxHeightMap,
+	// centerNormals2D and slopeMap were all just recomputed above, so bump the one
+	// shared height-derived mirror version. Runs on the sim (producer) thread.
+	drawMapMirrors.MarkHeightDirty();
+
 	// push the unsynced update; initial one without LOS check
 	if (initialize) {
 		std::lock_guard<std::mutex> lock(unsyncedHeightMapUpdatesMtx);

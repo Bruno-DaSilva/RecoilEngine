@@ -41,6 +41,10 @@ public:
 	bool AreAllFlagsSet(int x, int z, uint8_t flags) const { return (GetMapState(x, z) & flags) == flags; }
 	bool AreAnyFlagsSet(int x, int z, uint8_t flags) const { return (GetMapState(x, z) & flags) != 0; }
 
+	// PLACEMENT REHOST: true once InitNewYardmapStatusEffectsMap sized the map, so
+	// the draw-side mirror drain / diff-gate never index an empty stateMap.
+	bool IsInitialized() const { return !stateMap.empty(); }
+
 	void SetFlags  (int x, int z, uint8_t flags) { GetMapState(x, z) |=  flags; }
 	void ClearFlags(int x, int z, uint8_t flags) { GetMapState(x, z) &= ~flags; }
 

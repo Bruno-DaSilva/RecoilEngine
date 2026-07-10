@@ -114,6 +114,9 @@ void CGroundBlockingObjectMap::AddGroundBlockingObject(CSolidObject* object, con
 	// sim|draw PR 29: cell[0] may have changed -> re-scan the footprint's
 	// squares in the blocking mirror (PR 46: rect-incremental)
 	drawMapMirrors.MarkBlockingDirty(xminSqr, zminSqr, xmaxSqr, zmaxSqr);
+	// PLACEMENT REHOST: the Set{ExitOnly,BlockBuilding}At writes above are the
+	// yard-status BLOCK_BUILDING/EXIT_ONLY source; re-copy the yard-status mirror.
+	drawMapMirrors.MarkYardStatusDirty();
 
 	// FIXME: needs dependency injection (observer pattern?)
 	if (object->moveDef != nullptr)
@@ -160,6 +163,9 @@ void CGroundBlockingObjectMap::RemoveGroundBlockingObject(CSolidObject* object)
 	// sim|draw PR 29: cell[0] may have changed -> re-scan the footprint's
 	// squares in the blocking mirror (PR 46: rect-incremental)
 	drawMapMirrors.MarkBlockingDirty(bx, bz, bx + sx, bz + sz);
+	// PLACEMENT REHOST: the Clear{ExitOnly,BlockBuilding}At writes above mutate
+	// the yard-status mirror source (see the Add path for the over-mark note).
+	drawMapMirrors.MarkYardStatusDirty();
 
 	// FIXME: needs dependency injection (observer pattern?)
 	if (object->moveDef != nullptr)
