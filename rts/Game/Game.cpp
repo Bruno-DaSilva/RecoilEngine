@@ -1678,18 +1678,49 @@ void CGame::SimDrawBarrier()
 	// PR 44a (the producer flip): with the sim thread running, epoch
 	// PRODUCTION happens on the SIM thread at its frame edges
 	// (CGame::ProduceEpochAtSimEdge) -- this barrier is the CONSUMER half
-	// only: dispatch the acquired epoch's SEALED record/closure batches
-	// (still under barrierLive reading the parked live sim, §7.5 -- 44a does
-	// not touch the deferred-serving semantics), acquire the newest epoch,
-	// and run the residual park-bound steps. The lockstep produce-at-barrier
-	// path below remains for flag-off and the pre-spawn window.
+	// only: acquire the newest epoch, then dispatch its SEALED record/closure
+	// batches. PR 44b (§3.6): the deferred dispatches read PUBLISHED epoch
+	// state (no barrierLive live exception exists) -- their Lua callouts
+	// route to the snapshot twins against the just-acquired epoch, whose
+	// DEAD_THIS_BATCH rows + dead-retained render records cover every
+	// died-in-batch id (the armed id-coverage gate enforces this). The
+	// lockstep produce-at-barrier path below remains for flag-off and the
+	// pre-spawn window.
 	const bool producerFlip = SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning();
 
-	// (0) split only: open the boundary drain window -- the destroy records
-	// about to dispatch populate the id->shell fallback that lets step 7's
+	// PR 44b: the flip consumer ACQUIRES FIRST -- the deferred dispatches
+	// below no longer read the parked live sim (no barrierLive exception
+	// exists); their callouts route to the LuaSnapshotServe twins, which must
+	// read the epoch whose sealed batch is about to dispatch (§3.6a: every
+	// record/closure id resolves in ITS epoch -- ACTIVE or DEAD_THIS_BATCH).
+	// The dispatch window is per-epoch (§3.6c): it opens tagged with the held
+	// epoch id, DEAD_THIS_BATCH validity and the event-time overrides scope
+	// to the bracket, and the epoch cannot retire until the close (retirement
+	// only happens in AcquireNewestEpoch, which runs after the previous
+	// bracket closed -- asserted here).
+	if (producerFlip) {
+		assert(!SimDrawSplit::BoundaryShellWindowActive());
+
+		// the epoch CONSUMER half -- acquire the newest complete epoch
+		// (ref++), release the previously held one (ref--). A release that
+		// drops a slot's refcount to zero RETIRES that epoch: the
+		// DeferredObjectDeleter release is keyed to epoch retirement (§2.2).
+		const uint64_t retiredEpoch = simSnapshot.AcquireNewestEpoch();
+
+		if (retiredEpoch != 0)
+			deferredObjectDeleter.ReleaseRetired(retiredEpoch);
+
+		// point the map-mirror serving side at the acquired epoch's slot
+		drawMapMirrors.SetServingSlot(simSnapshot.HeldSlot());
+
+		SimDrawSplit::OpenEpochDispatchWindow(simSnapshot.HeldEpochId());
+	}
+
+	// (0) lockstep split only: open the boundary drain window -- the destroy
+	// records about to dispatch populate the id->shell maps that let step 7's
 	// deferred handlers resolve objects that died later in the same burst
 	// (closed again at step 8, before the ack poisons the shells)
-	if (SimDrawSplit::Enabled())
+	if (SimDrawSplit::Enabled() && !producerFlip)
 		SimDrawSplit::SetBoundaryShellWindow(true);
 
 	// (0b) split only: run the GL upload half of any sim-thread model loads
@@ -1755,25 +1786,25 @@ void CGame::SimDrawBarrier()
 	if (!producerFlip)
 		simSnapshot.Update();
 
-	// (3a) PR 43: the epoch CONSUMER half -- acquire the newest complete
-	// epoch (ref++), release the previously held one (ref--). Under the 43
-	// lockstep this immediately follows every publish (a pointer rotation
+	// (3a) PR 43: the epoch CONSUMER half, lockstep form (the flip acquired
+	// at the top of this function, BEFORE the dispatches -- PR 44b). Under
+	// the lockstep this immediately follows every publish (a pointer rotation
 	// with the double buffer's values). A release that drops a slot's
 	// refcount to zero RETIRES that epoch: run the retirement hooks -- the
 	// DeferredObjectDeleter release is rekeyed from "end of Draw" to "epoch
 	// retirement" (§2.2), returning the pool slots of every shell acked under
 	// the retired (or an earlier) epoch.
-	{
+	if (!producerFlip) {
 		const uint64_t retiredEpoch = simSnapshot.AcquireNewestEpoch();
 
 		if (SimDrawSplit::Enabled() && retiredEpoch != 0)
 			deferredObjectDeleter.ReleaseRetired(retiredEpoch);
-	}
 
-	// PR 44a: point the map-mirror serving side at the acquired epoch's slot
-	// (the mirrors became true per-slot copies; the producer fills the slot
-	// of the epoch being produced, the draw side reads the held slot's)
-	drawMapMirrors.SetServingSlot(simSnapshot.HeldSlot());
+		// point the map-mirror serving side at the acquired epoch's slot
+		// (the mirrors became true per-slot copies; the producer fills the
+		// slot of the epoch being produced, the draw side reads the held one)
+		drawMapMirrors.SetServingSlot(simSnapshot.HeldSlot());
+	}
 
 	// (3a') PR 43 §2.6 -- THE ARMED ID-COVERAGE GATE: every id the batch's
 	// records referenced (collected during the step-1 drain) must resolve in
@@ -1901,7 +1932,10 @@ void CGame::SimDrawBarrier()
 	// closes first -- the ack poisons the shells the window's id->shell
 	// fallback serves from (died-in-burst resolution for step 7's dispatches)
 	if (SimDrawSplit::Enabled()) {
-		SimDrawSplit::SetBoundaryShellWindow(false);
+		if (producerFlip)
+			SimDrawSplit::CloseEpochDispatchWindow();
+		else
+			SimDrawSplit::SetBoundaryShellWindow(false);
 		// PR 43: the dispatch window has closed -- revert the published slot's
 		// DEAD_THIS_BATCH marks (they only read as valid inside the window)
 		// and clear the drawers' dead-retained render records (their shell
@@ -2350,13 +2384,14 @@ bool CGame::Draw() {
 	// spans the barrier + UpdateUnsynced through the drawer extraction.
 	AcquireSimPause();
 
-	{
-		// the barrier's own dispatches (Render* events, deferred unsynced
-		// callins) legally read live sim state -- the sim is parked; the
-		// widget callins later in the frame stay contract-served
-		LuaSplitContract::ScopedLiveException barrierLive;
-		SimDrawBarrier();
-	}
+	// PR 44b: the barrierLive ScopedLiveException is GONE -- the barrier's
+	// deferred dispatches (the a0 closures' Lua handlers) read PUBLISHED
+	// epoch state through the LuaSnapshotServe twins (§3.6), exactly like
+	// every other draw-context callout. The Render* record dispatches are
+	// engine-drawer-only (no Lua) and read pinned shells / plain fields.
+	// Lockstep (flag-off / pre-spawn) dispatches run outside the draw window
+	// and stay live-legal without an exception bracket.
+	SimDrawBarrier();
 
 	// gate telemetry for the /debug frame grapher (draw-row "Gate" slice):
 	// the pause-wait + valve service + barrier span no other category covers

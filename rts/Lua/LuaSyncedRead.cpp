@@ -625,20 +625,14 @@ static inline CUnit* ParseRawUnit(lua_State* L, const char* caller, int index)
 
 	const int unitID = lua_toint(L, index);
 
-	CUnit* unit = unitHandler.GetUnit(unitID);
-
-	// boundary drain window (PR 27b): deferred handlers replaying events for
-	// a unit that died later in the same sim burst resolve its still-readable
-	// shell -- master ran them mid-frame with the unit alive. Read-only use
-	// (this file), hence the const_cast.
-	// PR 43 NOTE: this (with the ParseFeature sibling) is the LAST surviving
-	// shell-fallback READ -- it is the live-parse leg the barrierLive
-	// dispatches run under, which 43 deliberately does not convert. 44b
-	// replaces it with the DEAD_THIS_BATCH row twins (§3.6).
-	if (unit == nullptr)
-		unit = const_cast<CUnit*>(SimDrawSplit::ShellFallbackUnit(unitID));
-
-	return unit;
+	// PR 44b (§3.6): the explicit shell-fallback leg is RETIRED. The deferred
+	// barrier dispatches no longer run under a live exception -- their
+	// callouts route to the LuaSnapshotServe twins, where a died-in-batch id
+	// resolves via the epoch's DEAD_THIS_BATCH rows (and the drawers'
+	// dead-retained render records). The remaining callers of this live
+	// parse (pregame fallback, armed dual-run, query-reply parked eval,
+	// lockstep) never need a dead shell here.
+	return unitHandler.GetUnit(unitID);
 }
 
 static inline const CUnit* ParseUnit(lua_State* L, const char* caller, int index)
@@ -709,11 +703,8 @@ static const CFeature* ParseFeature(lua_State* L, const char* caller, int index)
 
 	const int featureID = lua_toint(L, index);
 
+	// PR 44b (§3.6): shell-fallback leg retired -- see ParseRawUnit
 	const CFeature* feature = featureHandler.GetFeature(featureID);
-
-	// boundary drain window (PR 27b): see ParseRawUnit
-	if (feature == nullptr)
-		feature = SimDrawSplit::ShellFallbackFeature(featureID);
 
 	if (feature == nullptr)
 		return nullptr;

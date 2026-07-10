@@ -30,6 +30,7 @@
  * on thread identity, precisely so the semantics are testable single-threaded.
  */
 #include <atomic>
+#include <cstdint>
 
 class CUnit;
 class CFeature;
@@ -50,31 +51,54 @@ namespace SimDrawSplit {
 	/// game teardown reset (thread-locals are per-thread and die with them)
 	void Clear();
 
-	// ---- boundary dispatch-drain window (PR 27b -> PR 43) ----
+	// ---- boundary dispatch-drain window (PR 27b -> PR 43 -> PR 44b) ----
 	// True while the barrier (or the valve service) replays deferred
 	// dispatches whose objects may have died later in the same sim burst:
 	// the deferred-deletion shells are still readable (the ack comes after),
-	// so id resolution falls back to them instead of returning nil -- master
-	// ran those handlers mid-frame with the object alive. PR 43 additionally
+	// so record dispatch resolves them instead of crashing -- master ran
+	// those handlers mid-frame with the object alive. PR 43 additionally
 	// keys the snapshot's DEAD_THIS_BATCH row validity and the drawers'
-	// dead-retained render records on this window. Main thread only; MUST be
-	// false again before the ack poisons the shells. Header-inline (like
-	// g_splitEnabled) so SimSnapshot's Valid() accessors can consult it
-	// without pulling SimDrawSplit.cpp into every TU (test executables).
+	// dead-retained render records on this window. PR 44b (§3.6c) scopes the
+	// window PER EPOCH: the flip consumer opens it with the epoch id whose
+	// sealed records/closures are dispatching (the lockstep barrier and the
+	// valve service open it with their held/served epoch likewise), and that
+	// epoch cannot retire until the bracket closes (retirement only happens
+	// at the next barrier's acquire, after the close -- asserted there).
+	// Main thread only; MUST be false again before the ack poisons the
+	// shells. Header-inline (like g_splitEnabled) so SimSnapshot's Valid()
+	// accessors can consult it without pulling SimDrawSplit.cpp into every
+	// TU (test executables).
 	inline bool g_boundaryShellWindow = false;
+	inline uint64_t g_dispatchingEpochId = 0;
 
 	inline void SetBoundaryShellWindow(bool active) { g_boundaryShellWindow = active; }
 	inline bool BoundaryShellWindowActive() { return g_boundaryShellWindow; }
 
-	// resolver fallbacks for the window (nullptr outside it / on a miss);
-	// implemented over RenderEventQueue's dispatch-time id->shell maps.
-	// PR 43 (3b): the ONLY remaining callers are LuaSyncedRead's
-	// ParseRawUnit/ParseFeature -- the live-parse leg of the barrierLive
-	// dispatches 43 does not convert (44b retires them onto the
-	// DEAD_THIS_BATCH twins). Everything else resolves via the drawers'
-	// dead-retained render records.
-	const CUnit* ShellFallbackUnit(int unitID);
-	const CFeature* ShellFallbackFeature(int featureID);
+	// PR 44b §3.6c: the per-epoch dispatch bracket (flip consumer + valve)
+	inline void OpenEpochDispatchWindow(uint64_t epochId) {
+		g_boundaryShellWindow = true;
+		g_dispatchingEpochId = epochId;
+	}
+	inline void CloseEpochDispatchWindow() {
+		g_boundaryShellWindow = false;
+		g_dispatchingEpochId = 0;
+	}
+	inline uint64_t DispatchingEpochId() { return g_dispatchingEpochId; }
+
+	// PR 44b §3.8: drain-time liveness checks for the deferred closures that
+	// used to re-resolve ids through the sim-owned handler tables (a
+	// concurrent-rehash/generation hazard once the sim runs during the
+	// drain). Both consult ONLY draw-owned / dispatch-populated state: the
+	// drawer render record's deferred-safe handle, the batch's dead-shell
+	// map and the pending-destroy ledger (mutex-guarded). "Alive at drain"
+	// reproduces the old `unitHandler.GetUnit(id) == expected` semantics:
+	// false when the id died in the dispatching batch, died after the
+	// epoch's edge (destroy record pending in the next epoch), or was reused
+	// by a new object.
+	bool BoundaryUnitAliveAtDrain(int unitID, const CUnit* expected);
+	/// current live occupant of unitID via the drawer render record;
+	/// nullptr when dead-in-batch / pending-dead / unregistered
+	CUnit* BoundaryLiveUnit(int unitID);
 
 	/// true while this thread executes the sim phase (ClientReadNet/SimFrame)
 	bool InSimPhase();

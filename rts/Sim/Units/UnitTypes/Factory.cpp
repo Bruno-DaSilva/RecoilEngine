@@ -273,8 +273,11 @@ void CFactory::FinishBuild(CUnit* buildee) {
 		const int factoryID = id;
 		const int buildeeID = buildee->id;
 		UnsyncedBoundaryQueue::Defer([factoryID, buildeeID]() {
-			CUnit* factory = unitHandler.GetUnit(factoryID);
-			CUnit* be = unitHandler.GetUnit(buildeeID);
+			// PR 44b §3.8: drain-time re-resolution must not touch the
+			// sim-owned handler tables (the sim runs concurrent with the
+			// drain now); resolve via the draw-owned render records instead
+			CUnit* factory = SimDrawSplit::BoundaryLiveUnit(factoryID);
+			CUnit* be = SimDrawSplit::BoundaryLiveUnit(buildeeID);
 
 			if (factory == nullptr || be == nullptr)
 				return;

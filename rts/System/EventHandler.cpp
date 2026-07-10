@@ -812,10 +812,13 @@ void CEventHandler::StockpileChanged(const CUnit* unit, const CWeapon* weapon, i
 				// the CWeapon* is not lifetime-protected by the deferred-
 				// deletion epoch (PreDestruct frees the weapons), so drop the
 				// dispatch if the unit died before the boundary: master fired
-				// it pre-death, the widget just misses one final tick
+				// it pre-death, the widget just misses one final tick.
+				// PR 44b §3.8: the liveness re-check reads draw-owned state
+				// (see SimDrawSplit.h) -- it must also catch died-AFTER-the-
+				// epoch-edge units, whose weapons are already freed.
 				const int unitID = unit->id;
 				UnsyncedBoundaryQueue::DeferFor(ec, [ec, unit, weapon, oldCount, unitID]() {
-					if (unitHandler.GetUnit(unitID) == unit)
+					if (SimDrawSplit::BoundaryUnitAliveAtDrain(unitID, unit))
 						ec->StockpileChanged(unit, weapon, oldCount);
 				});
 			} else {

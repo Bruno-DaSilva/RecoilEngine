@@ -252,7 +252,8 @@ void CWaitCommandsAI::AddLocalUnit(CUnit* unit, const CUnit* builder)
 	if (SimDrawSplit::DeferUnsyncedNow()) {
 		const int unitID = unit->id;
 		UnsyncedBoundaryQueue::Defer([this, unit, unitID]() {
-			if (unitHandler.GetUnit(unitID) == unit)
+			// PR 44b §3.8: liveness via draw-owned state (see SimDrawSplit.h)
+			if (SimDrawSplit::BoundaryUnitAliveAtDrain(unitID, unit))
 				AddLocalUnit(unit, nullptr);
 		});
 		return;
@@ -313,7 +314,8 @@ void CWaitCommandsAI::RemoveWaitCommand(CUnit* unit, const Command& cmd)
 	if (SimDrawSplit::DeferUnsyncedNow()) {
 		const int unitID = unit->id;
 		UnsyncedBoundaryQueue::Defer([this, unit, unitID, cmd]() {
-			if (unitHandler.GetUnit(unitID) == unit)
+			// PR 44b §3.8: liveness via draw-owned state (see SimDrawSplit.h)
+			if (SimDrawSplit::BoundaryUnitAliveAtDrain(unitID, unit))
 				RemoveWaitCommand(unit, cmd);
 		});
 		return;

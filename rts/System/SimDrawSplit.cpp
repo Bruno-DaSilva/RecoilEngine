@@ -2,7 +2,8 @@
 
 #include "SimDrawSplit.h"
 
-#include "Rendering/Common/RenderEventQueue.h" // drain-window shell resolution
+#include "Rendering/Common/RenderEventQueue.h" // drain-window dead/pending shell maps
+#include "Rendering/Units/UnitDrawer.h"        // drawer render record (drain-time liveness)
 
 #include <atomic>
 #include <cassert>
@@ -34,42 +35,45 @@ void Clear()
 {
 	g_splitEnabled = false;
 	g_boundaryShellWindow = false;
+	g_dispatchingEpochId = 0;
 }
 
 // SetBoundaryShellWindow / BoundaryShellWindowActive are header-inline (see
 // SimDrawSplit.h): the flag gates SimSnapshot's DEAD_THIS_BATCH validity,
 // which is read inline from the row accessors.
 
-const CUnit* ShellFallbackUnit(int unitID)
+// PR 44b §3.8 (see the header): drain-time liveness for deferred closures.
+// The pre-44b form was `unitHandler.GetUnit(id) == expected`, legal only with
+// the sim parked; this consults draw-owned / dispatch-populated state only.
+bool BoundaryUnitAliveAtDrain(int unitID, const CUnit* expected)
 {
-	if (!g_boundaryShellWindow)
-		return nullptr;
+	if (expected == nullptr)
+		return false;
 
-	if (const CUnit* shell = renderEventQueue.ResolveBoundaryDeadUnit(unitID))
-		return shell;
+	// died in the dispatching batch (its destroy record just dispatched)
+	if (renderEventQueue.ResolveBoundaryDeadUnit(unitID) != nullptr)
+		return false;
 
-	// PR 44a: under the producer flip the dispatch window replays an EPOCH's
-	// records, but the live sim may have run past the epoch's edge before the
-	// park -- an id referenced by this epoch's records can have died AFTER the
-	// epoch was sealed (its destroy record is pending in the NEXT epoch, so
-	// the dispatch-time dead map above does not know it yet). Its shell is
-	// parked and un-acked (the ack is per-sealed-batch), so serve it from the
-	// pending-destroy ledger. Lockstep (pre-flip / flag-off-with-contract)
-	// drains everything to the park point, leaving this ledger empty inside
-	// the window -- no behavior change there.
-	return renderEventQueue.FindPendingDestroyUnit(unitID);
+	// died after the epoch's edge (destroy record pending in the next epoch)
+	if (renderEventQueue.FindPendingDestroyUnit(unitID) != nullptr)
+		return false;
+
+	// identity: the drawer record's deferred-safe handle is the current
+	// occupant of the id (a reused id holds the NEW object here)
+	return (CUnitDrawer::GetRenderRecord(unitID).obj == expected);
 }
 
-const CFeature* ShellFallbackFeature(int featureID)
+CUnit* BoundaryLiveUnit(int unitID)
 {
-	if (!g_boundaryShellWindow)
+	if (renderEventQueue.ResolveBoundaryDeadUnit(unitID) != nullptr)
 		return nullptr;
 
-	if (const CFeature* shell = renderEventQueue.ResolveBoundaryDeadFeature(featureID))
-		return shell;
+	if (renderEventQueue.FindPendingDestroyUnit(unitID) != nullptr)
+		return nullptr;
 
-	// PR 44a: see ShellFallbackUnit
-	return renderEventQueue.FindPendingDestroyFeature(featureID);
+	// read-only handle by contract; the two draw-owned poke consumers
+	// (UI-group inherit) mutate draw-owned unit state only
+	return const_cast<CUnit*>(CUnitDrawer::GetRenderRecord(unitID).obj);
 }
 
 bool InSimPhase() { return (tlSimPhaseDepth > 0); }
