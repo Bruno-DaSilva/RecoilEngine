@@ -141,16 +141,18 @@ namespace SimDrawSplit {
 	 * valve wait (released by the draw side's consume+retire returning pool
 	 * pages -- neither needs anything from the sim) and the pause park
 	 * (released by ReleasePause).
+	 *
+	 * Backpressure (PR 44c §3.4): ClientReadNet consumes a NEWFRAME only
+	 * while the epoch ring holds < N-1 unretired epochs
+	 * (SimSnapshot::UnretiredEpochCount -- replaces the park-era
+	 * LastBoundaryFrame()+1 gate), unless free-running (fast-forward /
+	 * catch-up / skip / video capture): a free-running sim is extraction-
+	 * SKIPPED by the producer's pacing gate, never ring-blocked (§5.13).
 	 */
 
 	// main-thread side
 	void RequestPause();
-	void ReleasePause(int boundaryFrame);
-	/// PR 44b (no-park): the consumer publishes the backpressure boundary
-	/// frame explicitly (ReleasePause's side effect, park-free) -- the same
-	/// value at the same per-frame point (the consume-complete signal), so
-	/// the 44a pacing behavior is preserved verbatim
-	void PublishBoundaryFrame(int boundaryFrame);
+	void ReleasePause();
 
 	/// main-thread lock-free peek: the sim thread is currently parked (edge
 	/// or valve) -- reads of sim state from the main thread are quiescent
@@ -167,7 +169,11 @@ namespace SimDrawSplit {
 	/// re-checks pool headroom between rounds and resumes itself.
 	bool ValveParkWait();
 	void SimIdleWait();
-	int  LastBoundaryFrame();
+
+	/// PR 44c telemetry: NEWFRAME consumptions denied by the epoch-ring
+	/// backpressure gate (CGame::CanConsumeSimFrameNow); teardown-logged as
+	/// [BackpressureStats]. Header-inline like the flags above.
+	inline std::atomic<uint64_t> g_ringBlockCount = {0};
 
 	// sim-thread lifecycle (main sets running BEFORE spawning -- the pause
 	// handshake must see the thread from the very first Draw -- and exit+join

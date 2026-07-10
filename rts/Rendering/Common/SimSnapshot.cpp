@@ -523,7 +523,9 @@ uint64_t SimSnapshot::AcquireNewestEpoch()
 
 	if (slotMeta[prev].refCount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
 		// the released slot retired: report its epoch so the caller can run
-		// the retirement hooks (DeferredObjectDeleter::ReleaseRetired)
+		// the retirement hooks (DeferredObjectDeleter::ReleaseRetired).
+		// PR 44c: also advance the backpressure key (UnretiredEpochCount)
+		retiredEpochId.store(slotMeta[prev].epochId, std::memory_order_relaxed);
 		return slotMeta[prev].epochId;
 	}
 
@@ -807,6 +809,7 @@ void SimSnapshot::Clear()
 	holdingRef = false;
 	epochCounter.store(0, std::memory_order_relaxed);
 	consumedEpochId.store(0, std::memory_order_relaxed);
+	retiredEpochId.store(0, std::memory_order_relaxed);
 	idCoverageChecked = 0;
 	idCoverageViolations = 0;
 

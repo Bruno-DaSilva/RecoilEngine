@@ -174,11 +174,12 @@ private:
 	bool CanConsumeSimFrameNow() const;
 
 	// ---- PR 44b remainder (§9 ruling): the no-park consumer ----
-	/// consume-complete signal (§3.2 pacing + backpressure): stamped when
-	/// ALL consumer-side drawer consumption for the held epoch finished
-	/// (batch dispatch + drawer Update + SSBO upload) -- the producer's next
-	/// extraction is mutually exclusive with it by the pacing gate, which
-	/// reproduces the removed park's exclusion without blocking the sim
+	/// consume-complete signal (§3.2 pacing): stamped when ALL consumer-side
+	/// drawer consumption for the held epoch finished (batch dispatch +
+	/// drawer Update + SSBO upload) -- the producer's next extraction is
+	/// mutually exclusive with it by the pacing gate, which reproduces the
+	/// removed park's exclusion without blocking the sim. (PR 44c:
+	/// backpressure is keyed to epoch retirement, not signalled here.)
 	void SignalEpochConsumeComplete();
 
 public:

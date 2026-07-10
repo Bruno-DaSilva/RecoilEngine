@@ -1572,9 +1572,9 @@ bool CGame::UpdateUnsynced(const spring_time currentTime)
 			transformsUploader.Update();
 		// PR 44b (no-park): the drawer consumption for the held epoch is
 		// complete -- everything below reads extracted or draw-owned storage
-		// only. Stamp consume-complete (the producer may extract again) and
-		// publish the backpressure boundary frame; there is no per-frame
-		// park to release anymore.
+		// only. Stamp consume-complete (the producer may extract again);
+		// there is no per-frame park to release anymore (PR 44c: backpressure
+		// is ring-keyed, nothing to publish here either).
 		SignalEpochConsumeComplete();
 
 		// PR 42 window shrink: run the deferred sim-live consumers now that the
@@ -2385,15 +2385,14 @@ void CGame::AcquireLazyDispatchPark()
 // when ALL consumer-side drawer consumption for the held epoch finished; the
 // §3.2 pacing gate then reproduces the removed park's producer/consumer
 // exclusion without blocking the sim (production is skipped, simulation
-// continues). Also publishes the backpressure boundary frame (the exact
-// value ReleasePause published at this point pre-removal).
+// continues). PR 44c: no boundary-frame publish anymore -- backpressure is
+// keyed to the epoch ring (SimSnapshot::UnretiredEpochCount, §3.4).
 void CGame::SignalEpochConsumeComplete()
 {
 	if (!SimDrawSplit::Enabled() || !SimDrawSplit::SimThreadRunning())
 		return;
 
 	simSnapshot.MarkNewestEpochConsumed();
-	SimDrawSplit::PublishBoundaryFrame(gs->frameNum);
 }
 
 // PR 44a telemetry: cumulative parked-window stats (the program's headline
@@ -2415,7 +2414,7 @@ void CGame::ReleaseSimPause()
 	// is still mid-consumption.
 
 	simPauseHeld = false;
-	SimDrawSplit::ReleasePause(gs->frameNum);
+	SimDrawSplit::ReleasePause();
 
 	const spring_time parkEnd = spring_now();
 
@@ -2448,6 +2447,10 @@ void CGame::DumpSimPauseSurvey()
 
 	// PR 44c: valve engage/wait aggregates (zero-line suppressed)
 	deferredObjectDeleter.DumpValveStats();
+
+	// PR 44c telemetry: epoch-ring backpressure denials (zero-suppressed)
+	if (const uint64_t n = SimDrawSplit::g_ringBlockCount.load(std::memory_order_relaxed); n > 0)
+		LOG("[BackpressureStats] ringBlocked=%llu", (unsigned long long)n);
 
 	static const char* siteNames[size_t(SimPauseSite::COUNT)] = {
 		"LIFECYCLE", "GUI_TRY_TARGET", "GUI_TEST_BUILDSQUARE", "GUI_GET_COMMAND",

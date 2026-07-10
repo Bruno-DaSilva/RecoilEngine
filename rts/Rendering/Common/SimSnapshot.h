@@ -1231,6 +1231,17 @@ public:
 		consumedEpochId.store(slotMeta[HeldIdx()].epochId, std::memory_order_release);
 	}
 
+	/// PR 44c (§3.4): published epochs not yet RETIRED (retirement = the
+	/// consumer's acquire dropped a slot's refcount to 0; in-order, single
+	/// consumer). THE backpressure key: ClientReadNet consumes a NEWFRAME
+	/// only while this is < EPOCH_RING_SLOTS-1 unless free-running (the
+	/// LastBoundaryFrame()+1 gate's successor). Sim thread; relaxed reads of
+	/// two monotone counters -- a transiently stale value delays or admits
+	/// at most one packet-loop round.
+	uint64_t UnretiredEpochCount() const {
+		return epochCounter.load(std::memory_order_relaxed) - retiredEpochId.load(std::memory_order_relaxed);
+	}
+
 	/// the row-namespace half of the flip's produce due-check (new sim frames
 	/// since the newest publish / alive-count change / between-frames
 	/// mutation); Game.cpp adds the pending-records/closures + fallback-timer
@@ -1399,6 +1410,10 @@ private:
 	// PR 44a: the epoch id the consumer last ACQUIRED (§3.2 pacing input);
 	// written by AcquireNewestEpoch (release), read by the producer (acquire)
 	std::atomic<uint64_t> consumedEpochId = {0};
+
+	// PR 44c: id of the last epoch RETIRED by the consumer's acquire (see
+	// UnretiredEpochCount); monotone, teardown-reset with the counter
+	std::atomic<uint64_t> retiredEpochId = {0};
 
 	// PR 43 §2.6: id-coverage gate counters (see CheckEpochIdCoverage)
 	uint64_t idCoverageChecked = 0;

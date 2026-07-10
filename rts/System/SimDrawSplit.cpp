@@ -101,7 +101,6 @@ namespace {
 	// transitions under hsMtx; atomic so IsSimParked can peek lock-free
 	std::atomic<int> parkKind = {PARK_NONE};
 
-	std::atomic<int> lastBoundaryFrame = {-1};
 	std::atomic<bool> simExit = {false};
 }
 
@@ -118,15 +117,8 @@ void RequestPause()
 	cvMain.wait(lock, []() { return (parkKind != PARK_NONE || !g_simThreadRunning.load()); });
 }
 
-void PublishBoundaryFrame(int boundaryFrame)
+void ReleasePause()
 {
-	lastBoundaryFrame.store(boundaryFrame);
-}
-
-void ReleasePause(int boundaryFrame)
-{
-	lastBoundaryFrame.store(boundaryFrame);
-
 	{
 		std::unique_lock<std::mutex> lock(hsMtx);
 		pauseRequested.store(false);
@@ -200,8 +192,6 @@ void SimIdleWait()
 	cvSim.wait_for(lock, std::chrono::milliseconds(1));
 }
 
-int LastBoundaryFrame() { return lastBoundaryFrame.load(std::memory_order_relaxed); }
-
 bool IsSimParked() { return (parkKind.load(std::memory_order_relaxed) != PARK_NONE); }
 
 
@@ -234,7 +224,6 @@ bool SimThreadExitRequested() { return simExit.load(std::memory_order_relaxed); 
 void ResetSimThreadExit()
 {
 	simExit.store(false);
-	lastBoundaryFrame.store(-1);
 	pauseRequested.store(false);
 }
 

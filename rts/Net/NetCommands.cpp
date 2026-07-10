@@ -282,7 +282,9 @@ float CGame::GetNetMessageProcessingTimeLimit() const
 
 // PR 27b backpressure predicate (split only; see the loop in ClientReadNet).
 // True unless the next packet is a NEWFRAME/KEYFRAME that would advance the
-// sim past lastBoundaryFrame+1 while interpolation is active.
+// sim while the epoch ring already holds N-1 unretired epochs (PR 44c §3.4,
+// replacing the LastBoundaryFrame()+1 park-era gate) and interpolation is
+// active.
 bool CGame::CanConsumeSimFrameNow() const
 {
 	const std::shared_ptr<const netcode::RawPacket> pkt = clientNet->Peek(0);
@@ -291,15 +293,25 @@ bool CGame::CanConsumeSimFrameNow() const
 		return true;
 	if (pkt->data[0] != NETMSG_NEWFRAME && pkt->data[0] != NETMSG_KEYFRAME)
 		return true;
-	if (gs->frameNum < SimDrawSplit::LastBoundaryFrame() + 1)
+
+	// PR 44c (§3.4): sim runs ahead <= N-1 unretired epochs. An epoch
+	// retires when the draw side's acquire releases it (needing nothing from
+	// the sim), so the wait is deadlock-free. At N=3 the 1x cadence matches
+	// the old gate (publish -> blocked until the next acquire retires the
+	// previous epoch); it is looser only while the consumer is mid-consume
+	// or stalled -- blessed "unchanged-or-looser" (§5.13).
+	if (simSnapshot.UnretiredEpochCount() < SimSnapshot::EPOCH_RING_SLOTS - 1)
 		return true;
 
-	// free-run cases: fast-forward, demo skip, catch-up (no recent sim
+	// free-run carve-outs (§5.13 -- these must survive the rekey: a
+	// free-running sim is extraction-SKIPPED by the producer's pacing gate,
+	// never ring-BLOCKED): fast-forward, demo skip, catch-up (no recent sim
 	// progress -- the same predicate that disables interpolation), and
 	// video capture's single-stepped server
 	if (gs->speedFactor > 1.01f || skipping || IsSimLagging() || videoCapturing->AllowRecord())
 		return true;
 
+	SimDrawSplit::g_ringBlockCount.fetch_add(1, std::memory_order_relaxed);
 	return false;
 }
 
@@ -324,11 +336,11 @@ void CGame::ClientReadNet()
 			break;
 
 		// PR 27b (split only): park promptly at a frame edge when the draw
-		// side requested the barrier, and hold the sim at most one frame
-		// ahead of the last published boundary during interpolated play
-		// (free-running under fast-forward / catch-up / skip / capture) --
-		// budget and order below are untouched, so consumption stays
-		// bit-for-bit the master logic
+		// side requested the barrier, and hold the sim at most N-1 unretired
+		// epochs ahead during interpolated play (PR 44c §3.4; free-running
+		// under fast-forward / catch-up / skip / capture) -- budget and
+		// order below are untouched, so consumption stays bit-for-bit the
+		// master logic
 		if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
 			if (SimDrawSplit::PauseRequested())
 				break;
