@@ -25,6 +25,7 @@
 #include "Map/ReadMap.h"
 #include "System/Log/ILog.h"
 #include "System/SafeUtil.h"
+#include "System/SimDrawSplit.h" // PR 46: epoch-consistent timeInfo under the flip
 #include "SDL2/SDL_mouse.h"
 
 CR_BIND(UniformMatricesBuffer, )
@@ -219,7 +220,30 @@ void UniformConstants::UpdateParamsImpl(UniformParamsBuffer* updateBuffer)
 	updateBuffer->renderCaps =
 		globalRendering->supportClipSpaceControl << 0;
 
-	updateBuffer->timeInfo = float4{(float)gs->frameNum, spring_tomsecs(globalRendering->grTime) * 0.001f, (gs->GetLuaSimFrame() + globalRendering->timeOffset) / GAME_SPEED, globalRendering->timeOffset}; //gameFrame, drawSeconds, interpolated(unsynced)GameSeconds(synced), frameTimeOffset
+	float tiFrame  = (float)gs->frameNum;
+	float tiOffset = globalRendering->timeOffset;
+
+	// sim|draw PR 46: under the running flip the transforms-SSBO lerp pair is
+	// produced at the SIM thread's frame edges and reaches the GPU >= 1 draw
+	// frame after the live clock (timeOffset) rebased, so raw (frameNum,
+	// timeOffset) momentarily indexes the PREVIOUS frame's pair -- the pose
+	// regresses ~0.8 of a frame once per sim frame (30 Hz model/shadow
+	// jitter; probe evidence in doc/sim-draw-pr46-draw-interpolation-design.md).
+	// Rebase timeInfo onto the pair actually uploaded: x = the pair's frame,
+	// w = timeOffset + (liveFrame - pairFrame). The shader's clamped Lerp
+	// holds the pair's edge pose until the fresh pair arrives, and the
+	// continuous sim-time base x+w Lua shaders rely on is unchanged.
+	// Flag-off (and flip-not-running) is byte-identical: this branch is dead.
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
+		const int32_t pairFrame = SimDrawSplit::UploadedTransformFrame();
+
+		if (pairFrame >= 0) {
+			tiOffset += (float)std::max(0, gs->frameNum - pairFrame);
+			tiFrame   = (float)pairFrame;
+		}
+	}
+
+	updateBuffer->timeInfo = float4{tiFrame, spring_tomsecs(globalRendering->grTime) * 0.001f, (gs->GetLuaSimFrame() + globalRendering->timeOffset) / GAME_SPEED, tiOffset}; //gameFrame, drawSeconds, interpolated(unsynced)GameSeconds(synced), frameTimeOffset
 	updateBuffer->viewGeometry = float4{(float)globalRendering->viewSizeX, (float)globalRendering->viewSizeY, (float)globalRendering->viewPosX, (float)globalRendering->viewPosY}; //vsx, vsy, vpx, vpy
 	updateBuffer->mapSize = float4{(float)mapDims.mapx, (float)mapDims.mapy, (float)mapDims.pwr2mapx, (float)mapDims.pwr2mapy} *(float)SQUARE_SIZE; //xz, xzPO2
 	updateBuffer->mapHeight = float4{readMap->GetCurrMinHeight(), readMap->GetCurrMaxHeight(), readMap->GetInitMinHeight(), readMap->GetInitMaxHeight()};

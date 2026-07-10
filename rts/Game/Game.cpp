@@ -1568,8 +1568,15 @@ bool CGame::UpdateUnsynced(const spring_time currentTime)
 		// the consume window (after worldDrawer.Update so the new-object
 		// catch-up extraction is included, BEFORE the consume-complete
 		// signal -- the producer's next extraction writes the storage)
-		if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning())
+		if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
 			transformsUploader.Update();
+			// PR 46: the SSBO now holds the HELD epoch's transform pair
+			// (the producer cannot extract again until the consume-complete
+			// signal below) -- stamp its frame so UniformConstants can build
+			// the epoch-consistent shader lerp factor (see SimDrawSplit.h).
+			SimDrawSplit::SetUploadedTransformFrame(
+				simSnapshot.SlotMeta(simSnapshot.HeldSlot()).lastSimFrame);
+		}
 		// PR 44b (no-park): the drawer consumption for the held epoch is
 		// complete -- everything below reads extracted or draw-owned storage
 		// only. Stamp consume-complete (the producer may extract again);
