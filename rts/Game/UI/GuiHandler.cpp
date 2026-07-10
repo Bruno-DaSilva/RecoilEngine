@@ -39,6 +39,7 @@
 #include "Sim/Units/CommandAI/BuilderCAI.h"
 #include "Sim/Units/UnitDefHandler.h"
 #include "Sim/Units/Unit.h"
+#include "Sim/Features/FeatureHandler.h"
 #include "Sim/Units/UnitHandler.h"
 #include "Sim/Units/UnitLoader.h"
 #include "Sim/Weapons/WeaponDefHandler.h"
@@ -1839,10 +1840,15 @@ void CGuiHandler::EvaluateDefaultCmdQuery()
 
 
 // PR 44b: DRAW side, at request time (SetCursorIcon / GetDefaultCommandServed,
-// once per draw frame). Captures the main-thread-bound half of
-// GetDefaultCommandImpl -- the input-receiver early-out, the minimap-proxy
-// mapping, the camera/mouse ray and the selection-id snapshot -- into the
-// standing query slot the sim thread evaluates at its next frame edge.
+// once per draw frame). Runs the DRAW-side half of GetDefaultCommandImpl --
+// the input-receiver early-out and the PICK (GuiTraceRay / minimap
+// GetSelectUnit: both are PR-25 snapshot/pick-grid-backed draw-side searches
+// with draw-owned scratch, so they must run HERE, not on the sim thread; the
+// first strict-Rosetta gate SIGSEGV'd on exactly that -- the sim-side pick
+// raced the pick grid's per-epoch rebuild and GetClosestUnit's static
+// scratch, corrupting the heap) -- and captures the picked ids + the
+// selection-id snapshot into the standing query slot the sim thread
+// evaluates at its next frame edge.
 void CGuiHandler::StageDefaultCmdQuery() const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
@@ -1858,13 +1864,25 @@ void CGuiHandler::StageDefaultCmdQuery() const
 		// the live impl returns -1 here without firing the widget callin
 		in.noCommand = true;
 	} else if ((ir == minimap) && (minimap->FullProxy())) {
-		in.minimapProxy = true;
-		in.mapPos = minimap->GetMapPosition(mouse->lastx, mouse->lasty);
-		in.selectRadius = minimap->GetUnitSelectRadius();
+		// snapshot pick grid + snapshot LOS gate (PR 25), draw-side
+		const CUnit* unit = minimap->GetSelectUnit(minimap->GetMapPosition(mouse->lastx, mouse->lasty));
+
+		in.tracedUnitID = (unit != nullptr) ? unit->id : -1;
 	} else {
-		in.cameraPos = camera->GetPos();
-		in.mouseDir = mouse->dir;
-		in.viewRange = camera->GetFarPlaneDist() * 1.4f;
+		const CUnit* unit = nullptr;
+		const CFeature* feature = nullptr;
+
+		const float viewRange = camera->GetFarPlaneDist() * 1.4f;
+		const float dist = TraceRay::GuiTraceRay(camera->GetPos(), mouse->dir, viewRange, nullptr, unit, feature, true);
+		const float3 hit = camera->GetPos() + mouse->dir * dist;
+
+		// make sure the ray hit in the map (the live impl's -1 early-out,
+		// which fires no widget callin)
+		if (unit == nullptr && feature == nullptr && !hit.IsInBounds())
+			in.noCommand = true;
+
+		in.tracedUnitID = (unit != nullptr) ? unit->id : -1;
+		in.tracedFeatureID = (feature != nullptr) ? feature->id : -1;
 	}
 
 	if (!in.noCommand)
@@ -1876,9 +1894,10 @@ void CGuiHandler::StageDefaultCmdQuery() const
 
 
 // PR 44b: SIM thread, at its frame edges + the paused-idle query servicing
-// (ProduceEpochAtSimEdge). Runs the sim-read half: the trace / closest-unit
-// pick and the deep-CAI leader walk, against live sim state the sim thread
-// owns. Stages {unit, feature, raw cmd} for the consumer's commit.
+// (ProduceEpochAtSimEdge). Runs the LIVE-SIM half only: re-resolve the
+// stage-time picked ids (a died-since-stage id degrades to no-target, the
+// same shape as the live impl's null handling) and the deep-CAI leader walk.
+// Stages {unit, feature, raw cmd} for the consumer's commit.
 void CGuiHandler::EvaluateDefaultCmdQueryAtSimEdge()
 {
 	DefaultCmdQueryInput in;
@@ -1896,33 +1915,13 @@ void CGuiHandler::EvaluateDefaultCmdQueryAtSimEdge()
 	out.valid = true;
 
 	if (!in.noCommand) {
-		const CUnit* unit = nullptr;
-		const CFeature* feature = nullptr;
-		bool miss = false;
+		const CUnit* unit = (in.tracedUnitID >= 0) ? unitHandler.GetUnit(in.tracedUnitID) : nullptr;
+		const CFeature* feature = (in.tracedFeatureID >= 0) ? featureHandler.GetFeature(in.tracedFeatureID) : nullptr;
 
-		if (in.minimapProxy) {
-			// the CMiniMap::GetSelectUnit pick, sim-side: closest unit + the
-			// local-allyteam LOS/radar gate (live losStatus -- the sim thread
-			// owns it; the draw-side variant reads the snapshot row instead)
-			const CUnit* pick = CGameHelper::GetClosestUnit(in.mapPos, in.selectRadius);
-
-			if (pick != nullptr && (gu->spectatingFullView || (pick->losStatus[gu->myAllyTeam] & (LOS_INLOS | LOS_INRADAR))))
-				unit = pick;
-		} else {
-			const float dist = TraceRay::GuiTraceRay(in.cameraPos, in.mouseDir, in.viewRange, nullptr, unit, feature, true);
-			const float3 hit = in.cameraPos + in.mouseDir * dist;
-
-			// make sure the ray hit in the map (the live impl's -1 early-out)
-			if (unit == nullptr && feature == nullptr && !hit.IsInBounds())
-				miss = true;
-		}
-
-		if (!miss) {
-			out.fireCallin = true;
-			out.unit = unit;
-			out.feature = feature;
-			out.rawCmdID = selectedUnitsHandler.GetDefaultCmdEval(in.selectedIDs, unit, feature, out.leaderFound);
-		}
+		out.fireCallin = true;
+		out.unit = unit;
+		out.feature = feature;
+		out.rawCmdID = selectedUnitsHandler.GetDefaultCmdEval(in.selectedIDs, unit, feature, out.leaderFound);
 	}
 
 	std::lock_guard<std::mutex> lock(defaultCmdQueryMtx);

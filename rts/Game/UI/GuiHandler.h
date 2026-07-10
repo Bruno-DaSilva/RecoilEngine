@@ -127,16 +127,18 @@ public:
 
 	// PR 44b (the no-park flip): the default-cmd query/reply is RE-HOSTED --
 	// evaluation on the sim thread, presentation on the draw side:
-	//  - StageDefaultCmdQuery() (draw, at request time): captures the query's
-	//    main-thread-bound inputs -- input-receiver early-out, minimap-proxy
-	//    map position + pick radius, camera/mouse ray, and the selection-id
-	//    snapshot -- into a mutex-guarded standing slot.
+	//  - StageDefaultCmdQuery() (draw, at request time): runs the DRAW-side
+	//    half -- input-receiver early-out + the snapshot-backed pick
+	//    (GuiTraceRay / minimap GetSelectUnit, PR-25 draw-side searches over
+	//    the pick grid; they may NOT run on the sim thread) -- and captures
+	//    the picked ids + the selection-id snapshot into a mutex-guarded
+	//    standing slot.
 	//  - EvaluateDefaultCmdQueryAtSimEdge() (SIM thread, at its frame edges
 	//    AND from the paused-idle query servicing, so the cursor stays live
-	//    while the game is paused): runs the sim-read half (GuiTraceRay /
-	//    closest-unit pick + the deep-CAI leader walk, via
-	//    CSelectedUnitsHandler::GetDefaultCmdEval) and stages the result
-	//    {unit, feature, raw cmd}.
+	//    while the game is paused): re-resolves the picked ids against live
+	//    sim (a died-since-stage id degrades to no-target) and runs the
+	//    deep-CAI leader walk (CSelectedUnitsHandler::GetDefaultCmdEval),
+	//    staging the result {unit, feature, raw cmd}.
 	//  - CommitDefaultCmdReply() (draw, at the barrier): fires the main-
 	//    thread-bound DefaultCommand widget callin with the staged results
 	//    (widget cursor overrides apply here), maps the command id to its
@@ -252,16 +254,18 @@ private:
 
 	// PR 44b: the re-hosted query/reply staging (see the method comments).
 	// Cross-thread: draw stages the input + commits the output, the sim
-	// thread evaluates -- both slots share the one mutex.
+	// thread evaluates -- both slots share the one mutex. The PICK (trace /
+	// minimap closest-unit) happens at STAGE time on the DRAW side: since
+	// PR 25 GuiTraceRay and CGameHelper::GetClosestUnit are snapshot/pick-
+	// grid-backed draw-side searches (with draw-owned scratch) -- running
+	// them on the sim thread races the pick grid's per-epoch rebuild and the
+	// pick scratch (gate-found mimalloc corruption, strict Rosetta f~9700).
+	// Only the deep-CAI leader walk is live-sim work and evaluates sim-side.
 	struct DefaultCmdQueryInput {
 		bool pending = false;
-		bool noCommand = false;    // receiver hit: publish -1, nothing to evaluate
-		bool minimapProxy = false; // pick via mapPos + selectRadius instead of the ray
-		float3 mapPos;
-		float selectRadius = 0.0f;
-		float3 cameraPos;
-		float3 mouseDir;
-		float viewRange = 0.0f;
+		bool noCommand = false;    // receiver hit / out-of-map miss: publish -1, no eval
+		int tracedUnitID = -1;     // the stage-time pick (draw-side, snapshot-backed)
+		int tracedFeatureID = -1;
 		std::vector<int> selectedIDs; // request-time selection snapshot
 	};
 	struct DefaultCmdEvalResult {
