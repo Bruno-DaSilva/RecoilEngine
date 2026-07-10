@@ -297,9 +297,11 @@ bool Enforced(lua_State* L)
 
 	// PR 27b: with the sim thread live, EVERY unsynced-handle execution on a
 	// non-sim thread is draw-thread context -- input callins included, not
-	// just the CGame::Draw window. The barrier and its sanctioned boundary
-	// dispatches suppress enforcement via ScopedLiveException (live reads
-	// are legal there: the sim is parked).
+	// just the CGame::Draw window. PR 44b: the barrier's deferred dispatches
+	// are ENFORCED too (barrierLive removed -- their handlers read published
+	// epoch state through the serving twins, §3.6); only the valve service
+	// and the audited LuaSnapshotServe brackets still suspend enforcement
+	// via ScopedLiveException (sim provably parked there).
 	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
 		if (tlLiveExceptionDepth > 0 || Threading::IsSimThread())
 			return false;
@@ -336,8 +338,10 @@ bool DenyLiveRead(lua_State* L, const char* caller)
 	// sim mutates concurrently (the quadfield/team-list/command-queue
 	// families are crash-class, not timing edges). Every unserved live read
 	// denies deterministically until its family is snapshot-served; the
-	// barrier's own dispatches run under ScopedLiveException and never get
-	// here. (Decision 5: the boundary serves everything it claims to serve.)
+	// valve service's dispatches run under ScopedLiveException (sim parked
+	// mid-frame) and never get here -- the barrier's deferred dispatches DO
+	// since PR 44b, serving via the twins.
+	// (Decision 5: the boundary serves everything it claims to serve.)
 	//
 	// EXCEPT the value-safe subset: pure scalar/grid reads with no sim-owned
 	// pointer or container traversal (terrain-type arrays, height grids, LOS
