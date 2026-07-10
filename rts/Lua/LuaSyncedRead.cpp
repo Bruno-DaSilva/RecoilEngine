@@ -6569,7 +6569,7 @@ static int GetUnitLastAttackedPieceLive(lua_State* L, const char* caller)
 int LuaSyncedRead::GetUnitLastAttackedPiece(lua_State* L)
 {
 	// snapshot-served from draw context (sim|draw PR 32, see LuaSnapshotServe.h)
-	return LuaSnapshotServe::Route(L, __func__, &GetUnitLastAttackedPieceLive, &LuaSnapshotServe::GetUnitLastAttackedPiece);
+	return LuaSnapshotServe::RoutePieceCache(L, __func__, &GetUnitLastAttackedPieceLive, &LuaSnapshotServe::GetUnitLastAttackedPiece);
 }
 
 /***
@@ -6590,7 +6590,7 @@ static int GetUnitCollisionVolumeDataLive(lua_State* L, const char* caller)
 int LuaSyncedRead::GetUnitCollisionVolumeData(lua_State* L)
 {
 	// snapshot-served from draw context (sim|draw PR 32, see LuaSnapshotServe.h)
-	return LuaSnapshotServe::Route(L, __func__, &GetUnitCollisionVolumeDataLive, &LuaSnapshotServe::GetUnitCollisionVolumeData);
+	return LuaSnapshotServe::RoutePieceCache(L, __func__, &GetUnitCollisionVolumeDataLive, &LuaSnapshotServe::GetUnitCollisionVolumeData);
 }
 
 static int GetUnitPieceCollisionVolumeDataLive(lua_State* L, const char* caller)
@@ -6601,7 +6601,7 @@ static int GetUnitPieceCollisionVolumeDataLive(lua_State* L, const char* caller)
 int LuaSyncedRead::GetUnitPieceCollisionVolumeData(lua_State* L)
 {
 	// snapshot-served from draw context (sim|draw PR 32, see LuaSnapshotServe.h)
-	return LuaSnapshotServe::Route(L, __func__, &GetUnitPieceCollisionVolumeDataLive, &LuaSnapshotServe::GetUnitPieceCollisionVolumeData);
+	return LuaSnapshotServe::RoutePieceCache(L, __func__, &GetUnitPieceCollisionVolumeDataLive, &LuaSnapshotServe::GetUnitPieceCollisionVolumeData);
 }
 
 
@@ -8166,7 +8166,7 @@ static int GetFeatureLastAttackedPieceLive(lua_State* L, const char* caller)
 }
 int LuaSyncedRead::GetFeatureLastAttackedPiece(lua_State* L)
 {
-	return LuaSnapshotServe::Route(L, __func__, &GetFeatureLastAttackedPieceLive, &LuaSnapshotServe::GetFeatureLastAttackedPiece);
+	return LuaSnapshotServe::RoutePieceCache(L, __func__, &GetFeatureLastAttackedPieceLive, &LuaSnapshotServe::GetFeatureLastAttackedPiece);
 }
 
 /*** Parameters related to a collision volume.
@@ -8204,7 +8204,7 @@ static int GetFeatureCollisionVolumeDataLive(lua_State* L, const char* caller)
 }
 int LuaSyncedRead::GetFeatureCollisionVolumeData(lua_State* L)
 {
-	return LuaSnapshotServe::Route(L, __func__, &GetFeatureCollisionVolumeDataLive, &LuaSnapshotServe::GetFeatureCollisionVolumeData);
+	return LuaSnapshotServe::RoutePieceCache(L, __func__, &GetFeatureCollisionVolumeDataLive, &LuaSnapshotServe::GetFeatureCollisionVolumeData);
 }
 
 /***
@@ -8219,7 +8219,7 @@ static int GetFeaturePieceCollisionVolumeDataLive(lua_State* L, const char* call
 }
 int LuaSyncedRead::GetFeaturePieceCollisionVolumeData(lua_State* L)
 {
-	return LuaSnapshotServe::Route(L, __func__, &GetFeaturePieceCollisionVolumeDataLive, &LuaSnapshotServe::GetFeaturePieceCollisionVolumeData);
+	return LuaSnapshotServe::RoutePieceCache(L, __func__, &GetFeaturePieceCollisionVolumeDataLive, &LuaSnapshotServe::GetFeaturePieceCollisionVolumeData);
 }
 
 
@@ -10042,7 +10042,7 @@ static int GetUnitRootPieceLive(lua_State* L, const char* caller) {
 }
 int LuaSyncedRead::GetUnitRootPiece(lua_State* L) {
 	// pieces/scripts served from draw context (sim|draw PR 33, see LuaSnapshotServe.h)
-	return LuaSnapshotServe::Route(L, __func__, &GetUnitRootPieceLive, &LuaSnapshotServe::GetUnitRootPiece);
+	return LuaSnapshotServe::RoutePieceCache(L, __func__, &GetUnitRootPieceLive, &LuaSnapshotServe::GetUnitRootPiece);
 }
 
 /***
@@ -10055,7 +10055,7 @@ static int GetUnitPieceMapLive(lua_State* L, const char* caller) {
 	return (GetSolidObjectPieceMap(L, ParseTypedUnit(L, caller, 1)));
 }
 int LuaSyncedRead::GetUnitPieceMap(lua_State* L) {
-	return LuaSnapshotServe::Route(L, __func__, &GetUnitPieceMapLive, &LuaSnapshotServe::GetUnitPieceMap);
+	return LuaSnapshotServe::RoutePieceCache(L, __func__, &GetUnitPieceMapLive, &LuaSnapshotServe::GetUnitPieceMap);
 }
 
 
@@ -10069,7 +10069,7 @@ static int GetUnitPieceListLive(lua_State* L, const char* caller) {
 	return (GetSolidObjectPieceList(L, ParseTypedUnit(L, caller, 1)));
 }
 int LuaSyncedRead::GetUnitPieceList(lua_State* L) {
-	return LuaSnapshotServe::Route(L, __func__, &GetUnitPieceListLive, &LuaSnapshotServe::GetUnitPieceList);
+	return LuaSnapshotServe::RoutePieceCache(L, __func__, &GetUnitPieceListLive, &LuaSnapshotServe::GetUnitPieceList);
 }
 
 
@@ -10084,7 +10084,7 @@ static int GetUnitPieceInfoLive(lua_State* L, const char* caller) {
 	return (GetSolidObjectPieceInfo(L, ParseTypedUnit(L, caller, 1)));
 }
 int LuaSyncedRead::GetUnitPieceInfo(lua_State* L) {
-	return LuaSnapshotServe::Route(L, __func__, &GetUnitPieceInfoLive, &LuaSnapshotServe::GetUnitPieceInfo);
+	return LuaSnapshotServe::RoutePieceCache(L, __func__, &GetUnitPieceInfoLive, &LuaSnapshotServe::GetUnitPieceInfo);
 }
 
 
@@ -10104,7 +10104,7 @@ static int GetUnitPiecePosDirLive(lua_State* L, const char* caller) {
 	return (GetSolidObjectPiecePosDir(L, ParseTypedUnit(L, caller, 1)));
 }
 int LuaSyncedRead::GetUnitPiecePosDir(lua_State* L) {
-	return LuaSnapshotServe::Route(L, __func__, &GetUnitPiecePosDirLive, &LuaSnapshotServe::GetUnitPiecePosDir);
+	return LuaSnapshotServe::RoutePieceCache(L, __func__, &GetUnitPiecePosDirLive, &LuaSnapshotServe::GetUnitPiecePosDir);
 }
 
 
@@ -10121,7 +10121,7 @@ static int GetUnitPiecePositionLive(lua_State* L, const char* caller) {
 	return (GetSolidObjectPiecePosition(L, ParseTypedUnit(L, caller, 1)));
 }
 int LuaSyncedRead::GetUnitPiecePosition(lua_State* L) {
-	return LuaSnapshotServe::Route(L, __func__, &GetUnitPiecePositionLive, &LuaSnapshotServe::GetUnitPiecePosition);
+	return LuaSnapshotServe::RoutePieceCache(L, __func__, &GetUnitPiecePositionLive, &LuaSnapshotServe::GetUnitPiecePosition);
 }
 
 
@@ -10138,7 +10138,7 @@ static int GetUnitPieceDirectionLive(lua_State* L, const char* caller) {
 	return (GetSolidObjectPieceDirection(L, ParseTypedUnit(L, caller, 1)));
 }
 int LuaSyncedRead::GetUnitPieceDirection(lua_State* L) {
-	return LuaSnapshotServe::Route(L, __func__, &GetUnitPieceDirectionLive, &LuaSnapshotServe::GetUnitPieceDirection);
+	return LuaSnapshotServe::RoutePieceCache(L, __func__, &GetUnitPieceDirectionLive, &LuaSnapshotServe::GetUnitPieceDirection);
 }
 
 
@@ -10168,7 +10168,7 @@ static int GetUnitPieceMatrixLive(lua_State* L, const char* caller) {
 	return (GetSolidObjectPieceMatrix(L, ParseTypedUnit(L, caller, 1)));
 }
 int LuaSyncedRead::GetUnitPieceMatrix(lua_State* L) {
-	return LuaSnapshotServe::Route(L, __func__, &GetUnitPieceMatrixLive, &LuaSnapshotServe::GetUnitPieceMatrix);
+	return LuaSnapshotServe::RoutePieceCache(L, __func__, &GetUnitPieceMatrixLive, &LuaSnapshotServe::GetUnitPieceMatrix);
 }
 
 /***
@@ -10181,7 +10181,7 @@ static int GetFeatureRootPieceLive(lua_State* L, const char* caller) {
 	return (GetSolidObjectRootPiece(L, ParseFeature(L, caller, 1)));
 }
 int LuaSyncedRead::GetFeatureRootPiece(lua_State* L) {
-	return LuaSnapshotServe::Route(L, __func__, &GetFeatureRootPieceLive, &LuaSnapshotServe::GetFeatureRootPiece);
+	return LuaSnapshotServe::RoutePieceCache(L, __func__, &GetFeatureRootPieceLive, &LuaSnapshotServe::GetFeatureRootPiece);
 }
 
 /***
@@ -10194,7 +10194,7 @@ static int GetFeaturePieceMapLive(lua_State* L, const char* caller) {
 	return (GetSolidObjectPieceMap(L, ParseFeature(L, caller, 1)));
 }
 int LuaSyncedRead::GetFeaturePieceMap(lua_State* L) {
-	return LuaSnapshotServe::Route(L, __func__, &GetFeaturePieceMapLive, &LuaSnapshotServe::GetFeaturePieceMap);
+	return LuaSnapshotServe::RoutePieceCache(L, __func__, &GetFeaturePieceMapLive, &LuaSnapshotServe::GetFeaturePieceMap);
 }
 
 
@@ -10208,7 +10208,7 @@ static int GetFeaturePieceListLive(lua_State* L, const char* caller) {
 	return (GetSolidObjectPieceList(L, ParseFeature(L, caller, 1)));
 }
 int LuaSyncedRead::GetFeaturePieceList(lua_State* L) {
-	return LuaSnapshotServe::Route(L, __func__, &GetFeaturePieceListLive, &LuaSnapshotServe::GetFeaturePieceList);
+	return LuaSnapshotServe::RoutePieceCache(L, __func__, &GetFeaturePieceListLive, &LuaSnapshotServe::GetFeaturePieceList);
 }
 
 
@@ -10223,7 +10223,7 @@ static int GetFeaturePieceInfoLive(lua_State* L, const char* caller) {
 	return (GetSolidObjectPieceInfo(L, ParseFeature(L, caller, 1)));
 }
 int LuaSyncedRead::GetFeaturePieceInfo(lua_State* L) {
-	return LuaSnapshotServe::Route(L, __func__, &GetFeaturePieceInfoLive, &LuaSnapshotServe::GetFeaturePieceInfo);
+	return LuaSnapshotServe::RoutePieceCache(L, __func__, &GetFeaturePieceInfoLive, &LuaSnapshotServe::GetFeaturePieceInfo);
 }
 
 
@@ -10243,7 +10243,7 @@ static int GetFeaturePiecePosDirLive(lua_State* L, const char* caller) {
 	return (GetSolidObjectPiecePosDir(L, ParseFeature(L, caller, 1)));
 }
 int LuaSyncedRead::GetFeaturePiecePosDir(lua_State* L) {
-	return LuaSnapshotServe::Route(L, __func__, &GetFeaturePiecePosDirLive, &LuaSnapshotServe::GetFeaturePiecePosDir);
+	return LuaSnapshotServe::RoutePieceCache(L, __func__, &GetFeaturePiecePosDirLive, &LuaSnapshotServe::GetFeaturePiecePosDir);
 }
 
 
@@ -10260,7 +10260,7 @@ static int GetFeaturePiecePositionLive(lua_State* L, const char* caller) {
 	return (GetSolidObjectPiecePosition(L, ParseFeature(L, caller, 1)));
 }
 int LuaSyncedRead::GetFeaturePiecePosition(lua_State* L) {
-	return LuaSnapshotServe::Route(L, __func__, &GetFeaturePiecePositionLive, &LuaSnapshotServe::GetFeaturePiecePosition);
+	return LuaSnapshotServe::RoutePieceCache(L, __func__, &GetFeaturePiecePositionLive, &LuaSnapshotServe::GetFeaturePiecePosition);
 }
 
 
@@ -10277,7 +10277,7 @@ static int GetFeaturePieceDirectionLive(lua_State* L, const char* caller) {
 	return (GetSolidObjectPieceDirection(L, ParseFeature(L, caller, 1)));
 }
 int LuaSyncedRead::GetFeaturePieceDirection(lua_State* L) {
-	return LuaSnapshotServe::Route(L, __func__, &GetFeaturePieceDirectionLive, &LuaSnapshotServe::GetFeaturePieceDirection);
+	return LuaSnapshotServe::RoutePieceCache(L, __func__, &GetFeaturePieceDirectionLive, &LuaSnapshotServe::GetFeaturePieceDirection);
 }
 
 
@@ -10307,7 +10307,7 @@ static int GetFeaturePieceMatrixLive(lua_State* L, const char* caller) {
 	return (GetSolidObjectPieceMatrix(L, ParseFeature(L, caller, 1)));
 }
 int LuaSyncedRead::GetFeaturePieceMatrix(lua_State* L) {
-	return LuaSnapshotServe::Route(L, __func__, &GetFeaturePieceMatrixLive, &LuaSnapshotServe::GetFeaturePieceMatrix);
+	return LuaSnapshotServe::RoutePieceCache(L, __func__, &GetFeaturePieceMatrixLive, &LuaSnapshotServe::GetFeaturePieceMatrix);
 }
 
 /***
@@ -10357,7 +10357,7 @@ static int GetUnitScriptPieceLive(lua_State* L, const char* caller)
 
 int LuaSyncedRead::GetUnitScriptPiece(lua_State* L)
 {
-	return LuaSnapshotServe::Route(L, __func__, &GetUnitScriptPieceLive, &LuaSnapshotServe::GetUnitScriptPiece);
+	return LuaSnapshotServe::RoutePieceCache(L, __func__, &GetUnitScriptPieceLive, &LuaSnapshotServe::GetUnitScriptPiece);
 }
 
 
@@ -10391,7 +10391,7 @@ static int GetUnitScriptNamesLive(lua_State* L, const char* caller)
 
 int LuaSyncedRead::GetUnitScriptNames(lua_State* L)
 {
-	return LuaSnapshotServe::Route(L, __func__, &GetUnitScriptNamesLive, &LuaSnapshotServe::GetUnitScriptNames);
+	return LuaSnapshotServe::RoutePieceCache(L, __func__, &GetUnitScriptNamesLive, &LuaSnapshotServe::GetUnitScriptNames);
 }
 
 static int TraceRayGroundImpl(lua_State *const L, const float3 &pos, const float3 &dir, const float maxLen, const bool testWater)

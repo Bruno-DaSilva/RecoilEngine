@@ -1568,8 +1568,15 @@ bool CGame::UpdateUnsynced(const spring_time currentTime)
 		// the consume window (after worldDrawer.Update so the new-object
 		// catch-up extraction is included, BEFORE the consume-complete
 		// signal -- the producer's next extraction writes the storage)
-		if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning())
+		if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
 			transformsUploader.Update();
+			// PR 46: the SSBO now holds the HELD epoch's transform pair
+			// (the producer cannot extract again until the consume-complete
+			// signal below) -- stamp its frame so UniformConstants can build
+			// the epoch-consistent shader lerp factor (see SimDrawSplit.h).
+			SimDrawSplit::SetUploadedTransformFrame(
+				simSnapshot.SlotMeta(simSnapshot.HeldSlot()).lastSimFrame);
+		}
 		// PR 44b (no-park): the drawer consumption for the held epoch is
 		// complete -- everything below reads extracted or draw-owned storage
 		// only. Stamp consume-complete (the producer may extract again);
@@ -2553,6 +2560,25 @@ CGame::ScopedExternalSimPause::~ScopedExternalSimPause()
 
 bool CGame::Draw() {
 	const spring_time currentTimePreBarrier = spring_now();
+
+	// PR 47: under the split the draw thread free-runs, so the unsynced
+	// lua_States produce garbage per DRAW frame at an uncapped rate (measured
+	// ~40x master's draw-frame rate under headless FF), while their ONLY
+	// collector was the fixed 30Hz timed job with master's per-call budget.
+	// The imbalance let BAR's LuaUI heap balloon to its 1.2GB emergency-
+	// collect valve (42 emergency collects over one Rosetta replay; zero
+	// flag-off). Master ties collection to the loop that produces the
+	// garbage (SimFrame, whose call rate scales with sim speed); restore
+	// that coupling for the DRAW-owned states by stepping their skip-gated,
+	// budget-bounded incremental GC once per draw frame, on the thread that
+	// owns them and OUTSIDE the draw window (before the barrier, so no
+	// dispatch or draw callin is running). spring_lua_alloc_skip_gc() keeps
+	// the per-call cost self-balancing: the run probability scales with the
+	// global heap-load ratio, so a low heap skips almost every call. The
+	// 30Hz timed job remains as the backstop for non-drawing periods
+	// (menus, parked saves, minimized). Flag-off pacing is untouched.
+	if (SimDrawSplit::Enabled())
+		eventHandler.CollectGarbage(false, CEventHandler::GC_UNSYNCED_ONLY);
 
 	// PR 44b remainder (§9 ruling): THE PER-FRAME CONSUME-PARK IS GONE --
 	// the barrier below consumes the published epoch CONCURRENT with the

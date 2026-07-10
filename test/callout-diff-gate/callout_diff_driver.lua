@@ -118,6 +118,15 @@ end
 function widget:GameFrame(f)
 	lastAdvanceTime = os.clock()
 
+	-- DiffGateForce1x=1 (env DG_FORCE_1X) pins the demo to 1x even when the
+	-- recorded stream carries a setspeed (both gate replays were recorded
+	-- fast-forwarded at 20x, so any "1x" visual/timing observation without
+	-- this was silently FF'd -- the PR-46 lesson). Re-pinned periodically in
+	-- case the stream re-issues a speed change.
+	if Spring.GetConfigInt("DiffGateForce1x", 0) ~= 0 and (f % 150) == 30 then
+		Spring.SendCommands("setspeed 1")
+	end
+
 	if not armed and f >= 1 then
 		armed = true
 		if armGate ~= 0 then
@@ -183,6 +192,39 @@ local mapSizeZ = Game.mapSizeZ
 -- armed dual-run doubles every call, and full-cross would dominate the run
 local exerciseTick = 0
 local TAIL_STRIDE = 8
+
+-- PR 47: the piece-slot cache family is exercised on a SLOW cadence (one
+-- frame in 64) rather than in the per-frame tail: any piece-twin call
+-- lazily triggers EnsurePieceCacheCaptured for the held epoch (a
+-- maxUnits-sized resize + per-unit piece copy), so exercising it every
+-- frame under FF re-captures per draw frame and livelocks the armed run
+-- mid-game (gate-found). 1-in-64 keeps armed dual-run coverage (~2
+-- captures/s) at negligible cost. GetFeatureRootPiece is deliberately NOT
+-- exercised: the LIVE body null-derefs (o->localModel.GetRoot()->...) on
+-- features without an instantiated localModel (e.g. map rocks) -- a
+-- pre-existing base-branch crash bug (gdb-verified via the dual-run's
+-- live leg).
+local pieceTick = 0
+
+local function ExercisePieceFamily(units, feats)
+	pieceTick = (pieceTick + 1) % 64
+	if pieceTick ~= 0 then
+		return
+	end
+	for i = 1 + exerciseTick, #units, TAIL_STRIDE do
+		local uid = units[i]
+		Spring.GetUnitRootPiece(uid)
+		Spring.GetUnitPieceMap(uid)
+		Spring.GetUnitPieceList(uid)
+		Spring.GetUnitPieceMatrix(uid, 1)
+		Spring.GetUnitPiecePosDir(uid, 1)
+	end
+	for i = 1 + exerciseTick, #feats, TAIL_STRIDE do
+		local fid = feats[i]
+		Spring.GetFeaturePieceMap(fid)
+		Spring.GetFeaturePieceList(fid)
+	end
+end
 
 local function ExerciseUnitTail(uid, prevUid, fid)
 	Spring.ValidUnitID(uid)
@@ -306,6 +348,7 @@ local function ExerciseFamily()
 	for i = 1 + exerciseTick, #feats, TAIL_STRIDE do
 		ExerciseFeatureTail(feats[i], feats[i > 1 and (i - 1) or #feats])
 	end
+	ExercisePieceFamily(units, feats)
 
 	-- projectile family (second family): headless projectile-visual widgets
 	-- self-disable, so the driver must generate this surface itself

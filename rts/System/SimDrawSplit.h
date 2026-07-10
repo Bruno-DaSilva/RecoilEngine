@@ -194,4 +194,26 @@ namespace SimDrawSplit {
 	void RequestSimThreadExit();
 	bool SimThreadExitRequested();
 	void ResetSimThreadExit();
+
+	// ---- PR 46: epoch-consistent draw interpolation (sim|draw §7.6 follow-up) ----
+	// The sim frame the transforms-SSBO lerp pair CURRENTLY ON THE GPU was
+	// extracted at (pair = [prev = preFrameTra(F), curr = pos(F)], produced by
+	// the flip producer at frame edge F). Under the running flip the pair
+	// reaches the GPU >= 1 draw frame AFTER the sim thread rebased the live
+	// interpolation clock (CGame::SimFrame resets lastFrameTime at frame
+	// start), so the raw globalRendering->timeOffset is momentarily paired
+	// with the PREVIOUS frame's pair -- the rendered pose regresses ~0.8 of a
+	// frame once per sim frame (the PR-46 30 Hz model/shadow jitter).
+	// UniformConstants rebuilds timeInfo as {x = this frame, w = timeOffset +
+	// (liveFrame - this frame)}: the shader's clamped Lerp then holds the
+	// pair's edge pose until the fresh pair arrives (sub-draw-frame hold)
+	// instead of jumping backward, and x+w (the continuous sim-time base Lua
+	// shaders use) is unchanged. Stamped in CGame::UpdateUnsynced right after
+	// the flip's transformsUploader.Update() consume; written and read on the
+	// draw/main thread only -- plain int, -1 = nothing uploaded yet (pregame /
+	// lockstep), consumers fall back to the master-identical raw values.
+	inline int32_t g_uploadedTransformFrame = -1;
+
+	inline void SetUploadedTransformFrame(int32_t frame) { g_uploadedTransformFrame = frame; }
+	inline int32_t UploadedTransformFrame() { return g_uploadedTransformFrame; }
 }

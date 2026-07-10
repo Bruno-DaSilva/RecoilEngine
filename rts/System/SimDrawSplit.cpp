@@ -36,6 +36,7 @@ void Clear()
 	g_splitEnabled = false;
 	g_boundaryShellWindow = false;
 	g_dispatchingEpochId = 0;
+	g_uploadedTransformFrame = -1;
 }
 
 // SetBoundaryShellWindow / BoundaryShellWindowActive are header-inline (see
