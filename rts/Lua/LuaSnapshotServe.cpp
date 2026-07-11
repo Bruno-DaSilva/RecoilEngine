@@ -7999,7 +7999,7 @@ float trace::EpochView::TraceRayNoEnemyNoGroundDist(const float3& srcPos, const 
 
 	static std::vector<int> candUnits;
 	static std::vector<int> candFeatures;
-	snapshotPickGrid.QueryRay(srcPos, dir, traceLength, 0.0f, candUnits, candFeatures);
+	snapshotPickGrid.QueryRayExact(srcPos, dir, traceLength, candUnits, candFeatures);
 
 	const SimSnapshot::FeatureRows& frows = simSnapshot.ReadFeatures();
 	CollisionQuery cq;
@@ -8056,7 +8056,7 @@ bool trace::EpochView::TestCone(const float3& from, const float3& dir, float len
 
 	static std::vector<int> candUnits;
 	static std::vector<int> candFeatures;
-	snapshotPickGrid.QueryCone(from, dir, length, spread, candUnits, candFeatures);
+	snapshotPickGrid.QueryRayExact(from, dir, length, candUnits, candFeatures);
 
 	if (scanForAllies || scanForNeutrals) {
 		for (const int id : candUnits) {
@@ -8142,7 +8142,7 @@ bool trace::EpochView::TestTrajectoryCone(const float3& from, const float3& targ
 
 	static std::vector<int> candUnits;
 	static std::vector<int> candFeatures;
-	snapshotPickGrid.QueryRay(from, targetVec, dist, 0.0f, candUnits, candFeatures);
+	snapshotPickGrid.QueryRayExact(from, targetVec, dist, candUnits, candFeatures);
 
 	if (scanForAllies || scanForNeutrals) {
 		for (const int id : candUnits) {
@@ -8253,7 +8253,7 @@ bool trace::EpochView::MissileTrajectoryLOF(const float3& srcPos, const float3& 
 	// object collision (chord check per candidate along the XZ ray)
 	static std::vector<int> candUnits;
 	static std::vector<int> candFeatures;
-	snapshotPickGrid.QueryRay(srcPos, targetVec, xzTargetDist, 0.0f, candUnits, candFeatures);
+	snapshotPickGrid.QueryRayExact(srcPos, targetVec, xzTargetDist, candUnits, candFeatures);
 
 	const bool scanForAllies   = ((avoidFlags & Collision::NOFRIENDLIES) == 0);
 	const bool scanForNeutrals = ((avoidFlags & Collision::NONEUTRALS  ) == 0);

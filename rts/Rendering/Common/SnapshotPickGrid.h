@@ -52,14 +52,14 @@ public:
 	void QueryRay(const float3& start, const float3& dir, float len, float width,
 		std::vector<int>& unitIDs, std::vector<int>& featureIDs);
 
-	// coarse phase for a spread cone (weapon HaveFreeLineOfFire TestCone /
-	// TestTrajectoryCone, sim/draw split trace re-host): the cone half-width at
-	// distance d along the axis is (d * spread + baseSize); gather every candidate
-	// the enclosing widened ray crosses. Implemented as QueryRay widened by the
-	// cone's max half-width over [0, len] -- a conservative superset (the precise
-	// per-object cone test re-filters, so this only widens the candidate set,
-	// never changes the winner, keeping the grid's determinism contract).
-	void QueryCone(const float3& start, const float3& dir, float len, float spread,
+	// EXACT ray-cell gather (halo=0), matching CQuadField::GetQuadsOnRay for the
+	// weapon-trace TraceRay / TestCone / TestTrajectoryCone / missile scans
+	// (sim/draw split trace re-host). Those live broadphases gather ONLY the ray's
+	// own quads -- the cone/parabola widening is applied per-candidate, not to the
+	// broadphase -- so the min-1-cell halo QueryRay uses (for picking / radar
+	// error) would over-gather and flip the boolean any-hit answer. Same output
+	// contract (ascending, deduped).
+	void QueryRayExact(const float3& start, const float3& dir, float len,
 		std::vector<int>& unitIDs, std::vector<int>& featureIDs);
 
 	// coarse phase for a radius pick (minimap closest-unit): gather unit ids
