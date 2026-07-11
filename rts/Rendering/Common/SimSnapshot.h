@@ -311,6 +311,7 @@ public:
 		std::vector<float> height;
 		std::vector<float> mass;
 		std::vector<float> maxRange;
+		std::vector<float> decloakDistance;  // sim|draw split (Stage 0): GuiHandler decloak-range ring
 		std::vector<float> seismicSignature;
 		std::vector<float> experience;
 		std::vector<float> limExperience;
@@ -503,6 +504,7 @@ public:
 		int Team(int unitID) const { return Valid(unitID) ? team[unitID] : -1; }
 		int AllyTeam(int unitID) const { return Valid(unitID) ? allyTeam[unitID] : -1; }
 		int DefID(int unitID) const { return Valid(unitID) ? defID[unitID] : 0; }
+		int WeaponCount(int unitID) const { return Valid(unitID) ? weaponCount[unitID] : 0; }
 		float BuildProgress(int unitID) const { return Valid(unitID) ? buildProgress[unitID] : 0.0f; }
 		float Radius(int unitID) const { return Valid(unitID) ? radius[unitID] : 0.0f; }
 		// object-space basis vectors (drawer-midpos / camera-orientation consumers, PR 24)
@@ -531,6 +533,9 @@ public:
 		float Height(int unitID) const { return Valid(unitID) ? height[unitID] : 0.0f; }
 		float Mass(int unitID) const { return Valid(unitID) ? mass[unitID] : 0.0f; }
 		float MaxRange(int unitID) const { return Valid(unitID) ? maxRange[unitID] : 0.0f; }
+		float DecloakDistance(int unitID) const { return Valid(unitID) ? decloakDistance[unitID] : 0.0f; }
+		int StockpileNumStockpiled(int unitID) const { return Valid(unitID) ? stockpileNumStockpiled[unitID] : 0; }
+		bool StockpileIsInterceptor(int unitID) const { return Valid(unitID) && stockpileIsInterceptor[unitID] != 0; }
 		float SeismicSignature(int unitID) const { return Valid(unitID) ? seismicSignature[unitID] : 0.0f; }
 		float Experience(int unitID) const { return Valid(unitID) ? experience[unitID] : 0.0f; }
 		float LimExperience(int unitID) const { return Valid(unitID) ? limExperience[unitID] : 0.0f; }
@@ -672,6 +677,9 @@ public:
 		std::vector<int32_t> stockpileNumStockpiled;
 		std::vector<int32_t> stockpileNumQueued;
 		std::vector<float> stockpileBuildPercent;
+		// sim|draw split (Stage 0): the GuiHandler interceptor-range ring reads
+		// unit->stockpileWeapon->weaponDef->interceptor (the enemy-stockpile branch).
+		std::vector<uint8_t> stockpileIsInterceptor;
 		// GetUnitShieldState default case (unit->shieldWeapon; static_cast in the
 		// live path, so a non-null shieldWeapon is always a CPlasmaRepulser)
 		std::vector<uint8_t> hasShieldWeapon;

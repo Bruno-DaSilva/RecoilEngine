@@ -51,7 +51,7 @@ static inline uint64_t HashUnitRow(const SimSnapshot::UnitRows& r, int id)
 
 	// PR 27a tail ends at w[70]; PR 31 weapon fold occupies w[71];
 	// PR 32 deep-state words occupy w[72]..w[97].
-	uint32_t w[103]; // +3 PLACEMENT REHOST occupant words (w[98..100]); +2 TRACE REHOST (w[101..102])
+	uint32_t w[104]; // +3 PLACEMENT REHOST occupant words (w[98..100]); +2 TRACE REHOST (w[101..102]); +1 Stage 0 decloakDistance (w[103])
 	w[0]  = static_cast<uint32_t>(id);
 	f3(&w[1], r.pos[id]);
 	w[4]  = std::bit_cast<uint32_t>(r.speed[id].x);
@@ -150,6 +150,7 @@ static inline uint64_t HashUnitRow(const SimSnapshot::UnitRows& r, int id)
 	fnvU32(static_cast<uint32_t>(r.stockpileNumStockpiled[id]));
 	fnvU32(static_cast<uint32_t>(r.stockpileNumQueued[id]));
 	fnvF(r.stockpileBuildPercent[id]);
+	fnvU32(static_cast<uint32_t>(r.stockpileIsInterceptor[id]));  // sim|draw split (Stage 0)
 	fnvF(r.shieldWeaponPower[id]);
 	{
 		const int base = r.weaponOffset[id];
@@ -270,6 +271,9 @@ static inline uint64_t HashUnitRow(const SimSnapshot::UnitRows& r, int id)
 	w[101] = r.category[id];
 	w[102] = static_cast<uint32_t>(r.crashing[id])
 	       | (static_cast<uint32_t>(r.underFirstPersonControl[id]) << 8);
+
+	// sim|draw split (Stage 0): decloak-range ring read (GuiHandler)
+	w[103] = std::bit_cast<uint32_t>(r.decloakDistance[id]);
 
 	return Mix(w, sizeof(w), UNIT_SEED);
 }

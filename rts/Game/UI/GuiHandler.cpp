@@ -29,6 +29,7 @@
 #include "Rendering/IconHandler.h"
 #include "Rendering/Units/UnitDrawer.h"
 #include "Rendering/Common/SimSnapshot.h"
+#include "Lua/LuaSnapshotServe.h" // sim|draw split: served weapon range-ring primitives (Stage 0)
 #include "Rendering/GL/glExtra.h"
 #include "Rendering/Map/InfoTexture/IInfoTextureHandler.h"
 #include "Rendering/Textures/Bitmap.h"
@@ -3683,7 +3684,12 @@ static inline void DrawSensorRange(int radius, const float* color, const float3&
 }
 
 
-static void DrawUnitDefRanges(const CUnit* unit, const UnitDef* unitdef, const float3 pos)
+// sim|draw split (Stage 0): the live-unit sensor radii are passed in (from the
+// live CUnit flag-off, or the served UnitRows under the running split) plus the
+// decoy-test result `useUnitSensors` (== was the picked unitdef the unit's real
+// unitDef), so this helper never dereferences a live CUnit.
+static void DrawUnitDefRanges(const UnitDef* unitdef, const float3 pos, bool useUnitSensors,
+                              int radarRadius, int sonarRadius, int seismicRadius, int jammerRadius, int sonarJamRadius)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	// draw build range for immobile builders
@@ -3699,12 +3705,12 @@ static void DrawUnitDefRanges(const CUnit* unit, const UnitDef* unitdef, const f
 	}
 	// draw sensor and jammer ranges
 	if (unitdef->onoffable || unitdef->activateWhenBuilt) {
-		if (unit != nullptr && unitdef == unit->unitDef) { // test if it's a decoy
-			DrawSensorRange(unit->radarRadius   , cmdColors.rangeRadar,       pos);
-			DrawSensorRange(unit->sonarRadius   , cmdColors.rangeSonar,       pos);
-			DrawSensorRange(unit->seismicRadius , cmdColors.rangeSeismic,     pos);
-			DrawSensorRange(unit->jammerRadius  , cmdColors.rangeJammer,      pos);
-			DrawSensorRange(unit->sonarJamRadius, cmdColors.rangeSonarJammer, pos);
+		if (useUnitSensors) { // live/served unit's own radii (not a decoy)
+			DrawSensorRange(radarRadius   , cmdColors.rangeRadar,       pos);
+			DrawSensorRange(sonarRadius   , cmdColors.rangeSonar,       pos);
+			DrawSensorRange(seismicRadius , cmdColors.rangeSeismic,     pos);
+			DrawSensorRange(jammerRadius  , cmdColors.rangeJammer,      pos);
+			DrawSensorRange(sonarJamRadius, cmdColors.rangeSonarJammer, pos);
 		} else {
 			DrawSensorRange(unitdef->radarRadius   , cmdColors.rangeRadar,       pos);
 			DrawSensorRange(unitdef->sonarRadius   , cmdColors.rangeSonar,       pos);
@@ -3999,12 +4005,9 @@ void CGuiHandler::DrawMapStuff(bool onMiniMap)
 	      float rayTraceDist = -1.0f;
 
 	if (GetQueueKeystate()) {
-		// sim|draw PR 44 (prereq D): residual narrow park. The hovered unit's
-		// weapon list / maxRange / decloak / stockpile-weapon reads (range rings)
-		// have no serving channel; the pick itself (GetSelectUnit / GuiTraceRay) is
-		// snapshot-backed but the live weapon-object derefs need the sim quiescent.
-		// Shift-hover-gated -> ~0 engages in steady state.
-		CGame::ScopedExternalSimPause simPause(CGame::SimPauseSite::GUI_DRAW_MAPSTUFF);
+		// sim|draw split (Stage 0): the hovered unit's range rings. The pick itself
+		// (GetSelectUnit / GuiTraceRay) is snapshot-backed (draw-safe) either way.
+		const bool splitRunning = SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() && !SimDrawSplit::IsSimParked();
 
 		const CUnit* unit = nullptr;
 		const CFeature* feature = nullptr;
@@ -4016,51 +4019,121 @@ void CGuiHandler::DrawMapStuff(bool onMiniMap)
 			TraceRay::GuiTraceRay(tracePos, traceDir, maxTraceDist, nullptr, unit, feature, false);
 		}
 
-		if (unit != nullptr && (gu->spectatingFullView || unit->IsInLosForAllyTeam(gu->myAllyTeam))) {
-			pointeeUnit = unit;
+		if (splitRunning) {
+			// PARK RETIRED: read the hovered unit's ranges from the published epoch
+			// (UnitRows sensor radii / decloak / stockpile + the served weapon ring),
+			// never a live CUnit deref -> no sim park. Only the immutable unitDef
+			// (decoy/decloakSpherical/maxCoverage/shield) is read directly.
+			const auto& snap = simSnapshot.Read();
+			const int uid = (unit != nullptr) ? unit->id : -1;
 
-			const UnitDef* unitdef = unit->unitDef;
-			const bool enemyUnit = ((unit->allyteam != gu->myAllyTeam) && !gu->spectatingFullView);
+			if (snap.Valid(uid) && (gu->spectatingFullView || (snap.LosStatus(uid, gu->myAllyTeam) & LOS_INLOS) != 0)) {
+				pointeeUnit = unit;
 
-			if (enemyUnit && unitdef->decoyDef != nullptr)
-				unitdef = unitdef->decoyDef;
+				const UnitDef* realDef = unitDefHandler->GetUnitDefByID(snap.DefID(uid));
+				const UnitDef* unitdef = realDef;
+				const bool enemyUnit = ((snap.AllyTeam(uid) != gu->myAllyTeam) && !gu->spectatingFullView);
 
-			DrawUnitDefRanges(unit, unitdef, unit->pos);
+				if (enemyUnit && unitdef != nullptr && unitdef->decoyDef != nullptr)
+					unitdef = unitdef->decoyDef;
 
-			// draw (primary) weapon range
-			if (!unit->weapons.empty()) {
-				glDisable(GL_DEPTH_TEST);
-				glBallisticCircle(unit->weapons[0], { cmdColors.rangeAttack }, 40, unit->pos, {unit->maxRange, 0.0f, mapInfo->map.gravity});
-				glEnable(GL_DEPTH_TEST);
-			}
-			// draw decloak distance
-			if (pointeeUnit->decloakDistance > 0.0f) {
-				if (pointeeUnit->unitDef->decloakSpherical && globalRendering->drawDebug) {
-					CMatrix44f mat;
-					mat.Translate(unit->midPos);
-					mat.RotateX(90.0f * math::DEG_TO_RAD);
-					mat.Scale(OnesVector * pointeeUnit->decloakDistance);
+				if (unitdef != nullptr && realDef != nullptr) {
+					const float3 uPos = snap.Pos(uid);
 
-					GL::shapes.DrawWireSphere(16, 16, mat, cmdColors.rangeDecloak);
-				} else { // cylindrical
-					glSurfaceCircle(unit->pos, unit->decloakDistance, { cmdColors.rangeDecloak }, 40);
+					// useUnitSensors == not a decoy (unitdef is still the real def)
+					DrawUnitDefRanges(unitdef, uPos, (unitdef == realDef),
+						snap.RadarRadius(uid), snap.SonarRadius(uid), snap.SeismicRadius(uid), snap.JammerRadius(uid), snap.SonarJamRadius(uid));
+
+					// draw (primary) weapon range
+					if (snap.WeaponCount(uid) > 0) {
+						const float heightMod = LuaSnapshotServe::SplitServedWeaponHeightMod(uid, 0);
+						glDisable(GL_DEPTH_TEST);
+						glBallisticCircle({ cmdColors.rangeAttack }, 40, uPos, { snap.MaxRange(uid), 0.0f, mapInfo->map.gravity }, heightMod,
+							[uid](float modHeightDiff) { return LuaSnapshotServe::SplitServedWeaponRange2D(uid, 0, modHeightDiff); });
+						glEnable(GL_DEPTH_TEST);
+					}
+					// draw decloak distance
+					const float decloak = snap.DecloakDistance(uid);
+					if (decloak > 0.0f) {
+						if (realDef->decloakSpherical && globalRendering->drawDebug) {
+							CMatrix44f mat;
+							mat.Translate(snap.MidPos(uid));
+							mat.RotateX(90.0f * math::DEG_TO_RAD);
+							mat.Scale(OnesVector * decloak);
+
+							GL::shapes.DrawWireSphere(16, 16, mat, cmdColors.rangeDecloak);
+						} else { // cylindrical
+							glSurfaceCircle(uPos, decloak, { cmdColors.rangeDecloak }, 40);
+						}
+					}
+
+					// draw interceptor range
+					if (unitdef->maxCoverage > 0.0f) {
+						// enemy stockpile-weapon interceptor readiness, served: w!=null
+						// <=> enemyUnit && (stockpileWeapon && weaponDef->interceptor)
+						const bool haveInterceptor = enemyUnit && snap.StockpileIsInterceptor(uid);
+
+						// shows as on if not enemy, a non-interceptor stockpile, or if the stockpile has a missile
+						const SColor rangeInterceptorColor = (!enemyUnit || !haveInterceptor || snap.StockpileNumStockpiled(uid)) ?
+							SColor{ cmdColors.rangeInterceptorOn  }:
+							SColor{ cmdColors.rangeInterceptorOff };
+
+						glSurfaceCircle(uPos, unitdef->maxCoverage, rangeInterceptorColor, 40);
+					}
 				}
 			}
+		} else {
+			// flag-off / sim parked / pregame: the live path (byte-identical to
+			// master). The park is nest-safe and a no-op flag-off / when parked.
+			CGame::ScopedExternalSimPause simPause(CGame::SimPauseSite::GUI_DRAW_MAPSTUFF);
 
-			// draw interceptor range
-			if (unitdef->maxCoverage > 0.0f) {
-				const CWeapon* w = enemyUnit? unit->stockpileWeapon: nullptr; // will be checked if any missiles are ready
+			if (unit != nullptr && (gu->spectatingFullView || unit->IsInLosForAllyTeam(gu->myAllyTeam))) {
+				pointeeUnit = unit;
 
-				// if this isn't the interceptor, then don't use it
-				if (w != nullptr && !w->weaponDef->interceptor)
-					w = nullptr;
+				const UnitDef* unitdef = unit->unitDef;
+				const bool enemyUnit = ((unit->allyteam != gu->myAllyTeam) && !gu->spectatingFullView);
 
-				// shows as on if enemy, a non-stockpiled weapon, or if the stockpile has a missile
-				const SColor rangeInterceptorColor = (!enemyUnit || (w == nullptr) || w->numStockpiled) ?
-					SColor{ cmdColors.rangeInterceptorOn  }:
-					SColor{ cmdColors.rangeInterceptorOff };
+				if (enemyUnit && unitdef->decoyDef != nullptr)
+					unitdef = unitdef->decoyDef;
 
-				glSurfaceCircle(unit->pos, unitdef->maxCoverage, rangeInterceptorColor, 40);
+				DrawUnitDefRanges(unitdef, unit->pos, (unitdef == unit->unitDef),
+					unit->radarRadius, unit->sonarRadius, unit->seismicRadius, unit->jammerRadius, unit->sonarJamRadius);
+
+				// draw (primary) weapon range
+				if (!unit->weapons.empty()) {
+					glDisable(GL_DEPTH_TEST);
+					glBallisticCircle(unit->weapons[0], { cmdColors.rangeAttack }, 40, unit->pos, {unit->maxRange, 0.0f, mapInfo->map.gravity});
+					glEnable(GL_DEPTH_TEST);
+				}
+				// draw decloak distance
+				if (pointeeUnit->decloakDistance > 0.0f) {
+					if (pointeeUnit->unitDef->decloakSpherical && globalRendering->drawDebug) {
+						CMatrix44f mat;
+						mat.Translate(unit->midPos);
+						mat.RotateX(90.0f * math::DEG_TO_RAD);
+						mat.Scale(OnesVector * pointeeUnit->decloakDistance);
+
+						GL::shapes.DrawWireSphere(16, 16, mat, cmdColors.rangeDecloak);
+					} else { // cylindrical
+						glSurfaceCircle(unit->pos, unit->decloakDistance, { cmdColors.rangeDecloak }, 40);
+					}
+				}
+
+				// draw interceptor range
+				if (unitdef->maxCoverage > 0.0f) {
+					const CWeapon* w = enemyUnit? unit->stockpileWeapon: nullptr; // will be checked if any missiles are ready
+
+					// if this isn't the interceptor, then don't use it
+					if (w != nullptr && !w->weaponDef->interceptor)
+						w = nullptr;
+
+					// shows as on if enemy, a non-stockpiled weapon, or if the stockpile has a missile
+					const SColor rangeInterceptorColor = (!enemyUnit || (w == nullptr) || w->numStockpiled) ?
+						SColor{ cmdColors.rangeInterceptorOn  }:
+						SColor{ cmdColors.rangeInterceptorOff };
+
+					glSurfaceCircle(unit->pos, unitdef->maxCoverage, rangeInterceptorColor, 40);
+				}
 			}
 		}
 	}
@@ -4122,7 +4195,8 @@ void CGuiHandler::DrawMapStuff(bool onMiniMap)
 				for (const BuildInfo& bi: buildInfos) {
 					const float3& buildPos = bi.pos;
 
-					DrawUnitDefRanges(nullptr, buildeeDef, buildPos);
+					// build preview: no live unit yet -> def sensors (useUnitSensors=false)
+					DrawUnitDefRanges(buildeeDef, buildPos, false, 0, 0, 0, 0, 0);
 
 					// draw (primary) weapon range
 					if (buildeeDef->HasWeapons()) {
@@ -4197,42 +4271,93 @@ void CGuiHandler::DrawMapStuff(bool onMiniMap)
 		const bool   drawWeaponArcs = (!onMiniMap && gs->cheatEnabled && globalRendering->drawDebug);
 
 		if (playerAttackCmd || defaultAttackCmd) {
-			// sim|draw PR 44 (prereq D): residual narrow park -- the selected units'
-			// live weapon list / maxRange / pos reads (attack range rings) have no
-			// serving channel. Attack-command-gated -> ~0 engages in steady state.
-			CGame::ScopedExternalSimPause simPause(CGame::SimPauseSite::GUI_DRAW_MAPSTUFF);
+			// sim|draw split (Stage 0): the selected units' attack range rings.
+			const bool splitRunning = SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() && !SimDrawSplit::IsSimParked();
 
-			for (const int unitID: selectedUnitsHandler.selectedUnits) {
-				const CUnit* unit = unitHandler.GetUnit(unitID);
+			if (splitRunning) {
+				// PARK RETIRED: serve pos / maxRange / weapon count / LOS from the
+				// published epoch (UnitRows) and the range curve from trace::EpochView
+				// (SplitServedWeaponRange2D == CWeapon::GetLiveRange2D, already gated
+				// bit-exact epoch-vs-live by the TestRange trace dual-run). No live
+				// CUnit deref, so no sim park.
+				const auto& snap = simSnapshot.Read();
 
-				// PR 27b: draw pass with the sim thread live -- skip a selected
-				// unit the sim killed mid-frame (null handler slot)
-				if (unit == nullptr)
-					continue;
+				for (const int unitID: selectedUnitsHandler.selectedUnits) {
+					if (!snap.Valid(unitID))
+						continue;
+					// handled above
+					if (pointeeUnit != nullptr && unitID == pointeeUnit->id)
+						continue;
 
-				// handled above
-				if (unit == pointeeUnit)
-					continue;
+					const float maxRange = snap.MaxRange(unitID);
+					if (maxRange <= 0.0f)
+						continue;
+					if (snap.WeaponCount(unitID) <= 0)
+						continue;
+					// only consider (armed) static structures for the minimap
+					const UnitDef* uDef = unitDefHandler->GetUnitDefByID(snap.DefID(unitID));
+					if (onMiniMap && (uDef == nullptr || !uDef->IsImmobileUnit()))
+						continue;
 
-				if (unit->maxRange <= 0.0f)
-					continue;
-				if (unit->weapons.empty())
-					continue;
-				// only consider (armed) static structures for the minimap
-				if (onMiniMap && !unit->unitDef->IsImmobileUnit())
-					continue;
+					if (!gu->spectatingFullView && (snap.LosStatus(unitID, gu->myAllyTeam) & LOS_INLOS) == 0)
+						continue;
 
-				if (!gu->spectatingFullView && !unit->IsInLosForAllyTeam(gu->myAllyTeam))
-					continue;
+					const float heightMod = LuaSnapshotServe::SplitServedWeaponHeightMod(unitID, 0);
 
-				glDisable(GL_DEPTH_TEST);
-				glBallisticCircle(unit->weapons[0], { cmdColors.rangeAttack }, 40, unit->pos, { unit->maxRange, 0.0f, mapInfo->map.gravity });
-				glEnable(GL_DEPTH_TEST);
+					glDisable(GL_DEPTH_TEST);
+					glBallisticCircle({ cmdColors.rangeAttack }, 40, snap.Pos(unitID), { maxRange, 0.0f, mapInfo->map.gravity }, heightMod,
+						[unitID](float modHeightDiff) { return LuaSnapshotServe::SplitServedWeaponRange2D(unitID, 0, modHeightDiff); });
+					glEnable(GL_DEPTH_TEST);
 
-				if (!drawWeaponArcs)
-					continue;
+					if (!drawWeaponArcs)
+						continue;
 
-				DrawWeaponArc(unit);
+					// DrawWeaponArc is cheat + drawDebug-only and reads the live weapon
+					// wantedDir / muzzlePos (no served twin) -- keep it behind a narrow
+					// nested park (engages only under cheats+debug, ~never in play).
+					const CUnit* unit = unitHandler.GetUnit(unitID);
+					if (unit == nullptr)
+						continue;
+					CGame::ScopedExternalSimPause simPause(CGame::SimPauseSite::GUI_DRAW_MAPSTUFF);
+					DrawWeaponArc(unit);
+				}
+			} else {
+				// flag-off / sim parked / pregame: the live path (byte-identical to
+				// master). The park is nest-safe and a no-op flag-off / when parked.
+				CGame::ScopedExternalSimPause simPause(CGame::SimPauseSite::GUI_DRAW_MAPSTUFF);
+
+				for (const int unitID: selectedUnitsHandler.selectedUnits) {
+					const CUnit* unit = unitHandler.GetUnit(unitID);
+
+					// PR 27b: draw pass with the sim thread live -- skip a selected
+					// unit the sim killed mid-frame (null handler slot)
+					if (unit == nullptr)
+						continue;
+
+					// handled above
+					if (unit == pointeeUnit)
+						continue;
+
+					if (unit->maxRange <= 0.0f)
+						continue;
+					if (unit->weapons.empty())
+						continue;
+					// only consider (armed) static structures for the minimap
+					if (onMiniMap && !unit->unitDef->IsImmobileUnit())
+						continue;
+
+					if (!gu->spectatingFullView && !unit->IsInLosForAllyTeam(gu->myAllyTeam))
+						continue;
+
+					glDisable(GL_DEPTH_TEST);
+					glBallisticCircle(unit->weapons[0], { cmdColors.rangeAttack }, 40, unit->pos, { unit->maxRange, 0.0f, mapInfo->map.gravity });
+					glEnable(GL_DEPTH_TEST);
+
+					if (!drawWeaponArcs)
+						continue;
+
+					DrawWeaponArc(unit);
+				}
 			}
 		}
 	}

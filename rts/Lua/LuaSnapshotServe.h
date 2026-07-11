@@ -306,6 +306,19 @@ namespace LuaSnapshotServe {
 	// null-unit skip. Main thread (the cache is the held slot's).
 	bool ForEachServedCommand(int unitID, const std::function<bool(int, int, float, float)>& fn);
 
+	// sim|draw split (Stage 0): served draw-side weapon range-ring primitives for
+	// the GuiHandler weapon-range park retirement. Read the published epoch
+	// (trace::EpochView over the weapon rows), never a live CWeapon*. Both mirror
+	// the live glBallisticCircle CWeapon* path bit-for-bit (GetRange2D is already
+	// gated bit-exact epoch-vs-live by the TestRange trace dual-run). Return 0 for
+	// an invalid unit/weapon (the caller then skips the ring, as the live path skips
+	// an empty weapon list).
+	//   SplitServedWeaponRange2D : CWeapon::GetLiveRange2D twin -- GetRange2DT(view,
+	//     0, modHeightDiff); modHeightDiff already folds in weaponDef->heightmod.
+	//   SplitServedWeaponHeightMod : the immutable weaponDef->heightmod for weapon 0.
+	float SplitServedWeaponRange2D(int unitID, int weaponNum, float modHeightDiff);
+	float SplitServedWeaponHeightMod(int unitID, int weaponNum);
+
 	// ---- PR 34 (spatial/list remainder) ----
 	// The remainder of the spatial/list family: per-team plane test + table
 	// centroids over UnitRows, the whole-list projectile/feature twins over

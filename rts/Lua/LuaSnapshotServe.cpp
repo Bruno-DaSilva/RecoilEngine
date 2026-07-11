@@ -10245,6 +10245,36 @@ namespace {
 }
 
 
+// sim|draw split (Stage 0): served draw-side weapon range-ring primitives. Mirror
+// the live glBallisticCircle CWeapon* path (CWeapon::GetLiveRange2D + weaponDef->
+// heightmod) over the published epoch, so the GuiHandler range rings can drop their
+// sim park. GetRange2DT is the exact predicate the sim runs; its epoch-vs-live
+// bit-exactness is already gated by the TestRange trace dual-run (checked=0 mismatch).
+float LuaSnapshotServe::SplitServedWeaponRange2D(int unitID, int weaponNum, float modHeightDiff)
+{
+	const auto& urows = simSnapshot.Read();
+	if (!urows.Valid(unitID))
+		return 0.0f;
+	if (weaponNum < 0 || static_cast<size_t>(weaponNum) >= static_cast<size_t>(urows.weaponCount[unitID]))
+		return 0.0f;
+
+	trace::EpochView view(unitID, weaponNum);
+	return trace::GetRange2DT(view, 0.0f, modHeightDiff);
+}
+
+float LuaSnapshotServe::SplitServedWeaponHeightMod(int unitID, int weaponNum)
+{
+	const auto& urows = simSnapshot.Read();
+	if (!urows.Valid(unitID))
+		return 0.0f;
+	if (weaponNum < 0 || static_cast<size_t>(weaponNum) >= static_cast<size_t>(urows.weaponCount[unitID]))
+		return 0.0f;
+
+	trace::EpochView view(unitID, weaponNum);
+	return view.Def()->heightmod;
+}
+
+
 /******************************************************************************
  * PR 38g (Batch-4 P1): sanctioned-tail serving twins. GetUnitEstimatedPath
  * (UnitRows est-path block), GetFeatureFireTime/SmokeTime (FeatureRows fire/

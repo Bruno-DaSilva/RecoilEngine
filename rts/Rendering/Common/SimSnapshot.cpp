@@ -879,6 +879,7 @@ void SimSnapshot::Resize(UnitRows& rows, size_t maxUnits, int numAllyTeams)
 	rows.height.resize(maxUnits);
 	rows.mass.resize(maxUnits);
 	rows.maxRange.resize(maxUnits);
+	rows.decloakDistance.resize(maxUnits);
 	rows.seismicSignature.resize(maxUnits);
 	rows.experience.resize(maxUnits);
 	rows.limExperience.resize(maxUnits);
@@ -935,6 +936,7 @@ void SimSnapshot::Resize(UnitRows& rows, size_t maxUnits, int numAllyTeams)
 	rows.stockpileNumStockpiled.resize(maxUnits);
 	rows.stockpileNumQueued.resize(maxUnits);
 	rows.stockpileBuildPercent.resize(maxUnits);
+	rows.stockpileIsInterceptor.resize(maxUnits);
 	rows.hasShieldWeapon.resize(maxUnits);
 	rows.shieldWeaponEnabled.resize(maxUnits);
 	rows.shieldWeaponPower.resize(maxUnits);
@@ -1157,6 +1159,7 @@ void SimSnapshot::Extract(UnitRows& rows)
 		rows.height[id] = u->height;
 		rows.mass[id] = u->mass;
 		rows.maxRange[id] = u->maxRange;
+		rows.decloakDistance[id] = u->decloakDistance;
 		rows.seismicSignature[id] = u->seismicSignature;
 		rows.experience[id] = u->experience;
 		rows.limExperience[id] = u->limExperience;
@@ -1284,6 +1287,7 @@ void SimSnapshot::Extract(UnitRows& rows)
 		rows.stockpileNumStockpiled[id] = (stockpile != nullptr) ? stockpile->numStockpiled : 0;
 		rows.stockpileNumQueued[id] = (stockpile != nullptr) ? stockpile->numStockpileQued : 0;
 		rows.stockpileBuildPercent[id] = (stockpile != nullptr) ? stockpile->buildPercent : 0.0f;
+		rows.stockpileIsInterceptor[id] = (stockpile != nullptr) && stockpile->weaponDef->interceptor;
 
 		// GetUnitShieldState default case (static_cast in the live path, so a
 		// non-null shieldWeapon is a CPlasmaRepulser by construction)
@@ -1800,6 +1804,7 @@ void SimSnapshot::ExtractDeadRowsFromShells(UnitRows& urows, FeatureRows& frows,
 		urows.height[id] = u->height;
 		urows.mass[id] = u->mass;
 		urows.maxRange[id] = u->maxRange;
+		urows.decloakDistance[id] = u->decloakDistance;
 		urows.seismicSignature[id] = u->seismicSignature;
 		urows.experience[id] = u->experience;
 		urows.limExperience[id] = u->limExperience;
@@ -1898,6 +1903,7 @@ void SimSnapshot::ExtractDeadRowsFromShells(UnitRows& urows, FeatureRows& frows,
 		urows.stockpileNumStockpiled[id] = 0;
 		urows.stockpileNumQueued[id] = 0;
 		urows.stockpileBuildPercent[id] = 0.0f;
+		urows.stockpileIsInterceptor[id] = 0;
 		urows.hasShieldWeapon[id] = 0;
 		urows.shieldWeaponEnabled[id] = 0;
 		urows.shieldWeaponPower[id] = 0.0f;

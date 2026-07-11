@@ -641,6 +641,7 @@ void SnapshotDiffGate::CheckBoundary()
 				BitEqual(rows.height[i], u->height) &&
 				BitEqual(rows.mass[i], u->mass) &&
 				BitEqual(rows.maxRange[i], u->maxRange) &&
+				BitEqual(rows.decloakDistance[i], u->decloakDistance) &&
 				BitEqual(rows.seismicSignature[i], u->seismicSignature) &&
 				BitEqual(rows.armoredMultiple[i], u->armoredMultiple) &&
 				BitEqual(rows.experience[i], u->experience) &&
@@ -1899,6 +1900,7 @@ void SnapshotDiffGate::CheckWeaponRows()
 				(rows.stockpileNumStockpiled[i] == (stockpile != nullptr ? stockpile->numStockpiled : 0)) &&
 				(rows.stockpileNumQueued[i] == (stockpile != nullptr ? stockpile->numStockpileQued : 0)) &&
 				BitEqual(rows.stockpileBuildPercent[i], (stockpile != nullptr ? stockpile->buildPercent : 0.0f)) &&
+				((rows.stockpileIsInterceptor[i] != 0) == (stockpile != nullptr && stockpile->weaponDef->interceptor)) &&
 				((rows.hasShieldWeapon[i] != 0) == (shield != nullptr)) &&
 				((rows.shieldWeaponEnabled[i] != 0) == (shield != nullptr ? shield->IsEnabled() : false)) &&
 				BitEqual(rows.shieldWeaponPower[i], (shield != nullptr ? shield->GetCurPower() : 0.0f));

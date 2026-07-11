@@ -77,7 +77,14 @@ static constexpr float (*weaponRangeFuncs[])(const CWeapon*, const WeaponDef*, f
 };
 
 namespace {
-	std::vector<VA_TYPE_0> glBallisticCircleImpl(const CWeapon* weapon, const WeaponDef* weaponDef, uint32_t resolution, const float3& center, const float3& params)
+	// Core ring builder. range2D(modHeightDiff) returns the terrain-adjusted 2D
+	// weapon range at that height delta; heightMod is weaponDef->heightmod (the
+	// caller pre-multiplies the def scalar into the functor's argument). This lets
+	// three callers share one binary-search loop: the live weapon (GetLiveRange2D),
+	// the static def (GetStaticRange2D), and -- under the sim|draw split -- the
+	// published epoch (trace::GetRange2DT over served weapon rows, GuiHandler).
+	template<typename RangeFn>
+	std::vector<VA_TYPE_0> glBallisticCircleImpl(uint32_t resolution, const float3& center, const float3& params, float heightMod, RangeFn&& range2D)
 	{
 		static constexpr int resDiv = 50;
 
@@ -86,9 +93,6 @@ namespace {
 
 		const float radius = params.x;
 		const float slope = params.y;
-
-		const float wdHeightMod = weaponDef->heightmod;
-		const float wdProjGravity = mix(params.z, -weaponDef->myGravity, weaponDef->myGravity != 0.0f);
 
 		for_mt(0, resolution, [&](const int i) {
 			const float radians = math::TWOPI * (float)i / (float)resolution;
@@ -104,7 +108,7 @@ namespace {
 			pos.y = CGround::GetHeightAboveWater(pos.x, pos.z, false);
 
 			float posHeightDelta = (pos.y - center.y) * 0.5f;
-			float posWeaponRange = weaponRangeFuncs[weapon != nullptr](weapon, weaponDef, posHeightDelta* wdHeightMod, wdProjGravity);
+			float posWeaponRange = range2D(posHeightDelta * heightMod);
 			float rangeIncrement = (maxWeaponRange -= (posHeightDelta * slope)) * 0.5f;
 			float ydiff = 0.0f;
 
@@ -127,7 +131,7 @@ namespace {
 				pos.y = newY;
 
 				posHeightDelta = pos.y - center.y;
-				posWeaponRange = weaponRangeFuncs[weapon != nullptr](weapon, weaponDef, posHeightDelta* wdHeightMod, wdProjGravity);
+				posWeaponRange = range2D(posHeightDelta * heightMod);
 			}
 
 			pos.x = center.x + (sinR * posWeaponRange);
@@ -138,6 +142,19 @@ namespace {
 		});
 
 		return vertices;
+	}
+
+	// live/static backend: dispatch through weaponRangeFuncs (byte-identical to the
+	// pre-refactor body -- the def path still consumes wdProjGravity, the live path
+	// ignores it and reads the weapon's own gravity via GetRange2D).
+	std::vector<VA_TYPE_0> glBallisticCircleImpl(const CWeapon* weapon, const WeaponDef* weaponDef, uint32_t resolution, const float3& center, const float3& params)
+	{
+		const float wdHeightMod = weaponDef->heightmod;
+		const float wdProjGravity = mix(params.z, -weaponDef->myGravity, weaponDef->myGravity != 0.0f);
+		const auto rangeFn = weaponRangeFuncs[weapon != nullptr];
+
+		return glBallisticCircleImpl(resolution, center, params, wdHeightMod,
+			[&](float modHeightDiff) { return rangeFn(weapon, weaponDef, modHeightDiff, wdProjGravity); });
 	}
 }
 
@@ -198,6 +215,28 @@ void glBallisticCircle(const WeaponDef* weaponDef, const SColor& color, uint32_t
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	glBallisticCircle(nullptr, weaponDef, color, resolution, center, params);
+}
+
+void glBallisticCircle(const SColor& color, uint32_t resolution, const float3& center, const float3& params,
+                       float heightMod, const std::function<float(float modHeightDiff)>& range2D)
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	const float4 fColor = color;
+	if (fColor.a == 0.0f)
+		return;
+
+	auto& rb = RenderBuffer::GetTypedRenderBuffer<VA_TYPE_0>();
+	rb.AssertSubmission();
+
+	auto vertices = glBallisticCircleImpl(resolution, center, params, heightMod, range2D);
+	rb.AddVertices(vertices);
+
+	auto& sh = rb.GetShader();
+	sh.Enable();
+	sh.SetUniform("ucolor", fColor.x, fColor.y, fColor.z, fColor.w);
+	rb.DrawArrays(GL_LINE_LOOP);
+	sh.SetUniform("ucolor", 1.0f, 1.0f, 1.0f, 1.0f);
+	sh.Disable();
 }
 
 void glBallisticCircleLua(const CWeapon* weapon, const SColor& color, uint32_t resolution, const float3& center, const float3& params)

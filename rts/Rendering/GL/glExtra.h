@@ -3,6 +3,7 @@
 #pragma once
 
 #include <tuple>
+#include <functional>
 
 #include "myGL.h"
 #include "VAO.h"
@@ -26,6 +27,14 @@ extern void glBallisticCircle(const CWeapon* weapon     , const SColor& color, u
 extern void glBallisticCircle(const WeaponDef* weaponDef, const SColor& color, uint32_t resolution, const float3& center, const float3& params);
 extern void glBallisticCircleLua(const CWeapon* weapon, const SColor& color, uint32_t resolution, const float3& center, const float3& params);
 extern void glBallisticCircleLua(const WeaponDef* weaponDef, const SColor& color, uint32_t resolution, const float3& center, const float3& params);
+
+// sim|draw split (Stage 0 range-ring park retirement): ring from a served epoch
+// range function, no live CWeapon*. range2D(modHeightDiff) returns the 2D weapon
+// range at that height delta (draw-side, over the published snapshot); heightMod is
+// the immutable weaponDef->heightmod (reached via the served weaponDefID). The live
+// weapon overload above stays the flag-off / non-split path (byte-identical).
+extern void glBallisticCircle(const SColor& color, uint32_t resolution, const float3& center, const float3& params,
+                              float heightMod, const std::function<float(float modHeightDiff)>& range2D);
 
 using DrawVolumeFunc = void (*)(const void* data);
 extern void glDrawVolume(DrawVolumeFunc drawFunc, const void* data);
