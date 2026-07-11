@@ -587,7 +587,7 @@ float CGround::SimTrajectoryGroundColDist(const float3& trajStartPos, const floa
 	return (math::sqrt(pos.SqDistance2D(trajStartPos)));
 }
 
-float CGround::TrajectoryGroundCol(const float3& trajStartPos, const float3& trajTargetDir, float length, float linCoeff, float qdrCoeff)
+float CGround::TrajectoryGroundCol(const float3& trajStartPos, const float3& trajTargetDir, float length, float linCoeff, float qdrCoeff, bool synced)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	// trajTargetDir should be the normalized xz-vector from <trajStartPos> to the target
@@ -608,10 +608,10 @@ float CGround::TrajectoryGroundCol(const float3& trajStartPos, const float3& tra
 		const float3 pos = (trajStartPos + dir * dist) + (alt * dist * dist);
 
 		#if 1
-		if (GetApproximateHeight(pos) > pos.y)
+		if (GetApproximateHeight(pos, synced) > pos.y)
 			return dist;
 		#else
-		if (GetHeightReal(pos) > pos.y)
+		if (GetHeightReal(pos, synced) > pos.y)
 			return dist;
 		#endif
 	}

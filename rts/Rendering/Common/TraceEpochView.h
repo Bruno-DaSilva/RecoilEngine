@@ -192,10 +192,10 @@ struct EpochView {
 	float3 TargetBorderPos(UnitRef u, const float3& rawPos, const float3& rawDir) const;
 	float TraceRayNoEnemyNoGroundDist(const float3& srcPos, const float3& dir, float length, uint32_t avoidFlags) const;
 	bool TestCone(const float3& from, const float3& dir, float length, float spread, uint32_t avoidFlags) const;
-	// remaining ballistic primitives (STUB -> "clear"; wired in stage 4b-3)
-	float TrajectoryGroundCol(const float3&, const float3&, float, float, float) const { return -1.0f; }       // FIXME(4b-3)
-	bool TestTrajectoryCone(const float3&, const float3&, float, float, float, float, uint32_t) const { return false; } // FIXME(4b-3)
-	bool MissileTrajectoryLOF(const float3&, const float3&, const Target&) const { return true; }              // FIXME(4b-3)
+	// ballistic primitives (stage 4b-3): defined OUT-OF-LINE in LuaSnapshotServe.cpp
+	float TrajectoryGroundCol(const float3& srcPos, const float3& targetVec, float dist, float linCoeff, float qdrCoeff) const;
+	bool TestTrajectoryCone(const float3& srcPos, const float3& targetVec, float dist, float linCoeff, float qdrCoeff, float spread, uint32_t avoidFlags) const;
+	bool MissileTrajectoryLOF(const float3& srcPos, const float3& tgtPos, const Target& trg) const;
 };
 
 } // namespace trace

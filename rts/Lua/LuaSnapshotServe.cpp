@@ -8031,6 +8031,228 @@ bool trace::EpochView::TestCone(const float3& from, const float3& dir, float len
 }
 
 
+// ===================================================================
+// TRACE REHOST (stage 4b-3): ballistic HaveFreeLineOfFire primitives (Cannon
+// trajectory + Missile pursuit-curve), object-free over the demand piece cache.
+// ===================================================================
+namespace {
+
+// object-free mirror of TestTrajectoryConeHelper (TraceRay.cpp:93); coneSize is
+// vestigial in the live body (the ret is decided by the DetectHit chord check).
+bool EpochTestTrajectoryConeHelper(const float3& tstPos, const float3& tstDir, float length,
+	float linear, float quadratic, const TraceCandidate& tc)
+{
+	const CollisionVolume* cv = tc.cv;
+	const float3& off = cv->GetOffsets();
+	const float3 cvWorldPos = tc.midPos + (tc.transform.GetZ() * off.z) - (tc.transform.GetX() * off.x) + (tc.transform.GetY() * off.y);
+
+	const float3 cvRelVec = cvWorldPos - tstPos;
+	const float cvRelDst = std::clamp(cvRelVec.dot(tstDir), 0.0f, length);
+
+	const float3 hitPos = (tstPos + tstDir * cvRelDst) + (UpVector * (quadratic * cvRelDst * cvRelDst + linear * cvRelDst));
+
+	CollisionQuery cq;
+	if ((2 * quadratic * cvRelDst + linear) > 0) {
+		return CCollisionHandler::DetectHit(tc.midPos, tc.relMidPos, tc.inVoid, cv, tc.transform, tstPos, hitPos, &cq, true);
+	}
+	const float3 endPos = (tstPos + tstDir * length) + (UpVector * (quadratic * length * length + linear * length));
+	return CCollisionHandler::DetectHit(tc.midPos, tc.relMidPos, tc.inVoid, cv, tc.transform, hitPos, endPos, &cq, true);
+}
+
+} // namespace
+
+
+float trace::EpochView::TrajectoryGroundCol(const float3& srcPos, const float3& targetVec, float dist, float linCoeff, float qdrCoeff) const
+{
+	// unsynced heightmap (synced=false), the placement/ground precedent
+	return CGround::TrajectoryGroundCol(srcPos, targetVec, dist, linCoeff, qdrCoeff, false);
+}
+
+
+bool trace::EpochView::TestTrajectoryCone(const float3& from, const float3& targetVec, float dist, float linCoeff, float qdrCoeff, float spread, uint32_t avoidFlags) const
+{
+	// TraceRay::TestTrajectoryCone -- broadphase is the plain XZ ray (NOT widened);
+	// the per-candidate helper does the parabola/chord test
+	const bool scanForAllies   = ((avoidFlags & Collision::NOFRIENDLIES) == 0);
+	const bool scanForNeutrals = ((avoidFlags & Collision::NONEUTRALS  ) == 0);
+	const bool scanForFeatures = ((avoidFlags & Collision::NOFEATURES  ) == 0);
+
+	static std::vector<int> candUnits;
+	static std::vector<int> candFeatures;
+	snapshotPickGrid.QueryRay(from, targetVec, dist, 0.0f, candUnits, candFeatures);
+
+	if (scanForAllies || scanForNeutrals) {
+		for (const int id : candUnits) {
+			if (id == ownerID)
+				continue;
+			if ((urows.BlockingBits(id) & QUADMAPRAYS_BIT) == 0)
+				continue;
+			bool doTest = false;
+			doTest |= (scanForAllies   && urows.AllyTeam(id) == ownerAllyTeam);
+			doTest |= (scanForNeutrals && urows.Neutral(id));
+			if (!doTest)
+				continue;
+			TraceCandidate tc;
+			if (!ResolveUnitTraceCandidate(id, tc))
+				continue;
+			if (EpochTestTrajectoryConeHelper(from, targetVec, dist, linCoeff, qdrCoeff, tc))
+				return true;
+		}
+	}
+
+	if (scanForFeatures) {
+		const SimSnapshot::FeatureRows& frows = simSnapshot.ReadFeatures();
+		for (const int id : candFeatures) {
+			if ((frows.BlockingBits(id) & QUADMAPRAYS_BIT) == 0)
+				continue;
+			TraceCandidate tc;
+			if (!ResolveFeatureTraceCandidate(id, tc))
+				continue;
+			if (EpochTestTrajectoryConeHelper(from, targetVec, dist, linCoeff, qdrCoeff, tc))
+				return true;
+		}
+	}
+
+	return false;
+}
+
+
+bool trace::EpochView::MissileTrajectoryLOF(const float3& srcPos, const float3& tgtPos, const Target& trg) const
+{
+	// CMissileLauncher::TrajectoryLOF (MissileLauncher.cpp:80) over the epoch. The
+	// caller only reaches here with trajectoryHeight > 0; the pursuit-curve scalar
+	// integration is verbatim, ground/object scans go object-free.
+	const WeaponDef* wd = Def();
+	const uint32_t avoidFlags = AvoidFlags();
+
+	float3 targetVec = (tgtPos - srcPos) * XZVector;
+	const float xzTargetDist = targetVec.LengthNormalize();
+	if (xzTargetDist == 0.0f)
+		return true;
+
+	std::array<float, 9> mdist = {};
+	std::array<float, 9> mheight = {};
+	mdist[0] = 0; mheight[0] = 0;
+	mdist[8] = xzTargetDist; mheight[8] = (tgtPos.y - srcPos.y);
+
+	const float maxSpeed = wd->projectilespeed;
+	const float pSpeed = wd->startvelocity;
+	const float pAcc = wd->weaponacceleration;
+	float curspeed = wd->startvelocity;
+	float dist = srcPos.distance(tgtPos);
+	const float rt = (tgtPos - srcPos).Length2D();
+	const float yt = (tgtPos.y - srcPos.y);
+	const float eH = (dist * wd->trajectoryHeight);
+	const float eHT = math::truncf(dist / maxSpeed);
+	const float hstep = eHT / 8.0f;
+
+	// close target (impact within 8 frames): fall back to the base LOF (== the
+	// TestTrajectoryCone path CWeapon::HaveFreeLineOfFire routes through)
+	if (hstep < 1.0f)
+		return trace::HaveFreeLineOfFireBaseT(*this, srcPos, tgtPos, trg);
+
+	float drdt = 0.0f, dydt = 0.0f, rt_est = 0.0f, yt_est = 0.0f, drdt_est = 0.0f, dydt_est = 0.0f;
+	float t = 0.0f;
+	for (uint32_t i = 1; i < 8; i++) {
+		dist = math::sqrt(math::pow((rt - mdist[i - 1]), 2) + math::pow((yt + eH * (1 - t / eHT) - mheight[i - 1]), 2));
+		curspeed = std::min((pSpeed + pAcc * t), maxSpeed);
+		drdt = curspeed * (rt - mdist[i - 1]) / dist;
+		dydt = curspeed * (yt + eH * (1 - t / eHT) - mheight[i - 1]) / dist;
+		rt_est = mdist[i - 1] + hstep * drdt;
+		yt_est = mheight[i - 1] + hstep * dydt;
+		t = t + hstep;
+		dist = math::sqrt(math::pow((rt - rt_est), 2) + math::pow((yt + eH * (1 - t / eHT) - yt_est), 2));
+		curspeed = std::min((pSpeed + pAcc * t), maxSpeed);
+		drdt_est = curspeed * (rt - rt_est) / dist;
+		dydt_est = curspeed * (yt + eH * (1 - t / eHT) - yt_est) / dist;
+		mdist[i] = mdist[i - 1] + (hstep * 0.5f) * (drdt + drdt_est);
+		mheight[i] = mheight[i - 1] + (hstep * 0.5f) * (dydt + dydt_est);
+	}
+
+	// ground collision (unsynced heightmap)
+	uint32_t ii = 1;
+	float delta1 = mdist[ii] - mdist[ii - 1];
+	float delta2 = 0.0f, ratio = 0.0f, hitheight = 0.0f;
+	if ((avoidFlags & Collision::NOGROUND) == 0) {
+		for (float dd = 0; dd < xzTargetDist - DamageAreaOfEffect(); dd += SQUARE_SIZE) {
+			while (dd > mdist[ii]) {
+				ii = ii + 1;
+				delta1 = mdist[ii] - mdist[ii - 1];
+			}
+			delta2 = dd - mdist[ii - 1];
+			ratio = delta2 / delta1;
+			hitheight = mheight[ii - 1] + ratio * (mheight[ii] - mheight[ii - 1]);
+			if (CGround::GetApproximateHeight(srcPos + targetVec * dd, false) > (srcPos.y + hitheight))
+				return false;
+		}
+	}
+
+	// object collision (chord check per candidate along the XZ ray)
+	static std::vector<int> candUnits;
+	static std::vector<int> candFeatures;
+	snapshotPickGrid.QueryRay(srcPos, targetVec, xzTargetDist, 0.0f, candUnits, candFeatures);
+
+	const bool scanForAllies   = ((avoidFlags & Collision::NOFRIENDLIES) == 0);
+	const bool scanForNeutrals = ((avoidFlags & Collision::NONEUTRALS  ) == 0);
+	const bool scanForFeatures = ((avoidFlags & Collision::NOFEATURES  ) == 0);
+
+	const auto chordCheck = [&](const TraceCandidate& tc) -> bool {
+		const CollisionVolume* cv = tc.cv;
+		const float3& off = cv->GetOffsets();
+		const float3 cvWorldPos = tc.midPos + (tc.transform.GetZ() * off.z) - (tc.transform.GetX() * off.x) + (tc.transform.GetY() * off.y);
+		const float cvRelDst = std::clamp((cvWorldPos - srcPos).dot(targetVec), 0.0f, xzTargetDist);
+		CollisionQuery cq;
+		for (int i = 1; i < 9; i++) {
+			if (cvRelDst < mdist[i]) {
+				const float d1 = mdist[i] - mdist[i - 1];
+				const float d2 = cvRelDst - mdist[i - 1];
+				const float rr = d2 / d1;
+				const float hh = mheight[i - 1] + rr * (mheight[i] - mheight[i - 1]);
+				const float3 hitPos = srcPos + targetVec * cvRelDst + UpVector * hh;
+				if (mheight[i] > mheight[i - 1])
+					return CCollisionHandler::DetectHit(tc.midPos, tc.relMidPos, tc.inVoid, cv, tc.transform, srcPos, hitPos, &cq, true);
+				return CCollisionHandler::DetectHit(tc.midPos, tc.relMidPos, tc.inVoid, cv, tc.transform, hitPos, tgtPos, &cq, true);
+			}
+		}
+		return false;
+	};
+
+	if (scanForAllies || scanForNeutrals) {
+		for (const int id : candUnits) {
+			if (id == ownerID)
+				continue;
+			if ((urows.BlockingBits(id) & QUADMAPRAYS_BIT) == 0)
+				continue;
+			bool doTest = false;
+			doTest |= (scanForAllies   && urows.AllyTeam(id) == ownerAllyTeam);
+			doTest |= (scanForNeutrals && urows.Neutral(id));
+			if (!doTest)
+				continue;
+			TraceCandidate tc;
+			if (!ResolveUnitTraceCandidate(id, tc))
+				continue;
+			if (chordCheck(tc))
+				return false;
+		}
+	}
+
+	if (scanForFeatures) {
+		const SimSnapshot::FeatureRows& frows = simSnapshot.ReadFeatures();
+		for (const int id : candFeatures) {
+			if ((frows.BlockingBits(id) & QUADMAPRAYS_BIT) == 0)
+				continue;
+			TraceCandidate tc;
+			if (!ResolveFeatureTraceCandidate(id, tc))
+				continue;
+			if (chordCheck(tc))
+				return false;
+		}
+	}
+
+	return true;
+}
+
+
 // ---- unit piece/script twins (mirror LuaSyncedRead, ParseTypedUnit gate) ----
 int LuaSnapshotServe::GetUnitRootPiece(lua_State* L, const char* caller)   { return ServeRootPiece(L, ParseTypedUnitPieceSlot(L, caller)); }
 int LuaSnapshotServe::GetUnitPieceMap(lua_State* L, const char* caller)    { return ServePieceMap(L, ParseTypedUnitPieceSlot(L, caller)); }
