@@ -172,11 +172,7 @@ struct EpochView {
 	// CUnit::GetErrorPos(allyteam, aiming=true) == aimPos + GetErrorVector(allyteam)
 	float3 UnitErrorPos(UnitRef u) const { return urows.aimPos[u] + urows.ErrorVector(u, ownerAllyTeam); }
 
-	// ------- trace primitives (STUB stage 4a; bit-exact in stage 4b) -------
-	// TargetBorderPos returns rawPos verbatim, which is EXACT whenever
-	// weaponDef->targetBorder == 0 (the early-out in the live body); non-zero
-	// targetBorder mismatches until 4b wires the object-free DetectHit + colvol.
-	float3 TargetBorderPos(UnitRef /*u*/, const float3& rawPos, const float3& /*rawDir*/) const { return rawPos; }
+	// ---- trace primitives ----
 	// ground-only ray march (LiveView routes TraceRay(~NOGROUND) here): object scans
 	// are all masked off, so this is exactly TraceRay's ground leg -- return the
 	// ground-hit distance if the ray hits ground within [0,length], else length.
@@ -189,12 +185,17 @@ struct EpochView {
 			traceLength = groundLength;
 		return traceLength;
 	}
-	// the remaining four return "clear line of fire" (no obstruction found)
-	float TraceRayNoEnemyNoGroundDist(const float3&, const float3&, float length, uint32_t) const { return length; } // FIXME(4b-2)
-	bool TestCone(const float3&, const float3&, float, float, uint32_t) const { return false; }                // FIXME(4b)
-	float TrajectoryGroundCol(const float3&, const float3&, float, float, float) const { return -1.0f; }       // FIXME(4b)
-	bool TestTrajectoryCone(const float3&, const float3&, float, float, float, float, uint32_t) const { return false; } // FIXME(4b)
-	bool MissileTrajectoryLOF(const float3&, const float3&, const Target&) const { return true; }              // FIXME(4b)
+	// object-scan primitives (stage 4b-2): DEFINED OUT-OF-LINE in LuaSnapshotServe.cpp
+	// where the demand piece-cache colvols (GetUnitPieceSlot/GetFeaturePieceSlot),
+	// the pick grid, and the object-free CCollisionHandler live. Reconstruct the
+	// synced transform from the rows; piece-tree colvol candidates are deferred.
+	float3 TargetBorderPos(UnitRef u, const float3& rawPos, const float3& rawDir) const;
+	float TraceRayNoEnemyNoGroundDist(const float3& srcPos, const float3& dir, float length, uint32_t avoidFlags) const;
+	bool TestCone(const float3& from, const float3& dir, float length, float spread, uint32_t avoidFlags) const;
+	// remaining ballistic primitives (STUB -> "clear"; wired in stage 4b-3)
+	float TrajectoryGroundCol(const float3&, const float3&, float, float, float) const { return -1.0f; }       // FIXME(4b-3)
+	bool TestTrajectoryCone(const float3&, const float3&, float, float, float, float, uint32_t) const { return false; } // FIXME(4b-3)
+	bool MissileTrajectoryLOF(const float3&, const float3&, const Target&) const { return true; }              // FIXME(4b-3)
 };
 
 } // namespace trace

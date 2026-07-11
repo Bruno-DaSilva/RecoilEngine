@@ -7776,6 +7776,261 @@ void LuaSnapshotServe::RefreshPieces(int ringSlot, uint64_t targetEpoch)
 }
 
 
+// ===================================================================
+// TRACE REHOST (stage 4b-2): the object-scan trace::EpochView primitives, defined
+// here where the demand piece-cache colvols (GetUnitPieceSlot/GetFeaturePieceSlot),
+// the draw-side pick grid, and the object-free CCollisionHandler are all in scope.
+// A candidate's real collision volume comes from the demand piece cache; its
+// SYNCED transform is reconstructed from the snapshot rows (== ComposeMatrix). A
+// candidate whose colvol is not (yet) captured is skipped; per-piece hit volumes
+// (DefaultToPieceTree) are deferred in the object-free DetectHit (the caller then
+// finds no hit) -- documented residual until the per-piece trace path lands.
+// ===================================================================
+namespace {
+
+struct TraceCandidate {
+	const CollisionVolume* cv = nullptr;
+	CMatrix44f transform;
+	float3 midPos;
+	float3 relMidPos;
+	bool inVoid = false;
+};
+
+// resolve a unit candidate's real colvol + synced transform (CUnit::GetTransformMatrix
+// == ComposeMatrix(pos) == CMatrix44f(pos, -rightdir, updir, frontdir))
+bool ResolveUnitTraceCandidate(int id, TraceCandidate& out)
+{
+	const SimSnapshot::UnitRows& u = simSnapshot.Read();
+	if (!u.Valid(id))
+		return false;
+	const ObjectPieceSlot* slot = GetUnitPieceSlot(id);
+	if (slot == nullptr || !slot->hasColVol)
+		return false;
+	out.cv = &slot->colVol;
+	out.transform = CMatrix44f(u.Pos(id), -u.Rightdir(id), u.Updir(id), u.Frontdir(id));
+	out.midPos = u.MidPos(id);
+	out.relMidPos = u.relMidPos[id];
+	out.inVoid = u.InVoid(id);
+	return true;
+}
+
+// CFeature::GetTransformMatrix() == transMatrix; its columns are the stored
+// matX/Y/Zdir (fm.GetX/Y/Z) and its translation column is pos
+bool ResolveFeatureTraceCandidate(int id, TraceCandidate& out)
+{
+	const SimSnapshot::FeatureRows& f = simSnapshot.ReadFeatures();
+	if (!f.Valid(id))
+		return false;
+	const ObjectPieceSlot* slot = GetFeaturePieceSlot(id);
+	if (slot == nullptr || !slot->hasColVol)
+		return false;
+	out.cv = &slot->colVol;
+	out.transform = CMatrix44f(f.Pos(id), f.MatXdir(id), f.MatYdir(id), f.MatZdir(id));
+	out.midPos = f.MidPos(id);
+	out.relMidPos = f.relMidPos[id];
+	out.inVoid = f.InVoid(id);
+	return true;
+}
+
+// object-free mirror of TestConeHelper (TraceRay.cpp:44); no unsynced-debug block.
+// The live helper passes lmp=nullptr so GetPointSurfaceDistance always uses the
+// object transform (not per-piece), which we reconstruct here.
+bool EpochTestConeHelper(const float3& tstPos, const float3& tstDir, float length, float spread, const TraceCandidate& tc)
+{
+	const CollisionVolume* cv = tc.cv;
+	const float3& off = cv->GetOffsets();
+
+	// GetWorldSpacePos(obj) = midPos + GetObjectSpaceVec(offsets); GetObjectSpaceVec
+	// reconstructed from the transform columns (m == ComposeMatrix: -rightdir=col0)
+	const float3 cvWorldPos = tc.midPos + (tc.transform.GetZ() * off.z) - (tc.transform.GetX() * off.x) + (tc.transform.GetY() * off.y);
+
+	const float3 cvRelVec = cvWorldPos - tstPos;
+	const float cvRelDst = std::clamp(cvRelVec.dot(tstDir), 0.0f, length);
+	const float coneSize = cvRelDst * spread + 1.0f;
+
+	const float3 hitPos = tstPos + tstDir * cvRelDst;
+
+	// GetPointSurfaceDistance(obj, lmp=nullptr, pos): vm = transform; +relMidPos;
+	// +offsets; invert; then the matrix-space overload
+	CMatrix44f vm = tc.transform;
+	vm.Translate(tc.relMidPos);
+	vm.Translate(off);
+	vm.InvertAffineInPlace();
+
+	bool ret = false;
+	ret = ret || ((cv->GetPointSurfaceDistance(vm, tstPos) - coneSize) <= 0.0f);
+	ret = ret || ((cv->GetPointSurfaceDistance(vm, hitPos) - coneSize) <= 0.0f);
+	return ret;
+}
+
+// CSTATE_BIT_QUADMAPRAYS is blockingBits slot 3 (SimSnapshot PackBlockingBits)
+constexpr uint8_t QUADMAPRAYS_BIT = (1u << 3);
+
+} // namespace
+
+
+float3 trace::EpochView::TargetBorderPos(UnitRef u, const float3& rawPos, const float3& rawDir) const
+{
+	// CWeapon::GetTargetBorderPos (Weapon.cpp:893) over the epoch
+	float3 targetBorderPos = rawPos;
+
+	const WeaponDef* wd = Def();
+	if (wd->targetBorder == 0.0f)
+		return targetBorderPos;
+	if (u < 0 || !urows.Valid(u))              // targetUnit == nullptr
+		return targetBorderPos;
+	if (rawDir == ZeroVector)
+		return targetBorderPos;
+
+	TraceCandidate tc;
+	if (!ResolveUnitTraceCandidate(u, tc))     // colvol not captured -> no adjustment
+		return targetBorderPos;
+
+	const float tbScale = math::fabsf(wd->targetBorder);
+	const float3 weaponMuzzlePos = WeaponMuzzlePos();
+
+	CollisionVolume tmpColVol = *tc.cv;
+	CollisionQuery  tmpColQry;
+
+	tmpColVol.RescaleAxes(float3(tbScale, tbScale, tbScale));
+	tmpColVol.SetBoundingRadius();
+	tmpColVol.SetUseContHitTest(false);
+	tmpColVol.SetDefaultToPieceTree(false);
+	tmpColVol.SetIgnoreHits(false);
+
+	// weapon muzzle inside the (scaled) volume -> border collapses to the muzzle
+	if (CCollisionHandler::DetectHit(tc.midPos, tc.relMidPos, tc.inVoid, &tmpColVol, tc.transform, weaponMuzzlePos, ZeroVector, nullptr))
+		return (targetBorderPos = weaponMuzzlePos);
+
+	tmpColVol.SetUseContHitTest(true);
+	tmpColVol.SetDefaultToPieceTree(tc.cv->DefaultToPieceTree());
+	tmpColVol.SetIgnoreHits(tc.cv->IgnoreHits());
+
+	const float3 targetOffset = rawDir * (tmpColVol.GetBoundingRadius() * 2.0f);
+	const float3 targetRayPos = rawPos + targetOffset;
+
+	if (CCollisionHandler::DetectHit(tc.midPos, tc.relMidPos, tc.inVoid, &tmpColVol, tc.transform, weaponMuzzlePos, targetRayPos, &tmpColQry) && tmpColQry.AllHit())
+		targetBorderPos = mix(tmpColQry.GetIngressPos(), tmpColQry.GetEgressPos(), wd->targetBorder <= 0.0f);
+
+	return targetBorderPos;
+}
+
+
+float trace::EpochView::TraceRayNoEnemyNoGroundDist(const float3& srcPos, const float3& dir, float length, uint32_t avoidFlags) const
+{
+	// LiveView routes TraceRay(srcPos, dir, length, avoidFlags | NOENEMIES | NOGROUND,
+	// owner, ...): object scan only (no ground, no enemies), closest-hit length.
+	const uint32_t traceFlags = avoidFlags | Collision::NOENEMIES | Collision::NOGROUND;
+	const bool scanForAllies   = ((traceFlags & Collision::NOFRIENDLIES) == 0);
+	const bool scanForFeatures = ((traceFlags & Collision::NOFEATURES  ) == 0);
+	const bool scanForNeutrals = ((traceFlags & Collision::NONEUTRALS  ) == 0);
+	const bool scanForCloaked  = ((traceFlags & Collision::NOCLOAKED   ) == 0);
+	const bool scanForAnyUnits = scanForAllies || scanForNeutrals || scanForCloaked;
+
+	if (dir == ZeroVector)
+		return -1.0f;
+
+	float traceLength = length;
+	if (!scanForFeatures && !scanForAnyUnits)
+		return traceLength;
+
+	static std::vector<int> candUnits;
+	static std::vector<int> candFeatures;
+	snapshotPickGrid.QueryRay(srcPos, dir, traceLength, 0.0f, candUnits, candFeatures);
+
+	const SimSnapshot::FeatureRows& frows = simSnapshot.ReadFeatures();
+	CollisionQuery cq;
+
+	if (scanForFeatures) {
+		for (const int id : candFeatures) {
+			if ((frows.BlockingBits(id) & QUADMAPRAYS_BIT) == 0)
+				continue;
+			TraceCandidate tc;
+			if (!ResolveFeatureTraceCandidate(id, tc))
+				continue;
+			if (CCollisionHandler::DetectHit(tc.midPos, tc.relMidPos, tc.inVoid, tc.cv, tc.transform, srcPos, srcPos + dir * traceLength, &cq, true)) {
+				const float len = cq.GetHitPosDist(srcPos, dir);
+				if (len < traceLength)
+					traceLength = len;
+			}
+		}
+	}
+
+	if (scanForAnyUnits) {
+		for (const int id : candUnits) {
+			if (id == ownerID)
+				continue;
+			if ((urows.BlockingBits(id) & QUADMAPRAYS_BIT) == 0)
+				continue;
+			const int uAllyTeam = urows.AllyTeam(id);
+			bool doHitTest = false;
+			doHitTest |= (scanForAllies   && uAllyTeam == ownerAllyTeam);
+			doHitTest |= (scanForNeutrals && urows.Neutral(id));
+			doHitTest |= (scanForCloaked  && urows.IsCloaked(id));
+			if (!doHitTest)
+				continue;
+			TraceCandidate tc;
+			if (!ResolveUnitTraceCandidate(id, tc))
+				continue;
+			if (CCollisionHandler::DetectHit(tc.midPos, tc.relMidPos, tc.inVoid, tc.cv, tc.transform, srcPos, srcPos + dir * traceLength, &cq, true)) {
+				const float len = cq.GetHitPosDist(srcPos, dir);
+				if (len < traceLength)
+					traceLength = len;
+			}
+		}
+	}
+
+	return traceLength;
+}
+
+
+bool trace::EpochView::TestCone(const float3& from, const float3& dir, float length, float spread, uint32_t avoidFlags) const
+{
+	// TraceRay::TestCone(from, dir, length, spread, ownerAllyTeam, avoidFlags, owner)
+	const bool scanForAllies   = ((avoidFlags & Collision::NOFRIENDLIES) == 0);
+	const bool scanForNeutrals = ((avoidFlags & Collision::NONEUTRALS  ) == 0);
+	const bool scanForFeatures = ((avoidFlags & Collision::NOFEATURES  ) == 0);
+
+	static std::vector<int> candUnits;
+	static std::vector<int> candFeatures;
+	snapshotPickGrid.QueryCone(from, dir, length, spread, candUnits, candFeatures);
+
+	if (scanForAllies || scanForNeutrals) {
+		for (const int id : candUnits) {
+			if (id == ownerID)
+				continue;
+			if ((urows.BlockingBits(id) & QUADMAPRAYS_BIT) == 0)
+				continue;
+			bool doTest = false;
+			doTest |= (scanForAllies   && urows.AllyTeam(id) == ownerAllyTeam);
+			doTest |= (scanForNeutrals && urows.Neutral(id));
+			if (!doTest)
+				continue;
+			TraceCandidate tc;
+			if (!ResolveUnitTraceCandidate(id, tc))
+				continue;
+			if (EpochTestConeHelper(from, dir, length, spread, tc))
+				return true;
+		}
+	}
+
+	if (scanForFeatures) {
+		const SimSnapshot::FeatureRows& frows = simSnapshot.ReadFeatures();
+		for (const int id : candFeatures) {
+			if ((frows.BlockingBits(id) & QUADMAPRAYS_BIT) == 0)
+				continue;
+			TraceCandidate tc;
+			if (!ResolveFeatureTraceCandidate(id, tc))
+				continue;
+			if (EpochTestConeHelper(from, dir, length, spread, tc))
+				return true;
+		}
+	}
+
+	return false;
+}
+
+
 // ---- unit piece/script twins (mirror LuaSyncedRead, ParseTypedUnit gate) ----
 int LuaSnapshotServe::GetUnitRootPiece(lua_State* L, const char* caller)   { return ServeRootPiece(L, ParseTypedUnitPieceSlot(L, caller)); }
 int LuaSnapshotServe::GetUnitPieceMap(lua_State* L, const char* caller)    { return ServePieceMap(L, ParseTypedUnitPieceSlot(L, caller)); }
