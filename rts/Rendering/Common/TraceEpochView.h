@@ -35,6 +35,7 @@
 #include "SimSnapshot.h"
 #include "SnapshotPickGrid.h"
 
+#include "Map/Ground.h"                   // CGround (synced=false unsynced-heightmap reads)
 #include "Sim/Misc/CollisionHandler.h"
 #include "Sim/Misc/CollisionVolume.h"
 #include "Sim/Objects/SolidObject.h"      // PSTATE_BIT_*
@@ -132,10 +133,13 @@ struct EpochView {
 
 	// ================================ globals ====================================
 	bool Ally(int a, int b) const { return urows.Allied(a, b); }
-	// ---- ground (STUB stage 4a -> flat 0; DrawMapMirrors mirror in stage 4b) ----
-	float GroundHeightReal(float /*x*/, float /*z*/) const { return 0.0f; }        // FIXME(4b)
-	float GroundApproxHeight(float /*x*/, float /*z*/) const { return 0.0f; }      // FIXME(4b)
-	float GroundHeightAboveWater(float /*x*/, float /*z*/) const { return 0.0f; }  // FIXME(4b)
+	// ---- ground: the UNSYNCED heightmap (synced=false), the placement BuildHeight
+	// precedent -- identical to the live synced read in the flag-off dual-run
+	// (unsynced == synced at the draw phase), a documented <=1-boundary deviation
+	// flag-ON ----
+	float GroundHeightReal(float x, float z) const { return CGround::GetHeightReal(x, z, false); }
+	float GroundApproxHeight(float x, float z) const { return CGround::GetApproximateHeight(x, z, false); }
+	float GroundHeightAboveWater(float x, float z) const { return CGround::GetHeightAboveWater(x, z, false); }
 
 	// ======================== target derefs (Target POD) =========================
 	UnitRef TargetUnit(const Target& t) const { return t.unitID; }
@@ -173,9 +177,20 @@ struct EpochView {
 	// weaponDef->targetBorder == 0 (the early-out in the live body); non-zero
 	// targetBorder mismatches until 4b wires the object-free DetectHit + colvol.
 	float3 TargetBorderPos(UnitRef /*u*/, const float3& rawPos, const float3& /*rawDir*/) const { return rawPos; }
-	// the remaining five return "clear line of fire" (no obstruction found)
-	float TraceRayGroundDist(const float3&, const float3&, float) const { return 0.0f; }                       // FIXME(4b)
-	float TraceRayNoEnemyNoGroundDist(const float3&, const float3&, float length, uint32_t) const { return length; } // FIXME(4b)
+	// ground-only ray march (LiveView routes TraceRay(~NOGROUND) here): object scans
+	// are all masked off, so this is exactly TraceRay's ground leg -- return the
+	// ground-hit distance if the ray hits ground within [0,length], else length.
+	float TraceRayGroundDist(const float3& srcPos, const float3& dir, float length) const {
+		if (dir == ZeroVector)
+			return -1.0f;
+		float traceLength = length;
+		const float groundLength = CGround::LineGroundCol(srcPos, srcPos + dir * traceLength, false);
+		if (traceLength > groundLength && groundLength > 0.0f)
+			traceLength = groundLength;
+		return traceLength;
+	}
+	// the remaining four return "clear line of fire" (no obstruction found)
+	float TraceRayNoEnemyNoGroundDist(const float3&, const float3&, float length, uint32_t) const { return length; } // FIXME(4b-2)
 	bool TestCone(const float3&, const float3&, float, float, uint32_t) const { return false; }                // FIXME(4b)
 	float TrajectoryGroundCol(const float3&, const float3&, float, float, float) const { return -1.0f; }       // FIXME(4b)
 	bool TestTrajectoryCone(const float3&, const float3&, float, float, float, float, uint32_t) const { return false; } // FIXME(4b)
