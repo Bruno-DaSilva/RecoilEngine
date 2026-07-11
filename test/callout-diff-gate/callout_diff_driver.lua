@@ -313,10 +313,63 @@ local function ExerciseGlobals()
 	end
 end
 
+-- PLACEMENT REHOST (stage 3): drive Spring.TestBuildOrder (and, as they migrate,
+-- ClosestBuildPos / TestMoveOrder) across the map + near units/features so the
+-- armed dual-run compares the draw-side EpochView verdict against live every draw
+-- frame. Replays never drive interactive build placement, so without this the
+-- placement callouts have ZERO coverage. Rotating facing exercises the yardmap
+-- rotation; near-unit/feature positions hit the occupied/reclaimable/blocked cases.
+local function ExercisePlacement()
+	local units = Spring.GetAllUnits()
+	local defs, seen = {}, {}
+	for i = 1, #units do
+		local did = Spring.GetUnitDefID(units[i])
+		if did and not seen[did] then
+			seen[did] = true
+			defs[#defs + 1] = did
+			if #defs >= 4 then break end
+		end
+	end
+	if #defs == 0 then return end
+
+	local msx, msz = Game.mapSizeX, Game.mapSizeZ
+	local facing = Spring.GetGameFrame() % 4
+	local N = 6
+	for gz = 0, N - 1 do
+		for gx = 0, N - 1 do
+			local x = (gx + 0.5) * msx / N
+			local z = (gz + 0.5) * msz / N
+			for d = 1, #defs do
+				Spring.TestBuildOrder(defs[d], x, 0, z, facing)
+			end
+		end
+	end
+
+	for i = 1, math.min(#units, 24) do
+		local ux, _, uz = Spring.GetUnitPosition(units[i])
+		if ux then
+			for d = 1, #defs do
+				Spring.TestBuildOrder(defs[d], ux, 0, uz, facing)
+			end
+		end
+	end
+
+	local feats = Spring.GetAllFeatures()
+	for i = 1, math.min(#feats, 24) do
+		local fx, _, fz = Spring.GetFeaturePosition(feats[i])
+		if fx then
+			for d = 1, #defs do
+				Spring.TestBuildOrder(defs[d], fx, 0, fz, facing)
+			end
+		end
+	end
+end
+
 local function ExerciseFamily()
 	exerciseTick = (exerciseTick + 1) % TAIL_STRIDE
 
 	ExerciseGlobals()
+	ExercisePlacement()
 
 	local units = Spring.GetAllUnits()
 	local feats = Spring.GetAllFeatures()

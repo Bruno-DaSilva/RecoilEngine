@@ -252,6 +252,9 @@ public:
 	// readMap->GetMaxHeightMapSynced()[square] mirror (per-face max-corner height;
 	// GetPosSpeedMod + CheckCollisionQuery::UpdateElevationForPos read it).
 	float MaxHeightAtSquare(int square) const;
+	// readMap->GetSlopeMapSynced()[square] mirror by RAW half-res index (the
+	// GetPosSpeedMod form: square = (x>>1) + (z>>1)*hmapx).
+	float SlopeAtIndex(int square) const;
 	// readMap->GetCenterNormals2DSynced()[square] mirror (GetPosSpeedMod directional).
 	float3 CenterNormal2DAtSquare(int square) const;
 	// BuildingMaskMap::TestTileMaskUnsafe(hx, hz, mask) mirror (half-res). Returns

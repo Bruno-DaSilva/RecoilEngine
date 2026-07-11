@@ -31,6 +31,8 @@
 #include "Map/MapDimensions.h" // sim|draw PR 29: GetGroundBlocked map-coord clamp
 #include "Map/ReadMap.h" // sim|draw PR 40: readMap->GridVisibility (frustum twins)
 #include "Rendering/Common/DrawMapMirrors.h" // PR 28: map-layer mirror serving
+#include "Rendering/Common/PlacementEpochView.h" // PLACEMENT REHOST (stage 3): EpochView
+#include "Game/PlacementPredicates.h"          // PLACEMENT REHOST (stage 3): templated predicates
 #include "Rendering/Common/SimSnapshot.h"
 #include "Rendering/Common/SnapshotDiffGate.h"
 #include "Rendering/Common/SnapshotPickGrid.h"
@@ -10380,6 +10382,59 @@ namespace {
 		return r;
 	}
 
+	// PLACEMENT REHOST (stage 3): the callouts whose predicate is fully served
+	// draw-side via placement::EpochView. Migrated incrementally; a not-yet-ready
+	// kind keeps the sim-side query/reply channel (ServePlacementQuery).
+	bool PlacementKindEpochReady(LuaSnapshotServe::PlacementKind kind)
+	{
+		using PK = LuaSnapshotServe::PlacementKind;
+		return kind == PK::TestBuildOrder;
+	}
+
+	// Evaluate a placement query against the published EPOCH (draw-side): the same
+	// templated placement predicates the sim runs with LiveView, instantiated with
+	// EpochView (DrawMapMirrors + SimSnapshot rows). Synchronous, no queue -- the
+	// reply reflects the CURRENT query position against <=1-boundary-old world
+	// state (the recorded deviation swap). The armed flag-off dual-run compares
+	// this against EvaluatePlacementQueryLive for bit equality.
+	PlacementReply EvaluatePlacementQueryEpoch(const PlacementQuery& q)
+	{
+		using PK = LuaSnapshotServe::PlacementKind;
+		PlacementReply r = {};
+
+		switch (static_cast<PK>(q.kind)) {
+			case PK::TestBuildOrder: {
+				const UnitDef* unitDef = unitDefHandler->GetUnitDefByID(q.defID);
+				if (unitDef == nullptr) { r.retCount = 1; r.i0 = 0; return r; }
+
+				placement::EpochView view;
+
+				BuildInfo bi;
+				bi.buildFacing = q.facing;
+				bi.def = unitDef;
+				bi.pos = { q.px, q.py, q.pz };
+				// synced=false (draw-safe unsynced heightmap) + epoch currHeightBounds
+				bi.pos = CGameHelper::Pos2BuildPos(bi, false, &view.heightBounds);
+
+				int featureId = -1;
+				int retval = placement::TestUnitBuildSquareT(view, bi, featureId, q.readAllyTeam, false);
+
+				// live back-compat map: BUILDSQUARE_OPEN -> BUILDSQUARE_RECLAIMABLE
+				if (retval == CGameHelper::BUILDSQUARE_OPEN)
+					retval = CGameHelper::BUILDSQUARE_RECLAIMABLE;
+
+				r.i0 = retval;
+				if (featureId < 0) { r.retCount = 1; return r; }
+				r.retCount = 2; r.i1 = featureId;
+				return r;
+			}
+			// not yet epoch-ready (kept on the sim-side channel); the armed dual-run
+			// never reaches these (PlacementKindEpochReady gates them out)
+			default:
+				return EvaluatePlacementQueryLive(q);
+		}
+	}
+
 	// flag-ON serving twin: build the query (or resolve a def early-out inline),
 	// enqueue it for the next boundary, and return this frame's reply (the previous
 	// boundary's evaluation, or the documented default on first-call/miss).
@@ -10424,8 +10479,19 @@ int LuaSnapshotServe::RoutePlacementQuery(lua_State* L, const char* caller, Serv
 		SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() && !SimDrawSplit::IsSimParked();
 
 	if (splitRunning) {
-		// flag-ON: the sim thread owns live terrain/blocking state -- NEVER touch
-		// it from draw context. Enqueue + return the last boundary's sim-exact reply.
+		// flag-ON: the sim thread owns live terrain/blocking state -- NEVER touch it
+		// from draw context.
+		if (PlacementKindEpochReady(kind)) {
+			// PLACEMENT REHOST (stage 3): evaluate the predicate draw-side against the
+			// published epoch, synchronously (no queue). Current query position vs
+			// <=1-boundary-old world -- the recorded deviation swap.
+			PlacementQuery q;
+			PlacementReply reply;
+			if (BuildPlacementQuery(L, caller, kind, q, reply) != 0)
+				reply = EvaluatePlacementQueryEpoch(q);
+			return PushPlacementReply(L, kind, reply);
+		}
+		// not-yet-migrated kinds: enqueue + return the last boundary's sim-exact reply.
 		return ServePlacementQuery(L, caller, kind);
 	}
 
@@ -10466,8 +10532,13 @@ int LuaSnapshotServe::RoutePlacementQuery(lua_State* L, const char* caller, Serv
 	{
 		PlacementQuery q;
 		PlacementReply reply;
-		if (BuildPlacementQuery(L, caller, kind, q, reply) != 0)
-			reply = EvaluatePlacementQueryLive(q);
+		if (BuildPlacementQuery(L, caller, kind, q, reply) != 0) {
+			// PLACEMENT REHOST (stage 3): for migrated kinds the snap leg is the
+			// EPOCH evaluation -> this dual-run now proves epoch == live bit-for-bit
+			// (was a live-vs-live reconstruction check).
+			reply = PlacementKindEpochReady(kind) ? EvaluatePlacementQueryEpoch(q)
+			                                      : EvaluatePlacementQueryLive(q);
+		}
 		snapN = PushPlacementReply(L, kind, reply);
 	}
 

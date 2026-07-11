@@ -553,6 +553,13 @@ float DrawMapMirrors::MaxHeightAtSquare(int square) const
 	return (static_cast<size_t>(square) < pl.maxHeight.size()) ? pl.maxHeight[square] : 0.0f;
 }
 
+// readMap->GetSlopeMapSynced()[square] by raw half-res index
+float DrawMapMirrors::SlopeAtIndex(int square) const
+{
+	const Payload& pl = P();
+	return (static_cast<size_t>(square) < pl.slope.size()) ? pl.slope[square] : 0.0f;
+}
+
 // readMap->GetCenterNormals2DSynced()[square]
 float3 DrawMapMirrors::CenterNormal2DAtSquare(int square) const
 {
