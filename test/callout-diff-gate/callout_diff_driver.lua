@@ -363,6 +363,19 @@ local function ExercisePlacement()
 			end
 		end
 	end
+
+	-- ClosestBuildPos (stage 3b): search near each grid cell for a free build spot.
+	-- team = the team of the first unit (teamHandler.AllyTeam maps it).
+	local team = Spring.GetUnitTeam(units[1]) or Spring.GetGaiaTeamID()
+	for gz = 0, N - 1 do
+		for gx = 0, N - 1 do
+			local x = (gx + 0.5) * msx / N
+			local z = (gz + 0.5) * msz / N
+			for d = 1, #defs do
+				Spring.ClosestBuildPos(team, defs[d], x, 0, z, 200, 0, facing)
+			end
+		end
+	end
 end
 
 local function ExerciseFamily()

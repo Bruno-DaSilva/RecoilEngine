@@ -67,6 +67,10 @@ struct EpochView {
 		// currHeightBounds override routes the sim-mutable clamp through the epoch
 		return CGameHelper::GetBuildHeight(pos, def, false, &heightBounds);
 	}
+	// ---- ClosestBuildPos helpers ----
+	float3 SnapBuildPos(const BuildInfo& bi) const { return CGameHelper::Pos2BuildPos(bi, false, &heightBounds); }
+	int FeatureAllyteam(int featureId) const { return frows.AllyTeam(featureId); }
+
 	float MaxHeightAtSquare(int square) const { return drawMapMirrors.MaxHeightAtSquare(square); }
 	float SlopeAtIndex(int square) const { return drawMapMirrors.SlopeAtIndex(square); }
 	float3 CenterNormal2DAtIndex(int idx) const { return drawMapMirrors.CenterNormal2DAtSquare(idx); }

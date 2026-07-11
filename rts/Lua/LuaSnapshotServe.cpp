@@ -10388,7 +10388,7 @@ namespace {
 	bool PlacementKindEpochReady(LuaSnapshotServe::PlacementKind kind)
 	{
 		using PK = LuaSnapshotServe::PlacementKind;
-		return kind == PK::TestBuildOrder;
+		return kind == PK::TestBuildOrder || kind == PK::ClosestBuildPos;
 	}
 
 	// Evaluate a placement query against the published EPOCH (draw-side): the same
@@ -10426,6 +10426,15 @@ namespace {
 				r.i0 = retval;
 				if (featureId < 0) { r.retCount = 1; return r; }
 				r.retCount = 2; r.i1 = featureId;
+				return r;
+			}
+			case PK::ClosestBuildPos: {
+				r.retCount = 3;
+				placement::EpochView view;
+				const float3 buildPos = placement::ClosestBuildPosT(view,
+					q.teamID, unitDefHandler->GetUnitDefByID(q.defID),
+					float3(q.px, q.py, q.pz), q.searchRadius, q.minDistance, q.facing, false);
+				r.f0 = buildPos.x; r.f1 = buildPos.y; r.f2 = buildPos.z;
 				return r;
 			}
 			// not yet epoch-ready (kept on the sim-side channel); the armed dual-run

@@ -2,6 +2,7 @@
 
 #include "GameHelper.h"
 #include "PlacementPredicates.h" // PLACEMENT REHOST (stage 2): templated predicate stack
+#include "Rendering/Common/PlacementEpochView.h" // PLACEMENT REHOST (stage 3b): ClosestBuildPosT<EpochView> instantiation
 
 #include "Camera.h"
 #include "GameSetup.h"
@@ -1183,21 +1184,19 @@ static const std::vector<SearchOffset>& GetSearchOffsetTable(int radius)
 	return searchOffsets;
 }
 
-// used by AICallback, ResourceMapAnalyzer (unsynced), LuaSyncedRead
-float3 CGameHelper::ClosestBuildPos(
-	int team,
-	const UnitDef* unitDef,
-	const float3& worldPos,
-	float searchRadius,
-	int minDistance,
-	int buildFacing,
-	bool synced
-) {
-	RECOIL_DETAILED_TRACY_ZONE;
+// used by AICallback, ResourceMapAnalyzer (unsynced), LuaSyncedRead.
+// PLACEMENT REHOST (stage 3b): templated over a state view; DEFINED here (not the
+// header) because it uses the file-local GetSearchOffsetTable + teamHandler.
+// Explicitly instantiated for LiveView + EpochView below.
+namespace placement {
+template<class V>
+float3 ClosestBuildPosT(const V& view, int team, const UnitDef* unitDef, const float3& worldPos,
+                        float searchRadius, int minDistance, int buildFacing, bool synced)
+{
 	if (unitDef == nullptr)
 		return -RgtVector;
 
-	CFeature* feature = nullptr;
+	int featureId = -1; // reset by each TestUnitBuildSquareT call (matches the live feature=nullptr)
 
 	const int allyTeam = teamHandler.AllyTeam(team);
 	const int rawRadius = static_cast<int>(searchRadius / BUILD_SQUARE_SIZE);
@@ -1211,9 +1210,9 @@ float3 CGameHelper::ClosestBuildPos(
 		const float wzpos = worldPos.z + offsets[i].dy * BUILD_SQUARE_SIZE;
 
 		BuildInfo bi(unitDef, {wxpos, 0.0f, wzpos}, buildFacing);
-		bi.pos = Pos2BuildPos(bi, false);
+		bi.pos = view.SnapBuildPos(bi);
 
-		if (!TestUnitBuildSquare(bi, feature, allyTeam, synced) && (feature == nullptr || feature->allyteam != allyTeam))
+		if (!TestUnitBuildSquareT(view, bi, featureId, allyTeam, synced) && (featureId < 0 || view.FeatureAllyteam(featureId) != allyTeam))
 			continue;
 
 		const int xsqr  = static_cast<int>(wxpos / SQUARE_SIZE);
@@ -1236,12 +1235,12 @@ float3 CGameHelper::ClosestBuildPos(
 		// check for nearby blocking objects
 		for (int z = zmin; z < zmax; ++z) {
 			for (int x = xmin; x < xmax; ++x) {
-				const CSolidObject* solObj = groundBlockingObjectMap.GroundBlockedUnsafe(z * mapDims.mapx + x);
+				typename V::Occupant so = view.GroundBlocked(x, z);
 
-				if (solObj == nullptr)
+				if (view.OccNull(so))
 					continue;
 				// immobile=true implies Feature or Building
-				if (!solObj->immobile)
+				if (!view.OccImmobile(so))
 					continue;
 
 				free = false;
@@ -1258,13 +1257,13 @@ float3 CGameHelper::ClosestBuildPos(
 			// none found, check for nearby factories with open yards
 			for (int z = zmin; z < zmax; ++z) {
 				for (int x = xmin; x < xmax; ++x) {
-					const CSolidObject* solObj = groundBlockingObjectMap.GroundBlockedUnsafe(z * mapDims.mapx + x);
+					typename V::Occupant so = view.GroundBlocked(x, z);
 
-					if (solObj == nullptr)
+					if (view.OccNull(so))
 						continue;
-					if (!solObj->immobile)
+					if (!view.OccImmobile(so))
 						continue;
-					if (!solObj->yardOpen)
+					if (!view.OccYardOpen(so))
 						continue;
 
 					free = false;
@@ -1278,6 +1277,23 @@ float3 CGameHelper::ClosestBuildPos(
 	}
 
 	return -RgtVector;
+}
+
+template float3 ClosestBuildPosT<LiveView>(const LiveView&, int, const UnitDef*, const float3&, float, int, int, bool);
+template float3 ClosestBuildPosT<EpochView>(const EpochView&, int, const UnitDef*, const float3&, float, int, int, bool);
+} // namespace placement
+
+float3 CGameHelper::ClosestBuildPos(
+	int team,
+	const UnitDef* unitDef,
+	const float3& worldPos,
+	float searchRadius,
+	int minDistance,
+	int buildFacing,
+	bool synced
+) {
+	RECOIL_DETAILED_TRACY_ZONE;
+	return placement::ClosestBuildPosT(placement::LiveView{}, team, unitDef, worldPos, searchRadius, minDistance, buildFacing, synced);
 }
 
 // find the reference height for a build-position

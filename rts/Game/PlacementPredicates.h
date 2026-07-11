@@ -216,6 +216,14 @@ CGameHelper::BuildSquareStatus TestUnitBuildSquareT(
 	return testStatus;
 }
 
+// CGameHelper::ClosestBuildPos -- DEFINED (with explicit LiveView + EpochView
+// instantiations) in GameHelper.cpp, where the file-local GetSearchOffsetTable
+// and teamHandler live. Declared here so LuaSnapshotServe can call the EpochView
+// instantiation (linked against the GameHelper.cpp instantiation).
+template<class V>
+float3 ClosestBuildPosT(const V& view, int team, const UnitDef* unitDef, const float3& worldPos,
+                        float searchRadius, int minDistance, int buildFacing, bool synced);
+
 } // namespace placement
 
 // ---------------------------------------------------------------------------
@@ -230,6 +238,7 @@ CGameHelper::BuildSquareStatus TestUnitBuildSquareT(
 #include "Map/ReadMap.h"
 #include "Sim/Features/Feature.h"
 #include "Sim/Features/FeatureDef.h"
+#include "Sim/Features/FeatureHandler.h" // PLACEMENT REHOST: ClosestBuildPos feature allyteam
 #include "Sim/Misc/BuildingMaskMap.h"
 #include "Sim/Misc/GroundBlockingObjectMap.h"
 #include "Sim/Misc/LosHandler.h"
@@ -253,6 +262,12 @@ struct LiveView {
 	bool  YardBlockBuilding(int x, int z) const { return yardmapStatusEffectsMap.AreAnyFlagsSet(x, z, YardmapStatusEffectsMap::BLOCK_BUILDING); }
 	bool  InLos(const float3& pos, int allyTeam) const { return losHandler->InLos(pos, allyTeam); }
 	float BuildHeight(const float3& pos, const UnitDef* def, bool synced) const { return CGameHelper::GetBuildHeight(pos, def, synced); }
+	// ---- ClosestBuildPos helpers ----
+	float3 SnapBuildPos(const BuildInfo& bi) const { return CGameHelper::Pos2BuildPos(bi, false); }
+	int FeatureAllyteam(int featureId) const {
+		const CFeature* f = featureHandler.GetFeature(featureId);
+		return (f != nullptr) ? f->allyteam : -1;
+	}
 
 	bool HasNearbyGeoFeature(const float3& testPos, int mindx, int mindz, float searchRadius) const {
 		QuadFieldQuery qfQuery;
@@ -283,6 +298,7 @@ struct LiveView {
 	bool OccFeatureReclaimable(Occupant o) const { return static_cast<const CFeature*>(o)->def->reclaimable; }
 	bool OccUnitInLos(Occupant o, int at) const { return (static_cast<const CUnit*>(o)->losStatus[at] & LOS_INLOS) != 0; }
 	bool OccImmobile(Occupant o) const { return o->immobile; }
+	bool OccYardOpen(Occupant o) const { return o->yardOpen; }
 	const YardMapStatus* OccBlockMap(Occupant o) const { return o->GetBlockMap(); }
 	float3 OccPos(Occupant o) const { return o->pos; }
 	int OccXsize(Occupant o) const { return o->xsize; }
