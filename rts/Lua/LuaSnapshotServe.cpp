@@ -33,6 +33,8 @@
 #include "Rendering/Common/DrawMapMirrors.h" // PR 28: map-layer mirror serving
 #include "Rendering/Common/PlacementEpochView.h" // PLACEMENT REHOST (stage 3): EpochView
 #include "Game/PlacementPredicates.h"          // PLACEMENT REHOST (stage 3): templated predicates
+#include "Rendering/Common/TraceEpochView.h"  // TRACE REHOST (stage 4): trace::EpochView
+#include "Sim/Weapons/WeaponPredicates.h"      // TRACE REHOST (stage 4): templated trace predicates
 #include "Rendering/Common/SimSnapshot.h"
 #include "Rendering/Common/SnapshotDiffGate.h"
 #include "Rendering/Common/SnapshotPickGrid.h"
@@ -9746,6 +9748,87 @@ namespace {
 		return false;
 	}
 
+	// Evaluate a trace query against the published EPOCH state -- the SAME templated
+	// trace:: predicates (WeaponPredicates.h) as the live body, instantiated over
+	// trace::EpochView (SimSnapshot rows + mirrors + object-free collision backend)
+	// instead of live CWeapon/CUnit pointers. Mirrors EvaluateTraceQueryLive's
+	// control flow exactly -- the derived positions (GetUnitLeadTargetPos /
+	// GetAimFromPos) are recomputed epoch-side by the same templated chain. Served
+	// draw-side under the split (stage 4b) and by the armed flag-off dual-run
+	// (stage 4a) so the gate proves epoch == live. Returns the boolean.
+	//
+	// STAGE 4a: the trace::EpochView collision/cone/ground primitives are stubbed
+	// (conservative "clear line of fire"), so TestTarget/TestRange are already
+	// bit-exact while TryTarget/HaveFreeLineOfFire mismatch only where a real
+	// obstruction exists -- resolved when stage 4b wires the primitives.
+	bool EvaluateTraceQueryEpoch(const WeaponTraceQuery& q)
+	{
+		using TK = LuaSnapshotServe::TraceKind;
+
+		const auto& urows = simSnapshot.Read();
+		if (!urows.Valid(q.ownerID))
+			return false;
+		if (q.weaponNum < 0 || static_cast<size_t>(q.weaponNum) >= static_cast<size_t>(urows.weaponCount[q.ownerID]))
+			return false;
+
+		trace::EpochView view(q.ownerID, q.weaponNum);
+
+		const bool enemyForm = (q.enemyID >= 0);
+
+		// mirror SWeaponTarget(enemy, pos, true): type = enemy ? Unit : Pos;
+		// isUserTarget = true; groundPos = enemy ? p : Zero (Target_Unit never reads
+		// groundPos, so its value is immaterial in enemy form -- see the ctor).
+		const auto makeTarget = [&](const float3& p) {
+			trace::EpochView::Target t;
+			t.type = enemyForm ? Target_Unit : Target_Pos;
+			t.isUserTarget = true;
+			t.isAutoTarget = false;
+			t.isManualFire = false;
+			t.unitID = q.enemyID;
+			t.groundPos = enemyForm ? p : ZeroVector;
+			return t;
+		};
+
+		switch (static_cast<TK>(q.kind)) {
+			case TK::TryTarget: {
+				// an enemy-form query whose target vanished since enqueue -> "no target"
+				if (enemyForm && !urows.Valid(q.enemyID))
+					return false;
+				// pos is (0,0,0) in enemy form (GetLeadTargetPos ignores it)
+				const float3 pos = (q.variant == 1) ? float3(q.px, q.py, q.pz) : ZeroVector;
+				return trace::TryTargetT(view, makeTarget(pos));
+			}
+			case TK::TestTarget:
+			case TK::TestRange: {
+				if (enemyForm && !urows.Valid(q.enemyID))
+					return false;
+				const float3 pos = (q.variant == 1) ? float3(q.px, q.py, q.pz)
+				                                    : trace::GetUnitLeadTargetPosT(view, q.enemyID);
+				return (static_cast<TK>(q.kind) == TK::TestTarget)
+					? trace::TestTargetT(view, pos, makeTarget(pos))
+					: trace::TestRangeT (view, pos, makeTarget(pos));
+			}
+			case TK::HaveFreeLineOfFire: {
+				if ((q.variant == 3 || q.variant == 6) && !urows.Valid(q.enemyID))
+					return false;
+				float3 srcPos = trace::GetAimFromPosT(view, false);
+				float3 tgtPos;
+				if (q.srcMask & 1) srcPos.x = q.px;
+				if (q.srcMask & 2) srcPos.y = q.py;
+				if (q.srcMask & 4) srcPos.z = q.pz;
+				switch (q.variant) {
+					case 3: tgtPos = trace::GetUnitLeadTargetPosT(view, q.enemyID); break;
+					case 5: /* tgtPos stays zero */ break;
+					case 6: tgtPos = trace::GetUnitLeadTargetPosT(view, q.enemyID); break;
+					case 8: tgtPos = float3(q.qx, q.qy, q.qz); break;
+					default: return false;
+				}
+				return trace::HaveFreeLineOfFireT(view, srcPos, tgtPos, makeTarget(tgtPos));
+			}
+		}
+		return false;
+	}
+
 	// flag-ON serving twin: build the query (POV-gated), enqueue it for the next
 	// boundary, and return this frame's reply (the previous boundary's evaluation,
 	// or false on first-call/miss -- the documented first-frame default).
@@ -9915,11 +9998,11 @@ int LuaSnapshotServe::RouteTraceQuery(lua_State* L, const char* caller, ServeFn 
 	}
 
 	// armed flag-OFF gate: dual-run for coverage of the query-record construction
-	// + barrier evaluation. Live leg = master predicate; snap leg = the SAME
-	// query built and evaluated synchronously inline (live-exact by construction,
-	// so it passes trivially -- and any reconstruction bug is caught here). Serve
-	// the LIVE result: flag-off must be bit-identical, the query path is verified,
-	// not served.
+	// + evaluation. Live leg = master predicate; snap leg = the SAME query built
+	// and evaluated against the published EPOCH (EvaluateTraceQueryEpoch), so this
+	// dual-run proves epoch == live bit-for-bit (TRACE REHOST stage 4a: was a
+	// live-vs-live reconstruction check). Serve the LIVE result: flag-off must be
+	// bit-identical, the epoch path is verified here, not served.
 	const int base = lua_gettop(L);
 
 	int liveN = 0;
@@ -9942,7 +10025,7 @@ int LuaSnapshotServe::RouteTraceQuery(lua_State* L, const char* caller, ServeFn 
 	WeaponTraceQuery q;
 	int snapN = 0;
 	if (BuildTraceQuery(L, caller, kind, q) != 0) {
-		lua_pushboolean(L, EvaluateTraceQueryLive(q));
+		lua_pushboolean(L, EvaluateTraceQueryEpoch(q));
 		snapN = 1;
 	}
 

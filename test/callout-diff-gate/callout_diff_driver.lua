@@ -397,11 +397,59 @@ local function ExercisePlacement()
 	end
 end
 
+-- TRACE REHOST (stage 4): drive the four weapon-trace callouts across
+-- units x weapons x (enemy-form, pos-form) so the armed dual-run + strict have
+-- coverage (replays never call these -- the ExercisePlacement precedent).
+-- weaponNum is 1-based (LUA_WEAPON_BASE_INDEX); an out-of-range weaponNum makes
+-- both legs return nothing (a trivial 0==0 comparison), so probing w=1,2 over
+-- every sampled owner needs no weapon-count introspection.
+local function ExerciseTrace()
+	local units = Spring.GetAllUnits()
+	if #units == 0 then return end
+
+	local msx, msz = Game.mapSizeX, Game.mapSizeZ
+	local f = Spring.GetGameFrame()
+
+	-- a grid of ground target/source positions
+	local N = 4
+	local posList = {}
+	for gz = 0, N - 1 do
+		for gx = 0, N - 1 do
+			posList[#posList + 1] = { (gx + 0.5) * msx / N, 0, (gz + 0.5) * msz / N }
+		end
+	end
+	local nPos = #posList
+
+	local nUnits = math.min(#units, 24)
+	for i = 1, nUnits do
+		local uid = units[i]
+		local enemy = units[(i % #units) + 1]           -- a different unit (wraps)
+		local p = posList[(f + i) % nPos + 1]
+		local q = posList[(f + i + 3) % nPos + 1]
+		for w = 1, 2 do
+			-- enemy form (gettop 3): target unit
+			Spring.GetUnitWeaponTryTarget(uid, w, enemy)
+			Spring.GetUnitWeaponTestTarget(uid, w, enemy)
+			Spring.GetUnitWeaponTestRange(uid, w, enemy)
+			Spring.GetUnitWeaponHaveFreeLineOfFire(uid, w, enemy)                    -- variant 3
+			-- pos form (gettop 5): ground target
+			Spring.GetUnitWeaponTryTarget(uid, w, p[1], p[2], p[3])
+			Spring.GetUnitWeaponTestTarget(uid, w, p[1], p[2], p[3])
+			Spring.GetUnitWeaponTestRange(uid, w, p[1], p[2], p[3])
+			-- HaveFreeLineOfFire src/tgt variants: srcPos(5), srcPos+tgtID(6), srcPos+tgtPos(8)
+			Spring.GetUnitWeaponHaveFreeLineOfFire(uid, w, p[1], p[2], p[3])                  -- variant 5
+			Spring.GetUnitWeaponHaveFreeLineOfFire(uid, w, p[1], p[2], p[3], enemy)           -- variant 6
+			Spring.GetUnitWeaponHaveFreeLineOfFire(uid, w, p[1], p[2], p[3], q[1], q[2], q[3])-- variant 8
+		end
+	end
+end
+
 local function ExerciseFamily()
 	exerciseTick = (exerciseTick + 1) % TAIL_STRIDE
 
 	ExerciseGlobals()
 	ExercisePlacement()
+	ExerciseTrace()
 
 	local units = Spring.GetAllUnits()
 	local feats = Spring.GetAllFeatures()
