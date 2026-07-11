@@ -1743,13 +1743,21 @@ void SimSnapshot::ExtractDeadRowsFromShells(UnitRows& urows, FeatureRows& frows,
 		urows.cost[id] = u->cost;
 		urows.buildTime[id] = u->buildTime;
 		urows.blockingBits[id] = PackBlockingBits(u);
-		// PLACEMENT REHOST occupant scalars (dead-shell copy; same guards)
+		// PLACEMENT REHOST occupant scalars (dead-shell copy). immobile/yardOpen/
+		// physicalState/crushResistance are direct fields -- safe on a shell.
+		// isIdle()/IsPushResistant() deref commandAI/moveType, which are ALREADY
+		// DESTROYED on a DeferredObjectDeleter shell -- calling them here segfaults
+		// on the sim thread during epoch production. A dead unit is not a live
+		// blocking occupant (removed from the blocking map at death, so the
+		// cell[0]/full-cell mirror never references it for the placement predicate),
+		// so these two are unused for dead rows; default them rather than deref the
+		// freed sub-objects.
 		urows.immobile[id] = u->immobile;
 		urows.yardOpen[id] = u->yardOpen;
 		urows.physicalState[id] = static_cast<uint16_t>(u->physicalState);
 		urows.crushResistance[id] = u->crushResistance;
-		urows.isIdle[id] = u->IsIdle();
-		urows.isPushResistant[id] = (u->moveType != nullptr) && u->moveType->IsPushResistant();
+		urows.isIdle[id] = 0;
+		urows.isPushResistant[id] = 0;
 		urows.relMidPos[id] = u->relMidPos;
 		urows.frontdir[id] = u->frontdir;
 		urows.updir[id] = u->updir;
