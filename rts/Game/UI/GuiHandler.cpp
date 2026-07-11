@@ -3813,13 +3813,17 @@ void CGuiHandler::DrawMapStuff(bool onMiniMap)
 	// sim|draw PR 44 (prereq D): the whole-pass park is gone. The one per-frame
 	// live read -- the context-cursor default command near the end -- is served
 	// (GetDefaultCommandServed); GuiTraceRay picks are snapshot-backed (draw-safe);
-	// the ground/build-pos snap reads the draw-safe unsynced heightmap. What stays
-	// live is the residual weapon-state / range-ring / build-overlap-queue / yardmap
-	// reads (no serving channel) -- each is INPUT-GATED (attack/build command active
-	// or shift-hover or a drag), so it engages ~0 in steady-state gameplay and keeps
-	// a NARROW GUI_DRAW_MAPSTUFF park scoped to just that block (nest-safe, no-op
-	// flag-off / when the sim is already parked). Fully serving those residuals needs
-	// a weapon-state channel + a C++ placement/queue query path (a follow-up PR).
+	// the ground/build-pos snap reads the draw-safe unsynced heightmap.
+	// sim|draw split (Stage 0): the input-gated interior reads (weapon range/sensor/
+	// decloak/interceptor rings on shift-hover + the attack-command range rings + the
+	// build preview: builder circles, queued-command overlap, build-square verdict)
+	// are now SERVED draw-side under the running split -- UnitRows + trace::/placement::
+	// EpochView + the barrier command-queue cache -- so each block runs park-free when
+	// the split is live. Their GUI_DRAW_MAPSTUFF parks are retained ONLY for the
+	// flag-off / already-parked / pregame case (byte-identical live path, inert there).
+	// Still parked under the split: the cheat+drawDebug DrawWeaponArc (live weapon
+	// wantedDir/muzzlePos, no twin) and GetBuildPositions' own separate GUI_GET_BUILDPOS
+	// park (an input-gated ctrl circle-build read, a distinct follow-up item).
 	if (!onMiniMap) {
 		glEnable(GL_DEPTH_TEST);
 		glDepthMask(GL_FALSE);
