@@ -80,7 +80,13 @@ public:
 	 * @return a vector containing commands that overlap c
 	 */
 	std::vector<Command> GetOverlapQueued(const Command& c) const;
-	std::vector<Command> GetOverlapQueued(const Command& c, const CCommandQueue& queue) const;
+	// static (uses neither `this` nor any member -- only c and queue): lets the
+	// sim|draw split serve a draw-side twin (LuaSnapshotServe::GetServedOverlap-
+	// Queued) over a queue reconstructed from the barrier command-queue cache.
+	// The two overloads share one file-local implementation (CommandAI.cpp); the
+	// std::vector one is for the draw-side twin (CCommandQueue's ctor is private).
+	static std::vector<Command> GetOverlapQueued(const Command& c, const CCommandQueue& queue);
+	static std::vector<Command> GetOverlapQueued(const Command& c, const std::vector<Command>& queue);
 
 	const std::vector<const SCommandDescription*>& GetPossibleCommands() const { return possibleCommands; }
 

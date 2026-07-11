@@ -21,6 +21,7 @@
  */
 
 #include <algorithm>
+#include <vector>
 
 #include "Game/GameHelper.h"
 #include "Map/Ground.h"
@@ -210,6 +211,98 @@ CGameHelper::BuildSquareStatus TestUnitBuildSquareT(
 			if ((testStatus = std::min(testStatus, sqrStatus)) == CGameHelper::BUILDSQUARE_BLOCKED) {
 				return CGameHelper::BUILDSQUARE_BLOCKED;
 			}
+		}
+	}
+
+	return testStatus;
+}
+
+// CGameHelper::TestUnitBuildSquare -- BUILD-PREVIEW UI overload (commands != null).
+// Mirrors the live body (GameHelper.cpp) but over a View: accumulates the three
+// square lists (buildable / feature-occupied / illegal) for ShowUnitBuildSquare's
+// coloring and applies the queued-command overlap, WITHOUT the early-out (every
+// square must be classified). The per-square verdict is the same TestBuildSquareT
+// the sim runs (gated bit-exact epoch-vs-live via TestBuildOrder); only this
+// accumulation/overlap wrapper is UI-specific. synced is always false here.
+template<class V>
+CGameHelper::BuildSquareStatus TestUnitBuildSquareUIT(
+	const V& view,
+	const BuildInfo& buildInfo,
+	int allyteam,
+	const std::vector<Command>& commands,
+	std::vector<float3>& canbuildpos,
+	std::vector<float3>& featurepos,
+	std::vector<float3>& nobuildpos
+) {
+	int featureId = -1; // TestBuildSquareT out-param; the UI path discards it
+
+	const int xsize = buildInfo.GetXSize();
+	const int zsize = buildInfo.GetZSize();
+
+	const float3 testPos = buildInfo.pos;
+	      float3 sqrPos;
+
+	const int x1 = int(testPos.x / SQUARE_SIZE) - (xsize >> 1), x2 = x1 + xsize;
+	const int z1 = int(testPos.z / SQUARE_SIZE) - (zsize >> 1), z2 = z1 + zsize;
+	const int2 xrange = int2(x1, x2);
+	const int2 zrange = int2(z1, z2);
+
+	const MoveDef* moveDef = (buildInfo.def->pathType != -1U) ? moveDefHandler.GetMoveDefByPathType(buildInfo.def->pathType) : nullptr;
+
+	sqrPos.y = view.BuildHeight(testPos, buildInfo.def, false);
+
+	CGameHelper::BuildSquareStatus testStatus = CGameHelper::BUILDSQUARE_OPEN;
+
+	if (buildInfo.def->needGeo) {
+		const int mindx = xsize * (SQUARE_SIZE >> 1) - (SQUARE_SIZE >> 1);
+		const int mindz = zsize * (SQUARE_SIZE >> 1) - (SQUARE_SIZE >> 1);
+
+		testStatus = view.HasNearbyGeoFeature(testPos, mindx, mindz, std::max(xsize, zsize) * 6)
+			? CGameHelper::BUILDSQUARE_OPEN : CGameHelper::BUILDSQUARE_BLOCKED;
+	}
+
+	for (int z = z1; z < z2; z++) {
+		for (int x = x1; x < x2; x++) {
+			sqrPos.x = x * SQUARE_SIZE;
+			sqrPos.z = z * SQUARE_SIZE;
+
+			CGameHelper::BuildSquareStatus sqrStatus = CGameHelper::BUILDSQUARE_BLOCKED;
+
+			if (sqrPos.IsInBounds())
+				sqrStatus = TestBuildSquareT(view, sqrPos, xrange, zrange, buildInfo, moveDef, featureId, allyteam, false);
+
+			if (sqrStatus != CGameHelper::BUILDSQUARE_BLOCKED) {
+				// test if build-position overlaps a queued command
+				for (const Command& c: commands) {
+					const BuildInfo bc(c);
+
+					const int cmdSizeX = bc.GetXSize() * SQUARE_SIZE;
+					const int cmdSizeZ = bc.GetZSize() * SQUARE_SIZE;
+
+					const int cmdDistX = std::max(bc.pos.x - sqrPos.x - SQUARE_SIZE, sqrPos.x - bc.pos.x) * 2;
+					const int cmdDistZ = std::max(bc.pos.z - sqrPos.z - SQUARE_SIZE, sqrPos.z - bc.pos.z) * 2;
+
+					if (cmdDistX < cmdSizeX && cmdDistZ < cmdSizeZ) {
+						sqrStatus = CGameHelper::BUILDSQUARE_BLOCKED;
+						break;
+					}
+				}
+			}
+
+			switch (sqrStatus) {
+				case CGameHelper::BUILDSQUARE_OPEN:
+					canbuildpos.push_back(sqrPos);
+					break;
+				case CGameHelper::BUILDSQUARE_RECLAIMABLE:
+				case CGameHelper::BUILDSQUARE_OCCUPIED:
+					featurepos.push_back(sqrPos);
+					break;
+				case CGameHelper::BUILDSQUARE_BLOCKED:
+					nobuildpos.push_back(sqrPos);
+					break;
+			}
+
+			testStatus = std::min(testStatus, sqrStatus);
 		}
 	}
 

@@ -9,6 +9,9 @@
 struct lua_State;
 class CUnit; // sim|draw PR 30: CompareCmdQueueSlot's live-unit argument
 struct SCommandDescription; // sim|draw PR 44: GetServedAvailableCommands out-vector
+struct Command; // sim|draw split (Stage 0): GetServedOverlapQueued twin
+struct BuildInfo; // sim|draw split (Stage 0): TestUnitBuildSquareUIEpoch
+class float3;     // sim|draw split (Stage 0): TestUnitBuildSquareUIEpoch square lists
 
 /**
  * @brief LuaSnapshotServe -- snapshot-backed serving twins for draw-context Lua callouts
@@ -305,6 +308,25 @@ namespace LuaSnapshotServe {
 	// the caller treats that as an empty queue, exactly like the live path's
 	// null-unit skip. Main thread (the cache is the held slot's).
 	bool ForEachServedCommand(int unitID, const std::function<bool(int, int, float, float)>& fn);
+
+	// sim|draw split (Stage 0): served twin of CCommandAI::GetOverlapQueued(c),
+	// consumed by the GuiHandler build-preview overlap (retiring its sim park).
+	// Reconstructs the unit's command queue from the barrier command-queue cache
+	// (SnapCommand id/options/all params) and runs the exact static overlap logic
+	// (CCommandAI::GetOverlapQueued(c, queue)). Returns empty for a unit with no
+	// served slot -- the caller treats that as an empty queue, exactly like the
+	// live path's null-CommandAI skip. Main thread (the cache is the held slot's).
+	std::vector<Command> GetServedOverlapQueued(int unitID, const Command& c);
+
+	// sim|draw split (Stage 0): served draw-side ShowUnitBuildSquare verdict. Runs
+	// the build-preview UI test (placement::TestUnitBuildSquareUIT) over the epoch
+	// (placement::EpochView) instead of live sim, so CUnitDrawer::ShowUnitBuildSquare
+	// needs no sim park under the running split. Fills the buildable/feature/illegal
+	// square lists for coloring and returns the BuildSquareStatus (caller does !!x
+	// for canBuild). The per-square verdict is the same predicate gated bit-exact by
+	// TestBuildOrder; only the UI accumulation/overlap wrapper is draw-side here.
+	int TestUnitBuildSquareUIEpoch(const BuildInfo& buildInfo, const std::vector<Command>& commands,
+	                               std::vector<float3>& canbuildpos, std::vector<float3>& featurepos, std::vector<float3>& nobuildpos);
 
 	// sim|draw split (Stage 0): served draw-side weapon range-ring primitives for
 	// the GuiHandler weapon-range park retirement. Read the published epoch

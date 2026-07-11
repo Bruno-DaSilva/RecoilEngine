@@ -6,6 +6,8 @@
 #include "Game/CameraHandler.h"
 #include "Game/Game.h"
 #include "Game/GameHelper.h"
+#include "Lua/LuaSnapshotServe.h" // sim|draw split (Stage 0): served build-square verdict
+#include "System/SimDrawSplit.h"  // sim|draw split (Stage 0): splitRunning gate
 #include "Game/GameSetup.h"
 #include "Game/GlobalUnsynced.h"
 #include "Game/Players/Player.h"
@@ -1452,16 +1454,25 @@ bool CUnitDrawerGLSL::ShowUnitBuildSquare(const BuildInfo& buildInfo, const std:
 		canBuild = it->canBuild;
 	}
 	else {
-		canBuild = !!CGameHelper::TestUnitBuildSquare(
-			buildInfo,
-			feature,
-			-1,
-			false,
-			&buildableSquares,
-			&featureSquares,
-			&illegalSquares,
-			&commands
-		);
+		// sim|draw split (Stage 0): under the running split the live build-square
+		// test (groundBlockingObjectMap / losHandler / quadField derefs) would race
+		// the sim; serve the verdict from the epoch instead (placement::EpochView).
+		// The per-square predicate is identical -- only the data source differs.
+		if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() && !SimDrawSplit::IsSimParked()) {
+			canBuild = !!LuaSnapshotServe::TestUnitBuildSquareUIEpoch(
+				buildInfo, commands, buildableSquares, featureSquares, illegalSquares);
+		} else {
+			canBuild = !!CGameHelper::TestUnitBuildSquare(
+				buildInfo,
+				feature,
+				-1,
+				false,
+				&buildableSquares,
+				&featureSquares,
+				&illegalSquares,
+				&commands
+			);
+		}
 		buildCache.emplace_back();
 		auto& buildCacheItem = buildCache.back();
 

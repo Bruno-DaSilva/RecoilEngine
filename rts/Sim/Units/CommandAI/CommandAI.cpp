@@ -1427,10 +1427,13 @@ std::vector<Command> CCommandAI::GetOverlapQueued(const Command& c) const
 }
 
 
-std::vector<Command> CCommandAI::GetOverlapQueued(const Command& c, const CCommandQueue& q) const
+// shared body for both static overloads (CCommandQueue and std::vector<Command>);
+// uses only c and the queue's bidirectional iteration -- see the header note.
+template<class Queue>
+static std::vector<Command> GetOverlapQueuedImpl(const Command& c, const Queue& q)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	CCommandQueue::const_iterator ci = q.end();
+	auto ci = q.end();
 	std::vector<Command> v;
 	BuildInfo cbi(c);
 
@@ -1481,6 +1484,16 @@ std::vector<Command> CCommandAI::GetOverlapQueued(const Command& c, const CComma
 		} while (ci != q.begin());
 	}
 	return v;
+}
+
+std::vector<Command> CCommandAI::GetOverlapQueued(const Command& c, const CCommandQueue& q)
+{
+	return GetOverlapQueuedImpl(c, q);
+}
+
+std::vector<Command> CCommandAI::GetOverlapQueued(const Command& c, const std::vector<Command>& q)
+{
+	return GetOverlapQueuedImpl(c, q);
 }
 
 

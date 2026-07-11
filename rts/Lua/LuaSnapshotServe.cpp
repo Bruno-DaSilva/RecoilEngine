@@ -7122,6 +7122,42 @@ bool LuaSnapshotServe::ForEachServedCommand(int unitID, const std::function<bool
 }
 
 
+std::vector<Command> LuaSnapshotServe::GetServedOverlapQueued(int unitID, const Command& c)
+{
+	const std::vector<UnitCmdQueueSlot>& cache = ServedCmdCache();
+
+	if (unitID < 0 || static_cast<size_t>(unitID) >= cache.size())
+		return {};
+
+	const UnitCmdQueueSlot& slot = cache[unitID];
+	if (!slot.present)
+		return {};
+
+	// reconstruct the unit's command queue from the barrier cache (id / options /
+	// all params -- everything the overlap test reads via GetID/GetNumParams/
+	// GetParam/GetOpts/IsInternalOrder + BuildInfo::Parse; tag is not read).
+	std::vector<Command> queue;
+	queue.reserve(slot.commandQue.size());
+	for (const SnapCommand& sc: slot.commandQue) {
+		Command cmd(sc.id, sc.options);
+		for (unsigned int k = 0; k < sc.numParams; ++k)
+			cmd.PushParam(slot.commandQueParams[sc.paramOffset + k]);
+		queue.push_back(cmd);
+	}
+
+	return CCommandAI::GetOverlapQueued(c, queue);
+}
+
+
+int LuaSnapshotServe::TestUnitBuildSquareUIEpoch(const BuildInfo& buildInfo, const std::vector<Command>& commands,
+                                                 std::vector<float3>& canbuildpos, std::vector<float3>& featurepos, std::vector<float3>& nobuildpos)
+{
+	// mirror the live UI overload's allyteam (gu->myAllyTeam) over the epoch.
+	placement::EpochView view;
+	return placement::TestUnitBuildSquareUIT(view, buildInfo, gu->myAllyTeam, commands, canbuildpos, featurepos, nobuildpos);
+}
+
+
 /******************************************************************************
  * BEGIN PR 33 (pieces/scripts family) -- serving section
  *

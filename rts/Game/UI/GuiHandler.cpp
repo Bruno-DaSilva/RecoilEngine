@@ -4140,16 +4140,48 @@ void CGuiHandler::DrawMapStuff(bool onMiniMap)
 
 	// draw buildings we are about to build
 	if ((size_t(inCommand) < commands.size()) && (commands[inCommand].type == CMDTYPE_ICON_BUILDING)) {
-		// sim|draw PR 44 (prereq D): residual narrow park. The build preview walks
-		// live sim broadly: builder CAIs (pos/team/buildDistance), TestUnitBuildSquare
-		// (via ShowUnitBuildSquare) + GetOverlapQueued build-overlap on selected units'
-		// command queues -- none of which has a draw-side C++ served accessor today
-		// (the placement/queue channels are Lua-only / lack a GetOverlapQueued twin).
-		// The nested GetBuildPositions park nests no-op under this. Build-command-gated
-		// -> ~0 engages in steady state.
-		CGame::ScopedExternalSimPause simPause(CGame::SimPauseSite::GUI_DRAW_MAPSTUFF);
-		{
-			// draw build distance for all immobile builders during build commands
+		// sim|draw split (Stage 0): PARK RETIRED under the running split. The builder
+		// distance loop and the queued-command overlap are served from the epoch
+		// (UnitRows + the barrier command-queue cache), and ShowUnitBuildSquare tests
+		// the build square draw-side (placement::EpochView) -- nothing here derefs live
+		// sim. flag-off / parked keeps the live path under the outer park (byte-
+		// identical). GetBuildPositions keeps its own separate nest-safe GUI_GET_BUILDPOS
+		// park (an input-gated circle-build read, a distinct follow-up item).
+		const bool splitRunning = SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() && !SimDrawSplit::IsSimParked();
+
+		std::optional<CGame::ScopedExternalSimPause> outerPark;
+		if (!splitRunning)
+			outerPark.emplace(CGame::SimPauseSite::GUI_DRAW_MAPSTUFF);
+
+		// draw build distance for all immobile builders during build commands
+		if (splitRunning) {
+			// served: scan UnitRows for my-team builders (pos/team/def from rows +
+			// immutable def; selection is the draw-owned id set).
+			const auto& snap = simSnapshot.Read();
+			const int maxU = static_cast<int>(snap.MaxUnits());
+			const auto& selSet = selectedUnitsHandler.selectedUnits;
+			for (int bid = 0; bid < maxU; ++bid) {
+				if (!snap.Valid(bid))
+					continue;
+				if (pointeeUnit != nullptr && bid == pointeeUnit->id)
+					continue;
+				if (snap.Team(bid) != gu->myTeam)
+					continue;
+				const UnitDef* builderDef = unitDefHandler->GetUnitDefByID(snap.DefID(bid));
+				if (builderDef == nullptr || !builderDef->builder)
+					continue;
+				if (builderDef->canmove && selSet.find(bid) == selSet.end())
+					continue;
+
+				const float radius = builderDef->buildDistance;
+				static constexpr float mult[] = {1.0f, 1.0f, 1.0f, 0.3333f};
+				SColor color = SColor{ cmdColors.rangeBuild } * mult;
+				if (radius > 0.0f) {
+					glDisable(GL_TEXTURE_2D);
+					glSurfaceCircle(snap.Pos(bid), radius, color, 40);
+				}
+			}
+		} else {
 			for (const auto& [bid, builderCAI]: unitHandler.GetBuilderCAIs()) {
 				const CUnit* builder = builderCAI->owner;
 				const UnitDef* builderDef = builder->unitDef;
@@ -4222,6 +4254,12 @@ void CGuiHandler::DrawMapStuff(bool onMiniMap)
 						const Command c = bi.CreateCommand();
 
 						for (const int unitID: selectedUnitsHandler.selectedUnits) {
+							if (splitRunning) {
+								// served overlap over the barrier command-queue cache
+								for (const Command& cmd: LuaSnapshotServe::GetServedOverlapQueued(unitID, c))
+									buildCommands.push_back(cmd);
+								continue;
+							}
 							const CUnit* su = unitHandler.GetUnit(unitID);
 							// PR 27b: draw pass with the sim thread live -- a selected
 							// unit may have died mid-frame (null slot, destructed
