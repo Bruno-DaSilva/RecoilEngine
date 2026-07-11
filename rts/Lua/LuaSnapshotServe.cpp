@@ -7202,7 +7202,8 @@ namespace {
 		CMatrix44f modelSpaceMat;    // LocalModelPiece::GetModelSpaceMatrix()
 		float3 posDirPos;            // GetSolidObjectPiecePosDir's pos (object space)
 		float3 posDirDir;            // GetSolidObjectPiecePosDir's dir (object space)
-		CollisionVolume pieceColVol; // LocalModelPiece::GetCollisionVolume() (features)
+		CollisionVolume pieceColVol; // LocalModelPiece::GetCollisionVolume()
+		bool scriptVisible = true;   // LocalModelPiece::GetScriptVisible() (per-piece trace hit-test skip)
 	};
 
 	struct ObjectPieceSlot {
@@ -7313,8 +7314,10 @@ namespace {
 			pd.posDirPos = o->GetObjectSpacePos(emitPos);
 			pd.posDirDir = o->GetObjectSpaceVec(emitDir);
 
-			if (captureColVol)
+			if (captureColVol) {
 				pd.pieceColVol = *(lmp.GetCollisionVolume());
+				pd.scriptVisible = lmp.GetScriptVisible();
+			}
 		}
 
 		slot.scriptToModel.clear();
@@ -7794,6 +7797,7 @@ struct TraceCandidate {
 	float3 midPos;
 	float3 relMidPos;
 	bool inVoid = false;
+	const ObjectPieceSlot* slot = nullptr;   // per-piece volumes (DefaultToPieceTree path)
 };
 
 // resolve a unit candidate's real colvol + synced transform (CUnit::GetTransformMatrix
@@ -7811,6 +7815,7 @@ bool ResolveUnitTraceCandidate(int id, TraceCandidate& out)
 	out.midPos = u.MidPos(id);
 	out.relMidPos = u.relMidPos[id];
 	out.inVoid = u.InVoid(id);
+	out.slot = slot;
 	return true;
 }
 
@@ -7829,7 +7834,65 @@ bool ResolveFeatureTraceCandidate(int id, TraceCandidate& out)
 	out.midPos = f.MidPos(id);
 	out.relMidPos = f.relMidPos[id];
 	out.inVoid = f.InVoid(id);
+	out.slot = slot;
 	return true;
+}
+
+// object-free mirror of IntersectPieceTree/IntersectPiecesHelper over the demand
+// per-piece cache (pd.pieceColVol + pd.modelSpaceMat + pd.scriptVisible). The
+// live bounding-volume early-out (IntersectPieceTree) is a perf-only skip -- the
+// bounding volume encloses all pieces, so testing every piece is result-identical.
+bool EpochPieceTreeIntersect(const ObjectPieceSlot* slot, const CMatrix44f& objTransform,
+	const float3& p0, const float3& p1, CollisionQuery* cq)
+{
+	if (slot == nullptr)
+		return false;
+
+	bool hit = false;
+	float minDistSq = std::numeric_limits<float>::max();
+
+	for (const PieceDynamic& pd : slot->pieces) {
+		const CollisionVolume* lmpVol = &pd.pieceColVol;
+		if (!pd.scriptVisible || lmpVol->IgnoreHits())
+			continue;
+
+		CMatrix44f volMat = objTransform * pd.modelSpaceMat;
+		volMat.Translate(lmpVol->GetOffsets());
+
+		CollisionQuery cqn;
+		if (!CCollisionHandler::Intersect(lmpVol, volMat, p0, p1, &cqn))
+			continue;
+		if (!cqn.AnyHit())
+			continue;
+
+		const float curDistSq = (cqn.GetHitPos()).SqDistance(p0);
+		if (curDistSq >= minDistSq)
+			continue;
+
+		minDistSq = curDistSq;
+		hit = true;
+		if (cq == nullptr)
+			return true;
+		*cq = cqn;
+	}
+
+	return hit;
+}
+
+// EpochView DetectHit dispatcher: DefaultToPieceTree volumes override forceTrace/
+// testType and route to the per-piece path (mirroring CCollisionHandler::DetectHit
+// (o, v, m, ...)); simple volumes go to the object-free DetectHit.
+bool EpochDetectHit(const TraceCandidate& tc, const CollisionVolume* v,
+	const float3& p0, const float3& p1, CollisionQuery* cq, bool forceTrace)
+{
+	if (v->DefaultToPieceTree()) {
+		if (cq != nullptr)
+			cq->Reset();
+		if (tc.inVoid)
+			return false;
+		return EpochPieceTreeIntersect(tc.slot, tc.transform, p0, p1, cq);
+	}
+	return CCollisionHandler::DetectHit(tc.midPos, tc.relMidPos, tc.inVoid, v, tc.transform, p0, p1, cq, forceTrace);
 }
 
 // object-free mirror of TestConeHelper (TraceRay.cpp:44); no unsynced-debug block.
@@ -7899,7 +7962,7 @@ float3 trace::EpochView::TargetBorderPos(UnitRef u, const float3& rawPos, const 
 	tmpColVol.SetIgnoreHits(false);
 
 	// weapon muzzle inside the (scaled) volume -> border collapses to the muzzle
-	if (CCollisionHandler::DetectHit(tc.midPos, tc.relMidPos, tc.inVoid, &tmpColVol, tc.transform, weaponMuzzlePos, ZeroVector, nullptr))
+	if (EpochDetectHit(tc, &tmpColVol, weaponMuzzlePos, ZeroVector, nullptr, false))
 		return (targetBorderPos = weaponMuzzlePos);
 
 	tmpColVol.SetUseContHitTest(true);
@@ -7909,7 +7972,7 @@ float3 trace::EpochView::TargetBorderPos(UnitRef u, const float3& rawPos, const 
 	const float3 targetOffset = rawDir * (tmpColVol.GetBoundingRadius() * 2.0f);
 	const float3 targetRayPos = rawPos + targetOffset;
 
-	if (CCollisionHandler::DetectHit(tc.midPos, tc.relMidPos, tc.inVoid, &tmpColVol, tc.transform, weaponMuzzlePos, targetRayPos, &tmpColQry) && tmpColQry.AllHit())
+	if (EpochDetectHit(tc, &tmpColVol, weaponMuzzlePos, targetRayPos, &tmpColQry, false) && tmpColQry.AllHit())
 		targetBorderPos = mix(tmpColQry.GetIngressPos(), tmpColQry.GetEgressPos(), wd->targetBorder <= 0.0f);
 
 	return targetBorderPos;
@@ -7948,7 +8011,7 @@ float trace::EpochView::TraceRayNoEnemyNoGroundDist(const float3& srcPos, const 
 			TraceCandidate tc;
 			if (!ResolveFeatureTraceCandidate(id, tc))
 				continue;
-			if (CCollisionHandler::DetectHit(tc.midPos, tc.relMidPos, tc.inVoid, tc.cv, tc.transform, srcPos, srcPos + dir * traceLength, &cq, true)) {
+			if (EpochDetectHit(tc, tc.cv, srcPos, srcPos + dir * traceLength, &cq, true)) {
 				const float len = cq.GetHitPosDist(srcPos, dir);
 				if (len < traceLength)
 					traceLength = len;
@@ -7972,7 +8035,7 @@ float trace::EpochView::TraceRayNoEnemyNoGroundDist(const float3& srcPos, const 
 			TraceCandidate tc;
 			if (!ResolveUnitTraceCandidate(id, tc))
 				continue;
-			if (CCollisionHandler::DetectHit(tc.midPos, tc.relMidPos, tc.inVoid, tc.cv, tc.transform, srcPos, srcPos + dir * traceLength, &cq, true)) {
+			if (EpochDetectHit(tc, tc.cv, srcPos, srcPos + dir * traceLength, &cq, true)) {
 				const float len = cq.GetHitPosDist(srcPos, dir);
 				if (len < traceLength)
 					traceLength = len;
@@ -8053,10 +8116,10 @@ bool EpochTestTrajectoryConeHelper(const float3& tstPos, const float3& tstDir, f
 
 	CollisionQuery cq;
 	if ((2 * quadratic * cvRelDst + linear) > 0) {
-		return CCollisionHandler::DetectHit(tc.midPos, tc.relMidPos, tc.inVoid, cv, tc.transform, tstPos, hitPos, &cq, true);
+		return EpochDetectHit(tc, cv, tstPos, hitPos, &cq, true);
 	}
 	const float3 endPos = (tstPos + tstDir * length) + (UpVector * (quadratic * length * length + linear * length));
-	return CCollisionHandler::DetectHit(tc.midPos, tc.relMidPos, tc.inVoid, cv, tc.transform, hitPos, endPos, &cq, true);
+	return EpochDetectHit(tc, cv, hitPos, endPos, &cq, true);
 }
 
 } // namespace
@@ -8210,8 +8273,8 @@ bool trace::EpochView::MissileTrajectoryLOF(const float3& srcPos, const float3& 
 				const float hh = mheight[i - 1] + rr * (mheight[i] - mheight[i - 1]);
 				const float3 hitPos = srcPos + targetVec * cvRelDst + UpVector * hh;
 				if (mheight[i] > mheight[i - 1])
-					return CCollisionHandler::DetectHit(tc.midPos, tc.relMidPos, tc.inVoid, cv, tc.transform, srcPos, hitPos, &cq, true);
-				return CCollisionHandler::DetectHit(tc.midPos, tc.relMidPos, tc.inVoid, cv, tc.transform, hitPos, tgtPos, &cq, true);
+					return EpochDetectHit(tc, cv, srcPos, hitPos, &cq, true);
+				return EpochDetectHit(tc, cv, hitPos, tgtPos, &cq, true);
 			}
 		}
 		return false;

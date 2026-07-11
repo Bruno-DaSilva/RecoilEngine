@@ -195,11 +195,14 @@ class CCollisionHandler {
 		 * @param p0 start of ray (in world-coordinates)
 		 * @param p1 end of ray (in world-coordinates)
 		 */
-		static bool Intersect(const CollisionVolume* v, const CMatrix44f& m, const float3& p0, const float3& p1, CollisionQuery* cq);
 		static bool IntersectPieceTree(const CSolidObject* o, const CMatrix44f& m, const float3& p0, const float3& p1, CollisionQuery* cq);
 		static bool IntersectPiecesHelper(const CSolidObject* o, const CMatrix44f& m, const float3& p0, const float3& p1, CollisionQuery* cqp);
 
 	public:
+		// volume-only ray intersect -- public for the sim/draw split trace re-host's
+		// object-free per-piece path (mirrors IntersectPiecesHelper over the demand
+		// piece-cache colvols; same rationale as the object-free MouseHit)
+		static bool Intersect(const CollisionVolume* v, const CMatrix44f& m, const float3& p0, const float3& p1, CollisionQuery* cq);
 		static bool IntersectEllipsoid(const CollisionVolume* v, const float3& pi0, const float3& pi1, CollisionQuery* cq);
 		static bool IntersectCylinder(const CollisionVolume* v, const float3& pi0, const float3& pi1, CollisionQuery* cq);
 		static bool IntersectBox(const CollisionVolume* v, const float3& pi0, const float3& pi1, CollisionQuery* cq);
