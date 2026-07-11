@@ -703,18 +703,12 @@ namespace LuaSnapshotServe {
 	enum class PlacementKind { TestMoveOrder = 0, TestBuildOrder = 1, ClosestBuildPos = 2 };
 
 	/// entry-point glue for the three placement tests (called from LuaSyncedRead):
-	/// dispatches to `liveFn` when the split is off (bit-identical), to the
-	/// query/reply channel under the running split, and dual-runs live-vs-query
-	/// for coverage when the diff gate is armed flag-off.
+	/// dispatches to `liveFn` when the split is off (bit-identical); under the
+	/// running split serves the verdict DRAW-SIDE against the published epoch
+	/// (placement::EpochView, PLACEMENT REHOST); dual-runs live-vs-epoch for
+	/// coverage when the diff gate is armed flag-off.
 	int RoutePlacementQuery(lua_State* L, const char* caller, ServeFn liveFn, PlacementKind kind);
-
-	/// SimDrawBarrier hook (sim parked): drain the pending placement queries and
-	/// evaluate each against live sim state, publishing the replies for the next
-	/// draw frame. No-op (empty check) flag-off / when nothing was enqueued.
-	void EvaluatePlacementQueries();
-
-	/// game teardown: reset the placement-query pending queue + reply map (called
-	/// from ClearCaches()). Self-pruning already prevents growth/aliasing; this is
-	/// the explicit belt-and-suspenders reset.
-	void ClearPlacementQueryChannel();
+	// PLACEMENT REHOST (stage 4): EvaluatePlacementQueries() / ClearPlacement-
+	// QueryChannel() retired -- the placement query/reply channel is gone (served
+	// draw-side). The trace channel keeps its EvaluateTraceQueries/Clear* twins.
 }

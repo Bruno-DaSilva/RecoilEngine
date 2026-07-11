@@ -8015,10 +8015,8 @@ void LuaSnapshotServe::ClearCaches()
 	// caches above can); ClearTraceQueryChannel() resets it explicitly all the
 	// same, called next to this from CGame teardown.
 	LuaSnapshotServe::ClearTraceQueryChannel();
-
-	// PR 38e placement query/reply channel: same self-pruning main-thread-only
-	// design as the PR 35 trace channel above; reset it explicitly at teardown.
-	LuaSnapshotServe::ClearPlacementQueryChannel();
+	// PLACEMENT REHOST (stage 4): the placement query/reply channel is retired
+	// (all placement callouts served draw-side via EpochView) -- nothing to clear.
 }
 
 
@@ -10027,68 +10025,34 @@ void LuaSnapshotServe::ClearTraceQueryChannel()
 
 
 /******************************************************************************
- * PR 38e -- placement build/move tests via the SIM-SIDE QUERY/REPLY channel
+ * Placement build/move tests -- served DRAW-SIDE via placement::EpochView
+ * (PLACEMENT REHOST, doc/sim-draw-placement-rehost-plan.md §10; supersedes the
+ * PR 38e sim-side query/reply channel, retired in stage 4).
  *
- * Serves the last three sanctioned placement callouts -- TestBuildOrder /
- * TestMoveOrder / ClosestBuildPos -- so the draw thread no longer runs the live
- * CGameHelper::TestUnitBuildSquare / MoveDef::TestMoveSquare / ClosestBuildPos
- * physics predicates against sim-owned terrain/blocking state while the sim
- * advances. This is the SAME physics-predicate-rehost class as PR 35's weapon
- * trace tests (aed2f64bbb): flag-off Route()-style serving forbids ANY
- * approximation (the served value must equal master's live value byte-for-byte),
- * and a faithful draw-side recompute would need the whole terrain-speedmod
- * mirror + a bit-exact CMoveMath / TestUnitBuildSquare re-host bottoming out in
- * the SYNCED, non-double-buffered terrain arrays (maxHeightMap / typeMap /
- * slopeMap / centerNormals2D) + buildingMaskMap + yardmapStatusEffectsMap +
- * full per-cell object physical-state capture (RangeIsBlocked iterates whole
- * cells, not just the cell[0] the PR 29 blocking mirror captures) -- a large,
- * fragile, approximation-prone sub-project (the PR 29 escalation note). So these
- * three are served the same way PR 35 served the trace tests:
+ * The last three sanctioned placement callouts -- TestBuildOrder / TestMoveOrder /
+ * ClosestBuildPos -- run the SAME templated placement predicate stack the sim runs
+ * (placement:: / movemath::), instantiated with EpochView (DrawMapMirrors +
+ * SimSnapshot rows + immutable def data) instead of LiveView. The "one
+ * implementation, two backends" rehost the PR 38e channel deferred: the terrain
+ * speedmod arrays (center/max height, slope, centerNormals2D), buildingMaskMap,
+ * yardmapStatusEffectsMap and the FULL per-cell blocking object list are all
+ * mirrored (stage 1), so the draw-side recompute is bit-exact, not an
+ * approximation. RoutePlacementQuery:
  *
- *   flag-OFF: RoutePlacementQuery runs the LIVE body inline -> bit-identical.
- *   flag-ON : the callout enqueues a query and returns the last boundary's reply;
- *             EvaluatePlacementQueries() (a SimDrawBarrier step, sim parked -- the
- *             RefreshCommandQueues / EvaluateTraceQueries precedent) evaluates the
- *             EXACT live predicate against live sim state. Boundary-deferred
- *             (<=1 stale) but sim-exact, no approximation.
+ *   flag-OFF unarmed: runs the LIVE body inline -> bit-identical.
+ *   flag-OFF armed  : dual-runs live vs EpochView -> proves epoch == live.
+ *   flag-ON         : evaluates EpochView synchronously (no queue). The verdict
+ *                     is at the CURRENT query position vs <=1-boundary-old world
+ *                     (the recorded deviation swap -- the inverse of the retired
+ *                     channel's exact-state / stale-position).
  *
- * The query queue + reply map are MAIN-THREAD-ONLY (written by draw-context Lua
- * during CGame::Draw, drained at the barrier that opens the same CGame::Draw --
- * both on the main thread; the sim thread never touches them). No locks, no
- * atomics; flag-off the twin never enqueues, so the channel is inert.
- * DISTINCT from the snapshot ring -> flagged for PR 43's epoch refresh (same as
- * the PR 35 channel).
- *
- * Sync audit: CGameHelper::{TestUnitBuildSquare,Pos2BuildPos,ClosestBuildPos},
- * MoveDef::TestMoveSquare (-> CMoveMath GetPosSpeedMod / RangeIsBlocked /
- * ObjectBlockType) and losHandler->InLos are const reads over the blocking map /
- * terrain arrays / heightmap / features / los -- they consume NO gsRNG (verified:
- * no RNG in GameHelper's build-square region or MoveMath) and mutate no synced
- * state (master already calls all three from unsynced widget draw context every
- * frame without desync -- that is exactly why they were sanctionedLive). The
- * `synced` flag is false for a served handle, so the height snap uses the
- * UNSYNCED heightmap; the blocking/terrain reads are the same sanctioned barrier
- * class as RefreshCommandQueues' live queue walk (sim parked, scratch
- * uncontended -- no concurrent sim query runs). No synced write, no streflop, no
- * snapshot ring mutation.
- *
- * Dirty-marking choke-point audit: N/A -- like the PR 35 channel this adds no
- * mirror or dirty-copy; the reply map is recomputed wholesale each barrier from
- * live objects, so there is no dirty-mark to funnel and no missed-dirty class to
- * gate. (The PR 29 blocking mirror this family could otherwise build on is not
- * used here: the value must be bit-exact, and that mirror captures only cell[0]
- * -- RangeIsBlocked reads whole cells -- so a mirror recompute cannot match.)
- *
- * POV/masking audit: TestMoveOrder's los gate captures readAllyTeam+fullRead and
- * evaluates losHandler->InLos(pos, allyTeam) at the barrier exactly as the live
- * body (negative-allyTeam -> fullRead). TestBuildOrder passes readAllyTeam to
- * TestUnitBuildSquare (negative allyTeam = full visibility, as documented in the
- * live body). ClosestBuildPos takes an explicit teamID arg (not the handle POV)
- * and resolves team->allyTeam inside the helper, unchanged. Return shapes mirror
- * the live bodies exactly (TMO: 1 boolean; TBO: 1 number, or 2 with the blocking
- * feature id; CBP: 3 numbers). Bad-arg Lua errors (luaL_checkint/checkfloat /
- * LuaUtils::ParseFacing) raise identically because the query build re-does the
- * same arg reads in the same order as master.
+ * This block keeps the arg-parse (BuildPlacementQuery) + reply-format
+ * (PushPlacementReply) helpers -- the packed PlacementQuery POD is now just the
+ * parsed-args carrier for the synchronous epoch eval, not a reply-map key.
+ * Return shapes mirror the live bodies exactly (TMO: 1 boolean; TBO: 1 number, or
+ * 2 with the blocking feature id; CBP: 3 numbers); bad-arg Lua errors raise
+ * identically (same arg reads, same order). Still advisory-UI only -- the
+ * authoritative synced placement test re-runs at command execution, unchanged.
  ******************************************************************************/
 
 namespace {
@@ -10121,82 +10085,6 @@ namespace {
 		float f0, f1, f2;   // CBP buildPos x/y/z
 	};
 
-	struct PlacementQueryEq {
-		bool operator()(const PlacementQuery& a, const PlacementQuery& b) const {
-			return std::memcmp(&a, &b, sizeof(PlacementQuery)) == 0;
-		}
-	};
-	struct PlacementQueryHash {
-		size_t operator()(const PlacementQuery& q) const {
-			// FNV-1a over the raw bytes (the PR 35 channel's hash)
-			const unsigned char* p = reinterpret_cast<const unsigned char*>(&q);
-			size_t h = 1469598103934665603ULL;
-			for (size_t i = 0; i < sizeof(PlacementQuery); ++i) {
-				h ^= p[i];
-				h *= 1099511628211ULL;
-			}
-			return h;
-		}
-	};
-
-	// PR 43 §7.3 (operator-ruled per-callout keying, Batch-4):
-	//  - TestBuildOrder keys by the build-grid-SNAPPED pos (applied at query
-	//    build, see BuildPlacementQuery): its verdict is grid-cell-quantized,
-	//    so within-cell cursor motion maps to the same key => cache hit =>
-	//    correct values while the cursor moves. This is the CORRECT key, not
-	//    a band-aid; no standing model needed.
-	//  - ClosestBuildPos / TestMoveOrder results depend CONTINUOUSLY on
-	//    worldPos, so no snap is value-safe; they use the STANDING-LATEST-
-	//    QUERY model: the reply is keyed pos-agnostically (StandingPlacementKey
-	//    zeroes the float pos payload), the barrier evaluates the most
-	//    recently registered position per standing key, and a moving cursor
-	//    gets a 1-boundary-late CORRECT answer instead of persistent-default.
-	//    Enumerated deviation (ruled acceptable): two same-frame queries
-	//    sharing a standing key but different positions collide -- the last
-	//    registered position wins for both.
-	PlacementQuery StandingPlacementKey(const PlacementQuery& q)
-	{
-		using PK = LuaSnapshotServe::PlacementKind;
-
-		// TestBuildOrder's pos is already canonical (grid-snapped at build)
-		if (static_cast<PK>(q.kind) == PK::TestBuildOrder)
-			return q;
-
-		PlacementQuery k = q;
-		k.px = k.py = k.pz = 0.0f;
-		k.dx = k.dy = k.dz = 0.0f; // TMO dir tracks the cursor path too
-		return k;
-	}
-
-	// requested since the last barrier (draw-context callouts push here; the
-	// barrier drains + clears). Main-thread-only.
-	std::vector<PlacementQuery> placementQueryPending;
-	// PR 44a: see the trace channel note (shared queryChannelMtx)
-	bool placementRepliesStagedValid = false;
-	// last boundary's sim-exact replies, keyed by the STANDING key (§7.3).
-	// Rebuilt each barrier from the pending set (a query the widgets stop
-	// requesting drops out -- no growth).
-	std::unordered_map<PlacementQuery, PlacementReply, PlacementQueryHash, PlacementQueryEq> placementQueryReplies;
-	std::unordered_map<PlacementQuery, PlacementReply, PlacementQueryHash, PlacementQueryEq> placementRepliesStaged;
-	std::unordered_map<PlacementQuery, PlacementReply, PlacementQueryHash, PlacementQueryEq> placementQueryRepliesScratch;
-	// standing key -> most recently registered full query (barrier scratch)
-	std::unordered_map<PlacementQuery, PlacementQuery, PlacementQueryHash, PlacementQueryEq> placementQueryLatest;
-
-	// master's "no info yet" first-call/miss default per kind (documented):
-	//  - TMO: false (los-blocked answer)
-	//  - TBO: BUILDSQUARE_BLOCKED (conservative "cannot build")
-	//  - CBP: -RgtVector (CGameHelper::ClosestBuildPos' "not found" sentinel)
-	PlacementReply DefaultPlacementReply(LuaSnapshotServe::PlacementKind kind)
-	{
-		using PK = LuaSnapshotServe::PlacementKind;
-		PlacementReply r = {};
-		switch (kind) {
-			case PK::TestMoveOrder:  r.retCount = 1; r.i0 = 0; break;
-			case PK::TestBuildOrder: r.retCount = 1; r.i0 = CGameHelper::BUILDSQUARE_BLOCKED; break;
-			case PK::ClosestBuildPos: r.retCount = 3; r.f0 = -1.0f; r.f1 = 0.0f; r.f2 = 0.0f; break;
-		}
-		return r;
-	}
 
 	// push a reply onto the Lua stack in the live callout's exact shape.
 	int PushPlacementReply(lua_State* L, LuaSnapshotServe::PlacementKind kind, const PlacementReply& r)
@@ -10315,73 +10203,6 @@ namespace {
 		return 1;
 	}
 
-	// Evaluate a placement query against LIVE sim state -- the EXACT live body tail,
-	// with the derived positions (Pos2BuildPos build-grid snap) recomputed sim-side
-	// exactly as the live body does. Called at the barrier (sim parked) and by the
-	// armed flag-off dual-run (single-threaded). Re-derives the immutable def data;
-	// the def early-outs were answered inline (never enqueued), but re-checking is
-	// cheap and defensive against a stray direct call.
-	PlacementReply EvaluatePlacementQueryLive(const PlacementQuery& q)
-	{
-		using PK = LuaSnapshotServe::PlacementKind;
-		PlacementReply r = {};
-
-		switch (static_cast<PK>(q.kind)) {
-			case PK::TestMoveOrder: {
-				r.retCount = 1;
-				const UnitDef* unitDef = unitDefHandler->GetUnitDefByID(q.defID);
-				if (unitDef == nullptr || unitDef->pathType == -1u) { r.i0 = 0; return r; }
-				const MoveDef* moveDef = moveDefHandler.GetMoveDefByPathType(unitDef->pathType);
-				if (moveDef == nullptr) { r.i0 = unitDef->IsImmobileUnit() ? 0 : 1; return r; }
-
-				const float3 pos(q.px, q.py, q.pz);
-				const float3 dir(q.dx, q.dy, q.dz);
-
-				bool los = (q.readAllyTeam < 0) ? (q.fullRead != 0)
-				                                : losHandler->InLos(pos, q.readAllyTeam);
-				bool ret = false;
-				if (los) {
-					MoveTypes::CheckCollisionQuery collisionQuery(moveDef, pos);
-					ret = moveDef->TestMoveSquare(collisionQuery, pos, dir,
-						(q.flags & 1) != 0, (q.flags & 2) != 0, (q.flags & 4) != 0);
-				}
-				r.i0 = ret ? 1 : 0;
-				return r;
-			}
-			case PK::TestBuildOrder: {
-				const UnitDef* unitDef = unitDefHandler->GetUnitDefByID(q.defID);
-				if (unitDef == nullptr) { r.retCount = 1; r.i0 = 0; return r; }
-
-				BuildInfo bi;
-				bi.buildFacing = q.facing;
-				bi.def = unitDef;
-				bi.pos = { q.px, q.py, q.pz };
-				bi.pos = CGameHelper::Pos2BuildPos(bi, q.synced != 0);
-
-				CFeature* feature = nullptr;
-				int retval = CGameHelper::TestUnitBuildSquare(bi, feature, q.readAllyTeam, q.synced != 0);
-
-				// live back-compat map: BUILDSQUARE_OPEN -> BUILDSQUARE_RECLAIMABLE
-				if (retval == CGameHelper::BUILDSQUARE_OPEN)
-					retval = CGameHelper::BUILDSQUARE_RECLAIMABLE;
-
-				r.i0 = retval;
-				if (feature == nullptr) { r.retCount = 1; return r; }
-				r.retCount = 2; r.i1 = feature->id;
-				return r;
-			}
-			case PK::ClosestBuildPos: {
-				r.retCount = 3;
-				const float3 buildPos = CGameHelper::ClosestBuildPos(
-					q.teamID, unitDefHandler->GetUnitDefByID(q.defID),
-					float3(q.px, q.py, q.pz), q.searchRadius, q.minDistance, q.facing, q.synced != 0);
-				r.f0 = buildPos.x; r.f1 = buildPos.y; r.f2 = buildPos.z;
-				return r;
-			}
-		}
-		return r;
-	}
-
 	// PLACEMENT REHOST (stage 3c): mirrors CMoveMath::RangeIsBlocked ->
 	// RangeIsBlockedMt exactly (step-2 footprint walk, OR-fold ObjectBlockType,
 	// early-exit on BLOCK_STRUCTURE) but over the full-cell mirror instead of the
@@ -10459,21 +10280,12 @@ namespace {
 		return retTestMove;
 	}
 
-	// PLACEMENT REHOST (stage 3): the callouts whose predicate is fully served
-	// draw-side via placement::EpochView. Migrated incrementally; a not-yet-ready
-	// kind keeps the sim-side query/reply channel (ServePlacementQuery).
-	bool PlacementKindEpochReady(LuaSnapshotServe::PlacementKind kind)
-	{
-		using PK = LuaSnapshotServe::PlacementKind;
-		return kind == PK::TestBuildOrder || kind == PK::ClosestBuildPos || kind == PK::TestMoveOrder;
-	}
-
 	// Evaluate a placement query against the published EPOCH (draw-side): the same
 	// templated placement predicates the sim runs with LiveView, instantiated with
 	// EpochView (DrawMapMirrors + SimSnapshot rows). Synchronous, no queue -- the
 	// reply reflects the CURRENT query position against <=1-boundary-old world
-	// state (the recorded deviation swap). The armed flag-off dual-run compares
-	// this against EvaluatePlacementQueryLive for bit equality.
+	// state (the recorded deviation swap). Served flag-ON; the armed flag-OFF
+	// dual-run compares this against the live callout body for bit equality.
 	PlacementReply EvaluatePlacementQueryEpoch(const PlacementQuery& q)
 	{
 		using PK = LuaSnapshotServe::PlacementKind;
@@ -10535,36 +10347,12 @@ namespace {
 				r.f0 = buildPos.x; r.f1 = buildPos.y; r.f2 = buildPos.z;
 				return r;
 			}
-			// not yet epoch-ready (kept on the sim-side channel); the armed dual-run
-			// never reaches these (PlacementKindEpochReady gates them out)
+			// all PlacementKind values are handled above; unreachable
 			default:
-				return EvaluatePlacementQueryLive(q);
+				return r;
 		}
 	}
 
-	// flag-ON serving twin: build the query (or resolve a def early-out inline),
-	// enqueue it for the next boundary, and return this frame's reply (the previous
-	// boundary's evaluation, or the documented default on first-call/miss).
-	int ServePlacementQuery(lua_State* L, const char* caller, LuaSnapshotServe::PlacementKind kind)
-	{
-		PlacementQuery q;
-		PlacementReply inlineReply;
-		if (BuildPlacementQuery(L, caller, kind, q, inlineReply) == 0)
-			return PushPlacementReply(L, kind, inlineReply); // def early-out, no channel
-
-		{
-			// PR 44a: the sim-thread producer drains this queue concurrently
-			std::lock_guard<std::mutex> lock(queryChannelMtx);
-			placementQueryPending.push_back(q);
-		}
-
-		// PR 43 §7.3: standing-key lookup (pos-agnostic for CBP/TMO, snapped-
-		// cell for TBO) -- a moving cursor hits the previous boundary's reply
-		// instead of minting a perpetual miss. First-call keeps the default.
-		const auto it = placementQueryReplies.find(StandingPlacementKey(q));
-		const PlacementReply r = (it != placementQueryReplies.end()) ? it->second : DefaultPlacementReply(kind);
-		return PushPlacementReply(L, kind, r);
-	}
 }
 
 
@@ -10587,19 +10375,14 @@ int LuaSnapshotServe::RoutePlacementQuery(lua_State* L, const char* caller, Serv
 
 	if (splitRunning) {
 		// flag-ON: the sim thread owns live terrain/blocking state -- NEVER touch it
-		// from draw context.
-		if (PlacementKindEpochReady(kind)) {
-			// PLACEMENT REHOST (stage 3): evaluate the predicate draw-side against the
-			// published epoch, synchronously (no queue). Current query position vs
-			// <=1-boundary-old world -- the recorded deviation swap.
-			PlacementQuery q;
-			PlacementReply reply;
-			if (BuildPlacementQuery(L, caller, kind, q, reply) != 0)
-				reply = EvaluatePlacementQueryEpoch(q);
-			return PushPlacementReply(L, kind, reply);
-		}
-		// not-yet-migrated kinds: enqueue + return the last boundary's sim-exact reply.
-		return ServePlacementQuery(L, caller, kind);
+		// from draw context. PLACEMENT REHOST (stage 3/4): every placement callout is
+		// evaluated draw-side against the published epoch, synchronously (no queue).
+		// Current query position vs <=1-boundary-old world -- the recorded deviation swap.
+		PlacementQuery q;
+		PlacementReply reply;
+		if (BuildPlacementQuery(L, caller, kind, q, reply) != 0)
+			reply = EvaluatePlacementQueryEpoch(q);
+		return PushPlacementReply(L, kind, reply);
 	}
 
 	// flag-OFF from draw context: single-threaded, the sim is parked relative to
@@ -10640,11 +10423,10 @@ int LuaSnapshotServe::RoutePlacementQuery(lua_State* L, const char* caller, Serv
 		PlacementQuery q;
 		PlacementReply reply;
 		if (BuildPlacementQuery(L, caller, kind, q, reply) != 0) {
-			// PLACEMENT REHOST (stage 3): for migrated kinds the snap leg is the
-			// EPOCH evaluation -> this dual-run now proves epoch == live bit-for-bit
-			// (was a live-vs-live reconstruction check).
-			reply = PlacementKindEpochReady(kind) ? EvaluatePlacementQueryEpoch(q)
-			                                      : EvaluatePlacementQueryLive(q);
+			// PLACEMENT REHOST (stage 3/4): the snap leg is the EPOCH evaluation, so
+			// this dual-run proves epoch == live bit-for-bit (was a live-vs-live
+			// reconstruction check).
+			reply = EvaluatePlacementQueryEpoch(q);
 		}
 		snapN = PushPlacementReply(L, kind, reply);
 	}
@@ -10686,48 +10468,6 @@ int LuaSnapshotServe::RoutePlacementQuery(lua_State* L, const char* caller, Serv
 	return liveN;
 }
 
-
-void LuaSnapshotServe::EvaluatePlacementQueries()
-{
-	// flag-off / nothing enqueued -> inert (the twin only enqueues under the
-	// running split). Called at the SimDrawBarrier with the sim parked, so the
-	// live predicate evaluation is the sanctioned RefreshCommandQueues class.
-	// rebuild the reply map from this boundary's pending set (see the trace
-	// evaluator above for the pruning + §7.3 keying + PR 44a locking notes)
-	placementQueryLatest.clear();
-	{
-		std::lock_guard<std::mutex> lock(queryChannelMtx);
-
-		if (placementQueryPending.empty())
-			return;
-
-		for (const PlacementQuery& q: placementQueryPending)
-			placementQueryLatest[StandingPlacementKey(q)] = q;
-		placementQueryPending.clear();
-	}
-
-	placementQueryRepliesScratch.clear();
-	for (const auto& [key, q]: placementQueryLatest)
-		placementQueryRepliesScratch[key] = EvaluatePlacementQueryLive(q);
-
-	std::swap(placementQueryReplies, placementQueryRepliesScratch);
-}
-
-
-void LuaSnapshotServe::ClearPlacementQueryChannel()
-{
-	{
-		std::lock_guard<std::mutex> lock(queryChannelMtx);
-		placementQueryPending.clear();
-		placementQueryPending.shrink_to_fit();
-		placementRepliesStaged.clear();
-		placementRepliesStagedValid = false;
-	}
-	placementQueryReplies.clear();
-	placementQueryRepliesScratch.clear();
-	placementQueryLatest.clear();
-}
-
 // ---------------------------------------------------------------------------
 // PR 44a (producer flip): sim-edge query evaluation + park-time reply commit
 // ---------------------------------------------------------------------------
@@ -10740,18 +10480,18 @@ void LuaSnapshotServe::EvaluateQueriesAtSimEdge()
 	// the replies for the consumer's park-time commit. Also serviced while
 	// the sim is idle/paused (no frame edges) so cursor-tracking widget
 	// queries stay live -- the §8 Gap-B note's pattern, generalized.
+	// PLACEMENT REHOST (stage 4): the placement query/reply channel is retired --
+	// all placement callouts are served draw-side via EpochView. Only the trace
+	// channel remains here.
 	static std::vector<WeaponTraceQuery> tq;
-	static std::vector<PlacementQuery> pq;
 	tq.clear();
-	pq.clear();
 
 	{
 		std::lock_guard<std::mutex> lock(queryChannelMtx);
 		tq.swap(traceQueryPending);
-		pq.swap(placementQueryPending);
 	}
 
-	if (tq.empty() && pq.empty())
+	if (tq.empty())
 		return;
 
 	// §7.3 standing-latest-query dedupe + evaluation, outside the lock (the
@@ -10760,10 +10500,6 @@ void LuaSnapshotServe::EvaluateQueriesAtSimEdge()
 	traceQueryLatest.clear();
 	for (const WeaponTraceQuery& q: tq)
 		traceQueryLatest[StandingTraceKey(q)] = q;
-
-	placementQueryLatest.clear();
-	for (const PlacementQuery& q: pq)
-		placementQueryLatest[StandingPlacementKey(q)] = q;
 
 	// evaluate into locals, then merge under the lock. MERGE (not replace):
 	// multiple sim-edge evaluations can run between two consumer commits
@@ -10774,10 +10510,6 @@ void LuaSnapshotServe::EvaluateQueriesAtSimEdge()
 	for (const auto& [key, q]: traceQueryLatest)
 		traceQueryRepliesScratch[key] = EvaluateTraceQueryLive(q) ? 1 : 0;
 
-	placementQueryRepliesScratch.clear();
-	for (const auto& [key, q]: placementQueryLatest)
-		placementQueryRepliesScratch[key] = EvaluatePlacementQueryLive(q);
-
 	{
 		std::lock_guard<std::mutex> lock(queryChannelMtx);
 
@@ -10785,11 +10517,6 @@ void LuaSnapshotServe::EvaluateQueriesAtSimEdge()
 			for (const auto& [key, r]: traceQueryRepliesScratch)
 				traceRepliesStaged[key] = r;
 			traceRepliesStagedValid = true;
-		}
-		if (!placementQueryRepliesScratch.empty()) {
-			for (const auto& [key, r]: placementQueryRepliesScratch)
-				placementRepliesStaged[key] = r;
-			placementRepliesStagedValid = true;
 		}
 	}
 }
@@ -10806,11 +10533,7 @@ void LuaSnapshotServe::CommitStagedQueryReplies()
 		traceRepliesStaged.clear();
 		traceRepliesStagedValid = false;
 	}
-	if (placementRepliesStagedValid) {
-		std::swap(placementQueryReplies, placementRepliesStaged);
-		placementRepliesStaged.clear();
-		placementRepliesStagedValid = false;
-	}
+	// placement staging retired (stage 4): placement is served draw-side
 }
 
 

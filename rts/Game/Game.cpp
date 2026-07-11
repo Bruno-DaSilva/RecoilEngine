@@ -1885,11 +1885,12 @@ void CGame::SimDrawBarrier()
 			LuaSnapshotServe::PieceCacheEpoch(),
 			drawMapMirrors.DrainSerial());
 
-		// (3c/3d) evaluate the draw side's pending weapon-trace + placement
-		// queries (PR 35 / 38e). Sim parked, so the exact live predicates run
-		// against valid boundary-N state; replies publish for the next frame.
+		// (3c/3d) evaluate the draw side's pending weapon-trace queries (PR 35).
+		// Sim parked, so the exact live predicates run against valid boundary-N
+		// state; replies publish for the next frame. PLACEMENT REHOST (stage 4):
+		// the placement query/reply channel is retired -- placement is served
+		// draw-side via EpochView, no barrier evaluation needed.
 		LuaSnapshotServe::EvaluateTraceQueries();
-		LuaSnapshotServe::EvaluatePlacementQueries();
 	} else {
 		// (3c/3d flip) the PRODUCER evaluated the pending queries at its frame
 		// edge (and while idle/paused -- the §8 Gap-B servicing note) and
