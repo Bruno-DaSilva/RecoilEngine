@@ -149,11 +149,12 @@ namespace {
 		// twins -- GetUnitWeaponState/Damages/Vectors/Target/CanFire,
 		// GetUnitShieldState, GetUnitStockpile, GetUnitFlanking). The four trace
 		// tests (GetUnitWeaponTryTarget/TestTarget/TestRange/HaveFreeLineOfFire)
-		// landed in sim|draw PR 35 via the SIM-SIDE QUERY/REPLY channel (Batch-3
-		// amendment; LuaSnapshotServe::RouteTraceQuery + EvaluateTraceQueries):
-		// flag-off runs the live predicate inline, flag-on defers a query the sim
-		// evaluates sim-exact at the barrier -- so they take no draw-context live
-		// read and are no longer sanctioned. Nothing from this family remains here.
+		// are served DRAW-SIDE via trace::EpochView (TRACE REHOST, retiring the
+		// PR 35 sim-side query/reply channel; LuaSnapshotServe::RouteTraceQuery):
+		// flag-off runs the live predicate inline, flag-on evaluates the same
+		// templated trace:: predicate stack over the published epoch -- so they
+		// take no draw-context live read and are no longer sanctioned. Nothing
+		// from this family remains here.
 		// deep per-unit state (moveType/CAI/second-object derefs): FULLY SERVED
 		// in sim|draw PR 32. GetUnitStates/PosErrorParams/Storage/MetalExtraction/
 		// BuildeeRadius/LastAttacker + the build-state family (IsBuilding/

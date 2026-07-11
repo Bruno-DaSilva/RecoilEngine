@@ -263,15 +263,6 @@ namespace LuaSnapshotServe {
 	uint64_t PieceCacheEpoch();
 	uint64_t PieceCacheEpoch(int slot);
 
-	// ---- PR 44a (producer flip): sim-edge query evaluation ----
-	/// PRODUCER: drain + evaluate the pending trace/placement queries on the
-	/// sim thread (frame edge, and idle/paused servicing) and STAGE the
-	/// replies; cheap no-op when nothing is pending.
-	void EvaluateQueriesAtSimEdge();
-	/// CONSUMER (barrier, sim parked): swap the staged replies into the
-	/// served maps the draw-side callouts read.
-	void CommitStagedQueryReplies();
-
 	/// PR 43 §2.8 (/epochstats): approximate resident bytes of the cmd-queue
 	/// and piece cache channels (the two non-SimSnapshot epoch channels with
 	/// draw-owned payload stores)
@@ -601,59 +592,39 @@ namespace LuaSnapshotServe {
 	int GetFeatureSmokeTime(lua_State* L, const char* caller);   // LuaSyncedRead (ParseFeature)
 	int GetProjectileDamages(lua_State* L, const char* caller);  // LuaSyncedRead (ParseProjectile)
 
-	// ======================= PR 35: weapon trace tests =======================
-	// GetUnitWeaponTryTarget/TestTarget/TestRange/HaveFreeLineOfFire served by a
-	// SIM-SIDE QUERY/REPLY channel (Batch-3 amendment; NOT the draw-side
-	// recompute the plan doc's PR-35 row and decision-3(A) originally named --
-	// that would break flag-off bit-identity, since Route() serves the callout's
-	// value even flag-off, so any approximation replaces master's live answer).
+	// ======================= weapon trace tests =======================
+	// GetUnitWeaponTryTarget/TestTarget/TestRange/HaveFreeLineOfFire served
+	// DRAW-SIDE via trace::EpochView (TRACE REHOST, doc/sim-draw-trace-rehost-
+	// plan.md; supersedes the PR 35 sim-side query/reply channel, retired in
+	// stage 4b -- the "recompute draw-side" the plan doc's PR-35 row named all
+	// along, once the read-set rows / WeaponPredicates.h / TraceEpochView.h
+	// mirror made a bit-exact draw recompute tractable).
 	//
 	//  - Flag-OFF (no running split): RouteTraceQuery runs the LIVE predicate
 	//    inline (bit-identical to master; sim==draw single-threaded, the sim is
-	//    parked relative to draw). No queue, no defer.
-	//  - Flag-ON (running split): the callout enqueues a trace query {owner+weapon,
-	//    target form, arg variant} and returns the LAST boundary's sim-exact reply
-	//    (false on first-call/miss). EvaluateTraceQueries() drains the pending
-	//    queue at the SimDrawBarrier (sim parked) and evaluates the EXACT live
-	//    CWeapon predicate against live sim state -- boundary-deferred (<=1 stale)
-	//    but sim-exact, no approximation. Reply state is UNSYNCED (draw-only): no
-	//    synced write, no gsRNG, no streflop (the predicates are const reads,
-	//    already called from unsynced widgets on master without desync).
+	//    parked relative to draw). Armed: dual-runs live vs EpochView.
+	//  - Flag-ON (running split): the callout evaluates the SAME templated
+	//    trace:: predicate stack the sim runs (WeaponPredicates.h), instantiated
+	//    over trace::EpochView (SimSnapshot per-weapon SoA + UnitRows + demand
+	//    piece-cache collision volumes + object-free CCollisionHandler + CGround
+	//    mirrors), synchronously (no queue). All EpochView reads are UNSYNCED
+	//    (draw-only): no synced write, no gsRNG, no streflop.
 	//
-	// This request/reply channel is DISTINCT from the published snapshot ring --
-	// PR 43's epoch mechanism must carry the query queue + reply map alongside the
-	// ring (flagged for the epoch-infra refresh).
-	//
-	// FLAG-ON DEVIATION (PR 43 §7.3, operator-ruled keying -- supersedes the
-	// PR 35 full-query-key deviation): the reply map is keyed by the STANDING
-	// key (the query with its float pos/tgt payload zeroed). Enemy-form
-	// queries are unaffected (their float payload is already zero); a
-	// POS-FORM / cursor-tracking query now registers its CURRENT position
-	// each frame, the barrier evaluates the MOST RECENT registered position
-	// per standing key, and the serve is a pos-agnostic lookup -- <=1
-	// boundary late but NEVER-DEFAULT after the first boundary (the old
-	// full-pos key made a moving cursor a perpetual map miss returning
-	// `false` persistently). Enumerated deviations: (a) the reply reflects a
-	// <=1-boundary-old cursor position; (b) two same-frame queries sharing a
-	// standing key but different positions collide, last registered wins
-	// (ruled acceptable -- advisory UI predicates).
+	// FLAG-ON DEVIATION (the recorded deviation swap): the verdict is at the
+	// CURRENT query position vs a <=1-boundary-old world (the inverse of the
+	// retired channel's exact-state / stale-position). TestTarget/TestRange/
+	// TryTarget are bit-identical to live; HaveFreeLineOfFire carries only the
+	// inherent <=1-frame ground-staleness / pick-grid-broadphase advisory
+	// deviation -- the same draw-side class placement/pick-grid already carry.
+	// Advisory UI only; authoritative synced targeting re-runs sim-side at fire.
 	enum class TraceKind { TryTarget = 0, TestTarget = 1, TestRange = 2, HaveFreeLineOfFire = 3 };
 
 	/// entry-point glue for the four trace tests (called from LuaSyncedRead):
-	/// dispatches to `liveFn` when the split is off (bit-identical), to the
-	/// query/reply channel under the running split, and dual-runs live-vs-query
-	/// for coverage when the diff gate is armed flag-off.
+	/// dispatches to `liveFn` when the split is off (bit-identical); under the
+	/// running split serves the verdict DRAW-SIDE against the published epoch
+	/// (trace::EpochView, TRACE REHOST); dual-runs live-vs-epoch for coverage
+	/// when the diff gate is armed flag-off.
 	int RouteTraceQuery(lua_State* L, const char* caller, ServeFn liveFn, TraceKind kind);
-
-	/// SimDrawBarrier hook (sim parked): drain the pending trace queries and
-	/// evaluate each against live sim state, publishing the replies for the next
-	/// draw frame. No-op (empty check) flag-off / when nothing was enqueued.
-	void EvaluateTraceQueries();
-
-	/// game teardown: reset the trace-query pending queue + reply map (called from
-	/// ClearCaches()). Self-pruning already prevents growth/aliasing; this is the
-	/// explicit belt-and-suspenders reset.
-	void ClearTraceQueryChannel();
 
 	// ================= PR 38e: placement build/move tests =================
 	// TestBuildOrder/TestMoveOrder/ClosestBuildPos served by the SAME sim-side
@@ -708,7 +679,8 @@ namespace LuaSnapshotServe {
 	/// (placement::EpochView, PLACEMENT REHOST); dual-runs live-vs-epoch for
 	/// coverage when the diff gate is armed flag-off.
 	int RoutePlacementQuery(lua_State* L, const char* caller, ServeFn liveFn, PlacementKind kind);
-	// PLACEMENT REHOST (stage 4): EvaluatePlacementQueries() / ClearPlacement-
-	// QueryChannel() retired -- the placement query/reply channel is gone (served
-	// draw-side). The trace channel keeps its EvaluateTraceQueries/Clear* twins.
+	// PLACEMENT REHOST (stage 4) + TRACE REHOST (stage 4b): both query/reply
+	// channels are retired -- EvaluatePlacementQueries/ClearPlacementQueryChannel
+	// and EvaluateTraceQueries/ClearTraceQueryChannel are all gone; every callout
+	// is served draw-side against the published epoch, synchronously.
 }

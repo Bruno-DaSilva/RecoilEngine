@@ -19,13 +19,14 @@
  * Target_Intercept accessors are assert-unreachable. Read-only, one-boundary-
  * stale by design -- the armed flag-off dual-run proves it bit-equal to LiveView.
  *
- * STAGE 4a: the scalar / vector / owner / target / lead-chain half is complete
- * and bit-exact; the six trace primitives (+ the three ground reads) are STUBBED
- * to a conservative "clear line-of-fire" so the armed dual-run proves the scalar
- * half (TestTarget / TestRange) green while the collision-reaching callouts
- * (TryTarget / HaveFreeLineOfFire) mismatch only where a real obstruction exists.
- * STAGE 4b wires the primitives (object-free DetectHit / QueryCone / the mirrored
- * ground) to bit-exact and turns those green too.
+ * STAGE 4b (complete): the scalar / vector / owner / target / lead-chain half is
+ * bit-exact, and the trace primitives are wired bit-exact over the object-free
+ * CCollisionHandler backend (DetectHit / per-piece IntersectPieceTree), the
+ * SnapshotPickGrid exact-ray broadphase (QueryRayExact) and the mirrored CGround
+ * reads. TestTarget / TestRange / TryTarget are bit-identical to LiveView;
+ * HaveFreeLineOfFire carries only the inherent <=1-frame ground-staleness /
+ * pick-grid-broadphase advisory deviation (the same draw-side class the
+ * placement rehost and pick grid already carry).
  */
 
 #include <cassert>

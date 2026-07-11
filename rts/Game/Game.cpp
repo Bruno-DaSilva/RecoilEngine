@@ -1885,20 +1885,15 @@ void CGame::SimDrawBarrier()
 			LuaSnapshotServe::PieceCacheEpoch(),
 			drawMapMirrors.DrainSerial());
 
-		// (3c/3d) evaluate the draw side's pending weapon-trace queries (PR 35).
-		// Sim parked, so the exact live predicates run against valid boundary-N
-		// state; replies publish for the next frame. PLACEMENT REHOST (stage 4):
-		// the placement query/reply channel is retired -- placement is served
-		// draw-side via EpochView, no barrier evaluation needed.
-		LuaSnapshotServe::EvaluateTraceQueries();
+		// (3c/3d) TRACE REHOST (stage 4b) + PLACEMENT REHOST (stage 4): both
+		// query/reply channels are retired -- the four trace callouts and three
+		// placement callouts are served draw-side against the published epoch
+		// (EpochView), so there is no barrier query evaluation left to run.
 	} else {
-		// (3c/3d flip) the PRODUCER evaluated the pending queries at its frame
-		// edge (and while idle/paused -- the §8 Gap-B servicing note) and
-		// staged the replies; swap them into the served maps.
-		LuaSnapshotServe::CommitStagedQueryReplies();
-
 		// (3d' flip) PR 44b §9: commit the SYNCED-globals mirrors staged at
-		// the same edge (the dispatch window above/below serves from them)
+		// the same edge (the dispatch window above/below serves from them).
+		// TRACE/PLACEMENT REHOST: the query/reply staging is retired (served
+		// draw-side), so there are no staged trace/placement replies to commit.
 		CSplitLuaHandle::CommitAllSyncedGlobalsMirrors();
 	}
 
@@ -2164,8 +2159,10 @@ void CGame::ProduceEpochAtSimEdge(bool forceProduce)
 
 	if (!forceProduce && !framesDue && !(frameIdle && (mutationDue || recsDue || timeDue))) {
 		// idle/paused query servicing: no state changed since the newest
-		// epoch, so evaluating against it is trivially §7.3-consistent
-		LuaSnapshotServe::EvaluateQueriesAtSimEdge();
+		// epoch, so evaluating against it is trivially §7.3-consistent.
+		// TRACE/PLACEMENT REHOST: the trace + placement query channels are
+		// retired (served draw-side against the epoch), so there are no pending
+		// queries to evaluate at the sim edge here.
 
 		// PR 44b: service the standing default-cmd query too, so the context
 		// cursor stays live while the game is paused (no frame edges fire)
@@ -2198,11 +2195,13 @@ void CGame::ProduceEpochAtSimEdge(bool forceProduce)
 		CFeatureDrawer::ExtractTransformsAtSimEdge();
 	}
 
-	// (p7) evaluate pending trace/placement queries at the SAME edge the rows
-	// were extracted (§7.3: replies consistent with the epoch's rows)
+	// (p7) evaluate the pending default-cmd query at the SAME edge the rows
+	// were extracted (§7.3: reply consistent with the epoch's rows).
+	// TRACE/PLACEMENT REHOST: the trace + placement query channels are retired
+	// (served draw-side against the epoch), so only the default-cmd query edge
+	// evaluation remains.
 	{
 		SCOPED_TIMER("Sim::EpochProduce::Queries");
-		LuaSnapshotServe::EvaluateQueriesAtSimEdge();
 
 		// PR 44b: the re-hosted default-cmd query evaluates at the same edge
 		// (its reply commits at the consumer's barrier -- CommitDefaultCmdReply)
