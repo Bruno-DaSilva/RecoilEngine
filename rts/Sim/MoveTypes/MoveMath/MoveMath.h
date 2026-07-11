@@ -25,6 +25,9 @@ namespace MoveTypes {
 
 		void UpdateElevationForPos(float3 newPos) { UpdateElevationForPos({int(pos.x / SQUARE_SIZE), int(pos.z / SQUARE_SIZE)}); };
 		void UpdateElevationForPos(int2 sqr);
+		// PLACEMENT REHOST (stage 3c): one implementation, height fed from the live
+		// readMap (the sqr overload above) or the DrawMapMirrors maxHeight (epoch).
+		void UpdateElevationForPos(int2 sqr, float mapHeight);
 
 		bool    HasPhysicalStateBit(unsigned int bit) const { return ((physicalState & bit) != 0); }
 		void    SetPhysicalStateBit(unsigned int bit) { unsigned int ps = physicalState; ps |= ( bit); physicalState = static_cast<CSolidObject::PhysicalState>(ps); }

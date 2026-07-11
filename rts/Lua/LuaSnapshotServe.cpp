@@ -10382,13 +10382,90 @@ namespace {
 		return r;
 	}
 
+	// PLACEMENT REHOST (stage 3c): mirrors CMoveMath::RangeIsBlocked ->
+	// RangeIsBlockedMt exactly (step-2 footprint walk, OR-fold ObjectBlockType,
+	// early-exit on BLOCK_STRUCTURE) but over the full-cell mirror instead of the
+	// live blocking map. mtTempNum cross-square dedup is dropped -- ObjectBlockType
+	// is OR-idempotent and the early-exit fires at the same object, so the result
+	// is identical (proven by the armed dual-run). FOOTPRINT_[XZ]STEP == 2 (mirrors
+	// the file-local constants in MoveMath.cpp).
+	CMoveMath::BlockType EpochRangeIsBlocked(const placement::EpochView& view, int xmin, int xmax, int zmin, int zmax,
+	                                         const MoveTypes::CheckCollisionQuery* collider)
+	{
+		constexpr int FOOTPRINT_STEP = 2;
+		xmin = std::max(xmin, 0);
+		zmin = std::max(zmin, 0);
+		xmax = std::min(xmax, mapDims.mapx - 1);
+		zmax = std::min(zmax, mapDims.mapy - 1);
+
+		CMoveMath::BlockType ret = CMoveMath::BLOCK_NONE;
+		for (int z = zmin; z <= zmax; z += FOOTPRINT_STEP) {
+			for (int x = xmin; x <= xmax; x += FOOTPRINT_STEP) {
+				const int n = view.FullCellCount(x, z);
+				for (int i = 0; i < n; i++) {
+					const placement::EpochView::Occ o = view.FullCellObj(x, z, i);
+					if (((ret |= movemath::ObjectBlockTypeT(view, o, collider)) & CMoveMath::BLOCK_STRUCTURE) == 0)
+						continue;
+					return ret;
+				}
+			}
+		}
+		return ret;
+	}
+
+	// epoch reimplementation of the boolean result of MoveDef::TestMoveSquare(Range)
+	// (the served TestMoveOrder path: minSpeedMod/maxBlockBit ptrs are null, thread 0).
+	// The leaf verdicts (GetPosSpeedModT / ObjectBlockTypeT) are the SAME templates
+	// the sim runs; only the terrain/blocking data source differs (mirror vs live).
+	bool EpochTestMoveSquare(const placement::EpochView& view, const MoveDef& moveDef,
+	                         const float3& pos, const float3& dir,
+	                         bool testTerrain, bool testObjects, bool centerOnly)
+	{
+		// collider with the epoch elevation (CheckCollisionQuery(moveDef, pos) but
+		// fed the mirror maxHeight instead of the live readMap)
+		MoveTypes::CheckCollisionQuery collider(&moveDef);
+		collider.pos = pos.cClampInBounds();
+		{
+			const int2 sqr{int(collider.pos.x / SQUARE_SIZE), int(collider.pos.z / SQUARE_SIZE)};
+			collider.UpdateElevationForPos(sqr, view.MaxHeightAtSquare(sqr.y * mapDims.mapx + sqr.x));
+		}
+
+		const int xmid = int(pos.x / SQUARE_SIZE);
+		const int zmid = int(pos.z / SQUARE_SIZE);
+		const int xmin = xmid - moveDef.xsizeh * (1 - centerOnly);
+		const int zmin = zmid - moveDef.zsizeh * (1 - centerOnly);
+		const int xmax = xmid + moveDef.xsizeh * (1 - centerOnly);
+		const int zmax = zmid + moveDef.zsizeh * (1 - centerOnly);
+
+		bool retTestMove = true;
+
+		if (testTerrain) {
+			const bool dirPath = collider.moveDef->allowDirectionalPathing;
+			for (int z = zmin; retTestMove && z <= zmax; ++z) {
+				for (int x = xmin; retTestMove && x <= xmax; ++x) {
+					const float speedMod = dirPath
+						? movemath::GetPosSpeedModT(view, moveDef, x, z, dir)
+						: movemath::GetPosSpeedModT(view, moveDef, x, z);
+					retTestMove = (speedMod > 0.0f);
+				}
+			}
+		}
+
+		if (testObjects && retTestMove) {
+			const CMoveMath::BlockType blockBits = EpochRangeIsBlocked(view, xmin, xmax, zmin, zmax, &collider);
+			retTestMove = ((blockBits & CMoveMath::BLOCK_STRUCTURE) == 0);
+		}
+
+		return retTestMove;
+	}
+
 	// PLACEMENT REHOST (stage 3): the callouts whose predicate is fully served
 	// draw-side via placement::EpochView. Migrated incrementally; a not-yet-ready
 	// kind keeps the sim-side query/reply channel (ServePlacementQuery).
 	bool PlacementKindEpochReady(LuaSnapshotServe::PlacementKind kind)
 	{
 		using PK = LuaSnapshotServe::PlacementKind;
-		return kind == PK::TestBuildOrder || kind == PK::ClosestBuildPos;
+		return kind == PK::TestBuildOrder || kind == PK::ClosestBuildPos || kind == PK::TestMoveOrder;
 	}
 
 	// Evaluate a placement query against the published EPOCH (draw-side): the same
@@ -10403,6 +10480,27 @@ namespace {
 		PlacementReply r = {};
 
 		switch (static_cast<PK>(q.kind)) {
+			case PK::TestMoveOrder: {
+				r.retCount = 1;
+				const UnitDef* unitDef = unitDefHandler->GetUnitDefByID(q.defID);
+				if (unitDef == nullptr || unitDef->pathType == -1u) { r.i0 = 0; return r; }
+				const MoveDef* moveDef = moveDefHandler.GetMoveDefByPathType(unitDef->pathType);
+				if (moveDef == nullptr) { r.i0 = unitDef->IsImmobileUnit() ? 0 : 1; return r; }
+
+				const float3 pos(q.px, q.py, q.pz);
+				const float3 dir(q.dx, q.dy, q.dz);
+
+				placement::EpochView view;
+				const bool los = (q.readAllyTeam < 0) ? (q.fullRead != 0)
+				                                      : view.InLos(pos, q.readAllyTeam);
+				bool ret = false;
+				if (los) {
+					ret = EpochTestMoveSquare(view, *moveDef, pos, dir,
+						(q.flags & 1) != 0, (q.flags & 2) != 0, (q.flags & 4) != 0);
+				}
+				r.i0 = ret ? 1 : 0;
+				return r;
+			}
 			case PK::TestBuildOrder: {
 				const UnitDef* unitDef = unitDefHandler->GetUnitDefByID(q.defID);
 				if (unitDef == nullptr) { r.retCount = 1; r.i0 = 0; return r; }

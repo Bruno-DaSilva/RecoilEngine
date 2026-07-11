@@ -376,6 +376,25 @@ local function ExercisePlacement()
 			end
 		end
 	end
+
+	-- TestMoveOrder (stage 3c): normalized dir; rotates testTerrain/testObjects/
+	-- centerOnly across frames for coverage of all three branches. Immobile defs
+	-- (pathType==-1) early-out in the callout.
+	local dir = { {1, 0, 0}, {0, 0, 1}, {0.7071, 0, 0.7071}, {-0.7071, 0, 0.7071} }
+	local dv = dir[(facing % 4) + 1]
+	local f = Spring.GetGameFrame()
+	local tTerrain = (f % 2) == 0
+	local tObjects = (f % 3) ~= 0
+	local center = (f % 5) == 0
+	for gz = 0, N - 1 do
+		for gx = 0, N - 1 do
+			local x = (gx + 0.5) * msx / N
+			local z = (gz + 0.5) * msz / N
+			for d = 1, #defs do
+				Spring.TestMoveOrder(defs[d], x, 0, z, dv[1], dv[2], dv[3], tTerrain or not tObjects, tObjects, center)
+			end
+		end
+	end
 end
 
 local function ExerciseFamily()

@@ -41,7 +41,10 @@ MoveTypes::CheckCollisionQuery::CheckCollisionQuery(const MoveDef* refMoveDef, f
 }
 
 void MoveTypes::CheckCollisionQuery::UpdateElevationForPos(int2 sqr) {
-	const float mapHeight = readMap->GetMaxHeightMapSynced()[sqr.y * mapDims.mapx + sqr.x];
+	UpdateElevationForPos(sqr, readMap->GetMaxHeightMapSynced()[sqr.y * mapDims.mapx + sqr.x]);
+}
+
+void MoveTypes::CheckCollisionQuery::UpdateElevationForPos(int2 /*sqr*/, float mapHeight) {
 	pos.y = std::max(mapHeight, -moveDef->waterline);
 
 	bool inWater = (pos.y < 0.f);
