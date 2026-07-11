@@ -347,6 +347,15 @@ public:
 		std::vector<uint8_t> isIdle;           // CUnit::IsIdle()
 		std::vector<uint8_t> isPushResistant;  // moveType ? IsPushResistant() : 0
 
+		// TRACE REHOST (stage 1): per-unit occupant scalars the trace predicates
+		// read on owner + target units (category / crashing / FPS-control).
+		// allyteam, losStatusAll, physicalState (IsUnderWater/IsInWater),
+		// aimPos/pos/speed, posErrorVector, frontdir, heading, experience,
+		// limExperience, fireState, useHighTrajectory are already captured above.
+		std::vector<uint32_t> category;              // CSolidObject::category
+		std::vector<uint8_t> crashing;               // CUnit::IsCrashing()
+		std::vector<uint8_t> underFirstPersonControl;// CUnit::UnderFirstPersonControl()
+
 		// object-space basis + relative midpoint (drawer midpos math, GetUnitVectors-class reads)
 		std::vector<float3> relMidPos;
 		std::vector<float3> frontdir;
@@ -720,6 +729,43 @@ public:
 		std::vector<float> wShieldPower;
 		// GetUnitWeaponDamages per-weapon (flattened POD):
 		std::vector<DamagesSnap> wDamages;
+
+		// ---- TRACE REHOST (stage 1): trace-predicate read-set delta ----
+		// The mutable CWeapon / subclass members the four trace predicates
+		// (TryTarget/TestTarget/TestRange/HaveFreeLineOfFire + GetLeadTargetPos)
+		// read through a live CWeapon*. Immutable WeaponDef scalars (manualfire,
+		// canAttackGround, interceptor, interceptSolo, waterweapon, heightmod,
+		// cylinderTargeting, targetBorder, predictBoost, leadLimit, leadBonus,
+		// targetMoveError, ownerExpAccWeight, myGravity, trajectoryHeight,
+		// projectilespeed, startvelocity, weaponacceleration, fixedLauncher,
+		// beamburst, ...) are NOT captured -- read directly draw-side from the
+		// def handler via wWeaponDefID (thread-safe immutable, the placement
+		// EpochView unitDef precedent). wWeaponClass drives the draw-side virtual
+		// dispatch over the templated predicate overrides (WeaponPredicates.h).
+		std::vector<uint8_t> wWeaponClass;      // trace::WeaponClass (dispatch discriminator)
+		std::vector<int32_t> wWeaponDefID;      // weaponDef->id (-1 == none)
+		std::vector<float3> wAimFromPos;        // full aimFromPos (PR 31 kept only wAimFromPosY)
+		std::vector<float3> wRelAimFromPos;
+		std::vector<float3> wRelWeaponMuzzlePos;
+		std::vector<float3> wMainDir;           // unit-space main direction
+		std::vector<float3> wCurrentTargetPos;  // GetLeadTargetPos Target_None passthrough
+		std::vector<float3> wErrorVector;       // per-frame target-error vector
+		std::vector<float> wPredictSpeedMod;
+		std::vector<int32_t> wAccurateLeading;
+		std::vector<uint8_t> wOnlyForward;
+		std::vector<uint8_t> wDoTargetGroundPos;
+		std::vector<float> wMaxForwardAngleDif; // cos, CheckTargetAngleConstraint
+		std::vector<float> wMaxMainDirAngleDif; // cos, CheckTargetAngleConstraint
+		std::vector<uint32_t> wOnlyTargetCategory;
+		std::vector<float> wHeightBoostFactor;  // CWeapon::heightBoostFactor (Cannon range boost)
+		// subclass-mutable members read by the ballistic / range overrides
+		// (CCannon GetStaticRange2D + CalcWantedDir; CBombDropper TestRange).
+		// Zero for weapon classes that do not carry them.
+		std::vector<float> wCannonGravity;      // CCannon::gravity
+		std::vector<float> wCannonRangeBoost;   // CCannon::rangeBoostFactor
+		std::vector<uint8_t> wCannonHighTraj;   // CCannon::highTrajectory
+		std::vector<uint8_t> wBombDropTorpedoes;
+		std::vector<float> wBombTorpMoveRange;
 	};
 
 	/**

@@ -51,7 +51,7 @@ static inline uint64_t HashUnitRow(const SimSnapshot::UnitRows& r, int id)
 
 	// PR 27a tail ends at w[70]; PR 31 weapon fold occupies w[71];
 	// PR 32 deep-state words occupy w[72]..w[97].
-	uint32_t w[101]; // +3 PLACEMENT REHOST occupant words (w[98..100])
+	uint32_t w[103]; // +3 PLACEMENT REHOST occupant words (w[98..100]); +2 TRACE REHOST (w[101..102])
 	w[0]  = static_cast<uint32_t>(id);
 	f3(&w[1], r.pos[id]);
 	w[4]  = std::bit_cast<uint32_t>(r.speed[id].x);
@@ -168,6 +168,16 @@ static inline uint64_t HashUnitRow(const SimSnapshot::UnitRows& r, int id)
 			fnvF(r.wTargetGroundPos[wi].x); fnvF(r.wTargetGroundPos[wi].y); fnvF(r.wTargetGroundPos[wi].z);
 			fnvF(r.wRange[wi]);
 			fnvF(r.wShieldPower[wi]);
+			// TRACE REHOST: the per-frame recomputed weapon vectors + ballistic state
+			// (the def-immutable scalars are read draw-side from wWeaponDefID and are
+			// not folded; wWeaponClass is defID-deterministic and excluded).
+			fnvF(r.wAimFromPos[wi].x); fnvF(r.wAimFromPos[wi].y); fnvF(r.wAimFromPos[wi].z);
+			fnvF(r.wMainDir[wi].x); fnvF(r.wMainDir[wi].y); fnvF(r.wMainDir[wi].z);
+			fnvF(r.wCurrentTargetPos[wi].x); fnvF(r.wCurrentTargetPos[wi].y); fnvF(r.wCurrentTargetPos[wi].z);
+			fnvF(r.wErrorVector[wi].x); fnvF(r.wErrorVector[wi].y); fnvF(r.wErrorVector[wi].z);
+			fnvF(r.wPredictSpeedMod[wi]);
+			fnvF(r.wCannonGravity[wi]);
+			fnvU32(static_cast<uint32_t>(r.wCannonHighTraj[wi]));
 		}
 	}
 	w[71] = wpnAcc;
@@ -253,6 +263,13 @@ static inline uint64_t HashUnitRow(const SimSnapshot::UnitRows& r, int id)
 	w[99] = std::bit_cast<uint32_t>(r.crushResistance[id]);
 	w[100] = static_cast<uint32_t>(r.isIdle[id])
 	       | (static_cast<uint32_t>(r.isPushResistant[id]) << 8);
+
+	// TRACE REHOST occupant scalars (category is unitDef-deterministic but cheap to
+	// fold; crashing is a physicalState bit already folded at w[98] -- folded again
+	// here only for localization). underFirstPersonControl is independent synced state.
+	w[101] = r.category[id];
+	w[102] = static_cast<uint32_t>(r.crashing[id])
+	       | (static_cast<uint32_t>(r.underFirstPersonControl[id]) << 8);
 
 	return Mix(w, sizeof(w), UNIT_SEED);
 }

@@ -55,6 +55,9 @@
 #include "Sim/Weapons/PlasmaRepulser.h"
 #include "Sim/Weapons/BombDropper.h"
 #include "Sim/Weapons/WeaponTarget.h"
+// TRACE REHOST (stage 1): weapon-class discriminator + Cannon/BombDropper member reads
+#include "Sim/Weapons/WeaponTraceClass.h"
+#include "Sim/Weapons/Cannon.h"
 #include "Sim/Misc/DamageArray.h"
 #include "Lua/LuaHandleSynced.h"
 #include "Lua/LuaSnapshotServe.h"     // PR 43: /epochstats channel bytes           // PR 38: CSplitLuaHandle::GetGameParams (game rules params)
@@ -196,6 +199,7 @@ static inline void CopyDamages(SimSnapshot::UnitRows::DamagesSnap& dst, const Dy
 	for (int i = 0; i < n; ++i)
 		dst.damages[i] = src->Get(i);
 }
+
 
 bool SimSnapshot::UnitRows::PovUnitVisible(int unitID, int readAllyTeam, bool fullRead) const
 {
@@ -901,6 +905,10 @@ void SimSnapshot::Resize(UnitRows& rows, size_t maxUnits, int numAllyTeams)
 	rows.crushResistance.resize(maxUnits);
 	rows.isIdle.resize(maxUnits);
 	rows.isPushResistant.resize(maxUnits);
+	// TRACE REHOST occupant scalars
+	rows.category.resize(maxUnits);
+	rows.crashing.resize(maxUnits);
+	rows.underFirstPersonControl.resize(maxUnits);
 	rows.relMidPos.resize(maxUnits);
 	rows.frontdir.resize(maxUnits);
 	rows.updir.resize(maxUnits);
@@ -1176,6 +1184,10 @@ void SimSnapshot::Extract(UnitRows& rows)
 		rows.crushResistance[id] = u->crushResistance;
 		rows.isIdle[id] = u->IsIdle();
 		rows.isPushResistant[id] = (u->moveType != nullptr) && u->moveType->IsPushResistant();
+		// TRACE REHOST occupant scalars (owner + target reads in the trace predicates)
+		rows.category[id] = u->category;
+		rows.crashing[id] = u->IsCrashing();
+		rows.underFirstPersonControl[id] = u->UnderFirstPersonControl();
 		rows.relMidPos[id] = u->relMidPos;
 		rows.frontdir[id] = u->frontdir;
 		rows.updir[id] = u->updir;
@@ -1329,6 +1341,28 @@ void SimSnapshot::Extract(UnitRows& rows)
 		rows.wShieldEnabled.resize(nw);
 		rows.wShieldPower.resize(nw);
 		rows.wDamages.resize(nw);
+		// TRACE REHOST (stage 1) per-weapon predicate read-set delta
+		rows.wWeaponClass.resize(nw);
+		rows.wWeaponDefID.resize(nw);
+		rows.wAimFromPos.resize(nw);
+		rows.wRelAimFromPos.resize(nw);
+		rows.wRelWeaponMuzzlePos.resize(nw);
+		rows.wMainDir.resize(nw);
+		rows.wCurrentTargetPos.resize(nw);
+		rows.wErrorVector.resize(nw);
+		rows.wPredictSpeedMod.resize(nw);
+		rows.wAccurateLeading.resize(nw);
+		rows.wOnlyForward.resize(nw);
+		rows.wDoTargetGroundPos.resize(nw);
+		rows.wMaxForwardAngleDif.resize(nw);
+		rows.wMaxMainDirAngleDif.resize(nw);
+		rows.wOnlyTargetCategory.resize(nw);
+		rows.wHeightBoostFactor.resize(nw);
+		rows.wCannonGravity.resize(nw);
+		rows.wCannonRangeBoost.resize(nw);
+		rows.wCannonHighTraj.resize(nw);
+		rows.wBombDropTorpedoes.resize(nw);
+		rows.wBombTorpMoveRange.resize(nw);
 	}
 
 	// Pass 2: flat per-weapon state (computed values -- AccuracyExperience/
@@ -1396,6 +1430,48 @@ void SimSnapshot::Extract(UnitRows& rows)
 
 			// GetUnitWeaponDamages per-weapon (flattened POD)
 			CopyDamages(rows.wDamages[wi], weapon->damages);
+
+			// TRACE REHOST (stage 1): trace-predicate read-set delta. Mutable
+			// CWeapon members read by TryTarget/TestTarget/TestRange/
+			// HaveFreeLineOfFire/GetLeadTargetPos; immutable weaponDef scalars are
+			// read draw-side via wWeaponDefID, so they are NOT copied here.
+			const trace::WeaponClass wc = trace::ClassifyWeapon(weapon);
+			rows.wWeaponClass[wi] = static_cast<uint8_t>(wc);
+			rows.wWeaponDefID[wi] = (wdef != nullptr) ? wdef->id : -1;
+			rows.wAimFromPos[wi] = weapon->aimFromPos;
+			rows.wRelAimFromPos[wi] = weapon->relAimFromPos;
+			rows.wRelWeaponMuzzlePos[wi] = weapon->relWeaponMuzzlePos;
+			rows.wMainDir[wi] = weapon->mainDir;
+			rows.wCurrentTargetPos[wi] = weapon->GetCurrentTargetPos();
+			rows.wErrorVector[wi] = weapon->errorVector;
+			rows.wPredictSpeedMod[wi] = weapon->predictSpeedMod;
+			rows.wAccurateLeading[wi] = static_cast<int32_t>(weapon->accurateLeading);
+			rows.wOnlyForward[wi] = weapon->onlyForward;
+			rows.wDoTargetGroundPos[wi] = weapon->doTargetGroundPos;
+			rows.wMaxForwardAngleDif[wi] = weapon->maxForwardAngleDif;
+			rows.wMaxMainDirAngleDif[wi] = weapon->maxMainDirAngleDif;
+			rows.wOnlyTargetCategory[wi] = weapon->onlyTargetCategory;
+			rows.wHeightBoostFactor[wi] = weapon->heightBoostFactor;
+
+			// subclass-mutable members (zero for classes that lack them)
+			if (wc == trace::WeaponClass::Cannon) {
+				const CCannon* cannon = static_cast<const CCannon*>(weapon);
+				rows.wCannonGravity[wi] = cannon->GetGravity();
+				rows.wCannonRangeBoost[wi] = cannon->GetRangeBoostFactor();
+				rows.wCannonHighTraj[wi] = cannon->GetHighTrajectory();
+			} else {
+				rows.wCannonGravity[wi] = 0.0f;
+				rows.wCannonRangeBoost[wi] = 0.0f;
+				rows.wCannonHighTraj[wi] = 0;
+			}
+			if (wc == trace::WeaponClass::BombDropper) {
+				const CBombDropper* bomb = static_cast<const CBombDropper*>(weapon);
+				rows.wBombDropTorpedoes[wi] = bomb->GetDropTorpedoes();
+				rows.wBombTorpMoveRange[wi] = bomb->GetTorpMoveRange();
+			} else {
+				rows.wBombDropTorpedoes[wi] = 0;
+				rows.wBombTorpMoveRange[wi] = 0.0f;
+			}
 		}
 	}
 
@@ -1758,6 +1834,12 @@ void SimSnapshot::ExtractDeadRowsFromShells(UnitRows& urows, FeatureRows& frows,
 		urows.crushResistance[id] = u->crushResistance;
 		urows.isIdle[id] = 0;
 		urows.isPushResistant[id] = 0;
+		// TRACE REHOST occupant scalars: category/IsCrashing()/fpsControlPlayer are
+		// direct CSolidObject/CUnit fields (physicalState bit, member pointer), safe
+		// on a DeferredObjectDeleter shell (no commandAI/moveType deref).
+		urows.category[id] = u->category;
+		urows.crashing[id] = u->IsCrashing();
+		urows.underFirstPersonControl[id] = u->UnderFirstPersonControl();
 		urows.relMidPos[id] = u->relMidPos;
 		urows.frontdir[id] = u->frontdir;
 		urows.updir[id] = u->updir;

@@ -285,6 +285,10 @@ private:
 		MM_FULLCELL,     // full per-square blocking-cell object list (CSR mirror)
 		U_PLACEMENT,     // unit occupant scalars (immobile/yardOpen/physicalState/crush/idle/pushResist)
 		FT_PLACEMENT,    // feature occupant scalars (physicalState/crushResistance)
+		// TRACE REHOST: appended at the enum tail to keep every prior field index
+		// stable (FIELD_NAMES appended in lockstep)
+		U_TRACEOCC,      // unit occupant scalars (category/crashing/underFirstPersonControl)
+		W_TRACE,         // per-weapon trace-predicate read-set delta (vectors/scalars/ballistic)
 		F_COUNT
 	};
 

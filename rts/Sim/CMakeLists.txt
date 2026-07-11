@@ -156,6 +156,7 @@ add_library(engineSim STATIC
 		"${CMAKE_CURRENT_SOURCE_DIR}/Weapons/WeaponDefHandler.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Weapons/WeaponLoader.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Weapons/WeaponTarget.cpp"
+		"${CMAKE_CURRENT_SOURCE_DIR}/Weapons/WeaponTraceClass.cpp"
 	)
 
 target_link_libraries(engineSim SDL2::SDL2 Tracy::TracyClient nowide::nowide fmt::fmt)

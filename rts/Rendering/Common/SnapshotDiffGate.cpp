@@ -63,6 +63,8 @@
 #include "Sim/Weapons/Weapon.h"
 #include "Sim/Weapons/PlasmaRepulser.h"
 #include "Sim/Weapons/BombDropper.h"
+#include "Sim/Weapons/Cannon.h"              // TRACE REHOST: wpn:trace field pass
+#include "Sim/Weapons/WeaponTraceClass.h"    // TRACE REHOST: trace::ClassifyWeapon
 #include "Sim/Weapons/WeaponTarget.h"
 #include "Sim/Misc/DamageArray.h"
 #include "Game/Players/Player.h" // fpsControlPlayer gate compare
@@ -251,6 +253,9 @@ static constexpr const char* FIELD_NAMES[] = {
 	"map:fullCell",
 	"unit:placement",
 	"feat:placement",
+	// TRACE REHOST: appended to match the enum tail U_TRACEOCC, W_TRACE
+	"unit:traceOcc",
+	"wpn:trace",
 };
 
 // structural compare for the copied customOpts maps (emilib::HashMap has no
@@ -691,6 +696,15 @@ void SnapshotDiffGate::CheckBoundary()
 				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=unit:placement mismatch (imm snap=%d live=%d pstate snap=0x%x live=0x%x)",
 					gs->frameNum, id, int(rows.immobile[i]), int(u->immobile),
 					int(rows.physicalState[i]), int(static_cast<uint16_t>(u->physicalState)));
+
+			// TRACE REHOST occupant scalars (owner + target reads in the trace predicates)
+			const bool traceOccEqual =
+				(rows.category[i] == u->category) &&
+				(bool(rows.crashing[i]) == u->IsCrashing()) &&
+				(bool(rows.underFirstPersonControl[i]) == u->UnderFirstPersonControl());
+			if (Bump(fields[U_TRACEOCC], traceOccEqual))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=unit:traceOcc mismatch (cat snap=0x%x live=0x%x crash snap=%d live=%d)",
+					gs->frameNum, id, rows.category[i], u->category, int(rows.crashing[i]), int(u->IsCrashing()));
 		}
 
 		// ---- PR 32 (deep per-unit state) field pass ----
@@ -1967,6 +1981,36 @@ void SnapshotDiffGate::CheckWeaponRows()
 
 			if (Bump(fields[W_DAMAGES], WpnDamagesEqual(rows.wDamages[wi], weapon->damages)))
 				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d weapon=%d field=wpn:damages mismatch", gs->frameNum, id, int(w));
+
+			// TRACE REHOST: per-weapon trace-predicate read-set delta. Def-immutable
+			// scalars are read draw-side from wWeaponDefID, so only the captured
+			// mutable members are checked here (wWeaponDefID/wWeaponClass included).
+			const CCannon* liveCannon = dynamic_cast<const CCannon*>(weapon);
+			const CBombDropper* liveBomb = dynamic_cast<const CBombDropper*>(weapon);
+			const bool traceEqual =
+				(rows.wWeaponClass[wi] == static_cast<uint8_t>(trace::ClassifyWeapon(weapon))) &&
+				(rows.wWeaponDefID[wi] == ((wdef != nullptr) ? wdef->id : -1)) &&
+				BitEqual(rows.wAimFromPos[wi], weapon->aimFromPos) &&
+				BitEqual(rows.wRelAimFromPos[wi], weapon->relAimFromPos) &&
+				BitEqual(rows.wRelWeaponMuzzlePos[wi], weapon->relWeaponMuzzlePos) &&
+				BitEqual(rows.wMainDir[wi], weapon->mainDir) &&
+				BitEqual(rows.wCurrentTargetPos[wi], weapon->GetCurrentTargetPos()) &&
+				BitEqual(rows.wErrorVector[wi], weapon->errorVector) &&
+				BitEqual(rows.wPredictSpeedMod[wi], weapon->predictSpeedMod) &&
+				(rows.wAccurateLeading[wi] == int32_t(weapon->accurateLeading)) &&
+				(bool(rows.wOnlyForward[wi]) == weapon->onlyForward) &&
+				(bool(rows.wDoTargetGroundPos[wi]) == weapon->doTargetGroundPos) &&
+				BitEqual(rows.wMaxForwardAngleDif[wi], weapon->maxForwardAngleDif) &&
+				BitEqual(rows.wMaxMainDirAngleDif[wi], weapon->maxMainDirAngleDif) &&
+				(rows.wOnlyTargetCategory[wi] == weapon->onlyTargetCategory) &&
+				BitEqual(rows.wHeightBoostFactor[wi], weapon->heightBoostFactor) &&
+				BitEqual(rows.wCannonGravity[wi], liveCannon ? liveCannon->GetGravity() : 0.0f) &&
+				BitEqual(rows.wCannonRangeBoost[wi], liveCannon ? liveCannon->GetRangeBoostFactor() : 0.0f) &&
+				(bool(rows.wCannonHighTraj[wi]) == (liveCannon ? liveCannon->GetHighTrajectory() : false)) &&
+				(bool(rows.wBombDropTorpedoes[wi]) == (liveBomb ? liveBomb->GetDropTorpedoes() : false)) &&
+				BitEqual(rows.wBombTorpMoveRange[wi], liveBomb ? liveBomb->GetTorpMoveRange() : 0.0f);
+			if (Bump(fields[W_TRACE], traceEqual))
+				LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d weapon=%d field=wpn:trace mismatch", gs->frameNum, id, int(w));
 		}
 	}
 }

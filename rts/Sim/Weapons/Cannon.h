@@ -41,6 +41,12 @@ public:
 	// boostFacts{.x := range, .y := height}
 	static float GetStaticRange2D(const float2& baseConsts, const float2& projConsts, const float2& boostFacts);
 
+	// TRACE REHOST: the ballistic members the draw-side epoch predicate stack
+	// captures (CCannon overrides GetRange2D / HaveFreeLineOfFire).
+	float GetGravity() const { return gravity; }
+	float GetRangeBoostFactor() const { return rangeBoostFactor; }
+	bool GetHighTrajectory() const { return highTrajectory; }
+
 private:
 	/// tells where to point the gun to hit the point at pos+diff
 	float3 GetWantedDir(const float3& diff);
