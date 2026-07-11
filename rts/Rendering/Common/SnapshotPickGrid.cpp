@@ -228,6 +228,17 @@ void SnapshotPickGrid::QueryRay(const float3& start, const float3& dir, float le
 	std::sort(featureIDs.begin(), featureIDs.end());
 }
 
+void SnapshotPickGrid::QueryCone(const float3& start, const float3& dir, float len, float spread,
+	std::vector<int>& unitIDs, std::vector<int>& featureIDs)
+{
+	// TestConeHelper's coneSize = cvRelDst * spread + 1.0; the trajectory helper's
+	// baseSize is 0.0 (<= 1.0). Over [0, len] the max half-width is len*spread + 1;
+	// use it as a uniform ray halo (conservative -- the cone is narrower near the
+	// origin, so this over-covers, never under-covers).
+	const float coneWidth = std::max(0.0f, len) * std::max(0.0f, spread) + 1.0f;
+	QueryRay(start, dir, len, coneWidth, unitIDs, featureIDs);
+}
+
 void SnapshotPickGrid::QueryUnitsInRadius(const float3& pos, float radius, std::vector<int>& unitIDs)
 {
 	QueryUnitsInRect(float3(pos.x - radius, 0.0f, pos.z - radius), float3(pos.x + radius, 0.0f, pos.z + radius), unitIDs);

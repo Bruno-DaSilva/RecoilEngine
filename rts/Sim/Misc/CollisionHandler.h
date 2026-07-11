@@ -136,6 +136,27 @@ class CCollisionHandler {
 			const CollisionVolume* v,
 			CollisionQuery* cq = nullptr
 		);
+		// object-free DetectHit variant (sim/draw split trace re-host): the
+		// object's midPos / relMidPos / in-void state are passed explicitly (read
+		// from the render-side SimSnapshot rows / derived transform), so the test
+		// needs no live CSolidObject. Mirrors the object DetectHit overload
+		// (disc/ray + forceTrace) with simple-volume math byte-identical to it.
+		// Two volume classes need a live read and are NOT served here (the caller
+		// pre-checks the volume and falls back, exactly like the object-free
+		// MouseHit defers the piece tree): DefaultToPieceTree (per-piece hit
+		// volumes -> demand piece cache) and DefaultToFootPrint (blocking-map
+		// object identity) both return false.
+		static bool DetectHit(
+			const float3& midPos,
+			const float3& relMidPos,
+			bool isInVoid,
+			const CollisionVolume* v,
+			const CMatrix44f& m,
+			const float3 p0,
+			const float3 p1,
+			CollisionQuery* cq = nullptr,
+			bool forceTrace = false
+		);
 
 	private:
 		// HITTEST_DISC helpers for DetectHit
