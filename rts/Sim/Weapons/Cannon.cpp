@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "Cannon.h"
+#include "WeaponPredicates.h" // TRACE REHOST (stage 3): templated predicate stack
 #include "WeaponDef.h"
 #include "Game/TraceRay.h"
 #include "Map/Ground.h"
@@ -60,45 +61,7 @@ void CCannon::UpdateRange(const float val)
 bool CCannon::HaveFreeLineOfFire(const float3& srcPos, const float3& tgtPos, const SWeaponTarget& trg) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	// assume we can still fire at partially submerged targets
-	if (!weaponDef->waterweapon && TargetUnderWater(tgtPos, trg))
-		return false;
-
-	if (projectileSpeed == 0.0f)
-		return true;
-
-	float3 launchDir = CalcWantedDir(tgtPos - srcPos);
-	float3 targetVec = (tgtPos - srcPos) * XZVector;
-
-	if (launchDir.SqLength() == 0.0f)
-		return false;
-	if (targetVec.SqLength2D() == 0.0f)
-		return true;
-
-	const float xzTargetDist = targetVec.LengthNormalize();
-
-	// linear parabolic coefficient is the ratio of vertical velocity to horizontal velocity, with slight adjustment due to acceleration being applied in discrete steps.
-	// quadratic parabolic coefficient is the ratio of gravity to (horizontal velocity)^2
-	const float projectileSpeedHorizontal = std::max(0.001f,projectileSpeed * launchDir.Length2D()); //ensure projectileSpeedHorizontal cannot be zero
-	const float projectileSpeedVertical = projectileSpeed * launchDir.y;
-	const float linCoeff = (projectileSpeedVertical + (gravity * 0.5f) ) / projectileSpeedHorizontal; //(gravity * 0.5f) is factor due to discrete acceleration steps
-	const float qdrCoeff = (gravity * 0.5f) / (projectileSpeedHorizontal * projectileSpeedHorizontal);
-
-	const float groundColCheckDistance = std::max(10.0f, 0.9375f * xzTargetDist); 
-	// do not check last 1/16 of trajectory for ground collision
-	// as sometimes the approximate ground height calculation can create false positive ground collisions, 
-	// and the prior 10.0f buffer is no longer good enough with the accurate coefficients
-	// TODO: allow this ignore distance to be set on a per-unit basis
-	const float groundDist = ((avoidFlags & Collision::NOGROUND) == 0)?
-		CGround::TrajectoryGroundCol(srcPos, targetVec, groundColCheckDistance, linCoeff, qdrCoeff):
-		-1.0f;
-	const float angleSpread = (AccuracyExperience() + SprayAngleExperience()) * 0.6f * 0.9f;
-
-	if (groundDist > 0.0f)
-		return false;
-
-	// TODO: add a forcedUserTarget mode (enabled with meta key e.g.) and skip this test accordingly
-	return (!TraceRay::TestTrajectoryCone(srcPos, targetVec, xzTargetDist, linCoeff, qdrCoeff, angleSpread, owner->allyteam, avoidFlags, owner));
+	return trace::HaveFreeLineOfFireCannonT(trace::LiveView(this), srcPos, tgtPos, trg);
 }
 
 void CCannon::FireImpl(const bool scriptCall)

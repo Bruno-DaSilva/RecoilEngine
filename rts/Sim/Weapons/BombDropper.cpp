@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "BombDropper.h"
+#include "WeaponPredicates.h" // TRACE REHOST (stage 3): templated predicate stack
 #include "WeaponDef.h"
 #include "Game/GameHelper.h"
 #include "Sim/Misc/GlobalSynced.h"
@@ -80,31 +81,13 @@ float CBombDropper::GetPredictedImpactTime(const float3& impactPos) const
 bool CBombDropper::TestTarget(const float3& pos, const SWeaponTarget& trg) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	// assume we can still drop bombs on *partially* submerged targets
-	if (!dropTorpedoes && TargetUnderWater(pos, trg))
-		return false;
-	// assume we can drop torpedoes on any partially or fully submerged target
-	if (dropTorpedoes && !TargetInWater(pos, trg))
-		return false;
-
-	return CWeapon::TestTarget(pos, trg);
+	return trace::TestTargetBombDropperT(trace::LiveView(this), pos, trg);
 }
 
 bool CBombDropper::TestRange(const float3& tgtPos, const SWeaponTarget& trg) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	// bombs always fall down
-	if (aimFromPos.y < tgtPos.y)
-		return false;
-
-	const float fallTime = GetPredictedImpactTime(tgtPos);
-	const float dropDist = std::max(1, salvoSize - 1) * salvoDelay * owner->speed.Length2D() * 0.5f;
-
-	// torpedoes especially should not be dropped if the
-	// target position is already behind owner's position
-	const float torpDist = torpMoveRange * (owner->frontdir.dot(tgtPos - aimFromPos) > 0.0f);
-
-	return (tgtPos.SqDistance2D(aimFromPos + owner->speed * fallTime) < Square(dropDist + torpDist));
+	return trace::TestRangeBombDropperT(trace::LiveView(this), tgtPos, trg);
 }
 
 

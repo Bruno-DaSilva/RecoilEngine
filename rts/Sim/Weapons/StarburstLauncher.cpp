@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "StarburstLauncher.h"
+#include "WeaponPredicates.h" // TRACE REHOST (stage 3): templated predicate stack
 #include "WeaponDef.h"
 #include "Game/TraceRay.h"
 #include "Map/Ground.h"
@@ -51,7 +52,7 @@ void CStarburstLauncher::FireImpl(const bool scriptCall)
 bool CStarburstLauncher::HaveFreeLineOfFire(const float3& srcPos, const float3& tgtPos, const SWeaponTarget& trg) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	return (!TraceRay::TestCone(srcPos, weaponDef->fixedLauncher? weaponDir: UpVector, 100.0f, 0.0f, owner->allyteam, avoidFlags, owner));
+	return trace::HaveFreeLineOfFireStarburstT(trace::LiveView(this), srcPos, tgtPos, trg);
 }
 
 float CStarburstLauncher::GetRange2D(float boost, float ydiff) const

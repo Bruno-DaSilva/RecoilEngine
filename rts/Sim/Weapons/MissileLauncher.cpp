@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "MissileLauncher.h"
+#include "WeaponPredicates.h" // TRACE REHOST (stage 3): templated predicate stack
 
 #include "WeaponDef.h"
 #include "Game/TraceRay.h"
@@ -69,6 +70,14 @@ void CMissileLauncher::FireImpl(const bool scriptCall)
 }
 
 bool CMissileLauncher::HaveFreeLineOfFire(const float3& srcPos, const float3& tgtPos, const SWeaponTarget& trg) const
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	return trace::HaveFreeLineOfFireMissileT(trace::LiveView(this), srcPos, tgtPos, trg);
+}
+
+// TRACE REHOST (stage 3): verbatim trajectoryHeight LOF scan, called by the
+// LiveView missile-trajectory primitive (only reached when trajectoryHeight>0).
+bool CMissileLauncher::TrajectoryLOF(const float3& srcPos, const float3& tgtPos, const SWeaponTarget& trg) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	// high-trajectory missiles use curved path rather than linear ground intersection
