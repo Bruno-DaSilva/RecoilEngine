@@ -7,6 +7,7 @@
 #include "Game/GameHelper.h"
 #include "Game/TraceRay.h"
 #include "Game/Players/Player.h"
+#include "Rendering/Common/SimSnapshotWriteThrough.h"
 #include "Lua/LuaConfig.h"
 #include "Map/Ground.h"
 #include "Map/MapInfo.h"
@@ -500,6 +501,7 @@ void CWeapon::UpdateFire()
 		numStockpiled--;
 		owner->commandAI->StockpileChanged(this);
 		eventHandler.StockpileChanged(owner, this, oldCount);
+		SimSnapshotWT::NoteStockpile(owner);
 	}
 
 	reloadStatus = gs->frameNum + int(reloadTime / owner->reloadSpeed);
@@ -534,6 +536,9 @@ bool CWeapon::UpdateStockpile()
 			owner->commandAI->StockpileChanged(this);
 			eventHandler.StockpileChanged(owner, this, oldCount);
 		}
+
+		// per-frame-hot while actively stockpiling (buildPercent creep)
+		SimSnapshotWT::NoteStockpile(owner);
 	}
 
 	return (numStockpiled > 0) || (salvoLeft > 0);

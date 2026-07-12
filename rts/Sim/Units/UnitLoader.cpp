@@ -13,6 +13,8 @@
 #include "CommandAI/FactoryCAI.h"
 #include "CommandAI/MobileCAI.h"
 
+#include "Rendering/Common/SimSnapshotWriteThrough.h"
+
 #include "Game/GameHelper.h"
 #include "Map/Ground.h"
 #include "Map/MapDamage.h"
@@ -108,6 +110,12 @@ CUnit* CUnitLoader::LoadUnit(const UnitLoadParams& params)
 
 		unit->PreInit(params);
 		unit->PostInit(params.builder);
+
+		// WS-3 unit-creation completion choke: full-row init of the write-
+		// through live store. Same synced call stack as the activeUnits
+		// registration in PreInit, so no snapshot publish can interleave and
+		// every column entry is final before the id can be served.
+		SimSnapshotWT::UnitCreated(unit);
 	}
 
 	if (params.flattenGround)

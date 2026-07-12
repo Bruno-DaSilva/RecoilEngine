@@ -1271,6 +1271,18 @@ public:
 	/// game's first Update() extracts, and logs the extraction-cost stats
 	void Clear();
 
+	// ---- WS-3 (write-through mirrors): sim-side choke entry points, called
+	// via the SimSnapshotWT free functions (SimSnapshotWriteThrough.h) ----
+	void WTUnitCreated(const CUnit* u);
+	void WTRebuildLiveStore();
+	void WTNoteFlanking(const CUnit* u);
+	void WTNoteFlankingMobility(const CUnit* u);
+	void WTNoteReloadSpeed(const CUnit* u);
+	void WTNoteFpsControl(const CUnit* u);
+	void WTNoteStockpile(const CUnit* u);
+	void WTNoteShieldState(const CUnit* u);
+	void WTNoteWeaponDamages(const CUnit* u);
+
 	/// PR 16: while a SnapshotHash dump is armed, hash this completed sim frame.
 	/// Called once per sim frame from CGame::SimFrame (NOT draw time) so every
 	/// sim frame is hashed regardless of the draw/catch-up rate. Extracts into a
@@ -1418,7 +1430,11 @@ private:
 	// mailbox by LuaSnapshotServe::AcquireEstPathReadSet) gates the per-unit
 	// GetPathWayPoints copy; nullptr => capture no est-path (the hash scratch and
 	// the flag-off/unarmed path, where the est-path rows are unread).
-	void Extract(UnitRows& rows, std::vector<uint8_t>* estPathReadSet = nullptr);
+	// WS-3: slot >= 0 identifies the target ring slot so the write-through
+	// publisher can consult that slot's per-column copy serials; slot < 0 (the
+	// hash scratch) always takes the retained legacy gather for the migrated
+	// columns -- HashCompletedFrame must not consult ring serials.
+	void Extract(UnitRows& rows, std::vector<uint8_t>* estPathReadSet = nullptr, int slot = -1);
 	// minSlots (PR 43): grow-only row sizing may need to cover ids that died
 	// in the batch (shell-sourced DEAD_THIS_BATCH rows for ids the live
 	// containers no longer hold); Update() passes the dead-id maxima, the
@@ -1509,6 +1525,125 @@ private:
 	ProjectileRows hashProjScratch;
 	FeatureRows hashFeatScratch;
 	TeamRows hashTeamScratch;
+
+	// ---- WS-3 (write-through mirrors, doc/sim-draw-split-optimization/
+	// write-through-mirrors.md) -- Stage 0 infra + the Stage 1 pilot columns
+	// (the retired UnitsWeaponsPerUnit pass) ----
+public:
+	// migrated-column ids, indexing mutCounter[] / slotColSerial[][]; order
+	// must match WT_COL_NAMES in SimSnapshot.cpp
+	enum WTColumn : int {
+		WTCOL_WEAPON_COUNT = 0,
+		WTCOL_RELOAD_SPEED,
+		WTCOL_FPS_NO_FIRE,
+		WTCOL_FLANKING_MODE,
+		WTCOL_FLANKING_DIR,
+		WTCOL_FLANKING_MOVE_FACTOR,
+		WTCOL_FLANKING_AVG_DAMAGE,
+		WTCOL_FLANKING_DIF_DAMAGE,
+		WTCOL_FLANKING_MOBILITY,
+		WTCOL_HAS_STOCKPILE,
+		WTCOL_STOCKPILE_NUM_STOCKPILED,
+		WTCOL_STOCKPILE_NUM_QUEUED,
+		WTCOL_STOCKPILE_BUILD_PERCENT,
+		WTCOL_STOCKPILE_IS_INTERCEPTOR,
+		WTCOL_HAS_SHIELD_WEAPON,
+		WTCOL_SHIELD_WEAPON_ENABLED,
+		WTCOL_SHIELD_WEAPON_POWER,
+		WTCOL_COUNT
+	};
+private:
+	/**
+	 * Producer-owned live column store: one flat array per migrated column,
+	 * indexed by unit id (sized MaxUnits like the slot rows, element types
+	 * byte-identical so the publisher is a straight prefix memcpy). Every
+	 * mutation of a migrated field double-writes at a choke (the authoritative
+	 * member unchanged, plus the column entry) and bumps the column's counter;
+	 * the publisher copies only the columns whose counter differs from the
+	 * target slot's copy serial.
+	 *
+	 * SINGLE-WRITER, NO ATOMICS, deliberately (doc §3.2/§9): every choke
+	 * executes in synced-sim or net-consumption context -- CUnit::Update /
+	 * GetFlankingDamageBonus / AddExperience, CWeapon::UpdateFire /
+	 * UpdateStockpile, the CPlasmaRepulser curPower/isEnabled writers,
+	 * CCommandAI CMD_STOCKPILE, synced Lua ctrl (SetUnitFlanking /
+	 * SetUnitStockpile / SetUnitShieldState / SetUnitWeaponDamages), COB
+	 * (Get/SetUnitVal, CobInstance shield-enable callback), the ClientReadNet
+	 * direct-control handlers (CPlayer::Start/StopControllingUnit,
+	 * FPSUnitController::RecvStateUpdate), unit creation (CUnitLoader) and
+	 * creg load. All of those run on the sim thread under the split and on
+	 * the main thread flag-off. The sole reader is the publisher
+	 * (PublishLiveStore, inside ProduceSlotInternal), which runs on that SAME
+	 * thread in both modes (lockstep Update() = main thread, flip
+	 * BeginEpochProduction = sim thread). No concurrent access exists, so the
+	 * counters are plain uint64_t. Counter granularity is per-column, not
+	 * per-(column,id): a bump means "this column has >= 1 changed entry",
+	 * triggering a whole-prefix copy (bandwidth is cheap, doc insight §2.1).
+	 *
+	 * The store is unsynced render-side state: nothing synced reads it (the
+	 * MarkMutatedOutsideFrame precedent), no gsRNG/streflop involvement, so
+	 * flag-off demo resim stays byte-identical.
+	 */
+	struct LiveUnitStore {
+		std::vector<int32_t> weaponCount;
+		std::vector<float> reloadSpeed;
+		std::vector<uint8_t> fpsNoFire;
+		std::vector<int32_t> flankingMode;
+		std::vector<float3> flankingDir;
+		std::vector<float> flankingMoveFactor;
+		std::vector<float> flankingAvgDamage;
+		std::vector<float> flankingDifDamage;
+		std::vector<float> flankingMobility;
+		std::vector<uint8_t> hasStockpile;
+		std::vector<int32_t> stockpileNumStockpiled;
+		std::vector<int32_t> stockpileNumQueued;
+		std::vector<float> stockpileBuildPercent;
+		std::vector<uint8_t> stockpileIsInterceptor;
+		std::vector<uint8_t> hasShieldWeapon;
+		std::vector<uint8_t> shieldWeaponEnabled;
+		std::vector<float> shieldWeaponPower;
+
+		// deep columns (doc §3.4): the version-gated damages pair cannot
+		// memcpy; the choke pushes the id onto per-slot pending-apply lists
+		// (push-to-all-slots keeps the "must reach every rotating slot"
+		// property) and the publisher drains the target slot's list with
+		// per-id deep copies, deduped by the version compare
+		std::vector<UnitRows::DamagesSnap> deathExpDamages;
+		std::vector<UnitRows::DamagesSnap> selfdExpDamages;
+		std::vector<uint64_t> expDamagesVersion;
+		std::vector<int> damagesPending[EPOCH_RING_SLOTS];
+
+		// per-column mutation counters (plain uint64, see the class comment)
+		uint64_t mutCounter[WTCOL_COUNT] = {};
+
+		// max live id + 1: the memcpy prefix bound. Monotone within a game
+		// (grown at creation, reset only at Clear()), so it also covers this
+		// batch's died-in-batch ids -- their DEAD_THIS_BATCH shell overlays
+		// land inside the copied prefix (the §7.7 minSlots analogue).
+		size_t highWaterId = 0;
+	};
+
+	// per-ring-slot per-column copy serials: the column's mutCounter value
+	// when this slot last copied it. A column dirtied once reaches EVERY slot
+	// as slots rotate, because each slot only advances its own serial when it
+	// copies (the WS-5 ring subtlety solved by construction, doc §3.3).
+	uint64_t slotColSerial[EPOCH_RING_SLOTS][WTCOL_COUNT] = {};
+
+	LiveUnitStore liveStore;
+
+	// belt-and-braces rewind detection (doc §3.5/§7.5): the publisher rebuilds
+	// the store on a backwards sim-frame jump; the explicit creg-load hook
+	// (CCregLoadSaveHandler::LoadGame) covers loads including forward jumps
+	int32_t lastProduceFrame = -1;
+
+	// oracle bookkeeping (doc §3.6): per-column mismatch counters, reported at
+	// teardown next to the extraction stats
+	uint64_t wtOracleEpochs = 0;
+	uint64_t wtOracleMismatches[WTCOL_COUNT + 2] = {}; // +2: the deep damages pair
+
+	void EnsureLiveStoreSized();
+	void PublishLiveStore(UnitRows& rows, int slot);
+	void RunWriteThroughOracle(const UnitRows& rows);
 
 	// PR 43: the monotonic epoch counter (see EpochId()); PR 44a: atomic --
 	// the producer bumps it at publish while the draw side may load it

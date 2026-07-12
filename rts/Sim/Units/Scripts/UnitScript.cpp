@@ -14,6 +14,7 @@
 #include "Game/GameHelper.h"
 #include "Game/GlobalUnsynced.h"
 #include "Map/Ground.h"
+#include "Rendering/Common/SimSnapshotWriteThrough.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/GroundBlockingObjectMap.h"
 #include "Sim/Misc/LosHandler.h"
@@ -1391,10 +1392,11 @@ int CUnitScript::GetUnitVal(int val, int p1, int p2, int p3, int p4)
 			case 1: return int(unit->flankingBonusDir.x * COBSCALE);
 			case 2: return int(unit->flankingBonusDir.y * COBSCALE);
 			case 3: return int(unit->flankingBonusDir.z * COBSCALE);
-			case 4: unit->flankingBonusDir.x = (p2 / (float)COBSCALE); return 0;
-			case 5: unit->flankingBonusDir.y = (p2 / (float)COBSCALE); return 0;
-			case 6: unit->flankingBonusDir.z = (p2 / (float)COBSCALE); return 0;
-			case 7: unit->flankingBonusDir = float3(p2/(float)COBSCALE, p3/(float)COBSCALE, p4/(float)COBSCALE).Normalize(); return 0;
+			// GETTER cases 4-7 write flankingBonusDir (WS-3 choke rides each)
+			case 4: unit->flankingBonusDir.x = (p2 / (float)COBSCALE); SimSnapshotWT::NoteFlanking(unit); return 0;
+			case 5: unit->flankingBonusDir.y = (p2 / (float)COBSCALE); SimSnapshotWT::NoteFlanking(unit); return 0;
+			case 6: unit->flankingBonusDir.z = (p2 / (float)COBSCALE); SimSnapshotWT::NoteFlanking(unit); return 0;
+			case 7: unit->flankingBonusDir = float3(p2/(float)COBSCALE, p3/(float)COBSCALE, p4/(float)COBSCALE).Normalize(); SimSnapshotWT::NoteFlanking(unit); return 0;
 			default: return(-1);
 		}
 	case FLANK_B_MOBILITY_ADD:
@@ -1755,20 +1757,24 @@ void CUnitScript::SetUnitVal(int val, int param)
 
 		case FLANK_B_MODE: {
 			unit->flankingBonusMode = param;
+			SimSnapshotWT::NoteFlanking(unit);
 		} break;
 		case FLANK_B_MOBILITY_ADD: {
 			unit->flankingBonusMobilityAdd = (param / (float)COBSCALE);
+			SimSnapshotWT::NoteFlanking(unit);
 		} break;
 		case FLANK_B_MAX_DAMAGE: {
 			const float mindamage = unit->flankingBonusAvgDamage - unit->flankingBonusDifDamage;
 			unit->flankingBonusAvgDamage = (param / (float)COBSCALE + mindamage) * 0.5f;
 			unit->flankingBonusDifDamage = (param / (float)COBSCALE - mindamage) * 0.5f;
+			SimSnapshotWT::NoteFlanking(unit);
 		} break;
 
 		case FLANK_B_MIN_DAMAGE: {
 			const float maxdamage = unit->flankingBonusAvgDamage + unit->flankingBonusDifDamage;
 			unit->flankingBonusAvgDamage = (maxdamage + param / (float)COBSCALE) * 0.5f;
 			unit->flankingBonusDifDamage = (maxdamage - param / (float)COBSCALE) * 0.5f;
+			SimSnapshotWT::NoteFlanking(unit);
 		} break;
 
 		default: {

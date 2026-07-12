@@ -16,6 +16,7 @@
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Units/Unit.h"
+#include "Rendering/Common/SimSnapshotWriteThrough.h"
 #include "Sim/Units/UnitHandler.h"
 #include "System/SimDrawSplit.h"
 #include "System/SpringMath.h"
@@ -215,6 +216,7 @@ void CPlayer::StartControllingUnit()
 		if (eventHandler.AllowDirectUnitControl(this->playerNum, newControlleeUnit)) {
 			newControlleeUnit->fpsControlPlayer = this;
 			fpsController.SetControlleeUnit(newControlleeUnit);
+			SimSnapshotWT::NoteFpsControl(newControlleeUnit);
 			selectedUnitsHandler.ClearNetSelect(this->playerNum);
 
 			if (this->playerNum == gu->myPlayerNum) {
@@ -258,6 +260,7 @@ void CPlayer::StopControllingUnit()
 	thisUnit->AttackUnit(nullptr, true, false, true);
 	thisUnit->fpsControlPlayer = nullptr;
 	fpsController.SetControlleeUnit(nullptr);
+	SimSnapshotWT::NoteFpsControl(thisUnit);
 	selectedUnitsHandler.ClearNetSelect(this->playerNum);
 
 	if (thatUnit == thisUnit) {

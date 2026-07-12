@@ -27,6 +27,7 @@
 #include "Map/MapInfo.h"
 #include "Map/ReadMap.h"
 #include "Rendering/Common/DrawMapMirrors.h" // PR 28: terrain-type + orig-heightmap mirror dirty marking
+#include "Rendering/Common/SimSnapshotWriteThrough.h" // WS-3 write-through chokes
 #include "Rendering/Env/GrassDrawer.h"
 #include "Rendering/Env/IGroundDecalDrawer.h"
 #include "Rendering/Models/IModelParser.h"
@@ -2412,6 +2413,7 @@ int LuaSyncedCtrl::SetUnitStockpile(lua_State* L)
 	if (lua_isnumber(L, 3))
 		unit->stockpileWeapon->buildPercent = std::clamp(lua_tofloat(L, 3), 0.0f, 1.0f);
 
+	SimSnapshotWT::NoteStockpile(unit);
 	return 0;
 }
 
@@ -2742,6 +2744,9 @@ int LuaSyncedCtrl::SetUnitWeaponDamages(lua_State* L)
 		}
 	}
 
+	// WS-3 deep-pair choke: AFTER the key writes above (GetMutable may have
+	// cloned the array; the store must capture the post-mutation values)
+	SimSnapshotWT::NoteWeaponDamages(unit);
 	return 0;
 }
 
@@ -3483,6 +3488,8 @@ int LuaSyncedCtrl::SetUnitFlanking(lua_State* L)
 		unit->flankingBonusAvgDamage = (maxDamage + minDamage) * 0.5f;
 		unit->flankingBonusDifDamage = (maxDamage - minDamage) * 0.5f;
 	}
+
+	SimSnapshotWT::NoteFlanking(unit);
 	return 0;
 }
 

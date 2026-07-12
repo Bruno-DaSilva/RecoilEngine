@@ -2,8 +2,11 @@
 
 #include "SimSnapshot.h"
 
+#include <cstdio>
 #include <cstring>
+#include <type_traits>
 
+#include "SimSnapshotWriteThrough.h" // WS-3: choke-helper forwarders
 #include "SnapshotHash.h"
 #include "RenderEventQueue.h" // PR 43: boundary dead-id -> shell maps (DEAD_THIS_BATCH extraction)
 #include "ExternalAI/SkirmishAIData.h"     // PR 36: GetTeamLuaAI / GetAIInfo per-team AI block
@@ -59,9 +62,58 @@
 #include "Sim/Misc/DamageArray.h"
 #include "Lua/LuaHandleSynced.h"
 #include "Lua/LuaSnapshotServe.h"     // PR 43: /epochstats channel bytes           // PR 38: CSplitLuaHandle::GetGameParams (game rules params)
+#include "System/Config/ConfigHandler.h" // WS-3: write-through/oracle knobs
 #include "System/Log/ILog.h"
 #include "System/Misc/SpringTime.h"
 #include "System/TimeProfiler.h"
+
+// ---- WS-3 (write-through mirrors): config knobs ----
+CONFIG(int, SimSnapshotWriteThrough)
+	.defaultValue(1)
+	.minimumValue(0)
+	.description("WS-3 write-through mirrors: 1 = publish the migrated snapshot columns from the live column store (dirty-column prefix memcpys at the frame edge), 0 = retained legacy per-unit gather (fallback/bisection knob; byte-identical to pre-WS-3).");
+
+CONFIG(int, SimSnapshotOracle)
+	.defaultValue(0)
+	.minimumValue(0)
+	.description("Every N epoch publishes, re-run the retained legacy gather for the write-through-migrated columns and error-log any divergence from the published slot (WS-3 missed-choke detector); 0 = off.");
+
+CONFIG(int, SimSnapshotOracleBurst)
+	.defaultValue(0)
+	.minimumValue(0)
+	.description("Always oracle-verify the first M epoch publishes (WS-3 creation/init verification burst), independent of SimSnapshotOracle.");
+
+namespace {
+	bool WriteThroughActive()
+	{
+		return (configHandler != nullptr && configHandler->GetInt("SimSnapshotWriteThrough") != 0);
+	}
+
+	// WS-3: migrated-column names for [WTOracle] logging/teardown, indexed by
+	// SimSnapshot::WTColumn order (+ the two deep damages columns at the end)
+	constexpr const char* WT_COL_NAMES[] = {
+		"weaponCount",
+		"reloadSpeed",
+		"fpsNoFire",
+		"flankingMode",
+		"flankingDir",
+		"flankingMoveFactor",
+		"flankingAvgDamage",
+		"flankingDifDamage",
+		"flankingMobility",
+		"hasStockpile",
+		"stockpileNumStockpiled",
+		"stockpileNumQueued",
+		"stockpileBuildPercent",
+		"stockpileIsInterceptor",
+		"hasShieldWeapon",
+		"shieldWeaponEnabled",
+		"shieldWeaponPower",
+		"deathExpDamages",
+		"selfdExpDamages",
+	};
+	static_assert(sizeof(WT_COL_NAMES) / sizeof(WT_COL_NAMES[0]) == SimSnapshot::WTCOL_COUNT + 2, "");
+}
 
 SimSnapshot simSnapshot;
 
@@ -196,6 +248,77 @@ static inline void CopyDamages(SimSnapshot::UnitRows::DamagesSnap& dst, const Dy
 	dst.damages.resize(n);
 	for (int i = 0; i < n; ++i)
 		dst.damages[i] = src->Get(i);
+}
+
+// WS-3 Stage 1: the retained legacy UnitsWeaponsPerUnit gather body -- one
+// id's migrated columns, written to any UnitRows-shaped column set: the ring
+// slot rows (SimSnapshotWriteThrough=0 fallback), the hash scratch (which
+// must never consult ring serials), the oracle scratch, and the live column
+// store (creation full-row init + creg-load rebuild). Single source of truth
+// for the column formulas; the write-through chokes mirror them per family.
+template<typename Cols>
+static void GatherWeaponPerUnitColumns(Cols& c, int id, const CUnit* u)
+{
+	c.weaponCount[id] = static_cast<int32_t>(u->weapons.size());
+	c.reloadSpeed[id] = u->reloadSpeed;
+
+	// CanFire's FPS-fire gate captured as one bool (CWeapon::CanFire)
+	const CPlayer* fpsPlayer = u->fpsControlPlayer;
+	c.fpsNoFire[id] = (fpsPlayer != nullptr && !fpsPlayer->fpsController.mouse1 && !fpsPlayer->fpsController.mouse2);
+
+	// GetUnitFlanking
+	c.flankingMode[id] = u->flankingBonusMode;
+	c.flankingDir[id] = u->flankingBonusDir;
+	c.flankingMoveFactor[id] = u->flankingBonusMobilityAdd;
+	c.flankingAvgDamage[id] = u->flankingBonusAvgDamage;
+	c.flankingDifDamage[id] = u->flankingBonusDifDamage;
+	c.flankingMobility[id] = u->flankingBonusMobility;
+
+	// GetUnitStockpile (unit->stockpileWeapon; nil shape when null)
+	const CWeapon* stockpile = u->stockpileWeapon;
+	c.hasStockpile[id] = (stockpile != nullptr);
+	c.stockpileNumStockpiled[id] = (stockpile != nullptr) ? stockpile->numStockpiled : 0;
+	c.stockpileNumQueued[id] = (stockpile != nullptr) ? stockpile->numStockpileQued : 0;
+	c.stockpileBuildPercent[id] = (stockpile != nullptr) ? stockpile->buildPercent : 0.0f;
+	c.stockpileIsInterceptor[id] = (stockpile != nullptr) && stockpile->weaponDef->interceptor;
+
+	// GetUnitShieldState default case (static_cast in the live path, so a
+	// non-null shieldWeapon is a CPlasmaRepulser by construction)
+	const CPlasmaRepulser* shield = static_cast<const CPlasmaRepulser*>(u->shieldWeapon);
+	c.hasShieldWeapon[id] = (shield != nullptr);
+	c.shieldWeaponEnabled[id] = (shield != nullptr) ? uint8_t(shield->IsEnabled()) : uint8_t(0);
+	c.shieldWeaponPower[id] = (shield != nullptr) ? shield->GetCurPower() : 0.0f;
+
+	// GetUnitWeaponDamages explosion arrays (unit-level; flattened POD),
+	// version-skipped against the target's own serial column (serials are
+	// globally unique per process; 0 = unversioned, always copy)
+	if (c.expDamagesVersion[id] != u->damagesVersion) {
+		CopyDamages(c.deathExpDamages[id], u->deathExpDamages);
+		CopyDamages(c.selfdExpDamages[id], u->selfdExpDamages);
+		c.expDamagesVersion[id] = u->damagesVersion;
+	}
+}
+
+// WS-3 oracle: field-wise DamagesSnap compare (the float vector precludes a
+// raw memcmp; padding bytes are indeterminate)
+static bool DamagesSnapEqual(const SimSnapshot::UnitRows::DamagesSnap& a, const SimSnapshot::UnitRows::DamagesSnap& b)
+{
+	return
+		(a.valid == b.valid) &&
+		(a.paralyzeDamageTime == b.paralyzeDamageTime) &&
+		(a.impulseFactor == b.impulseFactor) &&
+		(a.impulseBoost == b.impulseBoost) &&
+		(a.craterMult == b.craterMult) &&
+		(a.craterBoost == b.craterBoost) &&
+		(a.dynDamageExp == b.dynDamageExp) &&
+		(a.dynDamageMin == b.dynDamageMin) &&
+		(a.dynDamageRange == b.dynDamageRange) &&
+		(a.dynDamageInverted == b.dynDamageInverted) &&
+		(a.craterAreaOfEffect == b.craterAreaOfEffect) &&
+		(a.damageAreaOfEffect == b.damageAreaOfEffect) &&
+		(a.edgeEffectiveness == b.edgeEffectiveness) &&
+		(a.explosionSpeed == b.explosionSpeed) &&
+		(a.damages == b.damages);
 }
 
 
@@ -369,6 +492,16 @@ int SimSnapshot::ProduceSlotInternal()
 	// caller publishes it as the newest-complete epoch.
 	const int target = PickFreeSlot();
 
+	// WS-3 §3.5/§7.5 belt-and-braces: a backwards sim-frame jump (checkpoint
+	// load / replay rewind) means the live store may hold post-jump-stale
+	// values; rebuild it from the live objects before publishing. The
+	// explicit CCregLoadSaveHandler::LoadGame hook covers the loads
+	// themselves (including forward jumps and the initial saved-game load,
+	// where creg-constructed units bypass the creation choke).
+	if (gs->frameNum < lastProduceFrame)
+		WTRebuildLiveStore();
+	lastProduceFrame = gs->frameNum;
+
 	// PR 43 §7.7 dead-row sources. Under lockstep the barrier's drain already
 	// dispatched the batch's destroy records, populating the dispatch-time
 	// dead maps; under the PR-44a flip the producer runs BEFORE the dispatch,
@@ -413,7 +546,8 @@ int SimSnapshot::ProduceSlotInternal()
 		SCOPED_TIMER("Update::SimSnapshot::Units");
 		// WS-6: hand the demand-gated est-path read-set (drained here) to Extract;
 		// null flag-off+unarmed, so the est-path capture is inert then.
-		Extract(buffers[target], LuaSnapshotServe::AcquireEstPathReadSet());
+		// WS-3: the slot index keys the write-through publisher's copy serials.
+		Extract(buffers[target], LuaSnapshotServe::AcquireEstPathReadSet(), target);
 	}
 	{
 		SCOPED_TIMER("Update::SimSnapshot::Projectiles");
@@ -439,6 +573,19 @@ int SimSnapshot::ProduceSlotInternal()
 	if (SimDrawSplit::Enabled()) {
 		SCOPED_TIMER("Update::SimSnapshot::DeadRows");
 		ExtractDeadRowsFromShells(buffers[target], featBuffers[target], projBuffers[target], deadUnits, deadFeatures, deadProjectiles);
+	}
+
+	// WS-3 §3.6 oracle: every Nth publish (plus the first M, burst), re-run
+	// the retained legacy gather and compare the published slot's migrated
+	// columns per ACTIVE id. A mismatch names a missed/mis-ordered mutation
+	// choke. The overlay above only touches DEAD_THIS_BATCH ids, which the
+	// oracle never compares, so running after it is safe.
+	if (WriteThroughActive() && configHandler != nullptr) {
+		const int oracleEvery = configHandler->GetInt("SimSnapshotOracle");
+		const int oracleBurst = configHandler->GetInt("SimSnapshotOracleBurst");
+
+		if ((oracleEvery > 0 && (numExtractions % oracleEvery) == 0) || numExtractions < static_cast<uint32_t>(oracleBurst))
+			RunWriteThroughOracle(buffers[target]);
 	}
 
 	EpochSlotMeta& meta = slotMeta[target];
@@ -836,6 +983,33 @@ void SimSnapshot::Clear()
 	idCoverageChecked = 0;
 	idCoverageViolations = 0;
 
+	// WS-3 §3.6/§7.6: oracle teardown report + live-store reset. Serials and
+	// counters restart at 0 together; per-slot damages versions in the ring
+	// rows stay (damagesVersion serials are process-monotone, no aliasing).
+	if (wtOracleEpochs > 0) {
+		uint64_t totalMismatches = 0;
+
+		for (int col = 0; col < WTCOL_COUNT + 2; ++col) {
+			totalMismatches += wtOracleMismatches[col];
+			if (wtOracleMismatches[col] > 0)
+				LOG_L(L_ERROR, "[WTOracle] teardown: col=%s mismatches=%llu",
+					WT_COL_NAMES[col], (unsigned long long)wtOracleMismatches[col]);
+		}
+
+		LOG("[WTOracle] teardown: verified %llu epochs, %llu column mismatches",
+			(unsigned long long)wtOracleEpochs, (unsigned long long)totalMismatches);
+	}
+	wtOracleEpochs = 0;
+	std::fill(std::begin(wtOracleMismatches), std::end(wtOracleMismatches), uint64_t(0));
+
+	liveStore.highWaterId = 0;
+	std::fill(std::begin(liveStore.mutCounter), std::end(liveStore.mutCounter), uint64_t(0));
+	std::fill(liveStore.expDamagesVersion.begin(), liveStore.expDamagesVersion.end(), uint64_t(0));
+	for (auto& pending : liveStore.damagesPending)
+		pending.clear();
+	std::memset(slotColSerial, 0, sizeof(slotColSerial));
+	lastProduceFrame = -1;
+
 	mutatedOutsideFrame = false;
 	sumExtractMs = 0.0f;
 	maxExtractMs = 0.0f;
@@ -987,6 +1161,382 @@ void SimSnapshot::Resize(UnitRows& rows, size_t maxUnits, int numAllyTeams)
 	rows.estPathCaptured.resize(maxUnits); // WS-6 demand gate
 }
 
+// ==== WS-3 (write-through mirrors): live store + publisher + oracle ====
+// (see the LiveUnitStore threading comment in SimSnapshot.h -- every function
+// below runs in the single producer-side thread context, chokes and publisher
+// alike; no atomics, by construction)
+
+void SimSnapshot::EnsureLiveStoreSized()
+{
+	const size_t maxUnits = unitHandler.MaxUnits();
+	LiveUnitStore& s = liveStore;
+
+	if (s.weaponCount.size() == maxUnits)
+		return;
+
+	s.weaponCount.resize(maxUnits);
+	s.reloadSpeed.resize(maxUnits);
+	s.fpsNoFire.resize(maxUnits);
+	s.flankingMode.resize(maxUnits);
+	s.flankingDir.resize(maxUnits);
+	s.flankingMoveFactor.resize(maxUnits);
+	s.flankingAvgDamage.resize(maxUnits);
+	s.flankingDifDamage.resize(maxUnits);
+	s.flankingMobility.resize(maxUnits);
+	s.hasStockpile.resize(maxUnits);
+	s.stockpileNumStockpiled.resize(maxUnits);
+	s.stockpileNumQueued.resize(maxUnits);
+	s.stockpileBuildPercent.resize(maxUnits);
+	s.stockpileIsInterceptor.resize(maxUnits);
+	s.hasShieldWeapon.resize(maxUnits);
+	s.shieldWeaponEnabled.resize(maxUnits);
+	s.shieldWeaponPower.resize(maxUnits);
+	s.deathExpDamages.resize(maxUnits);
+	s.selfdExpDamages.resize(maxUnits);
+	s.expDamagesVersion.resize(maxUnits, 0);
+}
+
+void SimSnapshot::WTUnitCreated(const CUnit* u)
+{
+	EnsureLiveStoreSized();
+
+	LiveUnitStore& s = liveStore;
+	const int id = u->id;
+
+	if (static_cast<size_t>(id) >= s.weaponCount.size())
+		return;
+
+	// creation ordering: this runs at the end of CUnitLoader::LoadUnit, in
+	// the same synced call stack that registered the unit in activeUnits --
+	// no publish can interleave, so every column entry is final (and every
+	// slot re-copies every column, counters bumped below) before the id can
+	// be served. This is also the id-reuse story (doc §7.2).
+	s.highWaterId = std::max(s.highWaterId, static_cast<size_t>(id) + 1);
+
+	GatherWeaponPerUnitColumns(s, id, u);
+
+	for (uint64_t& counter : s.mutCounter)
+		counter += 1;
+	for (auto& pending : s.damagesPending)
+		pending.push_back(id);
+}
+
+void SimSnapshot::WTRebuildLiveStore()
+{
+	EnsureLiveStoreSized();
+
+	LiveUnitStore& s = liveStore;
+
+	// force the deep pair to re-copy for every live id (a creg-loaded unit's
+	// ctor-fresh damagesVersion never aliases, but be explicit), rebuild all
+	// columns from the live objects, then bump every counter and zero every
+	// slot serial so each slot fully re-copies on its next produce.
+	// highWaterId stays monotone (doc §3.1): pre-load higher ids read as
+	// INACTIVE, a slightly larger prefix copy is harmless.
+	std::fill(s.expDamagesVersion.begin(), s.expDamagesVersion.end(), uint64_t(0));
+	for (auto& pending : s.damagesPending)
+		pending.clear();
+
+	for (const CUnit* u : unitHandler.GetActiveUnits()) {
+		const int id = u->id;
+
+		s.highWaterId = std::max(s.highWaterId, static_cast<size_t>(id) + 1);
+		GatherWeaponPerUnitColumns(s, id, u);
+
+		for (auto& pending : s.damagesPending)
+			pending.push_back(id);
+	}
+
+	for (uint64_t& counter : s.mutCounter)
+		counter += 1;
+
+	std::memset(slotColSerial, 0, sizeof(slotColSerial));
+}
+
+// choke bodies: recompute the family's columns from the unit's authoritative
+// members (the same formulas as GatherWeaponPerUnitColumns) and bump the
+// touched counters. Pre-registration writes (creation-time ctor/script paths
+// before the store is sized) early-return -- the creation full-row init that
+// follows in the same call stack captures the final values.
+
+void SimSnapshot::WTNoteFlanking(const CUnit* u)
+{
+	LiveUnitStore& s = liveStore;
+	const size_t id = static_cast<size_t>(u->id);
+
+	if (id >= s.flankingMode.size())
+		return;
+
+	s.flankingMode[id] = u->flankingBonusMode;
+	s.flankingDir[id] = u->flankingBonusDir;
+	s.flankingMoveFactor[id] = u->flankingBonusMobilityAdd;
+	s.flankingAvgDamage[id] = u->flankingBonusAvgDamage;
+	s.flankingDifDamage[id] = u->flankingBonusDifDamage;
+	s.flankingMobility[id] = u->flankingBonusMobility;
+	s.mutCounter[WTCOL_FLANKING_MODE] += 1;
+	s.mutCounter[WTCOL_FLANKING_DIR] += 1;
+	s.mutCounter[WTCOL_FLANKING_MOVE_FACTOR] += 1;
+	s.mutCounter[WTCOL_FLANKING_AVG_DAMAGE] += 1;
+	s.mutCounter[WTCOL_FLANKING_DIF_DAMAGE] += 1;
+	s.mutCounter[WTCOL_FLANKING_MOBILITY] += 1;
+}
+
+void SimSnapshot::WTNoteFlankingMobility(const CUnit* u)
+{
+	// the per-frame-hot single-column choke (CUnit::Update mobility regen):
+	// one L1-resident store + one counter bump per live unit per frame
+	LiveUnitStore& s = liveStore;
+	const size_t id = static_cast<size_t>(u->id);
+
+	if (id >= s.flankingMobility.size())
+		return;
+
+	s.flankingMobility[id] = u->flankingBonusMobility;
+	s.mutCounter[WTCOL_FLANKING_MOBILITY] += 1;
+}
+
+void SimSnapshot::WTNoteReloadSpeed(const CUnit* u)
+{
+	LiveUnitStore& s = liveStore;
+	const size_t id = static_cast<size_t>(u->id);
+
+	if (id >= s.reloadSpeed.size())
+		return;
+
+	s.reloadSpeed[id] = u->reloadSpeed;
+	s.mutCounter[WTCOL_RELOAD_SPEED] += 1;
+}
+
+void SimSnapshot::WTNoteFpsControl(const CUnit* u)
+{
+	LiveUnitStore& s = liveStore;
+	const size_t id = static_cast<size_t>(u->id);
+
+	if (id >= s.fpsNoFire.size())
+		return;
+
+	const CPlayer* fpsPlayer = u->fpsControlPlayer;
+	s.fpsNoFire[id] = (fpsPlayer != nullptr && !fpsPlayer->fpsController.mouse1 && !fpsPlayer->fpsController.mouse2);
+	s.mutCounter[WTCOL_FPS_NO_FIRE] += 1;
+}
+
+void SimSnapshot::WTNoteStockpile(const CUnit* u)
+{
+	LiveUnitStore& s = liveStore;
+
+	// null-guarded: reached via weapon->owner from CWeapon update paths
+	if (u == nullptr)
+		return;
+
+	const size_t id = static_cast<size_t>(u->id);
+
+	if (id >= s.hasStockpile.size())
+		return;
+
+	const CWeapon* stockpile = u->stockpileWeapon;
+	s.hasStockpile[id] = (stockpile != nullptr);
+	s.stockpileNumStockpiled[id] = (stockpile != nullptr) ? stockpile->numStockpiled : 0;
+	s.stockpileNumQueued[id] = (stockpile != nullptr) ? stockpile->numStockpileQued : 0;
+	s.stockpileBuildPercent[id] = (stockpile != nullptr) ? stockpile->buildPercent : 0.0f;
+	s.stockpileIsInterceptor[id] = (stockpile != nullptr) && stockpile->weaponDef->interceptor;
+	s.mutCounter[WTCOL_HAS_STOCKPILE] += 1;
+	s.mutCounter[WTCOL_STOCKPILE_NUM_STOCKPILED] += 1;
+	s.mutCounter[WTCOL_STOCKPILE_NUM_QUEUED] += 1;
+	s.mutCounter[WTCOL_STOCKPILE_BUILD_PERCENT] += 1;
+	s.mutCounter[WTCOL_STOCKPILE_IS_INTERCEPTOR] += 1;
+}
+
+void SimSnapshot::WTNoteShieldState(const CUnit* u)
+{
+	LiveUnitStore& s = liveStore;
+
+	// null-guarded: reached via weapon->owner from CPlasmaRepulser setters
+	if (u == nullptr)
+		return;
+
+	const size_t id = static_cast<size_t>(u->id);
+
+	if (id >= s.hasShieldWeapon.size())
+		return;
+
+	// recompute from the owner's shieldWeapon (the extracted source), NOT the
+	// mutated repulser: a unit can carry several shields and the columns
+	// mirror only owner->shieldWeapon, so this stays correct no matter which
+	// repulser's state changed
+	const CPlasmaRepulser* shield = static_cast<const CPlasmaRepulser*>(u->shieldWeapon);
+	s.hasShieldWeapon[id] = (shield != nullptr);
+	s.shieldWeaponEnabled[id] = (shield != nullptr) ? uint8_t(shield->IsEnabled()) : uint8_t(0);
+	s.shieldWeaponPower[id] = (shield != nullptr) ? shield->GetCurPower() : 0.0f;
+	s.mutCounter[WTCOL_HAS_SHIELD_WEAPON] += 1;
+	s.mutCounter[WTCOL_SHIELD_WEAPON_ENABLED] += 1;
+	s.mutCounter[WTCOL_SHIELD_WEAPON_POWER] += 1;
+}
+
+void SimSnapshot::WTNoteWeaponDamages(const CUnit* u)
+{
+	LiveUnitStore& s = liveStore;
+	const size_t id = static_cast<size_t>(u->id);
+
+	if (id >= s.expDamagesVersion.size())
+		return;
+
+	CopyDamages(s.deathExpDamages[id], u->deathExpDamages);
+	CopyDamages(s.selfdExpDamages[id], u->selfdExpDamages);
+	s.expDamagesVersion[id] = u->damagesVersion;
+
+	// deep column (§3.4): push-to-all-slots so the copy reaches every
+	// rotating slot; the drain dedupes via the per-slot version compare
+	for (auto& pending : s.damagesPending)
+		pending.push_back(static_cast<int>(id));
+}
+
+void SimSnapshot::PublishLiveStore(UnitRows& rows, int slot)
+{
+	LiveUnitStore& s = liveStore;
+	uint64_t* serials = slotColSerial[slot];
+
+	// prefix bound: highWaterId covers every id ever created this game --
+	// dead-in-batch ids included (creation is monotone), so the §7.7 shell
+	// overlays land inside the copied prefix. Store and slot rows are both
+	// sized MaxUnits once any unit exists.
+	const size_t n = std::min(s.highWaterId, rows.valid.size());
+
+	const auto copyColumn = [&](WTColumn col, auto& dst, const auto& src) {
+		if (serials[col] == s.mutCounter[col])
+			return;
+		if (n > 0)
+			std::memcpy(dst.data(), src.data(), n * sizeof(dst[0]));
+		serials[col] = s.mutCounter[col];
+	};
+
+	copyColumn(WTCOL_WEAPON_COUNT, rows.weaponCount, s.weaponCount);
+	copyColumn(WTCOL_RELOAD_SPEED, rows.reloadSpeed, s.reloadSpeed);
+	copyColumn(WTCOL_FPS_NO_FIRE, rows.fpsNoFire, s.fpsNoFire);
+	copyColumn(WTCOL_FLANKING_MODE, rows.flankingMode, s.flankingMode);
+	copyColumn(WTCOL_FLANKING_DIR, rows.flankingDir, s.flankingDir);
+	copyColumn(WTCOL_FLANKING_MOVE_FACTOR, rows.flankingMoveFactor, s.flankingMoveFactor);
+	copyColumn(WTCOL_FLANKING_AVG_DAMAGE, rows.flankingAvgDamage, s.flankingAvgDamage);
+	copyColumn(WTCOL_FLANKING_DIF_DAMAGE, rows.flankingDifDamage, s.flankingDifDamage);
+	copyColumn(WTCOL_FLANKING_MOBILITY, rows.flankingMobility, s.flankingMobility);
+	copyColumn(WTCOL_HAS_STOCKPILE, rows.hasStockpile, s.hasStockpile);
+	copyColumn(WTCOL_STOCKPILE_NUM_STOCKPILED, rows.stockpileNumStockpiled, s.stockpileNumStockpiled);
+	copyColumn(WTCOL_STOCKPILE_NUM_QUEUED, rows.stockpileNumQueued, s.stockpileNumQueued);
+	copyColumn(WTCOL_STOCKPILE_BUILD_PERCENT, rows.stockpileBuildPercent, s.stockpileBuildPercent);
+	copyColumn(WTCOL_STOCKPILE_IS_INTERCEPTOR, rows.stockpileIsInterceptor, s.stockpileIsInterceptor);
+	copyColumn(WTCOL_HAS_SHIELD_WEAPON, rows.hasShieldWeapon, s.hasShieldWeapon);
+	copyColumn(WTCOL_SHIELD_WEAPON_ENABLED, rows.shieldWeaponEnabled, s.shieldWeaponEnabled);
+	copyColumn(WTCOL_SHIELD_WEAPON_POWER, rows.shieldWeaponPower, s.shieldWeaponPower);
+
+	// deep damages pair (§3.4): drain this slot's pending-apply list with
+	// per-id deep copies, deduped by the per-slot version compare (the
+	// pre-WS-3 expDamagesVersion gate, list-driven instead of the all-units
+	// scan -- behaviorally identical, loop-free)
+	for (const int id : s.damagesPending[slot]) {
+		if (static_cast<size_t>(id) >= rows.expDamagesVersion.size() || static_cast<size_t>(id) >= s.expDamagesVersion.size())
+			continue;
+		if (rows.expDamagesVersion[id] == s.expDamagesVersion[id])
+			continue;
+
+		rows.deathExpDamages[id] = s.deathExpDamages[id];
+		rows.selfdExpDamages[id] = s.selfdExpDamages[id];
+		rows.expDamagesVersion[id] = s.expDamagesVersion[id];
+	}
+	s.damagesPending[slot].clear();
+}
+
+void SimSnapshot::RunWriteThroughOracle(const UnitRows& rows)
+{
+	SCOPED_TIMER("Update::SimSnapshot::WTOracle");
+
+	const size_t maxUnits = unitHandler.MaxUnits();
+	const int numAllyTeams = teamHandler.ActiveAllyTeams();
+
+	// legacy re-extract into the never-published hash scratch (the exact
+	// precedent for producer-thread scratch extraction, doc §3.6)
+	if (hashScratch.valid.size() != maxUnits || hashScratch.numAllyTeams != numAllyTeams)
+		Resize(hashScratch, maxUnits, numAllyTeams);
+
+	const auto& activeUnits = unitHandler.GetActiveUnits();
+
+	for (const CUnit* u : activeUnits)
+		GatherWeaponPerUnitColumns(hashScratch, u->id, u);
+
+	wtOracleEpochs += 1;
+
+	constexpr uint64_t MAX_LOGGED_PER_COLUMN = 8;
+
+	const auto render = [](char* out, size_t outSize, const auto& v) {
+		using T = std::decay_t<decltype(v)>;
+		if constexpr (std::is_same_v<T, float>) {
+			snprintf(out, outSize, "%.9g", v);
+		} else if constexpr (std::is_same_v<T, float3>) {
+			snprintf(out, outSize, "(%.9g %.9g %.9g)", v.x, v.y, v.z);
+		} else {
+			snprintf(out, outSize, "%lld", static_cast<long long>(v));
+		}
+	};
+
+	const auto report = [&](int col, int id, const char* slotVal, const char* legacyVal) {
+		wtOracleMismatches[col] += 1;
+		if (wtOracleMismatches[col] <= MAX_LOGGED_PER_COLUMN) {
+			LOG_L(L_ERROR, "[WTOracle] frame=%d family=unit col=%s id=%d slot=%s legacy=%s",
+				rows.simFrame, WT_COL_NAMES[col], id, slotVal, legacyVal);
+		}
+	};
+
+	// per-ACTIVE-id per-column compare -- never whole-column memcmp: INACTIVE
+	// entries legitimately hold stale garbage and DEAD_THIS_BATCH rows are
+	// shell-sourced, not store-sourced (doc §3.6/§7.3)
+	for (const CUnit* u : activeUnits) {
+		const int id = u->id;
+
+		char slotVal[96];
+		char legacyVal[96];
+
+		const auto check = [&](int col, const auto& slotCol, const auto& legacyCol) {
+			if (std::memcmp(&slotCol[id], &legacyCol[id], sizeof(slotCol[id])) == 0)
+				return;
+			render(slotVal, sizeof(slotVal), slotCol[id]);
+			render(legacyVal, sizeof(legacyVal), legacyCol[id]);
+			report(col, id, slotVal, legacyVal);
+		};
+
+		check(WTCOL_WEAPON_COUNT, rows.weaponCount, hashScratch.weaponCount);
+		check(WTCOL_RELOAD_SPEED, rows.reloadSpeed, hashScratch.reloadSpeed);
+		check(WTCOL_FPS_NO_FIRE, rows.fpsNoFire, hashScratch.fpsNoFire);
+		check(WTCOL_FLANKING_MODE, rows.flankingMode, hashScratch.flankingMode);
+		check(WTCOL_FLANKING_DIR, rows.flankingDir, hashScratch.flankingDir);
+		check(WTCOL_FLANKING_MOVE_FACTOR, rows.flankingMoveFactor, hashScratch.flankingMoveFactor);
+		check(WTCOL_FLANKING_AVG_DAMAGE, rows.flankingAvgDamage, hashScratch.flankingAvgDamage);
+		check(WTCOL_FLANKING_DIF_DAMAGE, rows.flankingDifDamage, hashScratch.flankingDifDamage);
+		check(WTCOL_FLANKING_MOBILITY, rows.flankingMobility, hashScratch.flankingMobility);
+		check(WTCOL_HAS_STOCKPILE, rows.hasStockpile, hashScratch.hasStockpile);
+		check(WTCOL_STOCKPILE_NUM_STOCKPILED, rows.stockpileNumStockpiled, hashScratch.stockpileNumStockpiled);
+		check(WTCOL_STOCKPILE_NUM_QUEUED, rows.stockpileNumQueued, hashScratch.stockpileNumQueued);
+		check(WTCOL_STOCKPILE_BUILD_PERCENT, rows.stockpileBuildPercent, hashScratch.stockpileBuildPercent);
+		check(WTCOL_STOCKPILE_IS_INTERCEPTOR, rows.stockpileIsInterceptor, hashScratch.stockpileIsInterceptor);
+		check(WTCOL_HAS_SHIELD_WEAPON, rows.hasShieldWeapon, hashScratch.hasShieldWeapon);
+		check(WTCOL_SHIELD_WEAPON_ENABLED, rows.shieldWeaponEnabled, hashScratch.shieldWeaponEnabled);
+		check(WTCOL_SHIELD_WEAPON_POWER, rows.shieldWeaponPower, hashScratch.shieldWeaponPower);
+
+		if (!DamagesSnapEqual(rows.deathExpDamages[id], hashScratch.deathExpDamages[id]))
+			report(WTCOL_COUNT + 0, id, "<snap>", "<snap>");
+		if (!DamagesSnapEqual(rows.selfdExpDamages[id], hashScratch.selfdExpDamages[id]))
+			report(WTCOL_COUNT + 1, id, "<snap>", "<snap>");
+	}
+}
+
+// ---- SimSnapshotWT choke forwarders (SimSnapshotWriteThrough.h) ----
+void SimSnapshotWT::UnitCreated(const CUnit* unit) { simSnapshot.WTUnitCreated(unit); }
+void SimSnapshotWT::RebuildLiveStore() { simSnapshot.WTRebuildLiveStore(); }
+void SimSnapshotWT::NoteFlanking(const CUnit* unit) { simSnapshot.WTNoteFlanking(unit); }
+void SimSnapshotWT::NoteFlankingMobility(const CUnit* unit) { simSnapshot.WTNoteFlankingMobility(unit); }
+void SimSnapshotWT::NoteReloadSpeed(const CUnit* unit) { simSnapshot.WTNoteReloadSpeed(unit); }
+void SimSnapshotWT::NoteFpsControl(const CUnit* unit) { simSnapshot.WTNoteFpsControl(unit); }
+void SimSnapshotWT::NoteStockpile(const CUnit* unit) { simSnapshot.WTNoteStockpile(unit); }
+void SimSnapshotWT::NoteShieldState(const CUnit* unit) { simSnapshot.WTNoteShieldState(unit); }
+void SimSnapshotWT::NoteWeaponDamages(const CUnit* unit) { simSnapshot.WTNoteWeaponDamages(unit); }
+
 // ---- PR 32 (deep per-unit state) extraction helpers ----
 // mirror the live dynamic_cast chains; values only, exact accessors so the
 // served table/scalars are bit-identical to the live callouts.
@@ -1114,13 +1664,19 @@ static void ExtractUnitMoveType(SimSnapshot::UnitRows& rows, int id, const CUnit
 	}
 }
 
-void SimSnapshot::Extract(UnitRows& rows, std::vector<uint8_t>* estPathReadSet)
+void SimSnapshot::Extract(UnitRows& rows, std::vector<uint8_t>* estPathReadSet, int slot)
 {
 	const size_t maxUnits = unitHandler.MaxUnits();
 	const int numAllyTeams = teamHandler.ActiveAllyTeams();
 
-	if (rows.valid.size() != maxUnits || rows.numAllyTeams != numAllyTeams)
+	if (rows.valid.size() != maxUnits || rows.numAllyTeams != numAllyTeams) {
 		Resize(rows, maxUnits, numAllyTeams);
+
+		// WS-3 §3.3: a resized slot's rows are (partially) fresh storage --
+		// zero its copy serials so every write-through column re-copies
+		if (slot >= 0)
+			std::memset(slotColSerial[slot], 0, sizeof(slotColSerial[slot]));
+	}
 
 	std::fill(rows.valid.begin(), rows.valid.end(), 0);
 
@@ -1331,57 +1887,39 @@ void SimSnapshot::Extract(UnitRows& rows, std::vector<uint8_t>* estPathReadSet)
 	}
 
 	// ================= PR 31: weapon/shield scalar family =================
-	// Pass 1: per-unit weapon rows + weaponOffset/weaponCount, accumulating the
-	// total live weapon count so the flat per-weapon arrays are sized once.
+	// WS-3 Stage 1 (write-through mirrors): the UnitsWeaponsPerUnit gather
+	// loop is RETIRED. Ring-slot publishes take the migrated columns from the
+	// live column store -- dirty-column prefix memcpys + the per-slot damages
+	// pending drain -- with no object access; the hash scratch (slot < 0,
+	// which must not consult ring serials) and the SimSnapshotWriteThrough=0
+	// fallback keep the retained legacy gather. Runs BEFORE the §7.7
+	// dead-row shell overlay (ordering is load-bearing, doc §7.3).
+	if (slot >= 0 && WriteThroughActive()) {
+		SCOPED_TIMER("Update::SimSnapshot::WTPublish");
+		PublishLiveStore(rows, slot);
+	} else {
+		for (const CUnit* u : activeUnits)
+			GatherWeaponPerUnitColumns(rows, u->id, u);
+
+		// fallback path: the slot took legacy values, keep its pending list
+		// bounded (the next write-through publish re-copies via the serials)
+		if (slot >= 0)
+			liveStore.damagesPending[slot].clear();
+	}
+
+	// weaponOffset stays edge-computed (WS-3 §3.7): an epoch-relative prefix
+	// sum indexing the flat per-weapon arrays, folded over the (write-
+	// through) weaponCount column and accumulating the total live weapon
+	// count so the flat arrays are sized once. This is what let the PerUnit
+	// loop above die; the walk reads no unit members beyond id.
 	int32_t totalWeapons = 0;
 	{
-		SCOPED_TIMER("Update::SimSnapshot::UnitsWeaponsPerUnit");
+		SCOPED_TIMER("Update::SimSnapshot::UnitsWeaponsPerWeapon");
 
 		for (const CUnit* u : activeUnits) {
 			const int id = u->id;
-			const int nw = static_cast<int>(u->weapons.size());
-
 			rows.weaponOffset[id] = totalWeapons;
-			rows.weaponCount[id] = nw;
-			totalWeapons += nw;
-
-			rows.reloadSpeed[id] = u->reloadSpeed;
-
-			// CanFire's FPS-fire gate captured as one bool (CWeapon::CanFire)
-			const CPlayer* fpsPlayer = u->fpsControlPlayer;
-			rows.fpsNoFire[id] = (fpsPlayer != nullptr && !fpsPlayer->fpsController.mouse1 && !fpsPlayer->fpsController.mouse2);
-
-			// GetUnitFlanking
-			rows.flankingMode[id] = u->flankingBonusMode;
-			rows.flankingDir[id] = u->flankingBonusDir;
-			rows.flankingMoveFactor[id] = u->flankingBonusMobilityAdd;
-			rows.flankingAvgDamage[id] = u->flankingBonusAvgDamage;
-			rows.flankingDifDamage[id] = u->flankingBonusDifDamage;
-			rows.flankingMobility[id] = u->flankingBonusMobility;
-
-			// GetUnitStockpile (unit->stockpileWeapon; nil shape when null)
-			const CWeapon* stockpile = u->stockpileWeapon;
-			rows.hasStockpile[id] = (stockpile != nullptr);
-			rows.stockpileNumStockpiled[id] = (stockpile != nullptr) ? stockpile->numStockpiled : 0;
-			rows.stockpileNumQueued[id] = (stockpile != nullptr) ? stockpile->numStockpileQued : 0;
-			rows.stockpileBuildPercent[id] = (stockpile != nullptr) ? stockpile->buildPercent : 0.0f;
-			rows.stockpileIsInterceptor[id] = (stockpile != nullptr) && stockpile->weaponDef->interceptor;
-
-			// GetUnitShieldState default case (static_cast in the live path, so a
-			// non-null shieldWeapon is a CPlasmaRepulser by construction)
-			const CPlasmaRepulser* shield = static_cast<const CPlasmaRepulser*>(u->shieldWeapon);
-			rows.hasShieldWeapon[id] = (shield != nullptr);
-			rows.shieldWeaponEnabled[id] = (shield != nullptr) ? uint8_t(shield->IsEnabled()) : uint8_t(0);
-			rows.shieldWeaponPower[id] = (shield != nullptr) ? shield->GetCurPower() : 0.0f;
-
-			// GetUnitWeaponDamages explosion arrays (unit-level; flattened POD).
-			// Version-skipped (the two full DynDamageArray copies dominated this
-			// pass): see the UnitRows::expDamagesVersion comment
-			if (rows.expDamagesVersion[id] != u->damagesVersion) {
-				CopyDamages(rows.deathExpDamages[id], u->deathExpDamages);
-				CopyDamages(rows.selfdExpDamages[id], u->selfdExpDamages);
-				rows.expDamagesVersion[id] = u->damagesVersion;
-			}
+			totalWeapons += rows.weaponCount[id];
 		}
 	}
 

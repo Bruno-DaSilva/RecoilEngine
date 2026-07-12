@@ -7,6 +7,7 @@
 #include "FactoryCAI.h"
 #include "ExternalAI/EngineOutHandler.h"
 #include "ExternalAI/SkirmishAIHandler.h"
+#include "Rendering/Common/SimSnapshotWriteThrough.h"
 #include "Game/GlobalUnsynced.h"
 #include "Game/SelectedUnitsHandler.h"
 #include "Game/WaitCommandsAI.h"
@@ -948,6 +949,7 @@ bool CCommandAI::ExecuteStateCommand(const Command& c)
 
 			stockpileWeapon->numStockpileQued += change;
 			stockpileWeapon->numStockpileQued = std::max(stockpileWeapon->numStockpileQued, 0);
+			SimSnapshotWT::NoteStockpile(owner);
 
 			UpdateStockpileIcon();
 			return true;

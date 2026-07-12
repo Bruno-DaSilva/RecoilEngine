@@ -4,6 +4,7 @@
 #define PLASMAREPULSER_H
 
 #include "Weapon.h"
+#include "Rendering/Common/SimSnapshotWriteThrough.h"
 #include "Sim/Misc/CollisionVolume.h"
 
 #include <vector>
@@ -24,9 +25,10 @@ public:
 	void SlowUpdate() override final;
 
 
-	void SetEnabled(bool b) { isEnabled = b; }
+	// WS-3 chokes: isEnabled/curPower feed the owner's shieldWeapon* columns
+	void SetEnabled(bool b) { isEnabled = b; SimSnapshotWT::NoteShieldState(owner); }
 	void SetRechargeDelay(int delay, bool overwrite);
-	void SetCurPower(float p) { curPower = p; }
+	void SetCurPower(float p) { curPower = p; SimSnapshotWT::NoteShieldState(owner); }
 
 	bool IsEnabled() const { return isEnabled; }
 	bool IsActive() const;

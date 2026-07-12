@@ -64,6 +64,7 @@
 #include "Sim/Weapons/WeaponLoader.h"
 #include "Rendering/Common/RenderEventQueue.h"
 #include "Rendering/Common/SimSnapshot.h"
+#include "Rendering/Common/SimSnapshotWriteThrough.h"
 #include "System/EventHandler.h"
 #include "System/Log/ILog.h"
 #include "System/Matrix44f.h"
@@ -732,6 +733,7 @@ void CUnit::Update()
 
 	recentDamage *= 0.9f;
 	flankingBonusMobility += flankingBonusMobilityAdd;
+	SimSnapshotWT::NoteFlankingMobility(this);
 
 	if (IsStunned()) {
 		// paralyzed weapons shouldn't reload
@@ -1264,6 +1266,7 @@ float CUnit::GetFlankingDamageBonus(const float3& attackDir)
 		flankingBonus = (flankingBonusAvgDamage - adirRelative.dot(flankingBonusDir) * flankingBonusDifDamage);
 	}
 
+	SimSnapshotWT::NoteFlanking(this);
 	return flankingBonus;
 }
 
@@ -1507,8 +1510,10 @@ void CUnit::AddExperience(float exp)
 	if (globalUnitParams.expPowerScale > 0.0f)
 		power = unitDef->power * (1.0f + (limExperience * globalUnitParams.expPowerScale));
 
-	if (globalUnitParams.expReloadScale > 0.0f)
+	if (globalUnitParams.expReloadScale > 0.0f) {
 		reloadSpeed = (1.0f + (limExperience * globalUnitParams.expReloadScale));
+		SimSnapshotWT::NoteReloadSpeed(this);
+	}
 
 	if (globalUnitParams.expHealthScale > 0.0f) {
 		maxHealth = std::max(0.1f, unitDef->health * (1.0f + (limExperience * globalUnitParams.expHealthScale)));
