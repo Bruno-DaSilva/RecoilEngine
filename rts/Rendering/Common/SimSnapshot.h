@@ -685,9 +685,14 @@ public:
 		std::vector<uint8_t> hasShieldWeapon;
 		std::vector<uint8_t> shieldWeaponEnabled;
 		std::vector<float> shieldWeaponPower;
-		// GetUnitWeaponDamages explosion arrays (unit-level; flattened POD)
+		// GetUnitWeaponDamages explosion arrays (unit-level; flattened POD).
+		// Version-skipped like unitRulesParams: the slot's copies are current
+		// while CUnit::damagesVersion is unchanged since this slot last copied
+		// them (ctor-seeded globally-unique serial, so a respawned id always
+		// re-copies; bumped by LuaSyncedCtrl::SetUnitWeaponDamages)
 		std::vector<DamagesSnap> deathExpDamages;
 		std::vector<DamagesSnap> selfdExpDamages;
+		std::vector<uint64_t> expDamagesVersion; // [maxUnits]
 
 		// flat per-weapon arrays (index = weaponOffset[unitID] + weaponNum; sized
 		// to the total live weapon count in Extract). GetUnitWeaponState:

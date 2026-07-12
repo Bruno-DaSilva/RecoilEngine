@@ -31,8 +31,6 @@
 #include "Sim/MoveTypes/GroundMoveType.h"
 #include "Sim/MoveTypes/HoverAirMoveType.h"
 #include "Sim/MoveTypes/StrafeAirMoveType.h"
-#include "Sim/MoveTypes/StaticMoveType.h"
-#include "Sim/MoveTypes/ScriptMoveType.h"
 #include "Sim/Path/IPathManager.h" // PR 38g GetUnitEstimatedPath (GetPathWayPoints)
 #include "Sim/Misc/GlobalConstants.h" // GAME_SPEED
 #include "Sim/Misc/NanoPieceCache.h"
@@ -979,6 +977,7 @@ void SimSnapshot::Resize(UnitRows& rows, size_t maxUnits, int numAllyTeams)
 	// ---- PR 38c: per-unit rules-params mirror (same maxUnits sizing) ----
 	rows.unitRulesParams.resize(maxUnits);
 	rows.unitRulesParamsVersion.resize(maxUnits, 0); // PR 46 version-skip
+	rows.expDamagesVersion.resize(maxUnits, 0);      // damages version-skip
 	// ---- PR 38g: GetUnitEstimatedPath est-path block (same maxUnits sizing) ----
 	rows.estPathHasPath.resize(maxUnits);
 	rows.estPathPoints.resize(maxUnits);
@@ -998,20 +997,26 @@ static void ExtractUnitBuildState(SimSnapshot::UnitRows& rows, int id, const CUn
 	rows.buildPower[id] = 0.0f;
 	rows.nanoPieces[id].clear();
 
-	if (const CBuilder* builder = dynamic_cast<const CBuilder*>(u); builder != nullptr) {
+	// dispatch mirrors CUnitHandler::NewUnit (IsFactoryUnit => CFactory, any
+	// other builder def => CBuilder) -- replaces a per-unit dynamic_cast pair
+	const UnitDef* ud = u->unitDef;
+
+	if (ud->IsFactoryUnit()) {
+		const CFactory* factory = static_cast<const CFactory*>(u);
+		rows.builderKind[id] = 2;
+		rows.curBuildID[id] = (factory->curBuild != nullptr) ? factory->curBuild->id : -1;
+		const NanoPieceCache& npc = factory->GetNanoPieceCache();
+		rows.buildPower[id] = npc.GetBuildPower();
+		rows.nanoPieces[id] = npc.GetNanoPieces();
+		return;
+	}
+	if (ud->IsBuilderUnit()) {
+		const CBuilder* builder = static_cast<const CBuilder*>(u);
 		rows.builderKind[id] = 1;
 		rows.curBuildID[id] = (builder->curBuild != nullptr) ? builder->curBuild->id : -1;
 		rows.buildDistance[id] = builder->buildDistance;
 		rows.range3D[id] = builder->range3D;
 		const NanoPieceCache& npc = builder->GetNanoPieceCache();
-		rows.buildPower[id] = npc.GetBuildPower();
-		rows.nanoPieces[id] = npc.GetNanoPieces();
-		return;
-	}
-	if (const CFactory* factory = dynamic_cast<const CFactory*>(u); factory != nullptr) {
-		rows.builderKind[id] = 2;
-		rows.curBuildID[id] = (factory->curBuild != nullptr) ? factory->curBuild->id : -1;
-		const NanoPieceCache& npc = factory->GetNanoPieceCache();
 		rows.buildPower[id] = npc.GetBuildPower();
 		rows.nanoPieces[id] = npc.GetNanoPieces();
 		return;
@@ -1038,72 +1043,79 @@ static void ExtractUnitMoveType(SimSnapshot::UnitRows& rows, int id, const CUnit
 	rows.estPathPoints[id].clear();
 	rows.estPathStarts[id].clear();
 
-	if (const CGroundMoveType* g = dynamic_cast<const CGroundMoveType*>(mt); g != nullptr) {
-		rows.moveTypeKind[id] = 1;
-		b.turnRate = g->GetTurnRate();
-		b.accRate = g->GetAccRate();
-		b.decRate = g->GetDecRate();
-		b.maxReverseSpeed = g->GetMaxReverseSpeed() * GAME_SPEED;
-		b.wantedSpeed = g->GetWantedSpeed() * GAME_SPEED;
-		b.currentSpeed = g->GetCurrentSpeed() * GAME_SPEED;
-		b.goalRadius = g->GetGoalRadius();
-		b.currWayPoint = g->GetCurrWayPoint();
-		b.nextWayPoint = g->GetNextWayPoint();
+	// dispatch on the AMoveType class tag (covers the runtime MoveCtrl swap to
+	// CScriptMoveType) -- replaces a per-unit 5-deep dynamic_cast chain
+	switch (mt->GetMoveTypeClass()) {
+		case AMoveType::MT_GROUND: {
+			const CGroundMoveType* g = static_cast<const CGroundMoveType*>(mt);
+			rows.moveTypeKind[id] = 1;
+			b.turnRate = g->GetTurnRate();
+			b.accRate = g->GetAccRate();
+			b.decRate = g->GetDecRate();
+			b.maxReverseSpeed = g->GetMaxReverseSpeed() * GAME_SPEED;
+			b.wantedSpeed = g->GetWantedSpeed() * GAME_SPEED;
+			b.currentSpeed = g->GetCurrentSpeed() * GAME_SPEED;
+			b.goalRadius = g->GetGoalRadius();
+			b.currWayPoint = g->GetCurrWayPoint();
+			b.nextWayPoint = g->GetNextWayPoint();
 
-		// PR 38g: capture the estimated path waypoints exactly as
-		// LuaPathFinder::PushPathNodes reads them. GetPathWayPoints is a pure const
-		// read (does NOT advance the path). pathID==0 => hasPath stays 0 and the
-		// twin returns no tables, matching PushPathNodes' pathID==0 early return.
-		if (const unsigned int pathID = g->GetPathID(); pathID != 0) {
-			rows.estPathHasPath[id] = 1;
-			// GetPathWayPoints takes vector<int>&; estPathStarts is vector<int32_t>
-			// (int32_t == int on every supported target), copied verbatim below.
-			std::vector<int> starts;
-			pathManager->GetPathWayPoints(pathID, rows.estPathPoints[id], starts);
-			rows.estPathStarts[id].assign(starts.begin(), starts.end());
+			// PR 38g: capture the estimated path waypoints exactly as
+			// LuaPathFinder::PushPathNodes reads them. GetPathWayPoints is a pure const
+			// read (does NOT advance the path). pathID==0 => hasPath stays 0 and the
+			// twin returns no tables, matching PushPathNodes' pathID==0 early return.
+			if (const unsigned int pathID = g->GetPathID(); pathID != 0) {
+				rows.estPathHasPath[id] = 1;
+				// GetPathWayPoints takes vector<int>&; estPathStarts is vector<int32_t>
+				// (int32_t == int on every supported target), copied verbatim below.
+				std::vector<int> starts;
+				pathManager->GetPathWayPoints(pathID, rows.estPathPoints[id], starts);
+				rows.estPathStarts[id].assign(starts.begin(), starts.end());
+			}
+			return;
 		}
-		return;
+		case AMoveType::MT_HOVER_AIR: {
+			const CHoverAirMoveType* h = static_cast<const CHoverAirMoveType*>(mt);
+			rows.moveTypeKind[id] = 2;
+			rows.mtAutoLand[id] = h->autoLand;
+			b.wantedHeight = h->wantedHeight;
+			b.collide = h->collide;
+			b.useSmoothMesh = h->useSmoothMesh;
+			b.aircraftState = h->aircraftState;
+			b.flyState = h->flyState;
+			b.goalDistance = h->goalDistance;
+			b.bankingAllowed = h->bankingAllowed;
+			b.currentBank = h->currentBank;
+			b.currentPitch = h->currentPitch;
+			b.turnRate = h->turnRate;
+			b.accRate = h->accRate;
+			b.decRate = h->decRate;
+			b.altitudeRate = h->altitudeRate;
+			b.dontLand = h->GetAllowLanding(); // pushed under key "dontLand" (== GetAllowLanding())
+			b.maxDrift = h->maxDrift;
+			return;
+		}
+		case AMoveType::MT_STRAFE_AIR: {
+			const CStrafeAirMoveType* s = static_cast<const CStrafeAirMoveType*>(mt);
+			rows.moveTypeKind[id] = 3;
+			rows.mtAutoLand[id] = s->autoLand;
+			rows.mtLoopbackAttack[id] = s->loopbackAttack;
+			b.aircraftState = s->aircraftState;
+			b.wantedHeight = s->wantedHeight;
+			b.collide = s->collide;
+			b.useSmoothMesh = s->useSmoothMesh;
+			b.myGravity = s->myGravity;
+			b.maxBank = s->maxBank;
+			b.turnRadius = s->turnRadius;
+			b.accRate = s->accRate;
+			b.maxAileron = s->maxAileron;
+			b.maxElevator = s->maxElevator;
+			b.maxRudder = s->maxRudder;
+			return;
+		}
+		case AMoveType::MT_STATIC: { rows.moveTypeKind[id] = 4; return; }
+		case AMoveType::MT_SCRIPT: { rows.moveTypeKind[id] = 5; return; }
+		default: { rows.moveTypeKind[id] = 0; } break;
 	}
-	if (const CHoverAirMoveType* h = dynamic_cast<const CHoverAirMoveType*>(mt); h != nullptr) {
-		rows.moveTypeKind[id] = 2;
-		rows.mtAutoLand[id] = h->autoLand;
-		b.wantedHeight = h->wantedHeight;
-		b.collide = h->collide;
-		b.useSmoothMesh = h->useSmoothMesh;
-		b.aircraftState = h->aircraftState;
-		b.flyState = h->flyState;
-		b.goalDistance = h->goalDistance;
-		b.bankingAllowed = h->bankingAllowed;
-		b.currentBank = h->currentBank;
-		b.currentPitch = h->currentPitch;
-		b.turnRate = h->turnRate;
-		b.accRate = h->accRate;
-		b.decRate = h->decRate;
-		b.altitudeRate = h->altitudeRate;
-		b.dontLand = h->GetAllowLanding(); // pushed under key "dontLand" (== GetAllowLanding())
-		b.maxDrift = h->maxDrift;
-		return;
-	}
-	if (const CStrafeAirMoveType* s = dynamic_cast<const CStrafeAirMoveType*>(mt); s != nullptr) {
-		rows.moveTypeKind[id] = 3;
-		rows.mtAutoLand[id] = s->autoLand;
-		rows.mtLoopbackAttack[id] = s->loopbackAttack;
-		b.aircraftState = s->aircraftState;
-		b.wantedHeight = s->wantedHeight;
-		b.collide = s->collide;
-		b.useSmoothMesh = s->useSmoothMesh;
-		b.myGravity = s->myGravity;
-		b.maxBank = s->maxBank;
-		b.turnRadius = s->turnRadius;
-		b.accRate = s->accRate;
-		b.maxAileron = s->maxAileron;
-		b.maxElevator = s->maxElevator;
-		b.maxRudder = s->maxRudder;
-		return;
-	}
-	if (dynamic_cast<const CStaticMoveType*>(mt) != nullptr) { rows.moveTypeKind[id] = 4; return; }
-	if (dynamic_cast<const CScriptMoveType*>(mt) != nullptr) { rows.moveTypeKind[id] = 5; return; }
-	rows.moveTypeKind[id] = 0;
 }
 
 void SimSnapshot::Extract(UnitRows& rows)
@@ -1126,112 +1138,134 @@ void SimSnapshot::Extract(UnitRows& rows)
 
 	const auto& activeUnits = unitHandler.GetActiveUnits();
 
-	for (const CUnit* u : activeUnits) {
-		const int id = u->id;
+	// the per-unit extraction runs as separate passes over activeUnits so each
+	// column family has its own sub-zone; the passes write disjoint column
+	// sets, so pass order is irrelevant
+	{
+		SCOPED_TIMER("Update::SimSnapshot::UnitsScalars");
 
-		rows.valid[id] = SimSnapshotValid::ACTIVE;
-		rows.pos[id] = u->pos;
-		rows.midPos[id] = u->midPos;
-		rows.aimPos[id] = u->aimPos;
-		rows.speed[id] = u->speed;
-		rows.health[id] = u->health;
-		rows.maxHealth[id] = u->maxHealth;
-		rows.paralyzeDamage[id] = u->paralyzeDamage;
-		rows.captureProgress[id] = u->captureProgress;
-		rows.team[id] = static_cast<uint8_t>(u->team);
-		rows.allyTeam[id] = static_cast<uint8_t>(u->allyteam);
-		rows.defID[id] = u->unitDef->id;
-		rows.buildProgress[id] = u->buildProgress;
-		rows.beingBuilt[id] = u->beingBuilt;
-		rows.stunned[id] = u->IsStunned();
-		rows.radius[id] = u->radius;
-		rows.selVol[id] = u->selectionVolume;
-		rows.noSelect[id] = u->noSelect;
-		rows.inVoid[id] = u->IsInVoid();
-		rows.isDead[id] = u->isDead;
-		rows.neutral[id] = u->neutral;
-		rows.activated[id] = u->activated;
-		rows.isCloaked[id] = u->isCloaked;
-		rows.armoredState[id] = u->armoredState;
-		rows.armoredMultiple[id] = u->armoredMultiple;
-		rows.heading[id] = u->heading;
-		rows.buildFacing[id] = u->buildFacing;
-		rows.height[id] = u->height;
-		rows.mass[id] = u->mass;
-		rows.maxRange[id] = u->maxRange;
-		rows.decloakDistance[id] = u->decloakDistance;
-		rows.seismicSignature[id] = u->seismicSignature;
-		rows.experience[id] = u->experience;
-		rows.limExperience[id] = u->limExperience;
-		rows.selfDCountdown[id] = u->selfDCountdown;
-		rows.losRadius[id] = u->losRadius;
-		rows.airLosRadius[id] = u->airLosRadius;
-		rows.radarRadius[id] = u->radarRadius;
-		rows.sonarRadius[id] = u->sonarRadius;
-		rows.seismicRadius[id] = u->seismicRadius;
-		rows.jammerRadius[id] = u->jammerRadius;
-		rows.sonarJamRadius[id] = u->sonarJamRadius;
-		rows.moveDefID[id] = (u->moveDef != nullptr) ? static_cast<int32_t>(u->moveDef->pathType) : -1;
-		rows.resourcesMake[id] = u->resourcesMake;
-		rows.resourcesUse[id] = u->resourcesUse;
-		rows.harvested[id] = u->harvested;
-		rows.harvestStorage[id] = u->harvestStorage;
-		rows.cost[id] = u->cost;
-		rows.buildTime[id] = u->buildTime;
-		rows.blockingBits[id] = PackBlockingBits(u);
-		// PLACEMENT REHOST occupant scalars (isPushResistant guarded: immobile
-		// units have a null moveType and never reach the mobile ObjectBlockType branch)
-		rows.immobile[id] = u->immobile;
-		rows.yardOpen[id] = u->yardOpen;
-		rows.physicalState[id] = static_cast<uint16_t>(u->physicalState);
-		rows.crushResistance[id] = u->crushResistance;
-		rows.isIdle[id] = u->IsIdle();
-		rows.isPushResistant[id] = (u->moveType != nullptr) && u->moveType->IsPushResistant();
-		// TRACE REHOST occupant scalars (owner + target reads in the trace predicates)
-		rows.category[id] = u->category;
-		rows.crashing[id] = u->IsCrashing();
-		rows.underFirstPersonControl[id] = u->UnderFirstPersonControl();
-		rows.relMidPos[id] = u->relMidPos;
-		rows.frontdir[id] = u->frontdir;
-		rows.updir[id] = u->updir;
-		rows.rightdir[id] = u->rightdir;
-		rows.posErrorVector[id] = u->posErrorVector;
-		rows.leavesGhost[id] = u->leavesGhost;
+		for (const CUnit* u : activeUnits) {
+			const int id = u->id;
 
-		// ---- PR 32 (deep per-unit state) ----
-		rows.fireState[id] = u->fireState;
-		rows.moveState[id] = u->moveState;
-		{
-			const CMobileCAI* mcai = dynamic_cast<const CMobileCAI*>(u->commandAI);
-			rows.repairBelowHealth[id] = (mcai != nullptr) ? mcai->repairBelowHealth : -1.0f;
+			rows.valid[id] = SimSnapshotValid::ACTIVE;
+			rows.pos[id] = u->pos;
+			rows.midPos[id] = u->midPos;
+			rows.aimPos[id] = u->aimPos;
+			rows.speed[id] = u->speed;
+			rows.health[id] = u->health;
+			rows.maxHealth[id] = u->maxHealth;
+			rows.paralyzeDamage[id] = u->paralyzeDamage;
+			rows.captureProgress[id] = u->captureProgress;
+			rows.team[id] = static_cast<uint8_t>(u->team);
+			rows.allyTeam[id] = static_cast<uint8_t>(u->allyteam);
+			rows.defID[id] = u->unitDef->id;
+			rows.buildProgress[id] = u->buildProgress;
+			rows.beingBuilt[id] = u->beingBuilt;
+			rows.stunned[id] = u->IsStunned();
+			rows.radius[id] = u->radius;
+			rows.selVol[id] = u->selectionVolume;
+			rows.noSelect[id] = u->noSelect;
+			rows.inVoid[id] = u->IsInVoid();
+			rows.isDead[id] = u->isDead;
+			rows.neutral[id] = u->neutral;
+			rows.activated[id] = u->activated;
+			rows.isCloaked[id] = u->isCloaked;
+			rows.armoredState[id] = u->armoredState;
+			rows.armoredMultiple[id] = u->armoredMultiple;
+			rows.heading[id] = u->heading;
+			rows.buildFacing[id] = u->buildFacing;
+			rows.height[id] = u->height;
+			rows.mass[id] = u->mass;
+			rows.maxRange[id] = u->maxRange;
+			rows.decloakDistance[id] = u->decloakDistance;
+			rows.seismicSignature[id] = u->seismicSignature;
+			rows.experience[id] = u->experience;
+			rows.limExperience[id] = u->limExperience;
+			rows.selfDCountdown[id] = u->selfDCountdown;
+			rows.losRadius[id] = u->losRadius;
+			rows.airLosRadius[id] = u->airLosRadius;
+			rows.radarRadius[id] = u->radarRadius;
+			rows.sonarRadius[id] = u->sonarRadius;
+			rows.seismicRadius[id] = u->seismicRadius;
+			rows.jammerRadius[id] = u->jammerRadius;
+			rows.sonarJamRadius[id] = u->sonarJamRadius;
+			rows.moveDefID[id] = (u->moveDef != nullptr) ? static_cast<int32_t>(u->moveDef->pathType) : -1;
+			rows.resourcesMake[id] = u->resourcesMake;
+			rows.resourcesUse[id] = u->resourcesUse;
+			rows.harvested[id] = u->harvested;
+			rows.harvestStorage[id] = u->harvestStorage;
+			rows.cost[id] = u->cost;
+			rows.buildTime[id] = u->buildTime;
+			rows.blockingBits[id] = PackBlockingBits(u);
+			// PLACEMENT REHOST occupant scalars (isPushResistant guarded: immobile
+			// units have a null moveType and never reach the mobile ObjectBlockType branch)
+			rows.immobile[id] = u->immobile;
+			rows.yardOpen[id] = u->yardOpen;
+			rows.physicalState[id] = static_cast<uint16_t>(u->physicalState);
+			rows.crushResistance[id] = u->crushResistance;
+			rows.isIdle[id] = u->IsIdle();
+			rows.isPushResistant[id] = (u->moveType != nullptr) && u->moveType->IsPushResistant();
+			// TRACE REHOST occupant scalars (owner + target reads in the trace predicates)
+			rows.category[id] = u->category;
+			rows.crashing[id] = u->IsCrashing();
+			rows.underFirstPersonControl[id] = u->UnderFirstPersonControl();
+			rows.relMidPos[id] = u->relMidPos;
+			rows.frontdir[id] = u->frontdir;
+			rows.updir[id] = u->updir;
+			rows.rightdir[id] = u->rightdir;
+			rows.posErrorVector[id] = u->posErrorVector;
+			rows.leavesGhost[id] = u->leavesGhost;
+
+			// ---- PR 32 (deep per-unit state) ----
+			rows.fireState[id] = u->fireState;
+			rows.moveState[id] = u->moveState;
+			{
+				const CCommandAI* cai = u->commandAI;
+				rows.repairBelowHealth[id] = cai->IsMobileCAI() ? static_cast<const CMobileCAI*>(cai)->repairBelowHealth : -1.0f;
+			}
+			rows.repeatOrders[id] = u->commandAI->repeatOrders;
+			rows.wantCloak[id] = u->wantCloak;
+			rows.useHighTrajectory[id] = u->useHighTrajectory;
+			rows.storage[id] = u->storage;
+			rows.metalExtract[id] = u->metalExtract;
+			rows.buildeeRadius[id] = u->buildeeRadius;
+			rows.posErrorDelta[id] = u->posErrorDelta;
+			rows.nextPosErrorUpdate[id] = u->nextPosErrorUpdate;
+			rows.lastAttackerID[id] = (u->lastAttacker != nullptr) ? u->lastAttacker->id : -1;
+			rows.transporterID[id] = (u->GetTransporter() != nullptr) ? u->GetTransporter()->id : -1;
+			rows.customTooltip[id] = unitToolTipMap.GetConst(id);
+			rows.transportees[id].clear();
+			rows.transportees[id].reserve(u->transportedUnits.size());
+			for (const CUnit::TransportedUnit& tu : u->transportedUnits)
+				rows.transportees[id].push_back(tu.unit->id);
 		}
-		rows.repeatOrders[id] = u->commandAI->repeatOrders;
-		rows.wantCloak[id] = u->wantCloak;
-		rows.useHighTrajectory[id] = u->useHighTrajectory;
-		rows.storage[id] = u->storage;
-		rows.metalExtract[id] = u->metalExtract;
-		rows.buildeeRadius[id] = u->buildeeRadius;
-		rows.posErrorDelta[id] = u->posErrorDelta;
-		rows.nextPosErrorUpdate[id] = u->nextPosErrorUpdate;
-		rows.lastAttackerID[id] = (u->lastAttacker != nullptr) ? u->lastAttacker->id : -1;
-		rows.transporterID[id] = (u->GetTransporter() != nullptr) ? u->GetTransporter()->id : -1;
-		rows.customTooltip[id] = unitToolTipMap.GetConst(id);
-		rows.transportees[id].clear();
-		rows.transportees[id].reserve(u->transportedUnits.size());
-		for (const CUnit::TransportedUnit& tu : u->transportedUnits)
-			rows.transportees[id].push_back(tu.unit->id);
-		ExtractUnitBuildState(rows, id, u);
-		ExtractUnitMoveType(rows, id, u);
+	}
 
-		for (int at = 0; at < numAllyTeams; ++at) {
-			rows.losStatusAll[at * maxUnits + id] = u->losStatus[at];
-			rows.posErrorBits[at * maxUnits + id] = u->GetPosErrorBit(at);
-			rows.inRadarAll[at * maxUnits + id] = losHandler->InRadar(u, at);
-			// PR 32 LOS unit variants: store the computed answer (the gates fold
-			// cloak/stealth/water/globalLOS logic, like inRadarAll)
-			rows.unitInLosAll[at * maxUnits + id] = losHandler->InLos(u, at);
-			rows.unitInAirLosAll[at * maxUnits + id] = losHandler->InAirLos(u, at);
-			rows.unitInJammerAll[at * maxUnits + id] = losHandler->InJammer(u, at);
+	{
+		SCOPED_TIMER("Update::SimSnapshot::UnitsBuildMove");
+
+		for (const CUnit* u : activeUnits) {
+			ExtractUnitBuildState(rows, u->id, u);
+			ExtractUnitMoveType(rows, u->id, u);
+		}
+	}
+
+	{
+		SCOPED_TIMER("Update::SimSnapshot::UnitsLos");
+
+		for (const CUnit* u : activeUnits) {
+			const int id = u->id;
+
+			for (int at = 0; at < numAllyTeams; ++at) {
+				rows.losStatusAll[at * maxUnits + id] = u->losStatus[at];
+				rows.posErrorBits[at * maxUnits + id] = u->GetPosErrorBit(at);
+				rows.inRadarAll[at * maxUnits + id] = losHandler->InRadar(u, at);
+				// PR 32 LOS unit variants: store the computed answer (the gates fold
+				// cloak/stealth/water/globalLOS logic, like inRadarAll)
+				rows.unitInLosAll[at * maxUnits + id] = losHandler->InLos(u, at);
+				rows.unitInAirLosAll[at * maxUnits + id] = losHandler->InAirLos(u, at);
+				rows.unitInJammerAll[at * maxUnits + id] = losHandler->InJammer(u, at);
+			}
 		}
 	}
 
@@ -1259,46 +1293,55 @@ void SimSnapshot::Extract(UnitRows& rows)
 	// Pass 1: per-unit weapon rows + weaponOffset/weaponCount, accumulating the
 	// total live weapon count so the flat per-weapon arrays are sized once.
 	int32_t totalWeapons = 0;
-	for (const CUnit* u : activeUnits) {
-		const int id = u->id;
-		const int nw = static_cast<int>(u->weapons.size());
+	{
+		SCOPED_TIMER("Update::SimSnapshot::UnitsWeaponsPerUnit");
 
-		rows.weaponOffset[id] = totalWeapons;
-		rows.weaponCount[id] = nw;
-		totalWeapons += nw;
+		for (const CUnit* u : activeUnits) {
+			const int id = u->id;
+			const int nw = static_cast<int>(u->weapons.size());
 
-		rows.reloadSpeed[id] = u->reloadSpeed;
+			rows.weaponOffset[id] = totalWeapons;
+			rows.weaponCount[id] = nw;
+			totalWeapons += nw;
 
-		// CanFire's FPS-fire gate captured as one bool (CWeapon::CanFire)
-		const CPlayer* fpsPlayer = u->fpsControlPlayer;
-		rows.fpsNoFire[id] = (fpsPlayer != nullptr && !fpsPlayer->fpsController.mouse1 && !fpsPlayer->fpsController.mouse2);
+			rows.reloadSpeed[id] = u->reloadSpeed;
 
-		// GetUnitFlanking
-		rows.flankingMode[id] = u->flankingBonusMode;
-		rows.flankingDir[id] = u->flankingBonusDir;
-		rows.flankingMoveFactor[id] = u->flankingBonusMobilityAdd;
-		rows.flankingAvgDamage[id] = u->flankingBonusAvgDamage;
-		rows.flankingDifDamage[id] = u->flankingBonusDifDamage;
-		rows.flankingMobility[id] = u->flankingBonusMobility;
+			// CanFire's FPS-fire gate captured as one bool (CWeapon::CanFire)
+			const CPlayer* fpsPlayer = u->fpsControlPlayer;
+			rows.fpsNoFire[id] = (fpsPlayer != nullptr && !fpsPlayer->fpsController.mouse1 && !fpsPlayer->fpsController.mouse2);
 
-		// GetUnitStockpile (unit->stockpileWeapon; nil shape when null)
-		const CWeapon* stockpile = u->stockpileWeapon;
-		rows.hasStockpile[id] = (stockpile != nullptr);
-		rows.stockpileNumStockpiled[id] = (stockpile != nullptr) ? stockpile->numStockpiled : 0;
-		rows.stockpileNumQueued[id] = (stockpile != nullptr) ? stockpile->numStockpileQued : 0;
-		rows.stockpileBuildPercent[id] = (stockpile != nullptr) ? stockpile->buildPercent : 0.0f;
-		rows.stockpileIsInterceptor[id] = (stockpile != nullptr) && stockpile->weaponDef->interceptor;
+			// GetUnitFlanking
+			rows.flankingMode[id] = u->flankingBonusMode;
+			rows.flankingDir[id] = u->flankingBonusDir;
+			rows.flankingMoveFactor[id] = u->flankingBonusMobilityAdd;
+			rows.flankingAvgDamage[id] = u->flankingBonusAvgDamage;
+			rows.flankingDifDamage[id] = u->flankingBonusDifDamage;
+			rows.flankingMobility[id] = u->flankingBonusMobility;
 
-		// GetUnitShieldState default case (static_cast in the live path, so a
-		// non-null shieldWeapon is a CPlasmaRepulser by construction)
-		const CPlasmaRepulser* shield = static_cast<const CPlasmaRepulser*>(u->shieldWeapon);
-		rows.hasShieldWeapon[id] = (shield != nullptr);
-		rows.shieldWeaponEnabled[id] = (shield != nullptr) ? uint8_t(shield->IsEnabled()) : uint8_t(0);
-		rows.shieldWeaponPower[id] = (shield != nullptr) ? shield->GetCurPower() : 0.0f;
+			// GetUnitStockpile (unit->stockpileWeapon; nil shape when null)
+			const CWeapon* stockpile = u->stockpileWeapon;
+			rows.hasStockpile[id] = (stockpile != nullptr);
+			rows.stockpileNumStockpiled[id] = (stockpile != nullptr) ? stockpile->numStockpiled : 0;
+			rows.stockpileNumQueued[id] = (stockpile != nullptr) ? stockpile->numStockpileQued : 0;
+			rows.stockpileBuildPercent[id] = (stockpile != nullptr) ? stockpile->buildPercent : 0.0f;
+			rows.stockpileIsInterceptor[id] = (stockpile != nullptr) && stockpile->weaponDef->interceptor;
 
-		// GetUnitWeaponDamages explosion arrays (unit-level; flattened POD)
-		CopyDamages(rows.deathExpDamages[id], u->deathExpDamages);
-		CopyDamages(rows.selfdExpDamages[id], u->selfdExpDamages);
+			// GetUnitShieldState default case (static_cast in the live path, so a
+			// non-null shieldWeapon is a CPlasmaRepulser by construction)
+			const CPlasmaRepulser* shield = static_cast<const CPlasmaRepulser*>(u->shieldWeapon);
+			rows.hasShieldWeapon[id] = (shield != nullptr);
+			rows.shieldWeaponEnabled[id] = (shield != nullptr) ? uint8_t(shield->IsEnabled()) : uint8_t(0);
+			rows.shieldWeaponPower[id] = (shield != nullptr) ? shield->GetCurPower() : 0.0f;
+
+			// GetUnitWeaponDamages explosion arrays (unit-level; flattened POD).
+			// Version-skipped (the two full DynDamageArray copies dominated this
+			// pass): see the UnitRows::expDamagesVersion comment
+			if (rows.expDamagesVersion[id] != u->damagesVersion) {
+				CopyDamages(rows.deathExpDamages[id], u->deathExpDamages);
+				CopyDamages(rows.selfdExpDamages[id], u->selfdExpDamages);
+				rows.expDamagesVersion[id] = u->damagesVersion;
+			}
+		}
 	}
 
 	// size the flat per-weapon arrays to the live weapon count (the DamagesSnap
@@ -1372,109 +1415,113 @@ void SimSnapshot::Extract(UnitRows& rows)
 	// Pass 2: flat per-weapon state (computed values -- AccuracyExperience/
 	// SprayAngleExperience/SalvoErrorExperience/MoveErrorExperience are stored
 	// resolved so the twins push scalars, never reproduce the experience math)
-	for (const CUnit* u : activeUnits) {
-		const int base = rows.weaponOffset[u->id];
-		const auto& weapons = u->weapons;
+	{
+		SCOPED_TIMER("Update::SimSnapshot::UnitsWeaponsPerWeapon");
 
-		for (size_t w = 0; w < weapons.size(); ++w) {
-			const CWeapon* weapon = weapons[w];
-			const WeaponDef* wdef = weapon->weaponDef;
-			const int wi = base + static_cast<int>(w);
+		for (const CUnit* u : activeUnits) {
+			const int base = rows.weaponOffset[u->id];
+			const auto& weapons = u->weapons;
 
-			// GetUnitWeaponState
-			rows.wAngleGood[wi] = weapon->angleGood;
-			rows.wReloadStatus[wi] = weapon->reloadStatus;
-			rows.wSalvoLeft[wi] = weapon->salvoLeft;
-			rows.wNumStockpiled[wi] = weapon->numStockpiled;
-			rows.wNextSalvo[wi] = weapon->nextSalvo;
-			rows.wReloadTime[wi] = weapon->reloadTime;
-			rows.wReaimTime[wi] = weapon->reaimTime;
-			rows.wAccuracyExp[wi] = weapon->AccuracyExperience();
-			rows.wSprayAngleExp[wi] = weapon->SprayAngleExperience();
-			rows.wSalvoError[wi] = weapon->SalvoErrorExperience();
-			rows.wMoveErrorExp[wi] = weapon->MoveErrorExperience();
-			rows.wRange[wi] = weapon->range;
-			rows.wProjectileSpeed[wi] = weapon->projectileSpeed;
-			rows.wAutoTargetRangeBoost[wi] = weapon->autoTargetRangeBoost;
-			rows.wSalvoSize[wi] = weapon->salvoSize;
-			rows.wSalvoDelay[wi] = weapon->salvoDelay;
-			rows.wSalvoWindup[wi] = weapon->salvoWindup;
-			rows.wProjectilesPerShot[wi] = weapon->projectilesPerShot;
-			rows.wAvoidFlags[wi] = weapon->avoidFlags;
-			rows.wCollisionFlags[wi] = weapon->collisionFlags;
-			rows.wTtl[wi] = weapon->ttl;
+			for (size_t w = 0; w < weapons.size(); ++w) {
+				const CWeapon* weapon = weapons[w];
+				const WeaponDef* wdef = weapon->weaponDef;
+				const int wi = base + static_cast<int>(w);
 
-			// GetUnitWeaponVectors (dir switch resolved by the twin from projectileType)
-			rows.wMuzzlePos[wi] = weapon->weaponMuzzlePos;
-			rows.wWantedDir[wi] = weapon->wantedDir;
-			rows.wWeaponDir[wi] = weapon->weaponDir;
-			rows.wProjectileType[wi] = static_cast<int32_t>(wdef->projectileType);
+				// GetUnitWeaponState
+				rows.wAngleGood[wi] = weapon->angleGood;
+				rows.wReloadStatus[wi] = weapon->reloadStatus;
+				rows.wSalvoLeft[wi] = weapon->salvoLeft;
+				rows.wNumStockpiled[wi] = weapon->numStockpiled;
+				rows.wNextSalvo[wi] = weapon->nextSalvo;
+				rows.wReloadTime[wi] = weapon->reloadTime;
+				rows.wReaimTime[wi] = weapon->reaimTime;
+				rows.wAccuracyExp[wi] = weapon->AccuracyExperience();
+				rows.wSprayAngleExp[wi] = weapon->SprayAngleExperience();
+				rows.wSalvoError[wi] = weapon->SalvoErrorExperience();
+				rows.wMoveErrorExp[wi] = weapon->MoveErrorExperience();
+				rows.wRange[wi] = weapon->range;
+				rows.wProjectileSpeed[wi] = weapon->projectileSpeed;
+				rows.wAutoTargetRangeBoost[wi] = weapon->autoTargetRangeBoost;
+				rows.wSalvoSize[wi] = weapon->salvoSize;
+				rows.wSalvoDelay[wi] = weapon->salvoDelay;
+				rows.wSalvoWindup[wi] = weapon->salvoWindup;
+				rows.wProjectilesPerShot[wi] = weapon->projectilesPerShot;
+				rows.wAvoidFlags[wi] = weapon->avoidFlags;
+				rows.wCollisionFlags[wi] = weapon->collisionFlags;
+				rows.wTtl[wi] = weapon->ttl;
 
-			// GetUnitWeaponCanFire inputs (def scalars + runtime state)
-			rows.wDefStockpile[wi] = wdef->stockpile;
-			rows.wDefFireSubmersed[wi] = wdef->fireSubmersed;
-			rows.wDefMaxFireAngle[wi] = wdef->maxFireAngle;
-			rows.wIsBombDropper[wi] = (dynamic_cast<const CBombDropper*>(weapon) != nullptr);
-			rows.wAimFromPosY[wi] = weapon->aimFromPos.y;
-			rows.wLastRequestedDir[wi] = weapon->lastRequestedDir;
+				// GetUnitWeaponVectors (dir switch resolved by the twin from projectileType)
+				rows.wMuzzlePos[wi] = weapon->weaponMuzzlePos;
+				rows.wWantedDir[wi] = weapon->wantedDir;
+				rows.wWeaponDir[wi] = weapon->weaponDir;
+				rows.wProjectileType[wi] = static_cast<int32_t>(wdef->projectileType);
 
-			// GetUnitWeaponTarget (SWeaponTarget)
-			const SWeaponTarget& tgt = weapon->GetCurrentTarget();
-			rows.wTargetType[wi] = static_cast<uint8_t>(tgt.type);
-			rows.wTargetIsUser[wi] = tgt.isUserTarget;
-			rows.wTargetUnitID[wi] = (tgt.type == Target_Unit && tgt.unit != nullptr) ? tgt.unit->id : 0;
-			rows.wTargetGroundPos[wi] = (tgt.type == Target_Pos) ? tgt.groundPos : ZeroVector;
-			rows.wTargetInterceptID[wi] = (tgt.type == Target_Intercept && tgt.intercept != nullptr) ? tgt.intercept->id : 0;
+				// GetUnitWeaponCanFire inputs (def scalars + runtime state)
+				rows.wDefStockpile[wi] = wdef->stockpile;
+				rows.wDefFireSubmersed[wi] = wdef->fireSubmersed;
+				rows.wDefMaxFireAngle[wi] = wdef->maxFireAngle;
+				rows.wIsBombDropper[wi] = (dynamic_cast<const CBombDropper*>(weapon) != nullptr);
+				rows.wAimFromPosY[wi] = weapon->aimFromPos.y;
+				rows.wLastRequestedDir[wi] = weapon->lastRequestedDir;
 
-			// GetUnitShieldState explicit-weapon case (dynamic_cast in the live path)
-			const CPlasmaRepulser* repulser = dynamic_cast<const CPlasmaRepulser*>(weapon);
-			rows.wIsShield[wi] = (repulser != nullptr);
-			rows.wShieldEnabled[wi] = (repulser != nullptr) ? uint8_t(repulser->IsEnabled()) : uint8_t(0);
-			rows.wShieldPower[wi] = (repulser != nullptr) ? repulser->GetCurPower() : 0.0f;
+				// GetUnitWeaponTarget (SWeaponTarget)
+				const SWeaponTarget& tgt = weapon->GetCurrentTarget();
+				rows.wTargetType[wi] = static_cast<uint8_t>(tgt.type);
+				rows.wTargetIsUser[wi] = tgt.isUserTarget;
+				rows.wTargetUnitID[wi] = (tgt.type == Target_Unit && tgt.unit != nullptr) ? tgt.unit->id : 0;
+				rows.wTargetGroundPos[wi] = (tgt.type == Target_Pos) ? tgt.groundPos : ZeroVector;
+				rows.wTargetInterceptID[wi] = (tgt.type == Target_Intercept && tgt.intercept != nullptr) ? tgt.intercept->id : 0;
 
-			// GetUnitWeaponDamages per-weapon (flattened POD)
-			CopyDamages(rows.wDamages[wi], weapon->damages);
+				// GetUnitShieldState explicit-weapon case (dynamic_cast in the live path)
+				const CPlasmaRepulser* repulser = dynamic_cast<const CPlasmaRepulser*>(weapon);
+				rows.wIsShield[wi] = (repulser != nullptr);
+				rows.wShieldEnabled[wi] = (repulser != nullptr) ? uint8_t(repulser->IsEnabled()) : uint8_t(0);
+				rows.wShieldPower[wi] = (repulser != nullptr) ? repulser->GetCurPower() : 0.0f;
 
-			// TRACE REHOST (stage 1): trace-predicate read-set delta. Mutable
-			// CWeapon members read by TryTarget/TestTarget/TestRange/
-			// HaveFreeLineOfFire/GetLeadTargetPos; immutable weaponDef scalars are
-			// read draw-side via wWeaponDefID, so they are NOT copied here.
-			const trace::WeaponClass wc = trace::ClassifyWeapon(weapon);
-			rows.wWeaponClass[wi] = static_cast<uint8_t>(wc);
-			rows.wWeaponDefID[wi] = (wdef != nullptr) ? wdef->id : -1;
-			rows.wAimFromPos[wi] = weapon->aimFromPos;
-			rows.wRelAimFromPos[wi] = weapon->relAimFromPos;
-			rows.wRelWeaponMuzzlePos[wi] = weapon->relWeaponMuzzlePos;
-			rows.wMainDir[wi] = weapon->mainDir;
-			rows.wCurrentTargetPos[wi] = weapon->GetCurrentTargetPos();
-			rows.wErrorVector[wi] = weapon->errorVector;
-			rows.wPredictSpeedMod[wi] = weapon->predictSpeedMod;
-			rows.wAccurateLeading[wi] = static_cast<int32_t>(weapon->accurateLeading);
-			rows.wOnlyForward[wi] = weapon->onlyForward;
-			rows.wDoTargetGroundPos[wi] = weapon->doTargetGroundPos;
-			rows.wMaxForwardAngleDif[wi] = weapon->maxForwardAngleDif;
-			rows.wMaxMainDirAngleDif[wi] = weapon->maxMainDirAngleDif;
-			rows.wOnlyTargetCategory[wi] = weapon->onlyTargetCategory;
-			rows.wHeightBoostFactor[wi] = weapon->heightBoostFactor;
+				// GetUnitWeaponDamages per-weapon (flattened POD)
+				CopyDamages(rows.wDamages[wi], weapon->damages);
 
-			// subclass-mutable members (zero for classes that lack them)
-			if (wc == trace::WeaponClass::Cannon) {
-				const CCannon* cannon = static_cast<const CCannon*>(weapon);
-				rows.wCannonGravity[wi] = cannon->GetGravity();
-				rows.wCannonRangeBoost[wi] = cannon->GetRangeBoostFactor();
-				rows.wCannonHighTraj[wi] = cannon->GetHighTrajectory();
-			} else {
-				rows.wCannonGravity[wi] = 0.0f;
-				rows.wCannonRangeBoost[wi] = 0.0f;
-				rows.wCannonHighTraj[wi] = 0;
-			}
-			if (wc == trace::WeaponClass::BombDropper) {
-				const CBombDropper* bomb = static_cast<const CBombDropper*>(weapon);
-				rows.wBombDropTorpedoes[wi] = bomb->GetDropTorpedoes();
-				rows.wBombTorpMoveRange[wi] = bomb->GetTorpMoveRange();
-			} else {
-				rows.wBombDropTorpedoes[wi] = 0;
-				rows.wBombTorpMoveRange[wi] = 0.0f;
+				// TRACE REHOST (stage 1): trace-predicate read-set delta. Mutable
+				// CWeapon members read by TryTarget/TestTarget/TestRange/
+				// HaveFreeLineOfFire/GetLeadTargetPos; immutable weaponDef scalars are
+				// read draw-side via wWeaponDefID, so they are NOT copied here.
+				const trace::WeaponClass wc = trace::ClassifyWeapon(weapon);
+				rows.wWeaponClass[wi] = static_cast<uint8_t>(wc);
+				rows.wWeaponDefID[wi] = (wdef != nullptr) ? wdef->id : -1;
+				rows.wAimFromPos[wi] = weapon->aimFromPos;
+				rows.wRelAimFromPos[wi] = weapon->relAimFromPos;
+				rows.wRelWeaponMuzzlePos[wi] = weapon->relWeaponMuzzlePos;
+				rows.wMainDir[wi] = weapon->mainDir;
+				rows.wCurrentTargetPos[wi] = weapon->GetCurrentTargetPos();
+				rows.wErrorVector[wi] = weapon->errorVector;
+				rows.wPredictSpeedMod[wi] = weapon->predictSpeedMod;
+				rows.wAccurateLeading[wi] = static_cast<int32_t>(weapon->accurateLeading);
+				rows.wOnlyForward[wi] = weapon->onlyForward;
+				rows.wDoTargetGroundPos[wi] = weapon->doTargetGroundPos;
+				rows.wMaxForwardAngleDif[wi] = weapon->maxForwardAngleDif;
+				rows.wMaxMainDirAngleDif[wi] = weapon->maxMainDirAngleDif;
+				rows.wOnlyTargetCategory[wi] = weapon->onlyTargetCategory;
+				rows.wHeightBoostFactor[wi] = weapon->heightBoostFactor;
+
+				// subclass-mutable members (zero for classes that lack them)
+				if (wc == trace::WeaponClass::Cannon) {
+					const CCannon* cannon = static_cast<const CCannon*>(weapon);
+					rows.wCannonGravity[wi] = cannon->GetGravity();
+					rows.wCannonRangeBoost[wi] = cannon->GetRangeBoostFactor();
+					rows.wCannonHighTraj[wi] = cannon->GetHighTrajectory();
+				} else {
+					rows.wCannonGravity[wi] = 0.0f;
+					rows.wCannonRangeBoost[wi] = 0.0f;
+					rows.wCannonHighTraj[wi] = 0;
+				}
+				if (wc == trace::WeaponClass::BombDropper) {
+					const CBombDropper* bomb = static_cast<const CBombDropper*>(weapon);
+					rows.wBombDropTorpedoes[wi] = bomb->GetDropTorpedoes();
+					rows.wBombTorpMoveRange[wi] = bomb->GetTorpMoveRange();
+				} else {
+					rows.wBombDropTorpedoes[wi] = 0;
+					rows.wBombTorpMoveRange[wi] = 0.0f;
+				}
 			}
 		}
 	}
