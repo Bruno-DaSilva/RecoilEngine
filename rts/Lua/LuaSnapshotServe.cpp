@@ -8187,6 +8187,26 @@ void LuaSnapshotServe::RefreshPieces(int ringSlot, uint64_t targetEpoch)
 			if (u->isDead)
 				continue;
 
+			// WS-1 re-gate finding: ALSO pre-register units under construction
+			// (the lathe targets). A unit is piece-queryable the moment it
+			// first appears in rows, and a demand first-touch costs a counted
+			// park; the builder-only pass below only ever covered the nano
+			// widgets' emit-piece queries, so an every-valid-id query surface
+			// (the diff-gate exercise driver) paid one park per unit built --
+			// the read-set model's standing cost since the 84b88529c8 demand
+			// flip, measured at ~8.9k/replay by the strict gate. beingBuilt
+			// registers every factory/builder-built unit at its creation edge
+			// (RefreshPieces runs after the frame that created it, so it is
+			// captured before any Parse gate can pass its id); the WS-1 skip
+			// key makes the standing registration affordable (an idle
+			// registered unit costs one key compare per epoch). Created-
+			// complete spawns (initial units, gadget CreateUnit, /give) and
+			// features stay demand-registered.
+			if (u->beingBuilt) {
+				unitPieceReadSet[u->id] = 1;
+				continue;
+			}
+
 			const UnitDef* ud = u->unitDef;
 			bool nanoActive = false;
 
