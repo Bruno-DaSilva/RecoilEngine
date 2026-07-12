@@ -268,7 +268,7 @@ protected:
 		TransformSkipKey key = {};     // value-shadow of the last completed walk
 		uint64_t pieceTreeVersion = 0; // WS-1 LocalModel counter seen at that walk
 		int32_t lastWalkFrame = std::numeric_limits<int32_t>::lowest(); // sim frame of that walk (pending re-extractions can re-walk the same frame; those must not double-count a quiescent edge)
-		uint8_t quiescentEdges = 0;    // consecutive unchanged frame edges, saturating at 2
+		uint8_t quiescentEdges = 0;    // consecutive frame-distinct walks that were unchanged AND wrote no piece slots, saturating at 2
 		bool everWalked = false;       // false until the first completed walk primes the record
 	};
 
@@ -532,14 +532,29 @@ inline void CModelDrawerDataBase<T>::ExtractObjectTransforms(const T* o)
 	 *     SetScriptVisible, colvol acquisition, no-interpolation arming,
 	 *     CLuaUnitScript::CreateScript), so an unchanged version means no
 	 *     piece content changed since the last completed walk.
-	 *  3. quiescentEdges >= 2 hoists the wasUpdated[2] double-trigger to
-	 *     object granularity: the FIRST unchanged frame edge after any change
-	 *     still walks -- that walk uploads the settled slot-[0] preFrameTra
-	 *     (re-saved from the final pose at the start of the frame AFTER the
-	 *     last mutation) and the pieces' settled prevModelSpaceTra. Only the
-	 *     second consecutive unchanged frame edge skips; by then every piece
-	 *     has wasUpdated == {false,false} and dirty == false, so the skipped
-	 *     walk would have written nothing.
+	 *  3. quiescentEdges counts OBSERVED piece-channel quiescence, not a
+	 *     derived settle timeline: it advances only when a frame-distinct
+	 *     completed walk was unchanged AND saw zero armed pieces (wrote no
+	 *     piece slots), and skipping requires two such walks. Deriving the
+	 *     settle point instead ("prev settles one edge after the mutation")
+	 *     skipped too early in practice -- the wasUpdated[2] double-trigger
+	 *     can drain without the prev slot settling (e.g. a pending-triggered
+	 *     re-extraction in the SAME sim frame consumes both triggers before
+	 *     the frame-start prevModelSpaceTra re-save; the oracle caught the
+	 *     resulting persistent stale piecePrev). Observation closes every
+	 *     such path: after two clean walks the piece channel is provably
+	 *     drained, and with an unchanged WS-1 version no piece can re-arm --
+	 *     arming requires a recompute-of-dirty (TickAllAnims BFS or the lazy
+	 *     GetModelSpaceTransform) or SetScriptVisible, and every dirty/
+	 *     visible transition bumps; SetDirtyRaw is only used by the BFS to
+	 *     clear. A skipped walk would therefore write nothing to the piece
+	 *     slots, and the object slots are idempotent under leg 1. Corrected
+	 *     timeline, last mutation in frame M: edge M walks (mismatch, writes
+	 *     moving prev + final curr), edge M+1 walks (unchanged, pieces still
+	 *     armed via wasUpdated[1]: uploads the settled preFrameTra slot [0]
+	 *     and settled prevModelSpaceTra), edges M+2/M+3 walk clean (armed
+	 *     drained, nothing written; quiescentEdges 1, then 2), edge M+4
+	 *     skips.
 	 * The record is refreshed ONLY at the end of a completed walk (the LOS
 	 * gate return above never touches it), so key/version always describe the
 	 * sim state at the moment the storage was last written -- changes made
@@ -556,11 +571,6 @@ inline void CModelDrawerDataBase<T>::ExtractObjectTransforms(const T* o)
 		(skip.pieceTreeVersion == curPieceTreeVersion) &&
 		(std::memcmp(&skip.key, &curKey, sizeof(TransformSkipKey)) == 0);
 
-	if (!unchanged)
-		skip.quiescentEdges = 0;
-	else if (gs->frameNum != skip.lastWalkFrame) // same-frame re-walks (pending re-extractions) are not new edges
-		skip.quiescentEdges = std::min<uint8_t>(skip.quiescentEdges + 1, 2);
-
 	if (unchanged && skip.quiescentEdges >= 2 && !o->alwaysUpdateMat) {
 		traObjSkipped.fetch_add(1, std::memory_order_relaxed);
 
@@ -571,6 +581,8 @@ inline void CModelDrawerDataBase<T>::ExtractObjectTransforms(const T* o)
 	}
 
 	traObjWalked.fetch_add(1, std::memory_order_relaxed);
+
+	bool anyPieceArmed = false;
 
 	ScopedTransformMemAlloc& stma = GetObjectTransformMemAlloc(o);
 
@@ -589,6 +601,8 @@ inline void CModelDrawerDataBase<T>::ExtractObjectTransforms(const T* o)
 		if likely(!lmp.GetWasUpdated())
 			continue;
 
+		anyPieceArmed = true;
+
 		if unlikely(!lmp.GetScriptVisible()) {
 			stma.UpdateForced(2 * (1 + i) + 0, Transform::Zero());
 			stma.UpdateForced(2 * (1 + i) + 1, Transform::Zero());
@@ -602,7 +616,16 @@ inline void CModelDrawerDataBase<T>::ExtractObjectTransforms(const T* o)
 		lmp.ResetWasUpdated();
 	}
 
-	// WS-2: refresh the skip record only on a completed walk (see above)
+	// WS-2: refresh the skip record only on a completed walk (see above).
+	// Quiescence is observational (comment leg 3): the counter advances only
+	// when this walk was unchanged AND wrote no piece slots, on a new frame
+	// edge (same-frame re-walks -- pending re-extractions -- are byte-identical
+	// repeats, not new edges); any piece write resets it.
+	if (!unchanged || anyPieceArmed)
+		skip.quiescentEdges = 0;
+	else if (gs->frameNum != skip.lastWalkFrame)
+		skip.quiescentEdges = std::min<uint8_t>(skip.quiescentEdges + 1, 2);
+
 	skip.key = curKey;
 	skip.pieceTreeVersion = curPieceTreeVersion;
 	skip.lastWalkFrame = gs->frameNum;
@@ -610,16 +633,23 @@ inline void CModelDrawerDataBase<T>::ExtractObjectTransforms(const T* o)
 }
 
 /* WS-2 §8 value-equivalence oracle: for an object the skip predicate just
- * skipped, recompute everything a full walk would reconcile and compare it
- * against the storage. Object slots go through UpdateIfChanged's eps-compare,
- * so "what a walk would leave" differs from the stored bytes only when the
- * recomputed value fails Transform::equals; piece slots are UpdateForced
- * (exact bytes of the piece's cached transforms), so those compare bitwise.
- * Read-only: no ResetWasUpdated, no storage writes -- the piece reads may
- * recompute a dirty piece, which is legal at the edge (sim quiescent) and
- * side-effect-equivalent to what the skipped walk would have done. A mismatch
- * names a mutation path that reached SSBO-feeding state without perturbing
- * the skip key -- the "missed a path" failure class turned into a log line. */
+ * skipped, recompute what a full walk WOULD WRITE and compare it against the
+ * storage. The reference is the walk, not from-scratch freshness: object
+ * slots go through UpdateIfChanged's eps-compare, so "what a walk would
+ * leave" differs from the stored bytes only when the recomputed value fails
+ * Transform::equals; piece slots are only written when the piece's
+ * wasUpdated trigger is armed, so unarmed pieces are NOT compared -- a walk
+ * would leave their bytes untouched, and storage that is stale relative to a
+ * from-scratch recompute but that no walk would refresh (a drained-trigger
+ * residue the flag-off baseline shares) is value-equivalent by the program's
+ * byte-identity-to-baseline contract, not a skip defect. Armed pieces on a
+ * skipped object compare bitwise (UpdateForced bytes); under an unchanged
+ * WS-1 version an armed piece here means a bumpless arming path. Read-only:
+ * no ResetWasUpdated, no storage writes -- the piece reads may recompute a
+ * dirty piece, which is legal at the edge (sim quiescent) and side-effect-
+ * equivalent to what the skipped walk would have done. A mismatch names a
+ * mutation path that reached SSBO-feeding state without perturbing the skip
+ * key -- the "missed a path" failure class turned into a log line. */
 template<typename T>
 inline void CModelDrawerDataBase<T>::RunTransformSkipOracle(const T* o)
 {
@@ -644,6 +674,12 @@ inline void CModelDrawerDataBase<T>::RunTransformSkipOracle(const T* o)
 		for (int i = 0; i < o->localModel.pieces.size(); ++i) {
 			const LocalModelPiece& lmp = o->localModel.pieces[i];
 
+			const auto& lmpTransform = lmp.GetModelSpaceTransform();
+
+			// a walk writes this piece's slots only when armed (see above)
+			if (!lmp.GetWasUpdated())
+				continue;
+
 			Transform expPrev;
 			Transform expCurr;
 
@@ -652,7 +688,7 @@ inline void CModelDrawerDataBase<T>::RunTransformSkipOracle(const T* o)
 				expCurr = Transform::Zero();
 			} else {
 				expPrev = lmp.GetEffectivePrevModelSpaceTransform();
-				expCurr = lmp.GetModelSpaceTransform();
+				expCurr = lmpTransform;
 			}
 
 			if (std::memcmp(&stma[2 * (1 + i) + 0], &expPrev, sizeof(Transform)) != 0) {
