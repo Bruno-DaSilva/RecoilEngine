@@ -470,7 +470,14 @@ public:
 		// 0 or non-ground) reproduces PushPathNodes' 0-return (no tables).
 		std::vector<uint8_t> estPathHasPath;            // [maxUnits]; 1 iff ground move type with pathID!=0
 		std::vector<std::vector<float3>> estPathPoints; // [maxUnits]; GetPathWayPoints points
-		std::vector<std::vector<int32_t>> estPathStarts;// [maxUnits]; GetPathWayPoints segment starts
+		std::vector<std::vector<int>> estPathStarts;    // [maxUnits]; GetPathWayPoints segment starts (int == int32_t)
+		// WS-6 (est-path demand gate): 1 iff the est-path block for this id was
+		// captured into THIS ring slot (the id was registered via a draw-side
+		// first touch). 0 for unregistered ids -- the serve reads the live path
+		// under a park instead, never the stale estPathPoints a prior slot
+		// occupant left. Rides the ring (not a parallel cache) since the est-path
+		// block already lives inside UnitRows. See LuaSnapshotServe est-path read-set.
+		std::vector<uint8_t> estPathCaptured;           // [maxUnits]
 
 		// out-of-range ids (including any id before the first extraction ever
 		// ran, when the arrays are still unsized) are part of the stale/nil
@@ -1407,7 +1414,11 @@ public:
 	// that scan valid[] directly between boundaries.
 	void ClearDeadThisBatch();
 private:
-	void Extract(UnitRows& rows);
+	// WS-6: the est-path read-set (producer-owned, drained from the draw->producer
+	// mailbox by LuaSnapshotServe::AcquireEstPathReadSet) gates the per-unit
+	// GetPathWayPoints copy; nullptr => capture no est-path (the hash scratch and
+	// the flag-off/unarmed path, where the est-path rows are unread).
+	void Extract(UnitRows& rows, std::vector<uint8_t>* estPathReadSet = nullptr);
 	// minSlots (PR 43): grow-only row sizing may need to cover ids that died
 	// in the batch (shell-sourced DEAD_THIS_BATCH rows for ids the live
 	// containers no longer hold); Update() passes the dead-id maxima, the

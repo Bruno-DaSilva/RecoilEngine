@@ -134,6 +134,8 @@ public:
 		LUA_GIVE_ORDER,      // LuaUnsyncedCtrl::GiveOrder family
 		PIECE_FIRST_TOUCH,   // PR 46: read-set piece serving, first query of an
 		                     // unregistered object (rare; registered thereafter)
+		EST_PATH_FIRST_TOUCH,// WS-6: read-set est-path serving, first query of an
+		                     // unregistered ground unit (rare; 0 in stock BAR)
 		COUNT
 	};
 	static void DumpSimPauseSurvey();

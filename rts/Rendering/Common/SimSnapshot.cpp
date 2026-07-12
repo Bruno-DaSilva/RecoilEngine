@@ -411,7 +411,9 @@ int SimSnapshot::ProduceSlotInternal()
 	// single opaque ~2ms span on the sim thread
 	{
 		SCOPED_TIMER("Update::SimSnapshot::Units");
-		Extract(buffers[target]);
+		// WS-6: hand the demand-gated est-path read-set (drained here) to Extract;
+		// null flag-off+unarmed, so the est-path capture is inert then.
+		Extract(buffers[target], LuaSnapshotServe::AcquireEstPathReadSet());
 	}
 	{
 		SCOPED_TIMER("Update::SimSnapshot::Projectiles");
@@ -982,6 +984,7 @@ void SimSnapshot::Resize(UnitRows& rows, size_t maxUnits, int numAllyTeams)
 	rows.estPathHasPath.resize(maxUnits);
 	rows.estPathPoints.resize(maxUnits);
 	rows.estPathStarts.resize(maxUnits);
+	rows.estPathCaptured.resize(maxUnits); // WS-6 demand gate
 }
 
 // ---- PR 32 (deep per-unit state) extraction helpers ----
@@ -1037,11 +1040,15 @@ static void ExtractUnitMoveType(SimSnapshot::UnitRows& rows, int id, const CUnit
 	SimSnapshot::MoveTypeBlock& b = rows.moveTypeBlock[id];
 	b = SimSnapshot::MoveTypeBlock{}; // ids are reused; default-zero for non-dynamic subtypes
 
-	// PR 38g GetUnitEstimatedPath: default empty (non-ground / no path); populated
-	// in the ground branch below. ids are reused, so clear every boundary.
+	// PR 38g GetUnitEstimatedPath: default empty (non-ground / no path / not
+	// registered). WS-6: the waypoint copy itself is demand-gated and runs in a
+	// separate read-set sweep after this pass (ExtractEstPaths); here every id
+	// defaults to the uncaptured/empty shape. ids are reused, so clear every
+	// boundary.
 	rows.estPathHasPath[id] = 0;
 	rows.estPathPoints[id].clear();
 	rows.estPathStarts[id].clear();
+	rows.estPathCaptured[id] = 0;
 
 	// dispatch on the AMoveType class tag (covers the runtime MoveCtrl swap to
 	// CScriptMoveType) -- replaces a per-unit 5-deep dynamic_cast chain
@@ -1058,19 +1065,8 @@ static void ExtractUnitMoveType(SimSnapshot::UnitRows& rows, int id, const CUnit
 			b.goalRadius = g->GetGoalRadius();
 			b.currWayPoint = g->GetCurrWayPoint();
 			b.nextWayPoint = g->GetNextWayPoint();
-
-			// PR 38g: capture the estimated path waypoints exactly as
-			// LuaPathFinder::PushPathNodes reads them. GetPathWayPoints is a pure const
-			// read (does NOT advance the path). pathID==0 => hasPath stays 0 and the
-			// twin returns no tables, matching PushPathNodes' pathID==0 early return.
-			if (const unsigned int pathID = g->GetPathID(); pathID != 0) {
-				rows.estPathHasPath[id] = 1;
-				// GetPathWayPoints takes vector<int>&; estPathStarts is vector<int32_t>
-				// (int32_t == int on every supported target), copied verbatim below.
-				std::vector<int> starts;
-				pathManager->GetPathWayPoints(pathID, rows.estPathPoints[id], starts);
-				rows.estPathStarts[id].assign(starts.begin(), starts.end());
-			}
+			// PR 38g GetUnitEstimatedPath waypoints: WS-6 moved the O(path) copy to
+			// the demand-gated ExtractEstPaths sweep -- only registered ids pay it.
 			return;
 		}
 		case AMoveType::MT_HOVER_AIR: {
@@ -1118,7 +1114,7 @@ static void ExtractUnitMoveType(SimSnapshot::UnitRows& rows, int id, const CUnit
 	}
 }
 
-void SimSnapshot::Extract(UnitRows& rows)
+void SimSnapshot::Extract(UnitRows& rows, std::vector<uint8_t>* estPathReadSet)
 {
 	const size_t maxUnits = unitHandler.MaxUnits();
 	const int numAllyTeams = teamHandler.ActiveAllyTeams();
@@ -1247,6 +1243,50 @@ void SimSnapshot::Extract(UnitRows& rows)
 		for (const CUnit* u : activeUnits) {
 			ExtractUnitBuildState(rows, u->id, u);
 			ExtractUnitMoveType(rows, u->id, u);
+		}
+	}
+
+	// WS-6 (est-path demand gate): capture the GetUnitEstimatedPath waypoints
+	// ONLY for unit ids the draw side has queried at least once (estPathReadSet,
+	// producer-owned, drained from the first-touch mailbox). Mirrors the
+	// RefreshPieces read-set sweep: registered live ground units capture (a pure
+	// const GetPathWayPoints read); dead / non-ground registered ids prune. A
+	// null read-set (hash scratch, or the flag-off/unarmed path where the rows
+	// are unread) captures nothing -- every id keeps the uncaptured/empty shape
+	// ExtractUnitMoveType wrote above. Stock BAR never queries est-path, so the
+	// read-set is empty and this sweep only walks a byte vector.
+	if (estPathReadSet != nullptr) {
+		SCOPED_TIMER("Update::SimSnapshot::UnitsEstPath");
+
+		std::vector<uint8_t>& readSet = *estPathReadSet;
+		for (size_t id = 0; id < maxUnits && id < readSet.size(); ++id) {
+			if (!readSet[id])
+				continue;
+
+			const CUnit* u = unitHandler.GetUnit(id);
+			if (u == nullptr || u->isDead) {
+				readSet[id] = 0; // prune (a reused id re-registers via first touch)
+				continue;
+			}
+
+			const AMoveType* mt = u->moveType; // never null
+			if (mt->GetMoveTypeClass() != AMoveType::MT_GROUND) {
+				readSet[id] = 0; // no longer a ground move type: prune
+				continue;
+			}
+
+			// registered live ground unit: this slot captures its est-path. A
+			// pathID==0 unit is a captured "no path" state (hasPath stays 0),
+			// not a perpetual miss.
+			const CGroundMoveType* g = static_cast<const CGroundMoveType*>(mt);
+			rows.estPathCaptured[id] = 1;
+			if (const unsigned int pathID = g->GetPathID(); pathID != 0) {
+				rows.estPathHasPath[id] = 1;
+				// GetPathWayPoints takes vector<int>&; estPathStarts is now
+				// vector<int> (int == int32_t on every supported target), so it
+				// is filled in place -- no per-unit temp + .assign copy.
+				pathManager->GetPathWayPoints(pathID, rows.estPathPoints[id], rows.estPathStarts[id]);
+			}
 		}
 	}
 
@@ -1936,6 +1976,7 @@ void SimSnapshot::ExtractDeadRowsFromShells(UnitRows& urows, FeatureRows& frows,
 		urows.estPathHasPath[id] = 0;
 		urows.estPathPoints[id].clear();
 		urows.estPathStarts[id].clear();
+		urows.estPathCaptured[id] = 0; // WS-6: dead-this-batch rows capture nothing
 		// weapon family: weapons freed in PreDestruct -> the count-0 nil shape
 		// (no flat-array slots referenced); explosion damages were decref'd
 		urows.weaponOffset[id] = 0;

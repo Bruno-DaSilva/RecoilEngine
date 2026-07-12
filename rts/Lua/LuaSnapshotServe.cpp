@@ -59,6 +59,8 @@
 #include "Sim/MoveTypes/MoveMath/MoveMath.h" // sim|draw PR 38e: TestMoveOrder barrier CheckCollisionQuery ctor
 #include "Sim/MoveTypes/AAirMoveType.h" // PR 32 GetUnitMoveTypeData aircraftState enum
 #include "Sim/MoveTypes/HoverAirMoveType.h" // PR 32 GetUnitMoveTypeData flyState enum
+#include "Sim/MoveTypes/GroundMoveType.h" // WS-6 GetUnitEstimatedPath first-touch live read
+#include "Sim/Path/IPathManager.h" // WS-6 GetUnitEstimatedPath first-touch GetPathWayPoints
 #include "Sim/Projectiles/PieceProjectile.h" // PR 33 GetPieceProjectileParams/Name twins
 #include "Sim/Projectiles/WeaponProjectiles/WeaponProjectileTypes.h" // PR 31 WEAPON_*_PROJECTILE (GetUnitWeaponVectors)
 #include "Sim/Weapons/WeaponTarget.h" // PR 31 Target_* (GetUnitWeaponTarget/CanFire)
@@ -7369,6 +7371,20 @@ namespace {
 	std::mutex pieceRegMtx;                     // guards the two pending lists
 	std::vector<int> pendingUnitPieceRegs;      // draw -> producer mailbox
 	std::vector<int> pendingFeaturePieceRegs;
+
+	// WS-6: est-path demand gate -- the pieces read-set model specialized to the
+	// GetUnitEstimatedPath waypoint block. Producer captures est-path only for
+	// unit ids the draw has queried; first touch of an unregistered valid ground
+	// unit serves the LIVE path under a counted park ([SimPauseSurvey] site
+	// EST_PATH_FIRST_TOUCH) and enqueues the id. estPathReadSet is producer-owned
+	// (drained + consulted on the sim thread); the draw thread only pushes onto
+	// pendingEstPathRegs under estPathRegMtx. A dead / non-ground registered id is
+	// pruned in the producer sweep (a reused id re-registers via its own first
+	// touch). No coarse demand-latch or pre-registration heuristic is needed
+	// (est-path has no predictable-first-touch consumer like the nano widget).
+	std::vector<uint8_t> estPathReadSet;        // [maxUnits]; producer-owned
+	std::mutex estPathRegMtx;                    // guards pendingEstPathRegs
+	std::vector<int> pendingEstPathRegs;         // draw -> producer mailbox
 	// demand gate for the producer's nano-job pre-registration: stays false
 	// until the draw side queries ANY unit piece slot, so setups with no
 	// piece-querying addon pay nothing for the pre-registered capture
@@ -7834,6 +7850,30 @@ void LuaSnapshotServe::EpochChannelBytes(size_t& cmdQueueBytes, size_t& pieceByt
 			pieceBytes += slot.scriptToModel.capacity() * sizeof(int32_t);
 		}
 	}
+}
+
+std::vector<uint8_t>* LuaSnapshotServe::AcquireEstPathReadSet()
+{
+	// flag-off (no contract, gate unarmed) never reads the est-path rows -- skip
+	// the drain + capture entirely (mirrors RefreshPieces' flag-off early-out).
+	if (!LuaSplitContract::Enabled() && !snapshotDiffGate.Armed())
+		return nullptr;
+
+	const size_t maxUnits = unitHandler.MaxUnits();
+	if (estPathReadSet.size() != maxUnits)
+		estPathReadSet.resize(maxUnits, 0); // producer-owned; resize off-lock
+
+	// drain the draw->producer first-touch mailbox (mirrors the piece drain)
+	{
+		std::lock_guard<std::mutex> lk(estPathRegMtx);
+		for (const int id: pendingEstPathRegs) {
+			if (id >= 0 && static_cast<size_t>(id) < maxUnits)
+				estPathReadSet[id] = 1;
+		}
+		pendingEstPathRegs.clear();
+	}
+
+	return &estPathReadSet;
 }
 
 void LuaSnapshotServe::RefreshPieces(int ringSlot, uint64_t targetEpoch)
@@ -8747,6 +8787,13 @@ void LuaSnapshotServe::ClearCaches()
 		featurePieceReadSet.clear();
 		pendingUnitPieceRegs.clear();
 		pendingFeaturePieceRegs.clear();
+	}
+
+	// WS-6: the est-path read-set likewise restarts with the next game
+	{
+		std::lock_guard<std::mutex> lk(estPathRegMtx);
+		estPathReadSet.clear();
+		pendingEstPathRegs.clear();
 	}
 
 	// TRACE REHOST (stage 4b) / PLACEMENT REHOST (stage 4): the PR 35 weapon-trace
@@ -10514,7 +10561,10 @@ int LuaSnapshotServe::GetUnitEstimatedPath(lua_State* L, const char* caller)
 	const int unitID = ParseUnitIDSynced(L, caller, 1);
 	const Pov pov = HandlePov(L);
 
-	// ParseAllyUnit mirror
+	// ParseAllyUnit mirror -- always-present rows, run BEFORE any park. Dead /
+	// enemy / non-ground ids return 0 here with NO park and NO registration,
+	// which structurally avoids the pieces re-park storm (only a valid allied
+	// GROUND unit not yet captured can reach the first-touch park below).
 	if (!rows.Valid(unitID) || !rows.PovAlliedUnit(unitID, pov.readAllyTeam, pov.fullRead))
 		return 0;
 
@@ -10522,11 +10572,46 @@ int LuaSnapshotServe::GetUnitEstimatedPath(lua_State* L, const char* caller)
 	if (rows.moveTypeKind[unitID] != 1)
 		return 0;
 
-	// PushPathNodes' pathID==0 early return mirror (no tables)
-	if (rows.estPathHasPath[unitID] == 0)
+	// WS-6 demand gate: this id's est-path was captured into the held slot ->
+	// serve from the rows exactly as before.
+	if (rows.estPathCaptured[unitID]) {
+		// PushPathNodes' pathID==0 early return mirror (no tables)
+		if (rows.estPathHasPath[unitID] == 0)
+			return 0;
+
+		return PushPathNodesFromSnap(L, rows.estPathPoints[unitID], rows.estPathStarts[unitID]);
+	}
+
+	// FIRST TOUCH of a valid allied ground unit not yet captured in this slot:
+	// register it for the producer's future edges, then read the LIVE path under
+	// a counted park (the sim is quiesced, so GetPathWayPoints on the live
+	// CGroundMoveType is safe -- same model as the pieces first-touch live reads)
+	// and serve THIS frame's value directly. A unit that died after the epoch
+	// edge but before this touch serves a miss for that one dispatch window
+	// (the enumerated pieces first-touch deviation, within contract).
+	{
+		std::lock_guard<std::mutex> lk(estPathRegMtx);
+		pendingEstPathRegs.push_back(unitID);
+	}
+
+	CGame::ScopedExternalSimPause park{CGame::SimPauseSite::EST_PATH_FIRST_TOUCH};
+
+	const CUnit* u = unitHandler.GetUnit(unitID);
+	if (u == nullptr || u->isDead)
 		return 0;
 
-	return PushPathNodesFromSnap(L, rows.estPathPoints[unitID], rows.estPathStarts[unitID]);
+	const CGroundMoveType* g = dynamic_cast<const CGroundMoveType*>(u->moveType);
+	if (g == nullptr)
+		return 0;
+
+	const unsigned int pathID = g->GetPathID();
+	if (pathID == 0)
+		return 0;
+
+	std::vector<float3> points;
+	std::vector<int> starts;
+	pathManager->GetPathWayPoints(pathID, points, starts);
+	return PushPathNodesFromSnap(L, points, starts);
 }
 
 // mirror of LuaSyncedRead::GetFeatureFireTime (ParseFeature POV; fireTime * INV_GAME_SPEED)

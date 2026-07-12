@@ -810,8 +810,14 @@ void SnapshotDiffGate::CheckBoundary()
 			// PR 38g (GetUnitEstimatedPath): the estimated-path waypoint block vs a
 			// live GetPathWayPoints read. hasPath==1 iff a ground move type with an
 			// active pathID; points bit-compared (float3), starts exact. Pure const
-			// read, matches ExtractUnitMoveType's ground branch.
-			{
+			// read, matches the demand-gated est-path capture (SimSnapshot Extract).
+			//
+			// WS-6 read-set-aware: est-path is captured only for ids the draw side
+			// queried (estPathCaptured==1); an uncaptured id is served LIVE under a
+			// park at first touch (tautologically equal to the live read -- nothing
+			// captured to diverge), so skip its rows-vs-live compare. This asserts
+			// the demand-gate contract: captured rows == live; uncaptured => live.
+			if (rows.estPathCaptured[i]) {
 				uint8_t liveHasPath = 0;
 				std::vector<float3> livePoints;
 				std::vector<int> liveStarts;

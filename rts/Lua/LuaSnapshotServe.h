@@ -628,6 +628,11 @@ namespace LuaSnapshotServe {
 	//  - GetProjectileDamages: ProjectileRows DamagesSnap (PushDamagesKeySnap, shared
 	//    with GetUnitWeaponDamages); ParseProjectile POV + isWeapon gate.
 	int GetUnitEstimatedPath(lua_State* L, const char* caller);  // LuaSyncedRead (ParseAllyUnit)
+	// WS-6 est-path demand gate: drain the draw->producer first-touch mailbox
+	// into the producer-owned est-path read-set and hand it to SimSnapshot::Extract
+	// (mirrors the RefreshPieces read-set drain). Returns nullptr when neither the
+	// split contract is live nor the diff-gate is armed (est-path rows unread).
+	std::vector<uint8_t>* AcquireEstPathReadSet();
 	int GetFeatureFireTime(lua_State* L, const char* caller);    // LuaSyncedRead (ParseFeature)
 	int GetFeatureSmokeTime(lua_State* L, const char* caller);   // LuaSyncedRead (ParseFeature)
 	int GetProjectileDamages(lua_State* L, const char* caller);  // LuaSyncedRead (ParseProjectile)
