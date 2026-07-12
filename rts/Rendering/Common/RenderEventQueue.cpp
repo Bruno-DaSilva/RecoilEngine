@@ -314,16 +314,22 @@ void RenderEventQueue::Dispatch(const Record& record, const std::vector<GhostAll
 		} break;
 
 		case T::ProjectileCreated: {
-			eventHandler.RenderProjectileCreated(ResolveProjectile(record.id, record.syncedProj));
+			// a rare unsynced-projectile record can outlive both the object and
+			// its shell (pre-existing, also seen on epoch-integration builds);
+			// ResolveProjectile already logged it -- drop the event rather than
+			// dispatch a null (the paired Destroyed drops the same way)
+			if (const CProjectile* proj = ResolveProjectile(record.id, record.syncedProj); proj != nullptr)
+				eventHandler.RenderProjectileCreated(proj);
 		} break;
 		case T::ProjectileDestroyed: {
 			const CProjectile* proj = ResolveProjectile(record.id, record.syncedProj);
 
-			eventHandler.RenderProjectileDestroyed(proj);
+			if (proj != nullptr)
+				eventHandler.RenderProjectileDestroyed(proj);
 			PopDestroyShell(ShellKey(ObjKind::Projectile, record.syncedProj, record.id));
 
 			// PR 27b: see the UnitDestroyed case (lights can track projectiles)
-			if (SimDrawSplit::Enabled()) {
+			if (SimDrawSplit::Enabled() && proj != nullptr) {
 				boundaryDestroyedProjectiles.push_back(proj);
 
 				// PR 43 §7.7: dead-id -> shell map for the producer's
