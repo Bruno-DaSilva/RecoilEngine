@@ -257,7 +257,7 @@ bool CUnitHandler::GarbageCollectUnit(unsigned int id)
 
 void CUnitHandler::QueueDeleteUnits()
 {
-	ZoneScoped;
+	SCOPED_TIMER("Sim::Unit::QueueDelete");
 	// gather up dead units
 	for (activeUpdateUnit = 0; activeUpdateUnit < activeUnits.size(); ++activeUpdateUnit) {
 		QueueDeleteUnit(activeUnits[activeUpdateUnit]);
@@ -281,7 +281,7 @@ bool CUnitHandler::QueueDeleteUnit(CUnit* unit)
 
 void CUnitHandler::DeleteUnits()
 {
-	ZoneScopedC(tracy::Color::Goldenrod);
+	SCOPED_TIMER("Sim::Unit::DeleteUnits");
 	while (!unitsToBeRemoved.empty()) {
 		DeleteUnit(unitsToBeRemoved.back());
 		unitsToBeRemoved.pop_back();
@@ -346,7 +346,7 @@ void CUnitHandler::UpdateUnitMoveTypes()
 
 void CUnitHandler::UpdateUnitLosStates()
 {
-	ZoneScopedC(tracy::Color::Goldenrod);
+	SCOPED_TIMER("Sim::Unit::LosStates");
 	for (CUnit* unit: activeUnits) {
 		for (int at = 0; at < teamHandler.ActiveAllyTeams(); ++at) {
 			unit->UpdateLosStatus(at);
@@ -451,6 +451,10 @@ void CUnitHandler::UpdatePreFrame()
 
 void CUnitHandler::Update()
 {
+	// parent timer so the Sim::Unit::* sub-steps nest under one zone
+	// instead of floating as siblings directly under the SimFrame marker
+	SCOPED_TIMER("Sim::Unit");
+
 	inUpdateCall = true;
 
 	DeleteUnits();

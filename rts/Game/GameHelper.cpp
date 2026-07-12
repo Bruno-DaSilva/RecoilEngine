@@ -43,6 +43,7 @@
 #include "Sim/Weapons/Weapon.h"
 #include "System/EventHandler.h"
 #include "System/SpringMath.h"
+#include "System/TimeProfiler.h"
 #include "System/Sound/ISoundChannels.h"
 
 #include "System/Misc/TracyDefs.h"
@@ -68,7 +69,7 @@ void CGameHelper::Kill()
 
 void CGameHelper::Update()
 {
-	ZoneScopedC(tracy::Color::Goldenrod);
+	SCOPED_TIMER("Sim::Helper");
 	const int wdIdx = gs->frameNum & (waitingDamages.size() - 1);
 
 	// need to use explicit indexing because CUnit::DoDamage

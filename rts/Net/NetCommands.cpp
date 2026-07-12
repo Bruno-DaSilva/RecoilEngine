@@ -343,6 +343,10 @@ bool CGame::SplitFullThrottleConsume() const
 
 void CGame::ClientReadNet()
 {
+	// parent zone so the per-message Net::* zones (and the SimFrame()s this
+	// loop issues) nest here instead of floating unparented between frames
+	ZoneScopedN("Net::ClientReadNet");
+
 	// first look ahead so we can adapt consumeSpeedMult to network fluctuations
 	// (smooths simframes across each full second, and balances the time spent in
 	// sim & drawing)

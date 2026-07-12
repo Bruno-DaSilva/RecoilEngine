@@ -2191,8 +2191,14 @@ void CGame::ProduceEpochAtSimEdge(bool forceProduce)
 	// the consumer's park (see UpdateUnsynced). Forced-serial on this thread.
 	{
 		SCOPED_TIMER("Sim::EpochProduce::Transforms");
-		CUnitDrawer::ExtractTransformsAtSimEdge();
-		CFeatureDrawer::ExtractTransformsAtSimEdge();
+		{
+			SCOPED_TIMER("Sim::EpochProduce::TransformsUnits");
+			CUnitDrawer::ExtractTransformsAtSimEdge();
+		}
+		{
+			SCOPED_TIMER("Sim::EpochProduce::TransformsFeatures");
+			CFeatureDrawer::ExtractTransformsAtSimEdge();
+		}
 	}
 
 	// (p7) evaluate the pending default-cmd query at the SAME edge the rows
@@ -2960,10 +2966,15 @@ void CGame::SimFrame() {
 			// (fixed 30Hz gc is not enough while catching up)
 			// PR 27b: under the split the sim phase GCs only the synced
 			// lua_States it owns; the main-thread timed job covers the rest
-			if (luaGCControl == 0)
+			if (luaGCControl == 0) {
+				SCOPED_TIMER("Sim::GameFrame::CollectGarbage");
 				eventHandler.CollectGarbage(false, SimDrawSplit::Enabled() ? CEventHandler::GC_SYNCED_ONLY : CEventHandler::GC_ALL);
+			}
 
-			eventHandler.GameFrame(gs->frameNum);
+			{
+				SCOPED_TIMER("Sim::GameFrame::Callins");
+				eventHandler.GameFrame(gs->frameNum);
+			}
 		}
 
 		helper->Update();

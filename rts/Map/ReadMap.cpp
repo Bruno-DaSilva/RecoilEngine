@@ -598,7 +598,7 @@ void CReadMap::UpdateHeightMapSynced(const SRectangle& hgtMapRect)
 
 void CReadMap::UpdateHeightBounds(int syncFrame)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
+	SCOPED_TIMER("Sim::ReadMap");
 	constexpr int PACING_PERIOD = GAME_SPEED; //tune if needed
 	int dataChunk = syncFrame % PACING_PERIOD;
 
