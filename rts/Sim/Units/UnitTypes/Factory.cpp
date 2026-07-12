@@ -203,6 +203,10 @@ void CFactory::StartBuild(const UnitDef* buildeeDef) {
 	curBuild = buildee;
 	curBuildDef = nullptr;
 
+	// sim|draw WS-5: worker-task choke (curBuild feeds ResolveWorkerTask, no
+	// queue bump; StartBuild does not route through StopBuild)
+	CCommandQueue::MarkDirty(id);
+
 	if (losStatus[gu->myAllyTeam] & LOS_INLOS) {
 		Channels::General->PlayRandomSample(unitDef->sounds.build, buildPos);
 	}
@@ -349,6 +353,10 @@ void CFactory::StopBuild()
 
 	curBuild = nullptr;
 	curBuildDef = nullptr;
+
+	// sim|draw WS-5: worker-task choke (curBuild cleared; DependentDied's clear
+	// routes through this StopBuild too)
+	CCommandQueue::MarkDirty(id);
 }
 
 bool CFactory::IsCurrentBuildeeMatchingBuildQueueFront(const CCommandQueue& buildQueue) const

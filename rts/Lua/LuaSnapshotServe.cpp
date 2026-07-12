@@ -6133,12 +6133,11 @@ namespace {
 		int workerTaskCmd = 0;
 		int workerTaskTarget = 0;
 
-		// sim|draw PR 44 (Gap B): CCommandAI::lastSelectedCommandPage, consumed by
-		// CSelectedUnitsHandler::GetAvailableCommands (min over the selection) so
-		// LayoutIcons no longer reads live commandAI under the running split. Copied
-		// unconditionally every refresh (a plain int; the descs are the versioned
-		// half, and the page moves independently of the cmdDesc version).
-		int lastSelectedCommandPage = 0;
+		// sim|draw WS-5: lastSelectedCommandPage is no longer snapshotted here --
+		// its only writers are main-thread (CSelectedUnitsHandler::GetAvailableCommands
+		// + the CommandAI ctors), never the sim, so GetServedAvailableCommands reads
+		// it live off commandAI on the main thread (race-free, removes the one
+		// unversioned field with no choke to ride; design §4.5).
 	};
 
 	// indexed by unitID, sized unitHandler.MaxUnits() at first refresh.
@@ -6152,6 +6151,54 @@ namespace {
 
 	// the consumer-held slot's copies -- every serving read goes through this
 	std::vector<UnitCmdQueueSlot>& ServedCmdCache() { return cmdQueueCaches[simSnapshot.HeldSlot()]; }
+
+	// sim|draw WS-5: mutation-side dirty-list replacing RefreshCommandQueues'
+	// O(maxUnits) scan. The mutation chokes (CCommandQueue::BumpVersion /
+	// CCommandAI::BumpCmdDescVersion, plus the explicit unversioned tail chokes)
+	// push the affected unit id here; the producer drains only the dirtied ids
+	// for the slot it is producing. THE RING SUBTLETY (design §3): a queue
+	// dirtied once must reach every one of the EPOCH_RING_SLOTS ring slots, so
+	// the push arms ALL slot bits and each produce clears only its own bit --
+	// the id stays live until every slot has recopied it.
+	//
+	// cmdDirtyPending[id]: bit s set = ring slot s still owes a recopy of id.
+	// cmdDirtyActive: the ids with any pending bit (the drain domain). Sized/
+	// touched only on the sim thread (chokes) and the producer drain (same
+	// thread, sim-state-owning) -- no atomics (design §8).
+	constexpr uint8_t CMD_ALL_SLOTS_MASK = (1u << SimSnapshot::EPOCH_RING_SLOTS) - 1;
+	std::vector<uint8_t> cmdDirtyPending;
+	std::vector<int> cmdDirtyActive;
+
+	void MarkCmdDirtyImpl(int id)
+	{
+		// flag-off the producer never drains, so keep the structures untouched
+		// (byte-identical, no unbounded growth); the push is inert.
+		if (!SimDrawSplit::Enabled())
+			return;
+
+		const size_t maxUnits = unitHandler.MaxUnits();
+
+		if (id < 0 || static_cast<size_t>(id) >= maxUnits)
+			return;
+
+		if (cmdDirtyPending.size() != maxUnits)
+			cmdDirtyPending.resize(maxUnits, 0);
+
+		// design §6: dedup -- append to the active vector only on the 0->set
+		// edge; an already-pending id just re-arms the mask (no-op if full)
+		if (cmdDirtyPending[id] == 0)
+			cmdDirtyActive.push_back(id);
+
+		cmdDirtyPending[id] = CMD_ALL_SLOTS_MASK;
+	}
+
+	// install the header-inline hook (CommandQueue.h) so every queue/desc bump
+	// and the explicit tail chokes route into MarkCmdDirtyImpl; done once at
+	// process start (before any unit exists)
+	[[maybe_unused]] const bool cmdDirtyHookInstalled = [] {
+		CCommandQueue::cmdDirtyHook = &MarkCmdDirtyImpl;
+		return true;
+	}();
 
 	// PR 38f (event-time command-queue presentation): a per-unit override
 	// consulted FIRST by GetCmdQueueSlot. Installed by ScopedCmdQueueEventOverride
@@ -6179,7 +6226,6 @@ namespace {
 		slot.workerTaskNumRet = 0;
 		slot.workerTaskCmd = 0;
 		slot.workerTaskTarget = 0;
-		slot.lastSelectedCommandPage = 0;
 	}
 
 	void CopyQueueSnap(const CCommandQueue& q, std::vector<SnapCommand>& cmds, std::vector<float>& params)
@@ -6588,13 +6634,19 @@ void LuaSnapshotServe::RefreshCommandQueues(int ringSlot, uint64_t targetEpoch)
 	SCOPED_TIMER("Sim::EpochProduce::CmdQueues");
 
 	// producer-only (the flip's sim frame edge, or the lockstep barrier with
-	// the sim parked): walks unitHandler and reads live queues. Epoch-gated so
-	// the copies always describe the same boundary as the target slot's rows
-	// -- and so the walk is free when nothing was (re)published. PR 44a: the
-	// version-gated per-unit recopy compares against THIS SLOT's previous
-	// content (up to EPOCH_RING_SLOTS boundaries old), so a changed queue is
-	// recopied into each slot as the ring rotates -- correctness by
-	// construction, ~ring-depth x the (sparse) per-boundary copy volume.
+	// the sim parked): reads live queues. Epoch-gated so the copies always
+	// describe the same boundary as the target slot's rows -- and so the drain
+	// is free when nothing was (re)published.
+	//
+	// sim|draw WS-5: iterate only the ids the mutation chokes dirtied (design
+	// §2), not [0, maxUnits). THE RING SUBTLETY (§3): the per-slot cache stores
+	// its own last-copied version per unit, so a queue changed once must be
+	// recopied into EACH ring slot as the ring rotates. The dirty push arms all
+	// slot bits; this drain processes the ids owing a recopy for THIS slot and
+	// clears that slot's bit, retiring an id only once every slot has copied it.
+	// The per-slot version compare below stays as an idempotency backstop (§3.5):
+	// it makes an over-push (e.g. a desc-only or worker-task push whose queue is
+	// unchanged) a harmless re-verify no-op.
 	const uint64_t gen = targetEpoch;
 
 	if (gen == 0 || gen == cmdQueueCacheEpochs[ringSlot])
@@ -6608,77 +6660,102 @@ void LuaSnapshotServe::RefreshCommandQueues(int ringSlot, uint64_t targetEpoch)
 	if (cmdQueueCache.size() != maxUnits)
 		cmdQueueCache.resize(maxUnits);
 
-	for (size_t id = 0; id < maxUnits; ++id) {
-		UnitCmdQueueSlot& slot = cmdQueueCache[id];
-		const CUnit* unit = unitHandler.GetUnit(id);
+	const uint8_t slotBit = uint8_t(1u << ringSlot);
 
-		// dead ids must serve the "no such unit" nil shape, never stale copies
-		if (unit == nullptr) {
-			if (slot.present)
-				ClearCmdQueueSlot(slot);
-			continue;
-		}
+	// drain: process the ids owing a recopy for this slot, then compact the
+	// active vector (drop ids whose pending mask reached 0, keep ids still owing
+	// other slots -- the §3.3 swap-pop, expressed as an in-place compaction)
+	size_t writePos = 0;
+	for (size_t r = 0, n = cmdDirtyActive.size(); r < n; ++r) {
+		const int id = cmdDirtyActive[r];
+		uint8_t& mask = cmdDirtyPending[id];
 
-		const CCommandAI* cai = unit->commandAI; // never null
-		const uint64_t cmdQueVersion = cai->commandQue.GetVersion();
+		if ((mask & slotBit) != 0) {
+			UnitCmdQueueSlot& slot = cmdQueueCache[id];
+			const CUnit* unit = unitHandler.GetUnit(id);
 
-		if (!slot.present || slot.cmdQueVersion != cmdQueVersion) {
-			// (re)classify here too: a died-and-respawned id always lands in
-			// this branch (queue versions are globally unique), so the flags
-			// can never go stale across id reuse
-			slot.present = true;
-			slot.isFactoryCAI = (dynamic_cast<const CFactoryCAI*>(cai) != nullptr);
-			slot.isFactoryUnit = (dynamic_cast<const CFactory*>(unit) != nullptr);
+			// dead ids must serve the "no such unit" nil shape, never stale copies
+			if (unit == nullptr) {
+				if (slot.present)
+					ClearCmdQueueSlot(slot);
+			} else {
+				const CCommandAI* cai = unit->commandAI; // never null
+				const uint64_t cmdQueVersion = cai->commandQue.GetVersion();
 
-			CopyQueueSnap(cai->commandQue, slot.commandQue, slot.commandQueParams);
-			slot.cmdQueVersion = cmdQueVersion;
+				if (!slot.present || slot.cmdQueVersion != cmdQueVersion) {
+					// (re)classify here too: a died-and-respawned id always lands in
+					// this branch (queue versions are globally unique), so the flags
+					// can never go stale across id reuse
+					slot.present = true;
+					slot.isFactoryCAI = (dynamic_cast<const CFactoryCAI*>(cai) != nullptr);
+					slot.isFactoryUnit = (dynamic_cast<const CFactory*>(unit) != nullptr);
 
-			if (!slot.isFactoryCAI && !slot.newUnitCommands.empty()) {
-				slot.newUnitCommands.clear();
-				slot.newUnitCommandsParams.clear();
-				slot.newUnitCmdsVersion = 0;
+					CopyQueueSnap(cai->commandQue, slot.commandQue, slot.commandQueParams);
+					slot.cmdQueVersion = cmdQueVersion;
+
+					if (!slot.isFactoryCAI && !slot.newUnitCommands.empty()) {
+						slot.newUnitCommands.clear();
+						slot.newUnitCommandsParams.clear();
+						slot.newUnitCmdsVersion = 0;
+					}
+				}
+
+				// sim|draw PR 30: cmd-desc surface, keyed on its OWN version (a queue pop
+				// does not recopy descs). A fresh/respawned slot has cmdDescVersion 0 and
+				// GetCmdDescVersion() is a globally-unique >=1 value, so it rebuilds; a
+				// reused id can never alias a prior owner's descs (see GetCmdDescVersion).
+				const uint64_t descVersion = cai->GetCmdDescVersion();
+				if (slot.cmdDescVersion != descVersion) {
+					CopyDescsSnap(cai->GetPossibleCommands(), slot.descs);
+					slot.cmdDescVersion = descVersion;
+				}
+
+				if (slot.isFactoryCAI) {
+					const CFactoryCAI* fcai = static_cast<const CFactoryCAI*>(cai);
+					const uint64_t newUnitCmdsVersion = fcai->newUnitCommands.GetVersion();
+
+					if (slot.newUnitCmdsVersion != newUnitCmdsVersion) {
+						CopyQueueSnap(fcai->newUnitCommands, slot.newUnitCommands, slot.newUnitCommandsParams);
+						slot.newUnitCmdsVersion = newUnitCmdsVersion;
+					}
+				}
+
+				if (slot.isFactoryUnit) {
+					const CFactory* fac = static_cast<const CFactory*>(unit);
+
+					slot.boPerform    = fac->boPerform;
+					slot.boOffset     = fac->boOffset;
+					slot.boRadius     = fac->boRadius;
+					slot.boRelHeading = fac->boRelHeading;
+					slot.boSherical   = fac->boSherical;
+					slot.boForced     = fac->boForced;
+				}
+
+				// sim|draw PR 30: decode GetUnitWorkerTask's answer here (not queue-
+				// derivable; the transitions push explicitly -- design §4.3)
+				ResolveWorkerTask(unit, slot);
 			}
+
+			mask &= ~slotBit;
 		}
 
-		// sim|draw PR 30: cmd-desc surface, keyed on its OWN version (a queue pop
-		// does not recopy descs). A fresh/respawned slot has cmdDescVersion 0 and
-		// GetCmdDescVersion() is a globally-unique >=1 value, so it rebuilds; a
-		// reused id can never alias a prior owner's descs (see GetCmdDescVersion).
-		const uint64_t descVersion = cai->GetCmdDescVersion();
-		if (slot.cmdDescVersion != descVersion) {
-			CopyDescsSnap(cai->GetPossibleCommands(), slot.descs);
-			slot.cmdDescVersion = descVersion;
-		}
-
-		if (slot.isFactoryCAI) {
-			const CFactoryCAI* fcai = static_cast<const CFactoryCAI*>(cai);
-			const uint64_t newUnitCmdsVersion = fcai->newUnitCommands.GetVersion();
-
-			if (slot.newUnitCmdsVersion != newUnitCmdsVersion) {
-				CopyQueueSnap(fcai->newUnitCommands, slot.newUnitCommands, slot.newUnitCommandsParams);
-				slot.newUnitCmdsVersion = newUnitCmdsVersion;
-			}
-		}
-
-		if (slot.isFactoryUnit) {
-			const CFactory* fac = static_cast<const CFactory*>(unit);
-
-			slot.boPerform    = fac->boPerform;
-			slot.boOffset     = fac->boOffset;
-			slot.boRadius     = fac->boRadius;
-			slot.boRelHeading = fac->boRelHeading;
-			slot.boSherical   = fac->boSherical;
-			slot.boForced     = fac->boForced;
-		}
-
-		// sim|draw PR 30: decode GetUnitWorkerTask's answer here (not queue-
-		// derivable); re-resolved every refresh (few builders/factories)
-		ResolveWorkerTask(unit, slot);
-
-		// sim|draw PR 44 (Gap B): CCommandAI::lastSelectedCommandPage for
-		// GetAvailableCommands. Plain int, copied unconditionally (no version).
-		slot.lastSelectedCommandPage = cai->lastSelectedCommandPage;
+		if (mask != 0)
+			cmdDirtyActive[writePos++] = id;
 	}
+
+	cmdDirtyActive.resize(writePos);
+}
+
+
+// sim|draw WS-5: post-creg-load / split-enable sweep (design §9). creg rebuilds
+// each queue with a fresh version and each cmdDescVersion ctor-fresh but fires
+// no dirty push for the loaded units (the ctor path may be bypassed), so seed
+// the drain domain with every active unit once. Bounded O(active units); a no-op
+// flag-off (MarkCmdDirtyImpl gates on the split).
+void LuaSnapshotServe::MarkAllCmdQueuesDirty()
+{
+	for (const CUnit* unit: unitHandler.GetActiveUnits())
+		CCommandQueue::MarkDirty(unit->id);
 }
 
 
@@ -7046,8 +7123,10 @@ LuaSnapshotServe::CmdQueueCompareResult LuaSnapshotServe::CompareCmdQueueSlot(in
 	}
 	res.factoryOk = factoryOk;
 
-	// sim|draw PR 44 (Gap B): lastSelectedCommandPage
-	res.pageOk = (slot->lastSelectedCommandPage == cai->lastSelectedCommandPage);
+	// sim|draw WS-5: lastSelectedCommandPage is no longer snapshotted (served
+	// live off commandAI on the main thread; design §4.5), so this compare is
+	// tautological -- kept for the diff-gate field enum's stability
+	res.pageOk = true;
 
 	return res;
 }
@@ -7070,7 +7149,11 @@ bool LuaSnapshotServe::GetServedAvailableCommands(int unitID, std::vector<SComma
 	if (!slot.present)
 		return false;
 
-	outPage = slot.lastSelectedCommandPage;
+	// sim|draw WS-5: lastSelectedCommandPage is read live here (main thread) --
+	// its only writers are main-thread (this handler + the CommandAI ctors), so
+	// the read is race-free and the field is no longer snapshotted (design §4.5)
+	const CUnit* unit = unitHandler.GetUnit(unitID);
+	outPage = (unit != nullptr) ? unit->commandAI->lastSelectedCommandPage : 0;
 
 	outDescs.clear();
 	outDescs.reserve(slot.descs.size());
@@ -8634,6 +8717,14 @@ void LuaSnapshotServe::ClearCaches()
 		cache.shrink_to_fit();
 	}
 	cmdQueueCacheEpochs.fill(0);
+
+	// sim|draw WS-5: the dirty-list restarts with the next game (unit ids and
+	// the per-slot version stamps reset), so a surviving entry could alias fresh
+	// ones -- drop it (generation-safety, same rationale as the cache clear above)
+	cmdDirtyPending.clear();
+	cmdDirtyPending.shrink_to_fit();
+	cmdDirtyActive.clear();
+	cmdDirtyActive.shrink_to_fit();
 
 	// PR 33 piece caches: unit/feature ids and model pointers restart with the
 	// next game, so a surviving entry could alias fresh ones

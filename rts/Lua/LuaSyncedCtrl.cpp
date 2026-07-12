@@ -4260,6 +4260,9 @@ int LuaSyncedCtrl::SetFactoryBuggerOff(lua_State* L)
 	f->boSherical    = luaL_optboolean(L, 6, f->boSherical   );
 	f->boForced      = luaL_optboolean(L, 7, f->boForced     );
 
+	// sim|draw WS-5: bugger-off scalars feed the epoch producer unversioned
+	CCommandQueue::MarkDirty(f->id);
+
 	lua_pushboolean(L, f->boPerform);
 	return 1;
 }

@@ -58,6 +58,10 @@ CFactoryCAI::CFactoryCAI(CUnit* owner): CCommandAI(owner)
 {
 	commandQue.SetQueueType(CCommandQueue::BuildQueueType);
 	newUnitCommands.SetQueueType(CCommandQueue::NewUnitQueueType);
+	// sim|draw WS-5: the second queue shares the factory's unit id so its bumps
+	// push the same dirty-list entry (the base ctor already fired the creation
+	// choke for this id)
+	newUnitCommands.ownerId = owner->id;
 
 	if (owner->unitDef->canmove) {
 		SCommandDescription c;

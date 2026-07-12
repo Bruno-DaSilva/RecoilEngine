@@ -991,6 +991,11 @@ void CGame::PostLoad()
 
 	Sim::systemUtils.NotifyPostLoad();
 
+	// sim|draw WS-5: creg rebuilds every command queue with a fresh version but
+	// fires no per-unit dirty push, so seed the epoch producer's dirty-list with
+	// all active units (design §9). No-op flag-off.
+	LuaSnapshotServe::MarkAllCmdQueuesDirty();
+
 	if (gameServer != nullptr) {
 		gameServer->PostLoad(gs->frameNum);
 	}

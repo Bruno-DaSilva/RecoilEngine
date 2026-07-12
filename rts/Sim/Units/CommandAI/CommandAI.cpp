@@ -114,6 +114,10 @@ CCommandAI::CCommandAI(CUnit* owner):
 	targetLostTimer(TARGET_LOST_TIMER),
 	cmdDescVersion(++nextGlobalCmdDescVersion) // sim|draw PR 30, see GetCmdDescVersion
 {
+	// sim|draw WS-5: plumb the owning unit id so queue/desc bumps push the
+	// dirty-list (owner->id is finalized in CUnit::PreInit before commandAI)
+	commandQue.ownerId = owner->id;
+
 	{
 		SCommandDescription c;
 
@@ -373,6 +377,11 @@ CCommandAI::CCommandAI(CUnit* owner):
 	}
 
 	UpdateNonQueueingCommands();
+
+	// sim|draw WS-5: creation choke -- arm every ring slot so each captures the
+	// fresh queue/descs (the ctor version draws already differ from any stale
+	// cache; this is what puts the new id into the drain domain)
+	CCommandQueue::MarkDirty(owner->id);
 }
 
 CCommandAI::~CCommandAI()

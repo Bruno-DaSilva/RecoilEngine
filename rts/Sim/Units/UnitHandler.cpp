@@ -295,6 +295,11 @@ void CUnitHandler::DeleteUnit(CUnit* delUnit)
 
 	BoundaryStats::Add(BoundaryStats::ctr.unitDestroyed);
 
+	// sim|draw WS-5: death choke -- arm every ring slot so each revisits the id
+	// and clears its stale queue to the nil shape (the drain re-reads GetUnit and
+	// finds null); required for completeness, preserves "dead ids serve nil".
+	CCommandQueue::MarkDirty(delUnit->id);
+
 	// we want to call RenderUnitDestroyed while the unit is still valid
 	renderEventQueue.RenderUnitDestroyed(delUnit);
 

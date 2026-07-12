@@ -189,7 +189,9 @@ protected:
 	// sim|draw PR 30 desc-surface choke point (see GetCmdDescVersion): the sole
 	// writer of cmdDescVersion; write only happens from sim context so a plain
 	// pre-incremented global read suffices
-	void BumpCmdDescVersion() { cmdDescVersion = ++nextGlobalCmdDescVersion; }
+	// sim|draw WS-5: the desc-surface bump rides the same dirty-list push as the
+	// queue bump (routed through commandQue's ownerId so a null owner is safe)
+	void BumpCmdDescVersion() { cmdDescVersion = ++nextGlobalCmdDescVersion; CCommandQueue::MarkDirty(commandQue.ownerId); }
 
 private:
 	// FIXME make synced?

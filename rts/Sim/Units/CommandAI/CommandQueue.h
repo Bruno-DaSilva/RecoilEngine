@@ -53,7 +53,21 @@ class CCommandQueue {
 		 * happen from sim context, so a plain increment suffices.
 		 */
 		uint64_t GetVersion() const { return version; }
-		void BumpVersion() { version = ++nextGlobalVersion; }
+		void BumpVersion() { version = ++nextGlobalVersion; MarkDirty(ownerId); }
+
+		// sim|draw WS-5: owning unit id, set by CCommandAI / CFactoryCAI via
+		// friend access. -1 => not owned yet (the ctor version draw, or a queue
+		// with no unit) so MarkDirty no-ops. Rides BumpVersion into the epoch
+		// producer's dirty-list (LuaSnapshotServe::RefreshCommandQueues).
+		int ownerId = -1;
+
+		// sim|draw WS-5: dirty-list push hook + invoker. Header-inline function
+		// pointer (installed by LuaSnapshotServe at startup) so every TU reaching
+		// this header stays link-clean whether or not it links LuaSnapshotServe;
+		// nullptr => inert (flag-off / test executables). The push writes only
+		// unsynced producer-side bookkeeping, so it is behavior-identical flag-off.
+		static inline void (*cmdDirtyHook)(int) = nullptr;
+		static void MarkDirty(int id) { if (cmdDirtyHook != nullptr && id >= 0) cmdDirtyHook(id); }
 
 		inline void push_back(const Command& cmd);
 		inline void push_front(const Command& cmd);

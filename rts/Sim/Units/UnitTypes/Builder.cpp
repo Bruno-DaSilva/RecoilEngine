@@ -230,6 +230,11 @@ bool CBuilder::UpdateTerraform(const Command&)
 				terraforming = false;
 				curBuildee->groundLevelled = true;
 
+				// sim|draw WS-5: this terraforming toggle can flip without the
+				// StopBuild below (TerraformComplete may return false), so the
+				// worker-task push must be explicit here
+				CCommandQueue::MarkDirty(id);
+
 				if (eventHandler.TerraformComplete(this, curBuildee)) {
 					StopBuild();
 				}
@@ -723,6 +728,14 @@ void CBuilder::StopBuild(bool callScript)
 		script->StopBuilding();
 
 	SetHoldFire(false);
+
+	// sim|draw WS-5: worker-task choke. curBuild/curReclaim/curResurrect/
+	// curCapture/terraforming feed ResolveWorkerTask but do NOT bump the queue.
+	// Every worker-task setter (SetRepairTarget/SetReclaimTarget/... /StartBuild/
+	// HelpTerraform) calls StopBuild(false) before installing the new target and
+	// the drain reads live at the boundary, so this single push covers the whole
+	// setter family (the "cleared" transition and the subsequent set).
+	CCommandQueue::MarkDirty(id);
 }
 
 
