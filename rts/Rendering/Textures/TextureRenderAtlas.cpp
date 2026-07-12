@@ -350,7 +350,7 @@ bool CTextureRenderAtlas::CreateAtlasTexture()
 	if (atlasRendered)
 		return true;
 
-	LOG_L(L_INFO, "CTextureRenderAtlas::%s()[0] atlas=%s FBO::ready=%d", __func__, atlasName.c_str(), FBO::IsReady());
+	// LOG_L(L_INFO, "CTextureRenderAtlas::%s()[0] atlas=%s FBO::ready=%d", __func__, atlasName.c_str(), FBO::IsReady());
 
 	if (!FBO::IsReady())
 		return false;
@@ -464,7 +464,7 @@ bool CTextureRenderAtlas::CreateAtlasTexture()
 		globalRendering->LoadViewport();
 	}
 
-	LOG_L(L_INFO, "CTextureRenderAtlas::%s()[1] atlas=%s atlasRendered=%d", __func__, atlasName.c_str(), atlasRendered);
+	// LOG_L(L_INFO, "CTextureRenderAtlas::%s()[1] atlas=%s atlasRendered=%d", __func__, atlasName.c_str(), atlasRendered);
 
 	if (!atlasRendered)
 		return false;
