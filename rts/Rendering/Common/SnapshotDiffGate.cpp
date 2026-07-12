@@ -1991,7 +1991,7 @@ void SnapshotDiffGate::CheckWeaponRows()
 			const CCannon* liveCannon = dynamic_cast<const CCannon*>(weapon);
 			const CBombDropper* liveBomb = dynamic_cast<const CBombDropper*>(weapon);
 			const bool traceEqual =
-				(rows.wWeaponClass[wi] == static_cast<uint8_t>(trace::ClassifyWeapon(weapon))) &&
+				(rows.wWeaponClass[wi] == static_cast<uint8_t>(trace::ClassifyWeaponSlow(weapon))) &&
 				(rows.wWeaponDefID[wi] == ((wdef != nullptr) ? wdef->id : -1)) &&
 				BitEqual(rows.wAimFromPos[wi], weapon->aimFromPos) &&
 				BitEqual(rows.wRelAimFromPos[wi], weapon->relAimFromPos) &&

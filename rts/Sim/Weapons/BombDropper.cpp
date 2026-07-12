@@ -32,6 +32,7 @@ CBombDropper::CBombDropper(CUnit* owner, const WeaponDef* def, bool useTorps)
 	: CWeapon(owner, def)
 	, dropTorpedoes(useTorps)
 {
+	weaponClass = trace::WeaponClass::BombDropper;
 	// null happens when loading
 	if (def != nullptr) {
 		torpMoveRange = def->range * useTorps;

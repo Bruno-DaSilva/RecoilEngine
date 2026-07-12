@@ -19,6 +19,7 @@ CR_REG_METADATA(CLaserCannon, (
 CLaserCannon::CLaserCannon(CUnit* owner, const WeaponDef* def): CWeapon(owner, def)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	weaponClass = trace::WeaponClass::LaserCannon;
 	//happens when loading
 	if (def != nullptr)
 		color = def->visuals.color;

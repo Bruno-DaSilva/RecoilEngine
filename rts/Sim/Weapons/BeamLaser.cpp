@@ -90,6 +90,7 @@ CBeamLaser::CBeamLaser(CUnit* owner, const WeaponDef* def)
 	, salvoDamageMult(1.0f)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	weaponClass = trace::WeaponClass::BeamLaser;
 	// null happens when loading
 	if (def != nullptr)
 		color = def->visuals.color;

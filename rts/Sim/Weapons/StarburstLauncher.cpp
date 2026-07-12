@@ -21,6 +21,7 @@ CR_REG_METADATA(CStarburstLauncher, (
 CStarburstLauncher::CStarburstLauncher(CUnit* owner, const WeaponDef* def): CWeapon(owner, def)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	weaponClass = trace::WeaponClass::StarburstLauncher;
 	// null happens when loading
 	if (def != nullptr) {
 		tracking = weaponDef->turnrate * def->tracks;

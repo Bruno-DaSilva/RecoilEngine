@@ -23,6 +23,7 @@ CR_REG_METADATA(CLightningCannon, (
 CLightningCannon::CLightningCannon(CUnit* owner, const WeaponDef* def): CWeapon(owner, def)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	weaponClass = trace::WeaponClass::LightningCannon;
 	// null happens when loading
 	if (def != nullptr)
 		color = def->visuals.color;

@@ -9,7 +9,7 @@ class CEmgCannon: public CWeapon
 {
 	CR_DECLARE_DERIVED(CEmgCannon)
 public:
-	CEmgCannon(CUnit* owner = nullptr, const WeaponDef* def = nullptr): CWeapon(owner, def) {}
+	CEmgCannon(CUnit* owner = nullptr, const WeaponDef* def = nullptr): CWeapon(owner, def) { weaponClass = trace::WeaponClass::EmgCannon; }
 
 private:
 	void FireImpl(const bool scriptCall) override final;

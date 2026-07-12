@@ -23,6 +23,11 @@ namespace trace {
 
 WeaponClass ClassifyWeapon(const CWeapon* w)
 {
+	return w->GetWeaponClass();
+}
+
+WeaponClass ClassifyWeaponSlow(const CWeapon* w)
+{
 	// Order matches the trace override matrix; every weapon subclass derives
 	// directly from CWeapon (flat hierarchy), so the chain has no ambiguity.
 	// Classes with no trace-reachable override fall through to Base.

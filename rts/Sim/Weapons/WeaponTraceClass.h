@@ -39,9 +39,12 @@ enum class WeaponClass : uint8_t {
 	DGunWeapon,
 };
 
-// Map a live CWeapon* to its WeaponClass (defined in WeaponTraceClass.cpp, which
-// pulls in every subclass header for the dynamic_cast chain). Used by the epoch
-// extractor + the diff gate; bounded by the live weapon count, extraction-only.
+// Map a live CWeapon* to its WeaponClass. ClassifyWeapon reads the construction-
+// time tag stamped by each subclass ctor (a single byte load); it is the hot path
+// used by the epoch extractor + the live trace predicates. ClassifyWeaponSlow
+// walks the dynamic_cast chain (defined in WeaponTraceClass.cpp, which pulls in
+// every subclass header) and is retained as RTTI ground-truth for the diff gate.
 WeaponClass ClassifyWeapon(const CWeapon* w);
+WeaponClass ClassifyWeaponSlow(const CWeapon* w);
 
 } // namespace trace

@@ -26,7 +26,7 @@ protected:
 	bool highTrajectory = false;
 
 public:
-	CCannon(CUnit* owner = nullptr, const WeaponDef* def = nullptr): CWeapon(owner, def) {}
+	CCannon(CUnit* owner = nullptr, const WeaponDef* def = nullptr): CWeapon(owner, def) { weaponClass = trace::WeaponClass::Cannon; }
 
 	void Init() override final;
 	void UpdateRange(const float val) override final;

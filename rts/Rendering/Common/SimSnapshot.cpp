@@ -1426,6 +1426,7 @@ void SimSnapshot::Extract(UnitRows& rows)
 				const CWeapon* weapon = weapons[w];
 				const WeaponDef* wdef = weapon->weaponDef;
 				const int wi = base + static_cast<int>(w);
+				const trace::WeaponClass wc = trace::ClassifyWeapon(weapon);
 
 				// GetUnitWeaponState
 				rows.wAngleGood[wi] = weapon->angleGood;
@@ -1460,7 +1461,7 @@ void SimSnapshot::Extract(UnitRows& rows)
 				rows.wDefStockpile[wi] = wdef->stockpile;
 				rows.wDefFireSubmersed[wi] = wdef->fireSubmersed;
 				rows.wDefMaxFireAngle[wi] = wdef->maxFireAngle;
-				rows.wIsBombDropper[wi] = (dynamic_cast<const CBombDropper*>(weapon) != nullptr);
+				rows.wIsBombDropper[wi] = (wc == trace::WeaponClass::BombDropper);
 				rows.wAimFromPosY[wi] = weapon->aimFromPos.y;
 				rows.wLastRequestedDir[wi] = weapon->lastRequestedDir;
 
@@ -1473,8 +1474,9 @@ void SimSnapshot::Extract(UnitRows& rows)
 				rows.wTargetInterceptID[wi] = (tgt.type == Target_Intercept && tgt.intercept != nullptr) ? tgt.intercept->id : 0;
 
 				// GetUnitShieldState explicit-weapon case (dynamic_cast in the live path)
-				const CPlasmaRepulser* repulser = dynamic_cast<const CPlasmaRepulser*>(weapon);
-				rows.wIsShield[wi] = (repulser != nullptr);
+				const bool isRepulser = (wc == trace::WeaponClass::PlasmaRepulser);
+				const CPlasmaRepulser* repulser = isRepulser ? static_cast<const CPlasmaRepulser*>(weapon) : nullptr;
+				rows.wIsShield[wi] = isRepulser;
 				rows.wShieldEnabled[wi] = (repulser != nullptr) ? uint8_t(repulser->IsEnabled()) : uint8_t(0);
 				rows.wShieldPower[wi] = (repulser != nullptr) ? repulser->GetCurPower() : 0.0f;
 
@@ -1485,7 +1487,6 @@ void SimSnapshot::Extract(UnitRows& rows)
 				// CWeapon members read by TryTarget/TestTarget/TestRange/
 				// HaveFreeLineOfFire/GetLeadTargetPos; immutable weaponDef scalars are
 				// read draw-side via wWeaponDefID, so they are NOT copied here.
-				const trace::WeaponClass wc = trace::ClassifyWeapon(weapon);
 				rows.wWeaponClass[wi] = static_cast<uint8_t>(wc);
 				rows.wWeaponDefID[wi] = (wdef != nullptr) ? wdef->id : -1;
 				rows.wAimFromPos[wi] = weapon->aimFromPos;

@@ -20,6 +20,7 @@ CR_REG_METADATA(CTorpedoLauncher,(
 CTorpedoLauncher::CTorpedoLauncher(CUnit* owner, const WeaponDef* def): CWeapon(owner, def)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	weaponClass = trace::WeaponClass::TorpedoLauncher;
 	// null happens when loading
 	if (def != nullptr)
 		tracking = weaponDef->turnrate * def->tracks;
