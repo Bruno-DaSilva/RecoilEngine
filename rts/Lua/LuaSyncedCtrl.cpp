@@ -822,7 +822,7 @@ static int SetSolidObjectPieceCollisionVolumeData(lua_State* L, CSolidObject* ob
 	if (lmp == nullptr)
 		luaL_argerror(L, 2, "invalid piece");
 
-	CollisionVolume* vol = lmp->GetCollisionVolume();
+	CollisionVolume* vol = lmp->GetCollisionVolumeMutable();
 
 	const float3 scales(luaL_checkfloat(L, 4), luaL_checkfloat(L, 5), luaL_checkfloat(L, 6));
 	const float3 offset(luaL_checkfloat(L, 7), luaL_checkfloat(L, 8), luaL_checkfloat(L, 9));

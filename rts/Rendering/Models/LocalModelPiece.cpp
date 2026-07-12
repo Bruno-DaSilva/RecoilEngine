@@ -77,8 +77,20 @@ LocalModelPiece::~LocalModelPiece()
 	spring::SafeDelete(colvol);
 }
 
+void LocalModelPiece::BumpTreeVersion()
+{
+	assert(localModel != nullptr);
+	localModel->BumpPieceTreeVersion();
+}
+
 void LocalModelPiece::SetDirty() {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// WS-1 §4.1-A/B: the piece pos/rot/scale + matrix-poke mutation choke.
+	// Bumping only on the SetFloat3/SetFloat !dirty entry is sufficient because
+	// every capture/extraction edge leaves all pieces clean (accessor recompute
+	// or the anim-tick BFS), so any later value change re-enters here (§3.3).
+	// The child recursion over-bumps (once per non-dirty child) -- harmless.
+	BumpTreeVersion();
 	dirty = true;
 
 	for (LocalModelPiece* child: children) {
@@ -164,6 +176,9 @@ const CMatrix44f& LocalModelPiece::GetModelSpaceMatrix() const
 
 void LocalModelPiece::SetScriptVisible(bool b)
 {
+	// WS-1 §4.1-C (conservative: bumps on a same-value write too)
+	BumpTreeVersion();
+
 	scriptSetVisible = b;
 	wasUpdated[0] = true; //update for current frame
 }

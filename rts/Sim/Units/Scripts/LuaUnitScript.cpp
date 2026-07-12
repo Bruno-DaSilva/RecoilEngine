@@ -1168,6 +1168,10 @@ int CLuaUnitScript::CreateScript(lua_State* L)
 
 	// replace the unit's script (ctor parses callIn table)
 	unit->script = CUnitScriptFactory::CreateLuaScript(unit, L);
+
+	// WS-1 §4.1-E: the swap changes the served script->model piece mapping
+	// (GetUnitScriptPiece/Names) while the piece tree may be value-identical
+	unit->localModel.BumpPieceTreeVersion();
 	return 0;
 }
 

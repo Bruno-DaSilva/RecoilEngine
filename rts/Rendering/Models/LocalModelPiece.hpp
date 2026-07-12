@@ -69,9 +69,13 @@ struct LocalModelPiece
 	void SetRotation(const float3& r) { SetFloat3(r, rot); } // anim-script only
 	void SetScaling(const float& s) { SetFloat(s, scale); }    // anim-script only
 
-	void SetRotationNoInterpolation(bool noInterpolate) { noInterpolation[0] = noInterpolate; }
-	void SetPositionNoInterpolation(bool noInterpolate) { noInterpolation[1] = noInterpolate; }
-	void SetScalingNoInterpolation (bool noInterpolate) { noInterpolation[2] = noInterpolate; }
+	// WS-1 §4.1-G: arming no-interpolation changes draw-consumed piece state even
+	// when the paired Set{Rotation,Position,Scaling} write bumps nothing (value
+	// unchanged or piece already dirty); bump on the false->true transition only.
+	// The per-tick disarm calls and the draw-side ResetWasUpdated must not bump.
+	void SetRotationNoInterpolation(bool noInterpolate) { if (noInterpolate && !noInterpolation[0]) BumpTreeVersion(); noInterpolation[0] = noInterpolate; }
+	void SetPositionNoInterpolation(bool noInterpolate) { if (noInterpolate && !noInterpolation[1]) BumpTreeVersion(); noInterpolation[1] = noInterpolate; }
+	void SetScalingNoInterpolation (bool noInterpolate) { if (noInterpolate && !noInterpolation[2]) BumpTreeVersion(); noInterpolation[2] = noInterpolate; }
 
 	void SetWasUpdatedRaw(bool state = true) { wasUpdated[0] = state; }
 	auto GetWasUpdated() const { return wasUpdated[0] || wasUpdated[1]; }
@@ -90,7 +94,11 @@ struct LocalModelPiece
 	const CMatrix44f& GetModelSpaceMatrix()    const;
 
 	const CollisionVolume* GetCollisionVolume() const { return colvol; }
-	      CollisionVolume* GetCollisionVolume()       { return colvol; }
+	// WS-1 §4.1-D: the only mutable access to the piece colvol -- bumping at the
+	// acquisition choke closes the Set*PieceCollisionVolumeData mutation path,
+	// and the rename is the compiler lock (read paths resolve to the const
+	// overload; a new writer must go through here)
+	CollisionVolume* GetCollisionVolumeMutable() { BumpTreeVersion(); return colvol; }
 
 	bool GetScriptVisible() const { return scriptSetVisible; }
 	void SetScriptVisible(bool b);
@@ -101,6 +109,8 @@ struct LocalModelPiece
 
 	void PostLoad();
 private:
+	void BumpTreeVersion();
+
 	mutable CMatrix44f modelSpaceMat; // transform relative to root LMP (SYNCED), chained pieceSpaceMat's
 	mutable Transform pieceSpaceTra;  // transform relative to parent LMP (SYNCED), combines <pos> and <rot>
 	mutable Transform modelSpaceTra;  // transform relative to root LMP (SYNCED), chained pieceSpaceTra's

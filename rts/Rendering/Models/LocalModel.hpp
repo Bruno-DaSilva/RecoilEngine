@@ -78,7 +78,35 @@ struct LocalModel
 
 	void SetBoundariesNeedsRecalc()       { needsBoundariesRecalc = true; }
 	bool GetBoundariesNeedsRecalc() const { return needsBoundariesRecalc; }
+
+	// sim|draw WS-1: piece-tree capture version, packed {instanceSeed:32 |
+	// localCount:32}. The seed is assigned from a process-wide monotonic source
+	// in SetModel ONLY (unit/feature creation and creg PostLoad, both single-
+	// threaded contexts), so values are unique across LocalModel instances and a
+	// died-then-reused id can never alias a predecessor's captured version. The
+	// count is a plain per-instance increment at every piece-mutation choke
+	// (LocalModelPiece::SetDirty / SetScriptVisible / colvol + no-interpolation
+	// chokes, CLuaUnitScript::CreateScript): the anim-tick for_mt partitions by
+	// unit script (one script per unit, touching only its own model's pieces)
+	// and every other mutator is single-threaded sim code phase-separated from
+	// it, so the member is single-writer at any instant -- no atomics. Readers
+	// (the epoch producer's piece capture, WS-2's transform extraction) run at
+	// the sim frame edge, after the anim for_mt joined. localCount wraps after
+	// 2^32 bumps of one instance (~33 days of continuous max-rate animation),
+	// the only false-skip mode -- accepted and documented (WS-2 §7 ask 1). The
+	// masked increment keeps the seed bits intact across a wrap. The draw-side
+	// ResetWasUpdated must never bump (it is not a sim mutation).
+	uint64_t GetPieceTreeVersion() const { return pieceTreeVersion; }
+	void BumpPieceTreeVersion() {
+		pieceTreeVersion = (pieceTreeVersion & PIECE_TREE_SEED_MASK) | ((pieceTreeVersion + 1) & PIECE_TREE_COUNT_MASK);
+	}
+
 private:
+	static constexpr uint64_t PIECE_TREE_SEED_MASK  = 0xFFFFFFFF00000000ull;
+	static constexpr uint64_t PIECE_TREE_COUNT_MASK = 0x00000000FFFFFFFFull;
+
+	void SeedPieceTreeVersion();
+
 	LocalModelPiece* CreateLocalModelPieces(const S3DModelPiece* mpParent);
 
 	void DrawPieces() const;
@@ -92,4 +120,6 @@ private:
 	CollisionVolume boundingVolume;
 
 	bool needsBoundariesRecalc = true;
+
+	uint64_t pieceTreeVersion = 0;
 };
