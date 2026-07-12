@@ -86,6 +86,8 @@ DiffGateCtrlPokes = ${DG_CTRL_POKES:-0}
 DiffGateForce1x = ${DG_FORCE_1X:-0}
 SplitDrawContract = ${DG_SPLIT_CONTRACT:-0}
 SplitDrawContractWarn = ${DG_SPLIT_CONTRACT_WARN:-1}
+DiffGateProfDumpStart = ${DG_PROF_START:-0}
+DiffGateProfDumpEnd = ${DG_PROF_END:-0}
 WorkerThreadCount = ${WORKERS:--1}
 EOF
 

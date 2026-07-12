@@ -98,6 +98,14 @@ function widget:Initialize()
 		Spring.SendCommands("setspeed 20")
 		Spring.SendCommands("speedcontrol 0")
 	end
+
+	-- DG_PROF_START/DG_PROF_END: schedule a /profiledump over [start,end]
+	-- (issued once, prospectively -- StartDump samples from CGame::SimFrame)
+	local profStart = Spring.GetConfigInt("DiffGateProfDumpStart", 0)
+	local profEnd   = Spring.GetConfigInt("DiffGateProfDumpEnd", 0)
+	if profStart > 0 and profEnd > profStart then
+		Spring.SendCommands(("profiledump %d %d %s_profdump.csv"):format(profStart, profEnd, label))
+	end
 end
 
 local function PickPovTeam()
