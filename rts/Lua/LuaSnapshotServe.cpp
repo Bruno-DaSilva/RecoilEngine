@@ -6170,12 +6170,14 @@ namespace {
 	constexpr uint8_t CMD_ALL_SLOTS_MASK = (1u << SimSnapshot::EPOCH_RING_SLOTS) - 1;
 	std::vector<uint8_t> cmdDirtyPending;
 	std::vector<int> cmdDirtyActive;
+	bool cmdDirtySeeded = false;
 
 	void MarkCmdDirtyImpl(int id)
 	{
 		// flag-off the producer never drains, so keep the structures untouched
-		// (byte-identical, no unbounded growth); the push is inert.
-		if (!SimDrawSplit::Enabled())
+		// (byte-identical, no unbounded growth); the push is inert. The armed
+		// diff-gate dual-runs the producer flag-off, so it needs the pushes too.
+		if (!SimDrawSplit::Enabled() && !snapshotDiffGate.Armed())
 			return;
 
 		const size_t maxUnits = unitHandler.MaxUnits();
@@ -6661,6 +6663,14 @@ void LuaSnapshotServe::RefreshCommandQueues(int ringSlot, uint64_t targetEpoch)
 
 	if (cmdQueueCache.size() != maxUnits)
 		cmdQueueCache.resize(maxUnits);
+
+	// first produce of a game: the creation chokes may predate the split/gate
+	// becoming push-eligible (load order), so seed the drain domain with every
+	// active unit once; ClearCaches resets the seed for the next game
+	if (!cmdDirtySeeded) {
+		cmdDirtySeeded = true;
+		MarkAllCmdQueuesDirty();
+	}
 
 	const uint8_t slotBit = uint8_t(1u << ringSlot);
 
@@ -8765,6 +8775,7 @@ void LuaSnapshotServe::ClearCaches()
 	cmdDirtyPending.shrink_to_fit();
 	cmdDirtyActive.clear();
 	cmdDirtyActive.shrink_to_fit();
+	cmdDirtySeeded = false;
 
 	// PR 33 piece caches: unit/feature ids and model pointers restart with the
 	// next game, so a surviving entry could alias fresh ones
