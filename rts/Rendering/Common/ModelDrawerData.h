@@ -1,5 +1,10 @@
 #pragma once
 
+#include <algorithm>
+#include <atomic>
+#include <cstring>
+#include <type_traits>
+#include <utility>
 #include <vector>
 #include <array>
 #include <cstdint>
@@ -10,6 +15,7 @@
 
 #include "System/EventClient.h"
 #include "System/EventHandler.h"
+#include "System/Log/ILog.h"
 #include "System/ContainerUtil.h"
 #include "System/Config/ConfigHandler.h"
 #include "System/Threading/ThreadPool.h"
@@ -41,6 +47,28 @@ const T* DrawerGetObjectByID(int id);
 // split-aware DrawerGetObjectByID wraps it (PR 27b)
 template<typename T>
 const T* DrawerResolveLiveObjectByID(int id);
+
+// sim|draw WS-2 (doc/sim-draw-split-optimization/transforms-dirty-skip.md §4):
+// the object half of the whole-object transform-skip key is a bitwise value-
+// shadow of exactly the values ExtractObjectTransforms consumes, NOT a
+// mutation-choke version -- the dir vectors are public members mutated by
+// reference-aliasing arithmetic all over the movetypes, so no finite choke
+// set exists for them. Both structs are padding-free (memcmp-comparable);
+// the feature matrix is stored as raw floats because CMatrix44f's alignas(64)
+// would introduce 52 B of indeterminate tail padding.
+struct UnitTransformSkipKey {
+	float3 pos;
+	float3 frontdir;
+	float3 rightdir;
+	float3 updir;
+};
+static_assert(sizeof(UnitTransformSkipKey) == 4 * sizeof(float3));
+
+struct FeatureTransformSkipKey {
+	float transMat[16]; // CFeature::transMatrix (what GetTransformMatrix() serves)
+	float3 pos;         // keyed separately: preFrameTra.t is taken from pos, not the matrix
+};
+static_assert(sizeof(FeatureTransformSkipKey) == 16 * sizeof(float) + sizeof(float3));
 
 class CModelDrawerDataConcept : public CEventClient {
 public:
@@ -103,6 +131,7 @@ protected:
 
 private:
 	void ExtractObjectTransforms(const T* o);
+	void RunTransformSkipOracle(const T* o);
 	void UpdateObjectUniforms(const T* o);
 public:
 	// object ids; resolve via DrawerGetObjectByID<T> (see above)
@@ -227,10 +256,52 @@ protected:
 
 	std::vector<int> unsortedObjects; // object ids (see GetUnsortedObjects)
 
+	// sim|draw WS-2: whole-object dirty-skip record for ExtractObjectTransforms
+	// (transforms-dirty-skip.md §3). Dense id-indexed like drawPositions; slots
+	// go stale on death and are reset by the id's next AddObject. Owned by the
+	// extraction's single caller context (sim thread at the frame edge under
+	// the split; main thread otherwise -- the split-off for_mt walk writes
+	// disjoint per-id slots, the same discipline as the storage writes).
+	using TransformSkipKey = std::conditional_t<std::is_same_v<T, CUnit>, UnitTransformSkipKey, FeatureTransformSkipKey>;
+
+	struct TransformSkipState {
+		TransformSkipKey key = {};     // value-shadow of the last completed walk
+		uint64_t pieceTreeVersion = 0; // WS-1 LocalModel counter seen at that walk
+		int32_t lastWalkFrame = std::numeric_limits<int32_t>::lowest(); // sim frame of that walk (pending re-extractions can re-walk the same frame; those must not double-count a quiescent edge)
+		uint8_t quiescentEdges = 0;    // consecutive unchanged frame edges, saturating at 2
+		bool everWalked = false;       // false until the first completed walk primes the record
+	};
+
+	static TransformSkipKey CurrentTransformSkipKey(const T* o) {
+		TransformSkipKey key;
+		if constexpr (std::is_same_v<T, CUnit>) {
+			key.pos = o->pos;
+			key.frontdir = o->frontdir;
+			key.rightdir = o->rightdir;
+			key.updir = o->updir;
+		} else {
+			std::memcpy(key.transMat, o->GetTransformMatrixRef().m, sizeof(key.transMat));
+			key.pos = o->pos;
+		}
+		return key;
+	}
+
 	// SCOPE-1: splitResolveCache/splitResolveCacheBuilt DELETED — id->object
 	// resolution now uses the drawer-owned render record's deferred-safe handle.
 	std::vector<DrawPosition> drawPositions; // indexed by object id
 	std::vector<DrawFlagState> drawFlags;    // indexed by object id
+	std::vector<TransformSkipState> transformSkipStates; // indexed by object id (WS-2)
+
+	// WS-2 skip-rate counters (always-on; atomics only for the split-off
+	// for_mt walk) + the oracle's teardown counters, logged in the dtor
+	std::atomic<uint64_t> traObjGated{0};
+	std::atomic<uint64_t> traObjWalked{0};
+	std::atomic<uint64_t> traObjSkipped{0};
+	std::atomic<uint64_t> traSkipOracleChecked{0};
+	std::atomic<uint64_t> traSkipOracleMismatched{0};
+	// SimDrawTransformSkipOracle cadence, latched once per extraction pass
+	uint64_t transformSkipOracleEpochs = 0;
+	bool transformSkipOracleThisEpoch = false;
 	spring::unordered_map<int, ScopedTransformMemAlloc> scTransMemAllocMap; // keyed by object id
 
 	// last sim frame ExtractTransforms() ran for; extraction is due once per new sim frame
@@ -267,6 +338,17 @@ inline CModelDrawerDataBase<T>::CModelDrawerDataBase(const std::string& ecName, 
 template<typename T>
 inline CModelDrawerDataBase<T>::~CModelDrawerDataBase()
 {
+	// WS-2 teardown telemetry (skip-rate + oracle verdict for the gate report)
+	if (traObjWalked.load(std::memory_order_relaxed) > 0 || traObjSkipped.load(std::memory_order_relaxed) > 0) {
+		LOG("[EpochStats] transformSkip(%s): gated=%llu walked=%llu skipped=%llu oracleChecked=%llu oracleMismatched=%llu",
+			GetName().c_str(),
+			(unsigned long long)traObjGated.load(std::memory_order_relaxed),
+			(unsigned long long)traObjWalked.load(std::memory_order_relaxed),
+			(unsigned long long)traObjSkipped.load(std::memory_order_relaxed),
+			(unsigned long long)traSkipOracleChecked.load(std::memory_order_relaxed),
+			(unsigned long long)traSkipOracleMismatched.load(std::memory_order_relaxed));
+	}
+
 	unsortedObjects.clear();
 	scTransMemAllocMap.clear();
 }
@@ -292,6 +374,11 @@ inline void CModelDrawerDataBase<T>::AddObject(const T* o, bool add)
 		drawFlags.resize(o->id + 1);
 
 	drawFlags[o->id] = {}; // SO_NODRAW_FLAG until the first UpdateObjectDrawFlags, as the old members were
+
+	if (o->id >= transformSkipStates.size())
+		transformSkipStates.resize(o->id + 1);
+
+	transformSkipStates[o->id] = {}; // everWalked=false: the id's first extraction always walks and primes the key (covers id reuse and creg reload)
 
 	const uint32_t numMatrices = ((o->model ? o->model->numPieces : 0) + 1u) * 2;
 	scTransMemAllocMap.emplace(o->id, ScopedTransformMemAlloc(numMatrices));
@@ -396,6 +483,12 @@ inline void CModelDrawerDataBase<T>::ExtractTransforms(bool allowMT)
 
 	SCOPED_TIMER("Update::ExtractTransforms");
 
+	// WS-2 §8 value-equivalence oracle cadence (SimDrawTransformSkipOracle=N,
+	// 0 = off): every N extraction passes, re-extract each skipped object into
+	// scratch and compare against the storage it claims is current
+	const int oracleN = configHandler->GetInt("SimDrawTransformSkipOracle");
+	transformSkipOracleThisEpoch = (oracleN > 0) && ((++transformSkipOracleEpochs % oracleN) == 0);
+
 	if (mtModelDrawer && allowMT) {
 		for_mt_chunk(0, unsortedObjects.size(), [this](const int k) {
 			ExtractObjectTransforms(DrawerGetObjectByID<T>(unsortedObjects[k]));
@@ -411,8 +504,73 @@ inline void CModelDrawerDataBase<T>::ExtractObjectTransforms(const T* o)
 {
 	// keep master's information surface (see comment above); alwaysUpdateMat keeps
 	// its master meaning of forcing transform updates for non-visible objects
-	if (!gu->spectatingFullView && !o->alwaysUpdateMat && !o->IsInLosForAllyTeam(gu->myAllyTeam))
+	if (!gu->spectatingFullView && !o->alwaysUpdateMat && !o->IsInLosForAllyTeam(gu->myAllyTeam)) {
+		traObjGated.fetch_add(1, std::memory_order_relaxed);
 		return;
+	}
+
+	/* sim|draw WS-2 whole-object dirty-skip (transforms-dirty-skip.md §3-§5).
+	 * Skip contract: skip ==> the storage already holds exactly what a full
+	 * walk would leave behind. Three legs carry it:
+	 *  1. Object slots [0]/[1] are pure (per-machine-deterministic) functions
+	 *     of the value-shadow key. Units: GetTransformMatrix() ==
+	 *     ComposeMatrix(pos) reads only {pos, -rightdir, updir, frontdir},
+	 *     and preFrameTra is Transform{MakeFrom(that matrix), pos} recomputed
+	 *     from the same four vectors at frame start. Features:
+	 *     GetTransformMatrix() serves the stored transMatrix and preFrameTra
+	 *     derives from {transMatrix, pos}. The key bitwise-compares those
+	 *     CONSUMED values at the edge, so every mutation path -- including the
+	 *     movetypes' in-place `frontdir += ...` compound writes through
+	 *     SyncedFloat3 references, transport attach dir pokes, and paths
+	 *     nobody has written yet -- lands in the compare; there is no choke
+	 *     inventory to miss. A bitwise-unchanged key reproduces bit-identical
+	 *     decomposed transforms.
+	 *  2. Piece slots are pure functions of piece-local state (pos/rot/scale/
+	 *     pieceSpaceTra, scriptSetVisible, noInterpolation, blockScriptAnims
+	 *     + the parent chain); every mutation choke for that state bumps the
+	 *     WS-1 piece-tree version (LocalModelPiece::SetDirty entry,
+	 *     SetScriptVisible, colvol acquisition, no-interpolation arming,
+	 *     CLuaUnitScript::CreateScript), so an unchanged version means no
+	 *     piece content changed since the last completed walk.
+	 *  3. quiescentEdges >= 2 hoists the wasUpdated[2] double-trigger to
+	 *     object granularity: the FIRST unchanged frame edge after any change
+	 *     still walks -- that walk uploads the settled slot-[0] preFrameTra
+	 *     (re-saved from the final pose at the start of the frame AFTER the
+	 *     last mutation) and the pieces' settled prevModelSpaceTra. Only the
+	 *     second consecutive unchanged frame edge skips; by then every piece
+	 *     has wasUpdated == {false,false} and dirty == false, so the skipped
+	 *     walk would have written nothing.
+	 * The record is refreshed ONLY at the end of a completed walk (the LOS
+	 * gate return above never touches it), so key/version always describe the
+	 * sim state at the moment the storage was last written -- changes made
+	 * while gated out of extraction force a walk on the next gate-passing
+	 * edge, which is what makes LOS re-entry / spectatingFullView toggles /
+	 * allyteam switches need no invalidation hooks. alwaysUpdateMat objects
+	 * never skip (conservative: their Lua consumers force-walk every edge). */
+	TransformSkipState& skip = transformSkipStates[o->id];
+	const TransformSkipKey curKey = CurrentTransformSkipKey(o);
+	const uint64_t curPieceTreeVersion = o->localModel.GetPieceTreeVersion();
+
+	const bool unchanged =
+		skip.everWalked &&
+		(skip.pieceTreeVersion == curPieceTreeVersion) &&
+		(std::memcmp(&skip.key, &curKey, sizeof(TransformSkipKey)) == 0);
+
+	if (!unchanged)
+		skip.quiescentEdges = 0;
+	else if (gs->frameNum != skip.lastWalkFrame) // same-frame re-walks (pending re-extractions) are not new edges
+		skip.quiescentEdges = std::min<uint8_t>(skip.quiescentEdges + 1, 2);
+
+	if (unchanged && skip.quiescentEdges >= 2 && !o->alwaysUpdateMat) {
+		traObjSkipped.fetch_add(1, std::memory_order_relaxed);
+
+		if unlikely(transformSkipOracleThisEpoch)
+			RunTransformSkipOracle(o);
+
+		return;
+	}
+
+	traObjWalked.fetch_add(1, std::memory_order_relaxed);
 
 	ScopedTransformMemAlloc& stma = GetObjectTransformMemAlloc(o);
 
@@ -443,6 +601,79 @@ inline void CModelDrawerDataBase<T>::ExtractObjectTransforms(const T* o)
 
 		lmp.ResetWasUpdated();
 	}
+
+	// WS-2: refresh the skip record only on a completed walk (see above)
+	skip.key = curKey;
+	skip.pieceTreeVersion = curPieceTreeVersion;
+	skip.lastWalkFrame = gs->frameNum;
+	skip.everWalked = true;
+}
+
+/* WS-2 §8 value-equivalence oracle: for an object the skip predicate just
+ * skipped, recompute everything a full walk would reconcile and compare it
+ * against the storage. Object slots go through UpdateIfChanged's eps-compare,
+ * so "what a walk would leave" differs from the stored bytes only when the
+ * recomputed value fails Transform::equals; piece slots are UpdateForced
+ * (exact bytes of the piece's cached transforms), so those compare bitwise.
+ * Read-only: no ResetWasUpdated, no storage writes -- the piece reads may
+ * recompute a dirty piece, which is legal at the edge (sim quiescent) and
+ * side-effect-equivalent to what the skipped walk would have done. A mismatch
+ * names a mutation path that reached SSBO-feeding state without perturbing
+ * the skip key -- the "missed a path" failure class turned into a log line. */
+template<typename T>
+inline void CModelDrawerDataBase<T>::RunTransformSkipOracle(const T* o)
+{
+	const auto& stma = std::as_const(*this).GetObjectTransformMemAlloc(o);
+
+	if (!stma.Valid())
+		return;
+
+	traSkipOracleChecked.fetch_add(1, std::memory_order_relaxed);
+
+	const char* diff = nullptr;
+	int diffPiece = -1;
+
+	const auto& tmPrev = o->preFrameTra;
+	const auto  tmCurr = Transform::FromMatrix(o->GetTransformMatrix());
+
+	if (!stma[0].equals(tmPrev)) {
+		diff = "objPrev";
+	} else if (!stma[1].equals(tmCurr)) {
+		diff = "objCurr";
+	} else {
+		for (int i = 0; i < o->localModel.pieces.size(); ++i) {
+			const LocalModelPiece& lmp = o->localModel.pieces[i];
+
+			Transform expPrev;
+			Transform expCurr;
+
+			if (!lmp.GetScriptVisible()) {
+				expPrev = Transform::Zero();
+				expCurr = Transform::Zero();
+			} else {
+				expPrev = lmp.GetEffectivePrevModelSpaceTransform();
+				expCurr = lmp.GetModelSpaceTransform();
+			}
+
+			if (std::memcmp(&stma[2 * (1 + i) + 0], &expPrev, sizeof(Transform)) != 0) {
+				diff = "piecePrev";
+				diffPiece = i;
+				break;
+			}
+			if (std::memcmp(&stma[2 * (1 + i) + 1], &expCurr, sizeof(Transform)) != 0) {
+				diff = "pieceCurr";
+				diffPiece = i;
+				break;
+			}
+		}
+	}
+
+	if (diff == nullptr)
+		return;
+
+	traSkipOracleMismatched.fetch_add(1, std::memory_order_relaxed);
+	LOG_L(L_ERROR, "[TransformSkipOracle] %s id=%d field=%s piece=%d frame=%d (skip predicate claimed quiescence over stale storage)",
+			GetName().c_str(), o->id, diff, diffPiece, gs->frameNum);
 }
 
 template<typename T>
