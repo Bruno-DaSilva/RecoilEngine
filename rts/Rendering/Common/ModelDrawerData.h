@@ -70,6 +70,9 @@ struct FeatureTransformSkipKey {
 };
 static_assert(sizeof(FeatureTransformSkipKey) == 16 * sizeof(float) + sizeof(float3));
 
+// the preFrameTra shadow is memcmp-compared; Transform must stay padding-free
+static_assert(sizeof(Transform) == sizeof(CQuaternion) + sizeof(float3) + sizeof(float));
+
 class CModelDrawerDataConcept : public CEventClient {
 public:
 	CModelDrawerDataConcept(const std::string& ecName, int ecOrder)
@@ -266,6 +269,7 @@ protected:
 
 	struct TransformSkipState {
 		TransformSkipKey key = {};     // value-shadow of the last completed walk
+		Transform preFrameTra = Transform{}; // slot-[0] input shadow (see predicate leg 1: preFrameTra is a frame-START sample the edge key does not cover)
 		uint64_t pieceTreeVersion = 0; // WS-1 LocalModel counter seen at that walk
 		int32_t lastWalkFrame = std::numeric_limits<int32_t>::lowest(); // sim frame of that walk (pending re-extractions can re-walk the same frame; those must not double-count a quiescent edge)
 		uint8_t quiescentEdges = 0;    // consecutive frame-distinct walks that were unchanged AND wrote no piece slots, saturating at 2
@@ -378,7 +382,7 @@ inline void CModelDrawerDataBase<T>::AddObject(const T* o, bool add)
 	if (o->id >= transformSkipStates.size())
 		transformSkipStates.resize(o->id + 1);
 
-	transformSkipStates[o->id] = {}; // everWalked=false: the id's first extraction always walks and primes the key (covers id reuse and creg reload)
+	transformSkipStates[o->id] = TransformSkipState{}; // everWalked=false: the id's first extraction always walks and primes the key (covers id reuse and creg reload)
 
 	const uint32_t numMatrices = ((o->model ? o->model->numPieces : 0) + 1u) * 2;
 	scTransMemAllocMap.emplace(o->id, ScopedTransformMemAlloc(numMatrices));
@@ -513,18 +517,28 @@ inline void CModelDrawerDataBase<T>::ExtractObjectTransforms(const T* o)
 	 * Skip contract: skip ==> the storage already holds exactly what a full
 	 * walk would leave behind. Three legs carry it:
 	 *  1. Object slots [0]/[1] are pure (per-machine-deterministic) functions
-	 *     of the value-shadow key. Units: GetTransformMatrix() ==
-	 *     ComposeMatrix(pos) reads only {pos, -rightdir, updir, frontdir},
-	 *     and preFrameTra is Transform{MakeFrom(that matrix), pos} recomputed
-	 *     from the same four vectors at frame start. Features:
-	 *     GetTransformMatrix() serves the stored transMatrix and preFrameTra
-	 *     derives from {transMatrix, pos}. The key bitwise-compares those
-	 *     CONSUMED values at the edge, so every mutation path -- including the
+	 *     of the shadowed inputs. Slot [1]: units' GetTransformMatrix() ==
+	 *     ComposeMatrix(pos) reads only {pos, -rightdir, updir, frontdir};
+	 *     features' serves the stored transMatrix. The key bitwise-compares
+	 *     those CONSUMED values at the edge, so every mutation path -- the
 	 *     movetypes' in-place `frontdir += ...` compound writes through
 	 *     SyncedFloat3 references, transport attach dir pokes, and paths
 	 *     nobody has written yet -- lands in the compare; there is no choke
-	 *     inventory to miss. A bitwise-unchanged key reproduces bit-identical
-	 *     decomposed transforms.
+	 *     inventory to miss. Slot [0]'s input, preFrameTra, is shadowed AS A
+	 *     VALUE (skip.preFrameTra) rather than derived from the key: it is a
+	 *     frame-START sample of the same pose state (UpdatePrevFrameTransform,
+	 *     SolidObject.cpp) while the key samples the frame END, and only at
+	 *     extraction edges -- with several sim frames between edges (FF) a
+	 *     pose can change and return BIT-EXACTLY inside the blind window
+	 *     (common for rotation: dirs re-derive from the quantized heading, and
+	 *     turn-in-place leaves pos untouched), leaving preFrameTra carrying
+	 *     the excursion at an edge whose key matches (the oracle caught this
+	 *     as transient objPrev staleness). Shadowing the consumed value makes
+	 *     the slot-[0] equivalence exact by construction: skip requires the
+	 *     bytes UpdateIfChanged(0, ...) would reconcile to be the bytes the
+	 *     last walk already reconciled. This also closes the design doc's §6
+	 *     "accepted residual" (bit-exact pose return while gated out), which
+	 *     was the same class.
 	 *  2. Piece slots are pure functions of piece-local state (pos/rot/scale/
 	 *     pieceSpaceTra, scriptSetVisible, noInterpolation, blockScriptAnims
 	 *     + the parent chain); every mutation choke for that state bumps the
@@ -569,7 +583,8 @@ inline void CModelDrawerDataBase<T>::ExtractObjectTransforms(const T* o)
 	const bool unchanged =
 		skip.everWalked &&
 		(skip.pieceTreeVersion == curPieceTreeVersion) &&
-		(std::memcmp(&skip.key, &curKey, sizeof(TransformSkipKey)) == 0);
+		(std::memcmp(&skip.key, &curKey, sizeof(TransformSkipKey)) == 0) &&
+		(std::memcmp(&skip.preFrameTra, &o->preFrameTra, sizeof(Transform)) == 0);
 
 	if (unchanged && skip.quiescentEdges >= 2 && !o->alwaysUpdateMat) {
 		traObjSkipped.fetch_add(1, std::memory_order_relaxed);
@@ -627,6 +642,7 @@ inline void CModelDrawerDataBase<T>::ExtractObjectTransforms(const T* o)
 		skip.quiescentEdges = std::min<uint8_t>(skip.quiescentEdges + 1, 2);
 
 	skip.key = curKey;
+	skip.preFrameTra = o->preFrameTra;
 	skip.pieceTreeVersion = curPieceTreeVersion;
 	skip.lastWalkFrame = gs->frameNum;
 	skip.everWalked = true;
