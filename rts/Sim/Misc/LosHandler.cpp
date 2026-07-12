@@ -955,11 +955,18 @@ bool CLosHandler::InRadar(const float3 pos, int allyTeam) const
 bool CLosHandler::InRadar(const CUnit* unit, int allyTeam) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	return InRadar(unit, allyTeam, InJammer(unit, allyTeam));
+}
+
+
+bool CLosHandler::InRadar(const CUnit* unit, int allyTeam, bool inJammer) const
+{
+	RECOIL_DETAILED_TRACY_ZONE;
 	// unit is discoverable by sonar
 	if (unit->IsInWater()) {
 		if ((!unit->sonarStealth || unit->beingBuilt) &&
 		    sonar.InSight(unit->pos, allyTeam) &&
-		    !InJammer(unit, allyTeam))
+		    !inJammer)
 			return true;
 	}
 
@@ -971,7 +978,7 @@ bool CLosHandler::InRadar(const CUnit* unit, int allyTeam) const
 	if (unit->stealth && !unit->beingBuilt)
 		return false;
 
-	return (radar.InSight(unit->pos, allyTeam) && !InJammer(unit, allyTeam));
+	return (radar.InSight(unit->pos, allyTeam) && !inJammer);
 }
 
 

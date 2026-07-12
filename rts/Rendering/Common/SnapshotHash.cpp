@@ -81,10 +81,10 @@ static inline uint64_t HashUnitRow(const SimSnapshot::UnitRows& r, int id)
 	uint32_t losAcc = 2166136261u;
 	uint32_t errAcc = 2166136261u;
 	for (int at = 0; at < r.numAllyTeams; ++at) {
-		losAcc = (losAcc ^ r.losStatusAll[at * r.MaxUnits() + id]) * 16777619u;
-		errAcc = (errAcc ^ r.posErrorBits[at * r.MaxUnits() + id]) * 16777619u;
+		losAcc = (losAcc ^ r.losStatusAll[id * r.numAllyTeams + at]) * 16777619u;
+		errAcc = (errAcc ^ r.posErrorBits[id * r.numAllyTeams + at]) * 16777619u;
 		// fold the per-allyteam InRadar answer (PR 25) into the los word
-		losAcc = (losAcc ^ (r.inRadarAll[at * r.MaxUnits() + id] << 1)) * 16777619u;
+		losAcc = (losAcc ^ (r.inRadarAll[id * r.numAllyTeams + at] << 1)) * 16777619u;
 	}
 	w[37] = losAcc;
 	w[38] = errAcc;
@@ -250,9 +250,9 @@ static inline uint64_t HashUnitRow(const SimSnapshot::UnitRows& r, int id)
 	{
 		uint32_t losVarAcc = 2166136261u;
 		for (int at = 0; at < r.numAllyTeams; ++at) {
-			losVarAcc = (losVarAcc ^ r.unitInLosAll[at * r.MaxUnits() + id]) * 16777619u;
-			losVarAcc = (losVarAcc ^ (r.unitInAirLosAll[at * r.MaxUnits() + id] << 1)) * 16777619u;
-			losVarAcc = (losVarAcc ^ (r.unitInJammerAll[at * r.MaxUnits() + id] << 2)) * 16777619u;
+			losVarAcc = (losVarAcc ^ r.unitInLosAll[id * r.numAllyTeams + at]) * 16777619u;
+			losVarAcc = (losVarAcc ^ (r.unitInAirLosAll[id * r.numAllyTeams + at] << 1)) * 16777619u;
+			losVarAcc = (losVarAcc ^ (r.unitInJammerAll[id * r.numAllyTeams + at] << 2)) * 16777619u;
 		}
 		w[97] = losVarAcc;
 	}

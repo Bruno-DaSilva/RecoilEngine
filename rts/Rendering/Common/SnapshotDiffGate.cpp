@@ -841,23 +841,23 @@ void SnapshotDiffGate::CheckBoundary()
 		// branch (a fullRead-less handle without a read allyteam).
 		for (int at = -1; at < numAllyTeams; ++at) {
 			if (at >= 0) {
-				if (Bump(fields[F_LOSSTATUS], rows.losStatusAll[at * maxUnits + i] == u->losStatus[at]))
+				if (Bump(fields[F_LOSSTATUS], rows.losStatusAll[i * numAllyTeams + at] == u->losStatus[at]))
 					LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=losStatusAll[ally %d] snap=0x%02x live=0x%02x",
-						gs->frameNum, id, at, rows.losStatusAll[at * maxUnits + i], u->losStatus[at]);
+						gs->frameNum, id, at, rows.losStatusAll[i * numAllyTeams + at], u->losStatus[at]);
 
-				if (Bump(fields[F_POSERRORBIT], rows.posErrorBits[at * maxUnits + i] == uint8_t(u->GetPosErrorBit(at))))
+				if (Bump(fields[F_POSERRORBIT], rows.posErrorBits[i * numAllyTeams + at] == uint8_t(u->GetPosErrorBit(at))))
 					LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=posErrorBits[ally %d] snap=%d live=%d",
-						gs->frameNum, id, at, int(rows.posErrorBits[at * maxUnits + i]), int(u->GetPosErrorBit(at)));
+						gs->frameNum, id, at, int(rows.posErrorBits[i * numAllyTeams + at]), int(u->GetPosErrorBit(at)));
 
-				if (Bump(fields[F_INRADAR], (rows.inRadarAll[at * maxUnits + i] != 0) == losHandler->InRadar(u, at)))
+				if (Bump(fields[F_INRADAR], (rows.inRadarAll[i * numAllyTeams + at] != 0) == losHandler->InRadar(u, at)))
 					LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=inRadarAll[ally %d] snap=%d live=%d",
-						gs->frameNum, id, at, int(rows.inRadarAll[at * maxUnits + i]), int(losHandler->InRadar(u, at)));
+						gs->frameNum, id, at, int(rows.inRadarAll[i * numAllyTeams + at]), int(losHandler->InRadar(u, at)));
 
 				// PR 32 LOS unit variants (IsUnitInLos/InAirLos/InJammer answers)
 				const bool losVarEqual =
-					((rows.unitInLosAll[at * maxUnits + i] != 0) == losHandler->InLos(u, at)) &&
-					((rows.unitInAirLosAll[at * maxUnits + i] != 0) == losHandler->InAirLos(u, at)) &&
-					((rows.unitInJammerAll[at * maxUnits + i] != 0) == losHandler->InJammer(u, at));
+					((rows.unitInLosAll[i * numAllyTeams + at] != 0) == losHandler->InLos(u, at)) &&
+					((rows.unitInAirLosAll[i * numAllyTeams + at] != 0) == losHandler->InAirLos(u, at)) &&
+					((rows.unitInJammerAll[i * numAllyTeams + at] != 0) == losHandler->InJammer(u, at));
 				if (Bump(fields[D_LOSVARIANTS], losVarEqual))
 					LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d unit=%d field=unit:losVariants[ally %d] mismatch", gs->frameNum, id, at);
 			}

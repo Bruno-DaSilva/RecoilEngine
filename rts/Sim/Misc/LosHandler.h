@@ -251,6 +251,8 @@ public:
 
 	bool InRadar(const float3 pos, int allyTeam) const;
 	bool InRadar(const CUnit* unit, int allyTeam) const;
+	// caller-supplied InJammer(unit, allyTeam) reuse (avoids the redundant recompute)
+	bool InRadar(const CUnit* unit, int allyTeam, bool inJammer) const;
 
 
 	// returns whether a square is being radar- or sonar-jammed

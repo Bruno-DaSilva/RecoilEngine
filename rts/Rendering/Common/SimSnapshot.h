@@ -120,8 +120,9 @@ namespace SimSnapshotValid {
  *    do not widen the staleness contract instead.
  *
  * losStatus / masking semantics (masking policy settled in PR 18):
- *  - losStatusAll holds one byte per (allyTeam, unit), laid out as numAllyTeams
- *    consecutive rows of maxUnits bytes (index at * maxUnits + unitID);
+ *  - losStatusAll holds one byte per (allyTeam, unit), laid out unit-major as
+ *    maxUnits blocks of numAllyTeams consecutive bytes (index unitID *
+ *    numAllyTeams + at), so a unit's per-allyteam bytes are contiguous;
  *    posErrorBits has the identical layout (CUnit::GetPosErrorBit per
  *    allyteam). LosStatus(unitID, allyTeam) is the row accessor -- consumers
  *    that used the old single-row form pass gu->myAllyTeam and read exactly
@@ -366,12 +367,12 @@ public:
 		// masking inputs (see the masking-policy block above)
 		std::vector<float3> posErrorVector;
 		std::vector<uint8_t> leavesGhost;
-		std::vector<uint8_t> losStatusAll;   // [numAllyTeams * maxUnits], row-major by allyteam
+		std::vector<uint8_t> losStatusAll;   // [maxUnits * numAllyTeams], unit-major (index unitID * numAllyTeams + at)
 		std::vector<uint8_t> posErrorBits;   // same layout; CUnit::GetPosErrorBit(at)
 		// picking (PR 25): the per-allyteam InRadar answer (GuiTraceRay's radar
 		// gate). InRadar folds sonar/jammer/water logic, so -- like the
 		// projectile/feature inLosAll rows -- we store the computed answer, not
-		// the inputs. Same [numAllyTeams * maxUnits] stride layout.
+		// the inputs. Same [maxUnits * numAllyTeams] unit-major layout.
 		std::vector<uint8_t> inRadarAll;
 
 		// ================= PR 32 (deep per-unit state) BEGIN =================
@@ -427,7 +428,7 @@ public:
 		// the computed per-(unit,allyteam) answer, exactly like inRadarAll (the
 		// gates fold cloak/stealth/water/globalLOS logic, so we store the answer
 		// losHandler->InLos/InAirLos/InJammer(unit, at), not the inputs). Same
-		// [numAllyTeams * maxUnits] stride layout.
+		// [maxUnits * numAllyTeams] unit-major layout.
 		std::vector<uint8_t> unitInLosAll;
 		std::vector<uint8_t> unitInAirLosAll;
 		std::vector<uint8_t> unitInJammerAll;
@@ -490,11 +491,11 @@ public:
 		// accessors return a deterministic default for invalid ids (stale/nil contract)
 		uint8_t LosStatus(int unitID, int argAllyTeam) const {
 			return (Valid(unitID) && argAllyTeam >= 0 && argAllyTeam < numAllyTeams) ?
-				losStatusAll[argAllyTeam * MaxUnits() + unitID] : 0;
+				losStatusAll[unitID * numAllyTeams + argAllyTeam] : 0;
 		}
 		bool InRadar(int unitID, int argAllyTeam) const {
 			return (Valid(unitID) && argAllyTeam >= 0 && argAllyTeam < numAllyTeams) &&
-				inRadarAll[argAllyTeam * MaxUnits() + unitID] != 0;
+				inRadarAll[unitID * numAllyTeams + argAllyTeam] != 0;
 		}
 		float3 Pos(int unitID) const { return Valid(unitID) ? pos[unitID] : float3{}; }
 		float3 MidPos(int unitID) const { return Valid(unitID) ? midPos[unitID] : float3{}; }
@@ -571,15 +572,15 @@ public:
 		// Callers mirror the live IsUnitInLos/InAirLos/InJammer bodies exactly.
 		bool UnitInLos(int unitID, int argAllyTeam) const {
 			return (Valid(unitID) && argAllyTeam >= 0 && argAllyTeam < numAllyTeams) &&
-				unitInLosAll[argAllyTeam * MaxUnits() + unitID] != 0;
+				unitInLosAll[unitID * numAllyTeams + argAllyTeam] != 0;
 		}
 		bool UnitInAirLos(int unitID, int argAllyTeam) const {
 			return (Valid(unitID) && argAllyTeam >= 0 && argAllyTeam < numAllyTeams) &&
-				unitInAirLosAll[argAllyTeam * MaxUnits() + unitID] != 0;
+				unitInAirLosAll[unitID * numAllyTeams + argAllyTeam] != 0;
 		}
 		bool UnitInJammer(int unitID, int argAllyTeam) const {
 			return (Valid(unitID) && argAllyTeam >= 0 && argAllyTeam < numAllyTeams) &&
-				unitInJammerAll[argAllyTeam * MaxUnits() + unitID] != 0;
+				unitInJammerAll[unitID * numAllyTeams + argAllyTeam] != 0;
 		}
 
 		// ---- serving-layer masking helpers (PR 18) ----

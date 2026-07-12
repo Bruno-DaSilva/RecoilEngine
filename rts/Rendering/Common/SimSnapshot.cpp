@@ -212,7 +212,7 @@ bool SimSnapshot::UnitRows::PovUnitVisible(int unitID, int readAllyTeam, bool fu
 	// did (residual radar) and nils exactly when master's would.
 	const uint8_t losStatus = SimSnapshotLosEvent::Active(unitID, readAllyTeam)
 		? SimSnapshotLosEvent::LosStatus()
-		: losStatusAll[readAllyTeam * MaxUnits() + unitID];
+		: losStatusAll[unitID * numAllyTeams + readAllyTeam];
 
 	return ((losStatus & (LOS_INLOS | LOS_INRADAR)) != 0);
 }
@@ -229,7 +229,7 @@ bool SimSnapshot::UnitRows::PovUnitInLos(int unitID, int readAllyTeam, bool full
 	// matching master's synchronous handler).
 	const uint8_t losStatus = SimSnapshotLosEvent::Active(unitID, readAllyTeam)
 		? SimSnapshotLosEvent::LosStatus()
-		: losStatusAll[readAllyTeam * MaxUnits() + unitID];
+		: losStatusAll[unitID * numAllyTeams + readAllyTeam];
 
 	return ((losStatus & LOS_INLOS) != 0);
 }
@@ -247,7 +247,7 @@ bool SimSnapshot::UnitRows::PovUnitTyped(int unitID, int readAllyTeam, bool full
 	// place of the row's end-of-frame byte, matching master's synchronous handler.
 	const uint8_t losStatus = SimSnapshotLosEvent::Active(unitID, readAllyTeam)
 		? SimSnapshotLosEvent::LosStatus()
-		: losStatusAll[readAllyTeam * MaxUnits() + unitID];
+		: losStatusAll[unitID * numAllyTeams + readAllyTeam];
 	constexpr uint8_t prevMask = (LOS_PREVLOS | LOS_CONTRADAR);
 
 	return ((losStatus & LOS_INLOS) != 0 || (losStatus & prevMask) == prevMask);
@@ -260,7 +260,7 @@ float3 SimSnapshot::UnitRows::ErrorVector(int unitID, int argAllyTeam) const
 	if (argAllyTeam < 0 || argAllyTeam >= numAllyTeams)
 		return (posErrorVector[unitID] * baseRadarErrorSize * 2.0f);
 
-	const int atErrorMask = (posErrorBits[argAllyTeam * MaxUnits() + unitID] != 0);
+	const int atErrorMask = (posErrorBits[unitID * numAllyTeams + argAllyTeam] != 0);
 	// PR 38g: during a deferred UnitLeftLos, feed master's captured at-dispatch
 	// losStatus (LOS_INLOS cleared, radar/ghost residual) into the UNCHANGED
 	// error math, so the mirror reproduces master's fuzzy radar-error position
@@ -268,7 +268,7 @@ float3 SimSnapshot::UnitRows::ErrorVector(int unitID, int argAllyTeam) const
 	// seenGhost -> zero) instead of PR 38f's forced zero error.
 	const int atSightMask = SimSnapshotLosEvent::Active(unitID, argAllyTeam)
 		? SimSnapshotLosEvent::LosStatus()
-		: losStatusAll[argAllyTeam * MaxUnits() + unitID];
+		: losStatusAll[unitID * numAllyTeams + argAllyTeam];
 
 	const int isVisible = 2 * ((atSightMask & LOS_INLOS  ) != 0 || Allied(argAllyTeam, allyTeam[unitID])); // in LOS or allied, no error
 	const int seenGhost = 4 * ((atSightMask & LOS_PREVLOS) != 0 && leavesGhost[unitID] != 0);              // seen ghosted immobiles, no error
@@ -1257,14 +1257,15 @@ void SimSnapshot::Extract(UnitRows& rows)
 			const int id = u->id;
 
 			for (int at = 0; at < numAllyTeams; ++at) {
-				rows.losStatusAll[at * maxUnits + id] = u->losStatus[at];
-				rows.posErrorBits[at * maxUnits + id] = u->GetPosErrorBit(at);
-				rows.inRadarAll[at * maxUnits + id] = losHandler->InRadar(u, at);
+				const bool inJammer = losHandler->InJammer(u, at);
+				rows.losStatusAll[id * numAllyTeams + at] = u->losStatus[at];
+				rows.posErrorBits[id * numAllyTeams + at] = u->GetPosErrorBit(at);
+				rows.inRadarAll[id * numAllyTeams + at] = losHandler->InRadar(u, at, inJammer);
 				// PR 32 LOS unit variants: store the computed answer (the gates fold
 				// cloak/stealth/water/globalLOS logic, like inRadarAll)
-				rows.unitInLosAll[at * maxUnits + id] = losHandler->InLos(u, at);
-				rows.unitInAirLosAll[at * maxUnits + id] = losHandler->InAirLos(u, at);
-				rows.unitInJammerAll[at * maxUnits + id] = losHandler->InJammer(u, at);
+				rows.unitInLosAll[id * numAllyTeams + at] = losHandler->InLos(u, at);
+				rows.unitInAirLosAll[id * numAllyTeams + at] = losHandler->InAirLos(u, at);
+				rows.unitInJammerAll[id * numAllyTeams + at] = inJammer;
 			}
 		}
 	}
@@ -1962,12 +1963,13 @@ void SimSnapshot::ExtractDeadRowsFromShells(UnitRows& urows, FeatureRows& frows,
 		// map-backed answers are computed with shell inputs against the live
 		// post-death maps -- memory-safe, position at-death) ----
 		for (int at = 0; at < numAllyTeams; ++at) {
-			urows.losStatusAll[at * maxUnits + id] = u->losStatus[at];
-			urows.posErrorBits[at * maxUnits + id] = u->GetPosErrorBit(at);
-			urows.inRadarAll[at * maxUnits + id] = losHandler->InRadar(u, at);
-			urows.unitInLosAll[at * maxUnits + id] = losHandler->InLos(u, at);
-			urows.unitInAirLosAll[at * maxUnits + id] = losHandler->InAirLos(u, at);
-			urows.unitInJammerAll[at * maxUnits + id] = losHandler->InJammer(u, at);
+			const bool inJammer = losHandler->InJammer(u, at);
+			urows.losStatusAll[id * numAllyTeams + at] = u->losStatus[at];
+			urows.posErrorBits[id * numAllyTeams + at] = u->GetPosErrorBit(at);
+			urows.inRadarAll[id * numAllyTeams + at] = losHandler->InRadar(u, at, inJammer);
+			urows.unitInLosAll[id * numAllyTeams + at] = losHandler->InLos(u, at);
+			urows.unitInAirLosAll[id * numAllyTeams + at] = losHandler->InAirLos(u, at);
+			urows.unitInJammerAll[id * numAllyTeams + at] = inJammer;
 		}
 	}
 

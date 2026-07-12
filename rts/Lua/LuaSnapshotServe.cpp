@@ -828,7 +828,7 @@ int LuaSnapshotServe::GetUnitLosState(lua_State* L, const char* caller)
 	if (allyTeamID < 0) {
 		losStatus = (allyTeamID == CEventClient::AllAccessTeam) ? (LOS_ALL_MASK_BITS | LOS_ALL_BITS) : 0;
 	} else {
-		losStatus = rows.losStatusAll[allyTeamID * rows.MaxUnits() + unitID];
+		losStatus = rows.losStatusAll[unitID * rows.numAllyTeams + allyTeamID];
 	}
 
 	constexpr int currMask = LOS_INLOS   | LOS_INRADAR;
@@ -9718,7 +9718,7 @@ int LuaSnapshotServe::GetUnitPosErrorParams(lua_State* L, const char* caller)
 	const int argAllyTeam = std::clamp(optAllyTeam, 0, rows.numAllyTeams);
 
 	const bool posErrorBit = (argAllyTeam >= 0 && argAllyTeam < rows.numAllyTeams) &&
-		rows.posErrorBits[argAllyTeam * rows.MaxUnits() + unitID] != 0;
+		rows.posErrorBits[unitID * rows.numAllyTeams + argAllyTeam] != 0;
 
 	lua_pushnumber(L, rows.posErrorVector[unitID].x);
 	lua_pushnumber(L, rows.posErrorVector[unitID].y);
