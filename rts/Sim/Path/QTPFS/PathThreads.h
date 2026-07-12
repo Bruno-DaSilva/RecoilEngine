@@ -12,6 +12,7 @@
 #include "Map/ReadMap.h"
 #include "Sim/MoveTypes/MoveDefHandler.h"
 #include "System/ChunkedArray.hpp"
+#include "System/Misc/TracyDefs.h"
 #include "System/Rectangle.h"
 
 namespace QTPFS {
@@ -169,9 +170,9 @@ namespace QTPFS {
             }
         }
 
-        void ResetQueue() { ZoneScoped; for (int i=0; i<SEARCH_DIRECTIONS; ++i) ResetQueue(i); }
+        void ResetQueue() { RECOIL_DETAILED_TRACY_ZONE; for (int i=0; i<SEARCH_DIRECTIONS; ++i) ResetQueue(i); }
 
-        void ResetQueue(int i) { ZoneScoped; /*while (!openNodes[i].empty()) openNodes[i].pop();*/ openNodes[i].clear(); }
+        void ResetQueue(int i) { RECOIL_DETAILED_TRACY_ZONE; /*while (!openNodes[i].empty()) openNodes[i].pop();*/ openNodes[i].clear(); }
 
 		void Init(size_t sparseSize, size_t denseSize) {
             constexpr size_t tmpNodeStoreInitialReserve = 128;

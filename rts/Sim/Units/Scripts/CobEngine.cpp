@@ -71,7 +71,7 @@ bool CCobEngine::RemoveThread(int threadID) {
 }
 
 void CCobEngine::ProcessQueuedThreads() {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 
 	// Remove threads killed during Tick by other thread (SIGNAL), we do it
 	// here as nothing is actively referencing any thread's memory here.
@@ -137,7 +137,7 @@ void CCobEngine::TickThread(CCobThread* thread)
 
 void CCobEngine::WakeSleepingThreads()
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	// check on the sleeping threads, remove any whose owner died
 	while (!sleepingThreadIDs.empty()) {
 		CCobThread* zzzThread = GetThread((sleepingThreadIDs.top()).id);
@@ -174,7 +174,7 @@ void CCobEngine::WakeSleepingThreads()
 
 void CCobEngine::TickRunningThreads()
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	// advance all currently running threads
 	for (const int threadID: runningThreadIDs) {
 		TickThread(GetThread(threadID));

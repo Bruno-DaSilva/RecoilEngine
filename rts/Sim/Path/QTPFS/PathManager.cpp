@@ -914,7 +914,7 @@ void QTPFS::PathManager::ThreadUpdate() {
 
 
 bool QTPFS::PathManager::InitializeSearch(QTPFS::entity searchEntity) {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	PathSearch* search = GetSearch(searchEntity);
 
 	if (search->initialized)
@@ -1099,7 +1099,7 @@ bool QTPFS::PathManager::ExecuteSearch(
 	unsigned int pathType,
 	bool immediateSearch
 ) {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 
 	BasicTimer searchTimer(0);
 
@@ -1260,7 +1260,7 @@ bool QTPFS::PathManager::ExecuteSearch(
 }
 
 void QTPFS::PathManager::QueueDeadPathSearches() {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 
 	// Only owned can be marked as dead.
 	auto pathUpdatesView = registry.view<IPath, PathIsToBeUpdated>();
@@ -1728,7 +1728,7 @@ float3 QTPFS::PathManager::NextWayPoint(
 	float, // radius,
 	bool synced
 ) {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	const float3 noPathPoint = -XZVector;
 
 	if (!IsFinalized())

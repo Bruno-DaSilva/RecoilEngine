@@ -124,7 +124,7 @@ LocalModelPiece* LocalModel::CreateLocalModelPieces(const S3DModelPiece* mpParen
 
 void LocalModel::UpdateBoundingVolume()
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 
 	// bounding-box extrema (local space)
 	float3 bbMins = DEF_MIN_SIZE;

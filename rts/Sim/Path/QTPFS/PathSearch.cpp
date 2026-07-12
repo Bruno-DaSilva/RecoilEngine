@@ -147,7 +147,7 @@ void QTPFS::PathSearch::Initialize(
 // #pragma GCC optimize ("O0")
 
 void QTPFS::PathSearch::InitializeThread(SearchThreadData* threadData, IPath* pathToRepair) {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	searchThreadData = threadData;
 
 	badGoal = false;
@@ -363,7 +363,7 @@ void QTPFS::PathSearch::PreLoadNode(uint32_t dir, uint32_t nodeId, uint32_t prev
 }
 
 void QTPFS::PathSearch::LoadPartialPath(IPath* path) {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	auto& nodes = path->GetNodeList();
 
 	assert(path->GetPathType() == pathType);
@@ -691,7 +691,7 @@ void QTPFS::PathSearch::SetNodeSearchLimit() {
 // #pragma GCC optimize ("O0")
 
 bool QTPFS::PathSearch::ExecutePathSearch() {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 
 	#ifdef QTPFS_TRACE_PATH_SEARCHES
 	searchExec = new PathSearchTrace::Execution(gs->frameNum);
@@ -1301,7 +1301,7 @@ bool QTPFS::PathSearch::ExecutePathSearch() {
 // #pragma GCC pop_options
 
 bool QTPFS::PathSearch::ExecuteRawSearch() {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	assert(pathOwner != nullptr);
 	auto& fwd = directionalSearchData[SearchThreadData::SEARCH_FORWARD];
 
@@ -1412,7 +1412,7 @@ void QTPFS::PathSearch::UpdateNode(SearchNode* nextNode, SearchNode* prevNode, u
 }
 
 void QTPFS::PathSearch::IterateNodes(unsigned int searchDir) {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	DirectionalSearchData& searchData = directionalSearchData[searchDir];
 
 	SearchQueueNode curOpenNode = (*searchData.openNodes).top();
@@ -1625,7 +1625,7 @@ void QTPFS::PathSearch::IterateNodeNeighbors(const INode* curNode, unsigned int 
 }
 
 void QTPFS::PathSearch::Finalize(IPath* path) {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 
 	// LOG("%s: [%p : %d] Finalize search.", __func__
 	// 		, &nodeLayer[path->GetPathType()]

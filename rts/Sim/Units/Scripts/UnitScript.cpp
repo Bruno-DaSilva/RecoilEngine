@@ -198,7 +198,7 @@ bool CUnitScript::DoSpin(float& cur, float dest, float& speed, float accel, int 
 */
 void CUnitScript::TickAllAnims(int deltaTime)
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 
 	// optimize the memory access patterns of the procedure below
 	std::sort(anims.begin(), anims.end(), [](const auto& lhs, const auto& rhs) {
@@ -286,7 +286,7 @@ void CUnitScript::TickAllAnims(int deltaTime)
 */
 bool CUnitScript::TickAnimFinished()
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 
 	// Tell listeners to unblock, and remove finished animations from the unit/script.
 	for (const auto& ai : doneAnims)
