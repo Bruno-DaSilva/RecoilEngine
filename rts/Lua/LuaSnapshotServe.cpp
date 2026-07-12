@@ -7244,6 +7244,12 @@ namespace {
 
 	struct ObjectPieceSlot {
 		bool present = false;
+		// first-touch dead-miss tombstone: the live lookup under the counted
+		// park found the object dead/absent; repeat queries of this id in the
+		// same held window serve the miss WITHOUT re-parking (a dying-while-
+		// queried object otherwise re-parks on every query until the next
+		// epoch). Reset alongside `present` every producer refresh.
+		bool deadMiss = false;
 		const void* metaKey = nullptr;   // ModelPieceMeta key (root original piece ptr)
 		int32_t rootPieceIndex = 0;
 		int32_t numPieces = 0;
@@ -7280,6 +7286,10 @@ namespace {
 	std::mutex pieceRegMtx;                     // guards the two pending lists
 	std::vector<int> pendingUnitPieceRegs;      // draw -> producer mailbox
 	std::vector<int> pendingFeaturePieceRegs;
+	// demand gate for the producer's nano-job pre-registration: stays false
+	// until the draw side queries ANY unit piece slot, so setups with no
+	// piece-querying addon pay nothing for the pre-registered capture
+	std::atomic<bool> unitPieceDemandSeen = {false};
 
 	// build (once) the immutable metadata for o's model from a live LocalModel
 	const ModelPieceMeta& GetOrBuildModelMeta(const void* key, const LocalModel& lm)
@@ -7381,11 +7391,17 @@ namespace {
 	{
 		std::vector<ObjectPieceSlot>& cache = unitPieceCaches[simSnapshot.HeldSlot()];
 
+		unitPieceDemandSeen.store(true, std::memory_order_relaxed);
+
 		if (unitID < 0 || static_cast<size_t>(unitID) >= unitHandler.MaxUnits())
 			return nullptr;
 
-		if (static_cast<size_t>(unitID) < cache.size() && cache[unitID].present)
-			return &cache[unitID];
+		if (static_cast<size_t>(unitID) < cache.size()) {
+			if (cache[unitID].present)
+				return &cache[unitID];
+			if (cache[unitID].deadMiss)
+				return nullptr;
+		}
 
 		// PR 46 first touch (draw thread; the Parse* gates validated the id
 		// against the held epoch's rows): register for the producer's future
@@ -7401,8 +7417,12 @@ namespace {
 		CGame::ScopedExternalSimPause park{CGame::SimPauseSite::PIECE_FIRST_TOUCH};
 
 		const CUnit* u = unitHandler.GetUnit(unitID);
-		if (u == nullptr || u->isDead)
+		if (u == nullptr || u->isDead) {
+			if (cache.size() < unitHandler.MaxUnits())
+				cache.resize(unitHandler.MaxUnits());
+			cache[unitID].deadMiss = true;
 			return nullptr;
+		}
 
 		if (cache.size() < unitHandler.MaxUnits())
 			cache.resize(unitHandler.MaxUnits());
@@ -7419,8 +7439,12 @@ namespace {
 		if (featureID < 0)
 			return nullptr;
 
-		if (static_cast<size_t>(featureID) < cache.size() && cache[featureID].present)
-			return &cache[featureID];
+		if (static_cast<size_t>(featureID) < cache.size()) {
+			if (cache[featureID].present)
+				return &cache[featureID];
+			if (cache[featureID].deadMiss)
+				return nullptr;
+		}
 
 		// PR 46 first touch -- see GetUnitPieceSlot
 		{
@@ -7431,8 +7455,12 @@ namespace {
 		CGame::ScopedExternalSimPause park{CGame::SimPauseSite::PIECE_FIRST_TOUCH};
 
 		const CFeature* f = featureHandler.GetFeature(featureID);
-		if (f == nullptr)
+		if (f == nullptr) {
+			if (cache.size() <= static_cast<size_t>(featureID))
+				cache.resize(featureID + 1);
+			cache[featureID].deadMiss = true;
 			return nullptr;
+		}
 
 		if (cache.size() <= static_cast<size_t>(featureID))
 			cache.resize(featureID + 1);
@@ -7775,42 +7803,85 @@ void LuaSnapshotServe::RefreshPieces(int ringSlot, uint64_t targetEpoch)
 		pendingFeaturePieceRegs.clear();
 	}
 
-	for (ObjectPieceSlot& s: unitPieceCache)
+	// pre-register units with a live nano job: BAR-class widgets (nano
+	// particles gl4) query the lathing unit's emit pieces on the first draw
+	// frame of a job, so first-touch parks arrived in build-wave bursts
+	// ([SimPauseSurvey] PIECE_FIRST_TOUCH ~1200/game, several serialized
+	// mid-frame sim waits inside one draw frame). Registering at job start
+	// captures the pieces one edge ahead of the first query; idle builders
+	// stay unregistered and dead ids still prune, so the read-set stays
+	// demand-shaped -- and the whole pass is demand-gated (unitPieceDemandSeen)
+	// so a game with no piece-querying addon captures nothing. The unitDef
+	// dispatch mirrors CUnitHandler::NewUnit (IsFactoryUnit => CFactory, any
+	// other builder def => CBuilder).
+	if (unitPieceDemandSeen.load(std::memory_order_relaxed)) {
+		for (const CUnit* u: unitHandler.GetActiveUnits()) {
+			const UnitDef* ud = u->unitDef;
+			bool nanoActive = false;
+
+			if (ud->IsFactoryUnit()) {
+				nanoActive = (static_cast<const CFactory*>(u)->curBuild != nullptr);
+			} else if (ud->IsBuilderUnit()) {
+				const CBuilder* b = static_cast<const CBuilder*>(u);
+				nanoActive =
+					(b->curBuild != nullptr) || (b->curReclaim != nullptr) ||
+					(b->curResurrect != nullptr) || (b->curCapture != nullptr) ||
+					b->terraforming;
+			}
+
+			if (nanoActive)
+				unitPieceReadSet[u->id] = 1;
+		}
+	}
+
+	for (ObjectPieceSlot& s: unitPieceCache) {
 		s.present = false;
+		s.deadMiss = false;
+	}
 
 	// PR 32: units also capture colVol + lastHit (GetUnitCollisionVolumeData /
 	// GetUnitPieceCollisionVolumeData / GetUnitLastAttackedPiece), like features.
 	// PR 46: registered ids only; a dead id prunes (a reused id re-registers
 	// through its own first touch)
-	for (size_t id = 0; id < maxUnits; ++id) {
-		if (!unitPieceReadSet[id])
-			continue;
+	{
+		SCOPED_TIMER("Sim::EpochProduce::PiecesUnits");
 
-		const CUnit* u = unitHandler.GetUnit(id);
-		if (u == nullptr || u->isDead) {
-			unitPieceReadSet[id] = 0;
-			continue;
+		for (size_t id = 0; id < maxUnits; ++id) {
+			if (!unitPieceReadSet[id])
+				continue;
+
+			const CUnit* u = unitHandler.GetUnit(id);
+			if (u == nullptr || u->isDead) {
+				unitPieceReadSet[id] = 0;
+				continue;
+			}
+
+			RefreshObjectPieceSlot(unitPieceCache[id], u, /*script*/true, /*colVol*/true, /*lastHit*/true);
 		}
-
-		RefreshObjectPieceSlot(unitPieceCache[id], u, /*script*/true, /*colVol*/true, /*lastHit*/true);
 	}
 
 	if (featurePieceCache.size() < featurePieceReadSet.size())
 		featurePieceCache.resize(featurePieceReadSet.size());
-	for (ObjectPieceSlot& s: featurePieceCache)
+	for (ObjectPieceSlot& s: featurePieceCache) {
 		s.present = false;
+		s.deadMiss = false;
+	}
 
-	for (size_t id = 0; id < featurePieceReadSet.size(); ++id) {
-		if (!featurePieceReadSet[id])
-			continue;
+	{
+		SCOPED_TIMER("Sim::EpochProduce::PiecesFeatures");
 
-		const CFeature* f = featureHandler.GetFeature(id);
-		if (f == nullptr) {
-			featurePieceReadSet[id] = 0;
-			continue;
+		for (size_t id = 0; id < featurePieceReadSet.size(); ++id) {
+			if (!featurePieceReadSet[id])
+				continue;
+
+			const CFeature* f = featureHandler.GetFeature(id);
+			if (f == nullptr) {
+				featurePieceReadSet[id] = 0;
+				continue;
+			}
+
+			RefreshObjectPieceSlot(featurePieceCache[id], f, /*script*/false, /*colVol*/true, /*lastHit*/true);
 		}
-
-		RefreshObjectPieceSlot(featurePieceCache[id], f, /*script*/false, /*colVol*/true, /*lastHit*/true);
 	}
 }
 
