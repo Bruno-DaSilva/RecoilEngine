@@ -7429,13 +7429,20 @@ namespace {
 
 	struct ObjectPieceSlot {
 		bool present = false;
-		// first-touch dead-miss tombstone: the live lookup under the counted
-		// park found the object dead/absent; repeat queries of this id in the
-		// same held window serve the miss WITHOUT re-parking (a dying-while-
-		// queried object otherwise re-parks on every query until the next
-		// epoch). Reset alongside `present` by the death-journal drain, and by
-		// any successful (re)capture of the slot.
+		// dead-miss tombstone: the id was observed dead -- by the first-touch
+		// live lookup under the counted park (died after the held epoch's
+		// edge), or by the producer's dead-prune branch / death-journal drain.
+		// The tombstone is PERSISTENT: it keeps serving the nil miss WITHOUT
+		// re-parking until the id is reused by a live object (the held rows
+		// showing it plainly alive at an epoch newer than deadMissEpoch is the
+		// reuse signal that re-enables the first-touch park). Cleared only by
+		// a successful capture. A per-epoch clearing producer (the retired
+		// wipe loops, and the first journal version) re-armed one park per
+		// produced epoch for every queried id in the rows-valid dying window
+		// ("dying units stay valid" -- the SimSnapshot validity contract),
+		// which the strict gate measured as a PIECE_FIRST_TOUCH park storm.
 		bool deadMiss = false;
+		uint64_t deadMissEpoch = 0;      // epoch stamp of the tombstone (same-window re-park suppression)
 		const void* metaKey = nullptr;   // ModelPieceMeta key (root original piece ptr)
 		int32_t rootPieceIndex = 0;
 		int32_t numPieces = 0;
@@ -7612,10 +7619,10 @@ namespace {
 			slot.lastHitFrame = o->pieceHitFrames[true];
 		}
 
-		// WS-1 §5.2: a dead-missed id can respawn before the next edge with the
-		// journal never seeing a death (the edge finds it alive) -- a successful
-		// capture must clear the tombstone (the retired wipe used to)
+		// WS-1 §5.2: a successful capture is the ONLY event that clears the
+		// (persistent) tombstone -- covers dead-missed-then-respawned ids
 		slot.deadMiss = false;
+		slot.deadMissEpoch = 0;
 
 		// WS-1 §4: store the skip key; the next refresh of this slot skips the
 		// whole capture when the key still matches
@@ -7706,8 +7713,24 @@ namespace {
 		if (static_cast<size_t>(unitID) < cache.size()) {
 			if (cache[unitID].present)
 				return &cache[unitID];
-			if (cache[unitID].deadMiss)
-				return nullptr;
+			if (cache[unitID].deadMiss) {
+				// persistent tombstone (see the ObjectPieceSlot comment):
+				// serve the nil miss without parking unless the held rows show
+				// the id PLAINLY alive -- ACTIVE and not in the rows-valid
+				// isDead death-anim linger -- at an epoch newer than the
+				// stamp. Only a reused-by-a-live-object id passes, and it must
+				// (the successor has to re-first-touch and re-register). The
+				// nil is value-identical to what the park's live lookup would
+				// return for a dead/dying object.
+				const SimSnapshot::UnitRows& rows = simSnapshot.Read();
+				const bool plainlyAlive =
+					static_cast<size_t>(unitID) < rows.valid.size() &&
+					rows.valid[unitID] == SimSnapshotValid::ACTIVE &&
+					!rows.isDead[unitID];
+
+				if (!plainlyAlive || simSnapshot.HeldEpochId() <= cache[unitID].deadMissEpoch)
+					return nullptr;
+			}
 		}
 
 		// PR 46 first touch (draw thread; the Parse* gates validated the id
@@ -7728,6 +7751,7 @@ namespace {
 			if (cache.size() < unitHandler.MaxUnits())
 				cache.resize(unitHandler.MaxUnits());
 			cache[unitID].deadMiss = true;
+			cache[unitID].deadMissEpoch = simSnapshot.HeldEpochId();
 			return nullptr;
 		}
 
@@ -7749,8 +7773,17 @@ namespace {
 		if (static_cast<size_t>(featureID) < cache.size()) {
 			if (cache[featureID].present)
 				return &cache[featureID];
-			if (cache[featureID].deadMiss)
-				return nullptr;
+			if (cache[featureID].deadMiss) {
+				// persistent tombstone -- see GetUnitPieceSlot; features have
+				// no rows-valid dying linger, so plainly-alive is ACTIVE
+				const SimSnapshot::FeatureRows& rows = simSnapshot.ReadFeatures();
+				const bool plainlyAlive =
+					static_cast<size_t>(featureID) < rows.valid.size() &&
+					rows.valid[featureID] == SimSnapshotValid::ACTIVE;
+
+				if (!plainlyAlive || simSnapshot.HeldEpochId() <= cache[featureID].deadMissEpoch)
+					return nullptr;
+			}
 		}
 
 		// PR 46 first touch -- see GetUnitPieceSlot
@@ -7766,6 +7799,7 @@ namespace {
 			if (cache.size() <= static_cast<size_t>(featureID))
 				cache.resize(featureID + 1);
 			cache[featureID].deadMiss = true;
+			cache[featureID].deadMissEpoch = simSnapshot.HeldEpochId();
 			return nullptr;
 		}
 
@@ -8147,6 +8181,12 @@ void LuaSnapshotServe::RefreshPieces(int ringSlot, uint64_t targetEpoch)
 	// other builder def => CBuilder).
 	if (unitPieceDemandSeen.load(std::memory_order_relaxed)) {
 		for (const CUnit* u: unitHandler.GetActiveUnits()) {
+			// a dying unit lingers in activeUnits (and can keep a stale
+			// curBuild); re-registering it would make the dead-prune branch
+			// journal it again every epoch for the whole linger
+			if (u->isDead)
+				continue;
+
 			const UnitDef* ud = u->unitDef;
 			bool nanoActive = false;
 
@@ -8171,7 +8211,11 @@ void LuaSnapshotServe::RefreshPieces(int ringSlot, uint64_t targetEpoch)
 	// WS-1 §5.1: drain the death journal into THIS ring slot's caches -- this
 	// replaces the retired all-slots present/deadMiss wipe loops (O(deaths
 	// since this slot last produced) instead of O(maxUnits + featureCacheSize)
-	// strided writes per epoch, which the skip key would defeat anyway)
+	// strided writes per epoch, which the skip key would defeat anyway).
+	// Deviation from the doc's §5.1/§5.2 wipe-equivalent draft: the drain
+	// TOMBSTONES the dead id (deadMiss=true) instead of blanking it -- a
+	// blanked slot re-parks on the next query of a still-rows-valid dead id
+	// (the strict-gate park storm; see the ObjectPieceSlot comment).
 	for (size_t i = pieceDeathDrainCursors[ringSlot]; i < pieceDeathJournal.size(); ++i) {
 		const PieceDeathEntry& e = pieceDeathJournal[i];
 		std::vector<ObjectPieceSlot>& cache = e.isFeature ? featurePieceCache : unitPieceCache;
@@ -8181,7 +8225,8 @@ void LuaSnapshotServe::RefreshPieces(int ringSlot, uint64_t targetEpoch)
 
 		ObjectPieceSlot& s = cache[e.id];
 		s.present = false;
-		s.deadMiss = false;
+		s.deadMiss = true;
+		s.deadMissEpoch = gen;
 		s.captureVersion = 0;
 	}
 
@@ -8205,13 +8250,14 @@ void LuaSnapshotServe::RefreshPieces(int ringSlot, uint64_t targetEpoch)
 			if (u == nullptr || u->isDead) {
 				unitPieceReadSet[id] = 0;
 
-				// WS-1 §5.1: journal the death for the other ring slots; clear
-				// THIS slot's entry inline (the cursor advances past the new
-				// entry at the end of this refresh)
+				// WS-1 §5.1: journal the death for the other ring slots;
+				// tombstone THIS slot's entry inline (the cursor advances
+				// past the new entry at the end of this refresh)
 				pieceDeathJournal.push_back({static_cast<int>(id), false});
 				ObjectPieceSlot& s = unitPieceCache[id];
 				s.present = false;
-				s.deadMiss = false;
+				s.deadMiss = true;
+				s.deadMissEpoch = gen;
 				s.captureVersion = 0;
 				continue;
 			}
@@ -8243,7 +8289,8 @@ void LuaSnapshotServe::RefreshPieces(int ringSlot, uint64_t targetEpoch)
 				pieceDeathJournal.push_back({static_cast<int>(id), true});
 				ObjectPieceSlot& s = featurePieceCache[id];
 				s.present = false;
-				s.deadMiss = false;
+				s.deadMiss = true;
+				s.deadMissEpoch = gen;
 				s.captureVersion = 0;
 				continue;
 			}
