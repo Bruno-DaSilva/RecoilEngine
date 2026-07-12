@@ -6182,6 +6182,23 @@ namespace {
 	std::vector<int> cmdDirtyActive;
 	bool cmdDirtySeeded = false;
 
+	// worker-task re-resolve registry: ResolveWorkerTask decodes from TARGET
+	// state too (curBuild->beingBuilt flips when the buildee finishes, and the
+	// CBuilder pickup path installs curBuild without StopBuild), so no builder-
+	// side choke can cover it. Re-resolve every live builder/factory id at each
+	// refresh instead -- O(workers), a few pointer reads each. Ids join on first
+	// capture, leave on death; a reused id self-corrects (resolve reads live).
+	std::vector<int> workerTaskIds;
+	std::vector<uint8_t> workerTaskMember;
+
+	// lastSelectedCommandPage, keyed by unit id: written ONLY by the main
+	// thread (CSelectedUnitsHandler::SetCommandPage) and read by the served
+	// GetAvailableCommands twin (also main thread) -- the live member cannot be
+	// used there because the sim thread nulls unit->commandAI on death while
+	// the shell stays allocated (deref race). Advisory UI value; cleared with
+	// the cmd caches.
+	std::vector<int> servedCmdPages;
+
 	void MarkCmdDirtyImpl(int id)
 	{
 		// flag-off the producer never drains, so keep the structures untouched
@@ -6673,12 +6690,15 @@ void LuaSnapshotServe::RefreshCommandQueues(int ringSlot, uint64_t targetEpoch)
 
 	if (cmdQueueCache.size() != maxUnits)
 		cmdQueueCache.resize(maxUnits);
+	if (workerTaskMember.size() != maxUnits)
+		workerTaskMember.resize(maxUnits, 0);
 
 	// first produce of a game: the creation chokes may predate the split/gate
 	// becoming push-eligible (load order), so seed the drain domain with every
-	// active unit once; ClearCaches resets the seed for the next game
+	// active unit; latch only once units exist (a pregame boundary must not
+	// consume the seed). ClearCaches resets the seed for the next game.
 	if (!cmdDirtySeeded) {
-		cmdDirtySeeded = true;
+		cmdDirtySeeded = !unitHandler.GetActiveUnits().empty();
 		MarkAllCmdQueuesDirty();
 	}
 
@@ -6700,6 +6720,8 @@ void LuaSnapshotServe::RefreshCommandQueues(int ringSlot, uint64_t targetEpoch)
 			if (unit == nullptr) {
 				if (slot.present)
 					ClearCmdQueueSlot(slot);
+				if (static_cast<size_t>(id) < servedCmdPages.size())
+					servedCmdPages[id] = 0;
 			} else {
 				const CCommandAI* cai = unit->commandAI; // never null
 				const uint64_t cmdQueVersion = cai->commandQue.GetVersion();
@@ -6756,6 +6778,14 @@ void LuaSnapshotServe::RefreshCommandQueues(int ringSlot, uint64_t targetEpoch)
 				// sim|draw PR 30: decode GetUnitWorkerTask's answer here (not queue-
 				// derivable; the transitions push explicitly -- design §4.3)
 				ResolveWorkerTask(unit, slot);
+
+				// worker registry join (see the registry comment above): first
+				// capture of a builder/factory id enrolls it for the re-resolve
+				// sweep below
+				if (!workerTaskMember[id] && (slot.isFactoryUnit || dynamic_cast<const CBuilder*>(unit) != nullptr)) {
+					workerTaskMember[id] = 1;
+					workerTaskIds.push_back(id);
+				}
 			}
 
 			mask &= ~slotBit;
@@ -6766,6 +6796,30 @@ void LuaSnapshotServe::RefreshCommandQueues(int ringSlot, uint64_t targetEpoch)
 	}
 
 	cmdDirtyActive.resize(writePos);
+
+	// worker-task re-resolve sweep: the decode depends on target state (e.g.
+	// curBuild->beingBuilt) and on builder fields written without a version
+	// bump (the pickup path), so refresh it for every enrolled live id at every
+	// boundary. Idempotent over ids the drain above already resolved.
+	{
+		size_t w = 0;
+		for (size_t r = 0, n = workerTaskIds.size(); r < n; ++r) {
+			const int id = workerTaskIds[r];
+			const CUnit* unit = unitHandler.GetUnit(id);
+
+			if (unit == nullptr) {
+				workerTaskMember[id] = 0;
+				continue;
+			}
+
+			UnitCmdQueueSlot& slot = cmdQueueCache[id];
+			if (slot.present)
+				ResolveWorkerTask(unit, slot);
+
+			workerTaskIds[w++] = id;
+		}
+		workerTaskIds.resize(w);
+	}
 }
 
 
@@ -6776,8 +6830,35 @@ void LuaSnapshotServe::RefreshCommandQueues(int ringSlot, uint64_t targetEpoch)
 // flag-off (MarkCmdDirtyImpl gates on the split).
 void LuaSnapshotServe::MarkAllCmdQueuesDirty()
 {
-	for (const CUnit* unit: unitHandler.GetActiveUnits())
+	for (CUnit* unit: unitHandler.GetActiveUnits()) {
+		CCommandAI* cai = unit->commandAI;
+
+		// creg load bypasses the owner-taking ctors (CR_BIND uses the default
+		// ctor and ownerId is not serialized), so every post-load bump would
+		// MarkDirty(-1) and the unit would never be re-captured -- repair the
+		// plumbing here (this sweep runs at PostLoad and at the seed)
+		cai->commandQue.ownerId = unit->id;
+
+		if (CFactoryCAI* fcai = dynamic_cast<CFactoryCAI*>(cai); fcai != nullptr)
+			fcai->newUnitCommands.ownerId = unit->id;
+
 		CCommandQueue::MarkDirty(unit->id);
+	}
+}
+
+
+// main-thread page store behind the served GetAvailableCommands twin; written
+// by CSelectedUnitsHandler::SetCommandPage in place of the live commandAI
+// member while the sim runs unparked (the live deref races death teardown)
+void LuaSnapshotServe::NoteSelectedCommandPage(int unitID, int page)
+{
+	if (unitID < 0 || static_cast<size_t>(unitID) >= unitHandler.MaxUnits())
+		return;
+
+	if (servedCmdPages.size() != unitHandler.MaxUnits())
+		servedCmdPages.resize(unitHandler.MaxUnits(), 0);
+
+	servedCmdPages[unitID] = page;
 }
 
 
@@ -7171,11 +7252,10 @@ bool LuaSnapshotServe::GetServedAvailableCommands(int unitID, std::vector<SComma
 	if (!slot.present)
 		return false;
 
-	// sim|draw WS-5: lastSelectedCommandPage is read live here (main thread) --
-	// its only writers are main-thread (this handler + the CommandAI ctors), so
-	// the read is race-free and the field is no longer snapshotted (design §4.5)
-	const CUnit* unit = unitHandler.GetUnit(unitID);
-	outPage = (unit != nullptr) ? unit->commandAI->lastSelectedCommandPage : 0;
+	// sim|draw WS-5: lastSelectedCommandPage is served from the main-thread page
+	// store (see servedCmdPages) -- dereferencing the live unit->commandAI here
+	// races the sim thread nulling it on death (the shell outlives the null)
+	outPage = (static_cast<size_t>(unitID) < servedCmdPages.size()) ? servedCmdPages[unitID] : 0;
 
 	outDescs.clear();
 	outDescs.reserve(slot.descs.size());
@@ -8984,6 +9064,12 @@ void LuaSnapshotServe::ClearCaches()
 	cmdDirtyActive.clear();
 	cmdDirtyActive.shrink_to_fit();
 	cmdDirtySeeded = false;
+	workerTaskIds.clear();
+	workerTaskIds.shrink_to_fit();
+	workerTaskMember.clear();
+	workerTaskMember.shrink_to_fit();
+	servedCmdPages.clear();
+	servedCmdPages.shrink_to_fit();
 
 	// PR 33 piece caches: unit/feature ids and model pointers restart with the
 	// next game, so a surviving entry could alias fresh ones

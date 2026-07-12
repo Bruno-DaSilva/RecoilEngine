@@ -261,7 +261,12 @@ namespace LuaSnapshotServe {
 	/// sim|draw WS-5: seed the command-queue dirty-list with every active unit
 	/// (design §9). Call after a creg checkpoint load, which reconstructs queues
 	/// with fresh versions but fires no per-unit dirty push. No-op flag-off.
+	/// Also repairs CCommandQueue::ownerId (not creg-serialized).
 	void MarkAllCmdQueuesDirty();
+
+	/// main-thread lastSelectedCommandPage store for the served
+	/// GetAvailableCommands twin (WS-5: the live commandAI deref races death)
+	void NoteSelectedCommandPage(int unitID, int page);
 
 	/// PR 43 §2.1: the EpochId the cmd-queue / piece cache slots currently
 	/// describe (0 = never refreshed). The 0-arg forms read the consumer-held

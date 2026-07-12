@@ -419,6 +419,10 @@ void SnapshotDiffGate::Arm()
 {
 	ResetCounters();
 	armed = true;
+	// arming makes the cmd dirty-list pushes eligible (they are dropped while
+	// unarmed flag-off), so anything mutated before this point was never
+	// pushed -- seed the drain domain with every active unit
+	LuaSnapshotServe::MarkAllCmdQueuesDirty();
 	LOG("[SnapshotDiffGate] armed: verifying SimSnapshot-served values against live sim at each draw boundary");
 }
 

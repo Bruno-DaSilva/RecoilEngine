@@ -1234,7 +1234,19 @@ void CSelectedUnitsHandler::SetCommandPage(int page)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	for (const int unitID: selectedUnits) {
+		// the served twin reads the page from here (main thread, race-free)
+		LuaSnapshotServe::NoteSelectedCommandPage(unitID, page);
+
+		// while the sim runs unparked, unit->commandAI is sim-owned and gets
+		// nulled on death with the shell still allocated -- do not touch it
+		if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() && !SimDrawSplit::IsSimParked())
+			continue;
+
 		CUnit* u = unitHandler.GetUnit(unitID);
+
+		if (u == nullptr)
+			continue;
+
 		CCommandAI* c = u->commandAI;
 		c->lastSelectedCommandPage = page;
 	}
