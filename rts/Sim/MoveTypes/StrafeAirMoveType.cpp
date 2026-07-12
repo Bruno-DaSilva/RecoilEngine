@@ -374,6 +374,7 @@ static int SelectLoopBackManeuver(
 CStrafeAirMoveType::CStrafeAirMoveType(CUnit* owner): AAirMoveType(owner)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	moveTypeClass = MT_STRAFE_AIR;
 	maneuverBlockTime = GAME_SPEED * 3;
 
 	// creg

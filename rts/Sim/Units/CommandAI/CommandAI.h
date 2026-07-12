@@ -109,6 +109,11 @@ public:
 	 */
 	uint64_t GetCmdDescVersion() const { return cmdDescVersion; }
 
+	// concrete-family tag, set by the CMobileCAI ctors (class-constant, so
+	// not creg-serialized): hot per-unit readers (SimSnapshot extraction)
+	// reach MobileCAI members via static_cast instead of a dynamic_cast
+	bool IsMobileCAI() const { return mobileCAI; }
+
 	/**
 	 * @brief Causes this CommandAI to execute the attack order c
 	 */
@@ -158,6 +163,9 @@ public:
 	int lastSelectedCommandPage;
 	int inCommand;
 protected:
+	// see IsMobileCAI()
+	bool mobileCAI = false;
+
 	bool HandleBuildOptionInsertion(int cmdId);
 	bool HandleBuildOptionRemoval(int cmdId);
 	// return true by default so non-AirCAI's trigger FinishCommand

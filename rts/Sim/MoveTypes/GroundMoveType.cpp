@@ -499,6 +499,8 @@ CGroundMoveType::CGroundMoveType(CUnit* owner):
 	pushResistant((owner != nullptr) && owner->unitDef->pushResistant),
 	canReverse((owner != nullptr) && (owner->unitDef->rSpeed > 0.0f))
 {
+	moveTypeClass = MT_GROUND;
+
 	// creg
 	if (owner == nullptr)
 		return;
@@ -2124,7 +2126,7 @@ void CGroundMoveType::ReRequestPath(bool forceRequest) {
 }
 
 bool CGroundMoveType::CanSetNextWayPoint(int thread) {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 
 	if (pathID == 0)
 		return false;

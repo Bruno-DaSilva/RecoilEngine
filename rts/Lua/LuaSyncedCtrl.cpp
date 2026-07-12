@@ -2723,6 +2723,10 @@ int LuaSyncedCtrl::SetUnitWeaponDamages(lua_State* L)
 		damages = DynDamageArray::GetMutable(weapon->damages);
 	}
 
+	// version-skip key for the SimSnapshot damage-array copies; covers ALL of
+	// the unit's damage arrays (unit-level explosion + per-weapon), so any
+	// future weapon-damages gate shares it
+	unit->BumpDamagesVersion();
 
 	if (lua_istable(L, 3)) {
 		// {key1 = value1, ...}

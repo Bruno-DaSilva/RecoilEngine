@@ -96,7 +96,9 @@ CMobileCAI::CMobileCAI():
 	tempOrder(false),
 	slowGuard(false),
 	moveDir(gsRNG.NextFloat() > 0.5f)
-{}
+{
+	mobileCAI = true;
+}
 
 
 CMobileCAI::CMobileCAI(CUnit* owner):
@@ -112,6 +114,8 @@ CMobileCAI::CMobileCAI(CUnit* owner):
 	slowGuard(false),
 	moveDir(gsRNG.NextFloat() > 0.5f)
 {
+	mobileCAI = true;
+
 	CalculateCancelDistance();
 
 	{

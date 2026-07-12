@@ -105,7 +105,23 @@ public:
 	};
 	ProgressState progressState = Done;
 
+	// concrete-class tag, set by each subclass ctor BEFORE its creg
+	// null-owner early-return (class-constant, so not creg-serialized): hot
+	// per-unit readers (SimSnapshot extraction) dispatch on it instead of
+	// walking a dynamic_cast chain
+	enum MoveTypeClasses : uint8_t {
+		MT_BASE       = 0,
+		MT_GROUND     = 1,
+		MT_HOVER_AIR  = 2,
+		MT_STRAFE_AIR = 3,
+		MT_STATIC     = 4,
+		MT_SCRIPT     = 5,
+	};
+	MoveTypeClasses GetMoveTypeClass() const { return moveTypeClass; }
+
 protected:
+	MoveTypeClasses moveTypeClass = MT_BASE;
+
 	float maxSpeed;                         // current maximum speed owner is allowed to reach (changes with eg. guard orders)
 	float maxSpeedDef;                      // default maximum speed owner can reach (as defined by its UnitDef, never changes)
 	float maxWantedSpeed;                   // maximum speed (temporarily) set by a CommandAI

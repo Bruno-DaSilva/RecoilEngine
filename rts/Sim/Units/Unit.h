@@ -278,6 +278,23 @@ public:
 	const DynDamageArray* selfdExpDamages = nullptr;
 	const DynDamageArray* deathExpDamages = nullptr;
 
+	// version-skip key for the SimSnapshot damage-array row copies (the
+	// modParamsVersion pattern, but ctor-seeded): the ctor draws a fresh
+	// globally-unique serial, so a never-mutated unit still differs from any
+	// stale slot copy (one initial copy per (re)spawned id, then skipped) and
+	// an id reused by a new unit can never alias the previous owner's copy.
+	// Bumped at the single runtime mutation choke, LuaSyncedCtrl::
+	// SetUnitWeaponDamages. CR_IGNORED (runtime-only serving state): a
+	// creg-loaded unit draws a fresh serial in the ctor, forcing a re-copy.
+	uint64_t damagesVersion = 0;
+
+	void BumpDamagesVersion() { damagesVersion = ++damagesVersionSource; }
+
+private:
+	static uint64_t damagesVersionSource;
+
+public:
+
 	CUnit* soloBuilder = nullptr;
 	CUnit* lastAttacker = nullptr;
 	// transport that the unit is currently in

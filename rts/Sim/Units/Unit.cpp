@@ -79,6 +79,10 @@
 
 GlobalUnitParams globalUnitParams;
 
+// global serial source for damagesVersion (synced-code/sim-thread writes only;
+// see the Unit.h comment -- the CSolidObject::modParamsVersionSource pattern)
+uint64_t CUnit::damagesVersionSource = 0;
+
 // See end of source for member bindings
 //////////////////////////////////////////////////////////////////////
 // Construction/Destruction
@@ -100,6 +104,8 @@ CUnit::CUnit(): CSolidObject()
 	moveState = MOVESTATE_MANEUVER;
 
 	lastNanoAdd = gs->frameNum;
+
+	BumpDamagesVersion();
 }
 
 CUnit::~CUnit()
@@ -741,7 +747,7 @@ void CUnit::Update()
 
 void CUnit::UpdateWeaponVectors()
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 
 	if (!CanUpdateWeapons())
 		return;
@@ -754,7 +760,7 @@ void CUnit::UpdateWeaponVectors()
 
 void CUnit::UpdateWeapons()
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 
 	if (!CanUpdateWeapons())
 			return;
@@ -1030,7 +1036,7 @@ static auto SplitResourcePackIntoPositiveNegative (const SResourcePack &pack)
 
 void CUnit::SlowUpdate()
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	UpdatePosErrorParams(false, true);
 
 	DoWaterDamage();
@@ -1166,7 +1172,7 @@ void CUnit::SlowUpdate()
 
 void CUnit::SlowUpdateWeapons()
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	if (!CanUpdateWeapons())
 		return;
 
@@ -2959,6 +2965,7 @@ CR_REG_METADATA(CUnit, (
 	CR_MEMBER(stockpileWeapon),
 	CR_MEMBER(selfdExpDamages),
 	CR_MEMBER(deathExpDamages),
+	CR_IGNORED(damagesVersion),
 
 	CR_MEMBER(featureDefID),
 
