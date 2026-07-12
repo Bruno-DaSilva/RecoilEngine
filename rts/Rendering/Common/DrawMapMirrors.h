@@ -140,26 +140,38 @@ public:
 	/// to a dirty-rect log; the drain re-scans only the logged rects instead
 	/// of the whole map (the PR-28 header's sanctioned "later cost
 	/// optimisation"; measured 6.65ms/epoch, dominated by this layer's
-	/// every-frame whole-map rewalk). A log overflow falls back to the
-	/// whole-map path via a blockingVersion bump.
+	/// every-frame whole-map rewalk). The same log drives BOTH the cell[0] and
+	/// the PLACEMENT REHOST full-cell mirrors (one walk fills both). A log
+	/// overflow falls back to the whole-map path via a blockingVersion bump.
 	void MarkBlockingDirty(int x1, int z1, int x2, int z2);
 
 	/// PLACEMENT REHOST: CReadMap::UpdateHeightMapSynced -- the SINGLE terraform
 	/// choke that recomputes centerHeightMap, maxHeightMap, the mip heightmaps,
-	/// centerNormals2D and slopeMap together (ReadMap.cpp:562-565). One bump here
-	/// covers all four height-derived mirror layers below. The load-time full-map
-	/// call (ReadMap.cpp:408) is the first bump. The corner heightmap itself has a
-	/// draw-owned unsynced variant (GetCornerHeightMapUnsynced) so it is NOT
-	/// mirrored -- only the SYNCED-only derived arrays are.
-	void MarkHeightDirty() { ++heightVersion; }
+	/// centerNormals2D and slopeMap together (ReadMap.cpp:562-565). Covers all
+	/// four height-derived mirror layers below. Takes the caller's centerRect
+	/// (map squares, INCLUSIVE max -- unlike MarkBlockingDirty) and appends it to
+	/// a dirty-rect log; the drain re-copies only the logged rects (terraform is
+	/// every explosion crater, so the previous whole-map version bump re-copied
+	/// ~21MB of arrays per drain during combat). The load-time full-map call
+	/// (ReadMap.cpp:408) logs a full-map rect, subsumed by every slot's full
+	/// first drain. A log overflow falls back to the whole-copy path via a
+	/// heightVersion bump. The corner heightmap itself has a draw-owned unsynced
+	/// variant (GetCornerHeightMapUnsynced) so it is NOT mirrored -- only the
+	/// SYNCED-only derived arrays are.
+	void MarkHeightDirty(int x1, int z1, int x2, int z2);
 	/// PLACEMENT REHOST: BuildingMaskMap::SetTileMask (Spring.SetBuildingMask) --
 	/// the sole runtime writer of buildingMaskMap's maskMap. The load-time
 	/// Init fill is picked up by the first drain (size-mismatch clause).
 	void MarkBuildMaskDirty() { ++buildMaskVersion; }
-	/// PLACEMENT REHOST: YardmapStatusEffectsMap SetFlags/ClearFlags/ClearTile --
-	/// the BLOCK_BUILDING/EXIT_ONLY writers driven by factory yard open/close and
-	/// the exit-only setup. Low churn; version-gated whole copy.
-	void MarkYardStatusDirty() { ++yardStatusVersion; }
+	/// PLACEMENT REHOST: YardmapStatusEffectsMap SetFlags/ClearFlags -- the
+	/// BLOCK_BUILDING/EXIT_ONLY writers, all inside the two GroundBlockingObjectMap
+	/// {Add,Remove}GroundBlockingObject footprint loops (yard open/close funnels
+	/// through them). Takes the same footprint rect as MarkBlockingDirty (map
+	/// squares, exclusive max) and appends it to a dirty-rect log; the drain
+	/// re-flattens only the logged rects (the whole-map GetMapState flatten ran
+	/// on every building add/remove). A log overflow falls back to the whole-map
+	/// path via a yardStatusVersion bump.
+	void MarkYardStatusDirty(int x1, int z1, int x2, int z2);
 
 	// ---- producer + consumer + lifecycle ----
 
@@ -226,10 +238,13 @@ public:
 	// ---- PLACEMENT REHOST: full-cell blocking mirror ----
 	// The move-placement path (MoveDef::TestMoveSquare -> RangeIsBlocked ->
 	// SquareIsBlocked) OR-folds ObjectBlockType over EVERY object in a blocking
-	// cell, not just cell[0]. The mirror stores the full per-square object list in
-	// CSR form (fullCellOffset prefix-sums into the flat fullCellId/fullCellKind).
-	// It shares blockingVersion with the cell[0] mirror (same choke points). The
-	// live mtTempNum cross-square dedup is a pure perf optimisation (ObjectBlockType
+	// cell, not just cell[0]. The mirror stores the full per-square object list as
+	// per-square (offset, count) rows into the flat fullCellId/fullCellKind pool
+	// (NOT prefix-sum CSR: incremental updates relocate grown rows to the pool
+	// tail, so offsets are unordered and the pool carries garbage between the
+	// occasional repacks -- see the drain). It shares blockingVersion and the
+	// PR 46 dirty-rect log with the cell[0] mirror (same choke points). The live
+	// mtTempNum cross-square dedup is a pure perf optimisation (ObjectBlockType
 	// is OR-idempotent), so the epoch consumer just ORs over each square's objects.
 
 	// number of blocking objects in the cell at map square (x, z); 0 out of range
@@ -326,8 +341,10 @@ public:
 	const std::vector<int32_t>& BlockIds() const { return P().blockId; }
 	const std::vector<uint8_t>& BlockKinds() const { return P().blockKind; }
 
-	// PLACEMENT REHOST full-cell mirror diff-gate accessors (CSR form)
+	// PLACEMENT REHOST full-cell mirror diff-gate accessors (per-square
+	// offset+count rows into the id/kind pool; offsets are NOT sorted)
 	const std::vector<int32_t>& FullCellOffsets() const { return P().fullCellOffset; }
+	const std::vector<int32_t>& FullCellCounts()  const { return P().fullCellCount; }
 	const std::vector<int32_t>& FullCellIds()     const { return P().fullCellId; }
 	const std::vector<uint8_t>& FullCellKinds()   const { return P().fullCellKind; }
 
@@ -395,21 +412,30 @@ private:
 		// log up to (everything below it is reflected in blockId/blockKind)
 		uint64_t blockingRectsDrained = 0;
 
-		// PLACEMENT REHOST full-cell mirror (CSR): fullCellOffset has mapx*mapy+1
-		// entries; the objects of square sq are fullCellId[off[sq] .. off[sq+1]).
-		// Shares blockingVersion with the cell[0] mirror above.
-		std::vector<int32_t> fullCellOffset;         // [mapx*mapy + 1] prefix offsets
-		std::vector<int32_t> fullCellId;             // flat object ids
-		std::vector<uint8_t> fullCellKind;           // flat BLOCK_KIND_*
-		uint32_t fullCellDrained = 0xffffffffu;
+		// PLACEMENT REHOST full-cell mirror: the objects of square sq are
+		// fullCellId/fullCellKind[fullCellOffset[sq] .. +fullCellCount[sq]).
+		// Shares blockingVersion, blockingDrained AND the rect-log cursor
+		// (blockingRectsDrained) with the cell[0] mirror above -- both are
+		// (re)built by the same walk in the drain. Incremental updates write a
+		// shrunk/equal row in place and relocate a grown row to the pool tail,
+		// so offsets are unordered and the pool accumulates garbage; the drain
+		// repacks it (a pure pool copy, no live reads) past a growth threshold.
+		std::vector<int32_t> fullCellOffset;         // [mapx*mapy] row starts (unsorted)
+		std::vector<int32_t> fullCellCount;          // [mapx*mapy] row lengths
+		std::vector<int32_t> fullCellId;             // row pool: object ids
+		std::vector<uint8_t> fullCellKind;           // row pool: BLOCK_KIND_*
+		size_t fullCellPoolTight = 0;                // pool size at the last full build/repack
 
 		// PLACEMENT REHOST: the four height-derived SYNCED-only layers (all
-		// recomputed together by UpdateHeightMapSynced -> one shared version)
+		// recomputed together by UpdateHeightMapSynced -> one shared version +
+		// dirty-rect log)
 		std::vector<float> centerHeight;             // [mapx*mapy]   center heightmap
 		std::vector<float> maxHeight;                // [mapx*mapy]   per-face max-corner
 		std::vector<float> slope;                    // [hmapx*hmapy] slopemap
 		std::vector<float3> centerNormals2D;         // [mapx*mapy]   interpolated 2D normal
 		uint32_t heightDrained = 0xffffffffu;
+		// height dirty-rect log cursor (same mechanism as blockingRectsDrained)
+		uint64_t heightRectsDrained = 0;
 
 		// PLACEMENT REHOST: building-mask (half-res) + yard-status (full-res,
 		// stored flat in logical (x,z) order, NOT the live 8x8-tile layout)
@@ -417,6 +443,8 @@ private:
 		uint32_t buildMaskDrained = 0xffffffffu;
 		std::vector<uint8_t> yardStatus;             // [mapx*mapy]
 		uint32_t yardStatusDrained = 0xffffffffu;
+		// yard-status dirty-rect log cursor (same mechanism as blockingRectsDrained)
+		uint64_t yardRectsDrained = 0;
 
 		bool ready = false;
 	};
@@ -450,26 +478,32 @@ private:
 	uint32_t extractionVersion = 1;
 	uint32_t blockingVersion = 1;
 
-	// ---- PR 46: blocking dirty-rect log (producing-thread-owned, like the
-	// versions above: the choke points and the drain run on the same thread).
-	// Rect i in the deque has serial blockingRectBaseSerial + i; the next
-	// appended rect gets blockingRectNextSerial. A slot's drain applies
-	// [its cursor, blockingRectNextSerial) and the fully-applied prefix is
-	// pruned once every slot's cursor has passed it. ----
-	struct BlockingRect { int32_t x1, z1, x2, z2; }; // squares, exclusive max
-	std::deque<BlockingRect> blockingRects;
+	// ---- PR 46: dirty-rect logs (producing-thread-owned, like the versions
+	// above: the choke points and the drain run on the same thread). Rect i in
+	// a deque has serial <base> + i; the next appended rect gets <next>. A
+	// slot's drain applies [its cursor, <next>) and the fully-applied prefix
+	// is pruned once every slot's cursor has passed it. The blocking log is
+	// shared by the cell[0] + full-cell mirrors; the height + yard-status logs
+	// (PLACEMENT REHOST rect follow-up) reuse the identical mechanism. ----
+	struct DirtyRect { int32_t x1, z1, x2, z2; }; // squares; see each choke for incl/excl
+	std::deque<DirtyRect> blockingRects;          // exclusive max (footprint loops)
 	uint64_t blockingRectNextSerial = 1;
 	uint64_t blockingRectBaseSerial = 1;
+	std::deque<DirtyRect> heightRects;            // INCLUSIVE max (UpdateHeightMapSynced centerRect)
+	uint64_t heightRectNextSerial = 1;
+	uint64_t heightRectBaseSerial = 1;
+	std::deque<DirtyRect> yardRects;              // exclusive max (footprint loops)
+	uint64_t yardRectNextSerial = 1;
+	uint64_t yardRectBaseSerial = 1;
 
 	// PLACEMENT REHOST: one shared version for the four height-derived layers
-	// (bumped by MarkHeightDirty from UpdateHeightMapSynced) + the two
-	// low-churn layer versions. fullCellVersion is bumped by MarkBlockingDirty
-	// (every blocking mutation) so the full-cell mirror (move path) whole-map
-	// re-walks -- the PR 46 rect log optimises the cell[0] mirror only.
+	// (bumped only by a heightRects log overflow / Clear; MarkHeightDirty logs
+	// rects) + the build-mask version + the yard-status version (bumped only by
+	// a yardRects overflow / Clear). The full-cell mirror shares blockingVersion
+	// with the cell[0] mirror.
 	uint32_t heightVersion = 1;
 	uint32_t buildMaskVersion = 1;
 	uint32_t yardStatusVersion = 1;
-	uint32_t fullCellVersion = 1;
 };
 
 extern DrawMapMirrors drawMapMirrors;

@@ -115,8 +115,9 @@ void CGroundBlockingObjectMap::AddGroundBlockingObject(CSolidObject* object, con
 	// squares in the blocking mirror (PR 46: rect-incremental)
 	drawMapMirrors.MarkBlockingDirty(xminSqr, zminSqr, xmaxSqr, zmaxSqr);
 	// PLACEMENT REHOST: the Set{ExitOnly,BlockBuilding}At writes above are the
-	// yard-status BLOCK_BUILDING/EXIT_ONLY source; re-copy the yard-status mirror.
-	drawMapMirrors.MarkYardStatusDirty();
+	// yard-status BLOCK_BUILDING/EXIT_ONLY source; all sit inside the footprint
+	// loop, so log the same rect for the yard-status mirror.
+	drawMapMirrors.MarkYardStatusDirty(xminSqr, zminSqr, xmaxSqr, zmaxSqr);
 
 	// FIXME: needs dependency injection (observer pattern?)
 	if (object->moveDef != nullptr)
@@ -164,8 +165,8 @@ void CGroundBlockingObjectMap::RemoveGroundBlockingObject(CSolidObject* object)
 	// squares in the blocking mirror (PR 46: rect-incremental)
 	drawMapMirrors.MarkBlockingDirty(bx, bz, bx + sx, bz + sz);
 	// PLACEMENT REHOST: the Clear{ExitOnly,BlockBuilding}At writes above mutate
-	// the yard-status mirror source (see the Add path for the over-mark note).
-	drawMapMirrors.MarkYardStatusDirty();
+	// the yard-status mirror source inside the same footprint loop.
+	drawMapMirrors.MarkYardStatusDirty(bx, bz, bx + sx, bz + sz);
 
 	// FIXME: needs dependency injection (observer pattern?)
 	if (object->moveDef != nullptr)

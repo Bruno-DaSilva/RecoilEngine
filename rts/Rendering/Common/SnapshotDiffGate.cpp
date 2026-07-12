@@ -1728,21 +1728,22 @@ void SnapshotDiffGate::CheckMapMirrors()
 			LOG_L(L_ERROR, "[SnapshotDiffGate] frame=%d field=map:yardStatus mismatch (square=%zu)", gs->frameNum, badSq);
 	}
 
-	// --- PLACEMENT REHOST: full-cell blocking mirror (CSR) ---
+	// --- PLACEMENT REHOST: full-cell blocking mirror (offset+count rows) ---
 	// A mismatch means the full-cell mirror drifted from the live cell (a missed
 	// MarkBlockingDirty, or a classification/order divergence). Compare each square's
 	// object list in cell-iteration order with the same feature-first classification.
 	{
 		const std::vector<int32_t>& off = drawMapMirrors.FullCellOffsets();
+		const std::vector<int32_t>& cnt = drawMapMirrors.FullCellCounts();
 		const std::vector<int32_t>& fid = drawMapMirrors.FullCellIds();
 		const std::vector<uint8_t>& fkind = drawMapMirrors.FullCellKinds();
 		const size_t nSquares = static_cast<size_t>(mapDims.mapx) * static_cast<size_t>(mapDims.mapy);
-		bool eq = (off.size() == nSquares + 1);
+		bool eq = (off.size() == nSquares) && (cnt.size() == nSquares);
 		size_t badSq = 0;
 
 		for (size_t sq = 0; eq && sq < nSquares; ++sq) {
 			const int base = off[sq];
-			const int mcount = off[sq + 1] - base;
+			const int mcount = cnt[sq];
 
 			const auto cell = groundBlockingObjectMap.GetCellUnsafeConst(static_cast<unsigned int>(sq));
 			int mi = 0;

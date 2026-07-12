@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstring>
 
 #include "Map/MapDimensions.h"
 #include "Map/MapInfo.h"
@@ -47,11 +48,11 @@ void DrawMapMirrors::MarkLosDirty(int type, int ally)
 		++losFullVersion;
 }
 
-// PR 46: bound on the blocking dirty-rect log. Rects accumulate while no
-// drain runs (production skipped: draw not consuming, pause); past the cap a
-// blockingVersion bump reverts the affected slots to the whole-map walk,
-// which is what the log exists to avoid but is always correct.
-static constexpr size_t MAX_BLOCKING_RECTS = 1 << 16;
+// PR 46: bound on the dirty-rect logs. Rects accumulate while no drain runs
+// (production skipped: draw not consuming, pause); past the cap a version
+// bump reverts the affected slots to the whole-map walk, which is what the
+// logs exist to avoid but is always correct.
+static constexpr size_t MAX_MIRROR_RECTS = 1 << 16;
 
 void DrawMapMirrors::MarkBlockingDirty(int x1, int z1, int x2, int z2)
 {
@@ -63,11 +64,7 @@ void DrawMapMirrors::MarkBlockingDirty(int x1, int z1, int x2, int z2)
 	if (x1 >= x2 || z1 >= z2)
 		return;
 
-	// PLACEMENT REHOST: the full-cell mirror (move path) does a whole-map re-walk
-	// rather than applying the rect log, so bump its version on every mutation.
-	++fullCellVersion;
-
-	if (blockingRects.size() >= MAX_BLOCKING_RECTS) {
+	if (blockingRects.size() >= MAX_MIRROR_RECTS) {
 		++blockingVersion;
 		blockingRectBaseSerial = (blockingRectNextSerial += 1);
 		blockingRects.clear();
@@ -76,6 +73,55 @@ void DrawMapMirrors::MarkBlockingDirty(int x1, int z1, int x2, int z2)
 
 	blockingRects.push_back({x1, z1, x2, z2});
 	blockingRectNextSerial += 1;
+}
+
+// PLACEMENT REHOST rect follow-up: the height-derived choke logs the caller's
+// centerRect (INCLUSIVE max, pre-clamped to map{x,y}m1 by UpdateHeightMapSynced;
+// re-clamped here defensively). The drain expands it by the live recompute
+// margins (see the height section there).
+void DrawMapMirrors::MarkHeightDirty(int x1, int z1, int x2, int z2)
+{
+	x1 = std::max(x1, 0);
+	z1 = std::max(z1, 0);
+	x2 = std::min(x2, mapDims.mapxm1);
+	z2 = std::min(z2, mapDims.mapym1);
+
+	if (x1 > x2 || z1 > z2)
+		return;
+
+	if (heightRects.size() >= MAX_MIRROR_RECTS) {
+		++heightVersion;
+		heightRectBaseSerial = (heightRectNextSerial += 1);
+		heightRects.clear();
+		return;
+	}
+
+	heightRects.push_back({x1, z1, x2, z2});
+	heightRectNextSerial += 1;
+}
+
+// PLACEMENT REHOST rect follow-up: same footprint rect (exclusive max) the
+// caller passes to MarkBlockingDirty -- every Set/Clear{ExitOnly,BlockBuilding}At
+// write sits inside the {Add,Remove}GroundBlockingObject footprint loops.
+void DrawMapMirrors::MarkYardStatusDirty(int x1, int z1, int x2, int z2)
+{
+	x1 = std::max(x1, 0);
+	z1 = std::max(z1, 0);
+	x2 = std::min(x2, mapDims.mapx);
+	z2 = std::min(z2, mapDims.mapy);
+
+	if (x1 >= x2 || z1 >= z2)
+		return;
+
+	if (yardRects.size() >= MAX_MIRROR_RECTS) {
+		++yardStatusVersion;
+		yardRectBaseSerial = (yardRectNextSerial += 1);
+		yardRects.clear();
+		return;
+	}
+
+	yardRects.push_back({x1, z1, x2, z2});
+	yardRectNextSerial += 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -151,41 +197,50 @@ void DrawMapMirrors::DrainAtBarrier(int slot)
 		pl.losFullDrained = losFullVersion;
 	}
 
-	// --- global-LOS + jammer config (tiny, unconditional) ---
-	pl.numAllyTeams = liveAllyTeams;
-	pl.globalLos.resize(pl.numAllyTeams);
-	for (int at = 0; at < pl.numAllyTeams; ++at)
-		pl.globalLos[at] = losHandler->GetGlobalLOS(at);
-	pl.separateJammers = modInfo.separateJammers;
+	// --- global-LOS + jammer config + radar-error scalars (tiny, unconditional) ---
+	{
+		SCOPED_TIMER("Sim::EpochProduce::MirrorScalars");
 
-	// --- radar-error scalars (tiny, unconditional) ---
-	pl.baseRadarErrorSize = losHandler->GetBaseRadarErrorSize();
-	pl.baseRadarErrorMult = losHandler->GetBaseRadarErrorMult();
-	pl.radarErrorSizes.resize(pl.numAllyTeams);
-	for (int at = 0; at < pl.numAllyTeams; ++at)
-		pl.radarErrorSizes[at] = losHandler->GetAllyTeamRadarErrorSize(at);
+		pl.numAllyTeams = liveAllyTeams;
+		pl.globalLos.resize(pl.numAllyTeams);
+		for (int at = 0; at < pl.numAllyTeams; ++at)
+			pl.globalLos[at] = losHandler->GetGlobalLOS(at);
+		pl.separateJammers = modInfo.separateJammers;
+
+		pl.baseRadarErrorSize = losHandler->GetBaseRadarErrorSize();
+		pl.baseRadarErrorMult = losHandler->GetBaseRadarErrorMult();
+		pl.radarErrorSizes.resize(pl.numAllyTeams);
+		for (int at = 0; at < pl.numAllyTeams; ++at)
+			pl.radarErrorSizes[at] = losHandler->GetAllyTeamRadarErrorSize(at);
+	}
 
 	// --- terrain-type table (version-gated whole copy; near-static) ---
-	if (pl.terrainTypesDrained != terrainTypesVersion || pl.terrainTypes.empty()) {
-		pl.terrainTypes.resize(CMapInfo::NUM_TERRAIN_TYPES);
-		for (int i = 0; i < CMapInfo::NUM_TERRAIN_TYPES; ++i) {
-			const CMapInfo::TerrainType& tt = mapInfo->terrainTypes[i];
-			TerrainType& d = pl.terrainTypes[i];
-			d.name = tt.name;
-			d.hardness = tt.hardness;
-			d.tankSpeed = tt.tankSpeed;
-			d.kbotSpeed = tt.kbotSpeed;
-			d.hoverSpeed = tt.hoverSpeed;
-			d.shipSpeed = tt.shipSpeed;
-			d.receiveTracks = tt.receiveTracks;
+	{
+		SCOPED_TIMER("Sim::EpochProduce::MirrorTerrainTypes");
+
+		if (pl.terrainTypesDrained != terrainTypesVersion || pl.terrainTypes.empty()) {
+			pl.terrainTypes.resize(CMapInfo::NUM_TERRAIN_TYPES);
+			for (int i = 0; i < CMapInfo::NUM_TERRAIN_TYPES; ++i) {
+				const CMapInfo::TerrainType& tt = mapInfo->terrainTypes[i];
+				TerrainType& d = pl.terrainTypes[i];
+				d.name = tt.name;
+				d.hardness = tt.hardness;
+				d.tankSpeed = tt.tankSpeed;
+				d.kbotSpeed = tt.kbotSpeed;
+				d.hoverSpeed = tt.hoverSpeed;
+				d.shipSpeed = tt.shipSpeed;
+				d.receiveTracks = tt.receiveTracks;
+			}
+			pl.terrainTypesDrained = terrainTypesVersion;
 		}
-		pl.terrainTypesDrained = terrainTypesVersion;
 	}
 
 	// --- typemap (PR 38d): per-square terrain-type index, version-gated ---
 	// Near-static: Spring.SetMapSquareTerrainType is the sole runtime writer; the
 	// load-time fill is caught by the size-mismatch clause on the first drain.
 	{
+		SCOPED_TIMER("Sim::EpochProduce::MirrorTypeMap");
+
 		const size_t n = static_cast<size_t>(mapDims.hmapx) * static_cast<size_t>(mapDims.hmapy);
 		if (pl.typeMapDrained != typeMapVersion || pl.typeMap.size() != n) {
 			const uint8_t* src = readMap->GetTypeMapSynced();
@@ -200,6 +255,8 @@ void DrawMapMirrors::DrainAtBarrier(int slot)
 	// scalars); the distributionMap copy is gated on the version / a size change
 	// (which also catches the load-time metalMap.Init fill on the first drain).
 	{
+		SCOPED_TIMER("Sim::EpochProduce::MirrorMetal");
+
 		pl.metalSizeX = metalMap.GetSizeX();
 		pl.metalSizeZ = metalMap.GetSizeZ();
 		pl.metalScale = metalMap.GetMetalScale();
@@ -227,10 +284,13 @@ void DrawMapMirrors::DrainAtBarrier(int slot)
 	}
 
 	// --- smooth-height mesh (version-gated whole copy; window updater) ---
-	pl.smoothMaxX = smoothGround.GetMaxX();
-	pl.smoothMaxY = smoothGround.GetMaxY();
-	pl.smoothRes = smoothGround.GetResolution();
 	{
+		SCOPED_TIMER("Sim::EpochProduce::MirrorSmoothMesh");
+
+		pl.smoothMaxX = smoothGround.GetMaxX();
+		pl.smoothMaxY = smoothGround.GetMaxY();
+		pl.smoothRes = smoothGround.GetResolution();
+
 		const size_t n = static_cast<size_t>(pl.smoothMaxX) * static_cast<size_t>(pl.smoothMaxY);
 		if (pl.smoothMeshDrained != smoothMeshVersion || pl.smoothMesh.size() != n) {
 			// GetMeshData() dereferences mesh[0]; only touch it when non-empty
@@ -244,6 +304,8 @@ void DrawMapMirrors::DrainAtBarrier(int slot)
 
 	// --- original heightmap (version-gated whole copy) ---
 	{
+		SCOPED_TIMER("Sim::EpochProduce::MirrorOrigHeight");
+
 		const size_t n = static_cast<size_t>(mapDims.mapxp1) * static_cast<size_t>(mapDims.mapyp1);
 		if (pl.origHeightDrained != origHeightVersion || pl.origHeight.size() != n) {
 			const float* src = readMap->GetOriginalHeightMapSynced();
@@ -252,72 +314,153 @@ void DrawMapMirrors::DrainAtBarrier(int slot)
 		}
 	}
 
-	// --- blocking map (PR 29): per-square cell[0] id + kind ---
-	// GroundBlockedUnsafe(sq) returns the same cell[0] object the live
-	// placement callouts read; classify it once here so the served twins never
-	// dereference a live CSolidObject. PR 46: incremental -- the choke points
-	// log each mutation's footprint rect, and a caught-up slot re-scans ONLY
-	// the rects appended since its cursor (the whole-map walk was ~all of the
-	// measured 6.65ms/epoch drain cost). The whole-map path remains for the
-	// slot's first drain, a map-size change, and a version bump (log
-	// overflow / Clear); the armed SnapshotDiffGate memcmp pass is the
-	// deterministic detector for a rect this misses.
+	// --- blocking map (PR 29 cell[0] + PLACEMENT REHOST full cell) ---
+	// GroundBlockedUnsafe(sq) returns the same cell[0] object the live placement
+	// callouts read; the move-placement OR-fold reads EVERY object in the cell.
+	// One walk classifies both mirrors here so the served twins never dereference
+	// a live CSolidObject. PR 46: incremental -- the choke points log each
+	// mutation's footprint rect, and a caught-up slot re-scans ONLY the rects
+	// appended since its cursor (the whole-map walk was ~all of the measured
+	// 6.65ms/epoch drain cost, and the full-cell mirror briefly reintroduced it
+	// via an every-mutation version bump). The whole-map path remains for the
+	// slot's first drain, a map-size change, and a version bump (log overflow /
+	// Clear); the armed SnapshotDiffGate memcmp pass is the deterministic
+	// detector for a rect this misses.
+	//
+	// Full-cell row updates: a row whose new length fits the old one is written
+	// in place; a grown row is relocated to the pool tail (fullCellOffset is
+	// unordered on purpose). The garbage relocation leaves behind is bounded by
+	// an occasional repack -- a pure copy of the live rows, no sim-state reads.
 	{
 		SCOPED_TIMER("Sim::EpochProduce::MirrorBlocking");
 
-		const auto classifySquare = [&pl](size_t sq) {
-			const CSolidObject* s = groundBlockingObjectMap.GroundBlockedUnsafe(static_cast<unsigned int>(sq));
-
-			// live GetGroundBlocked order: feature cast first, then unit;
-			// anything else -> NONE (the twin's "neither" fall-through)
-			if (s == nullptr) {
-				pl.blockId[sq] = -1;
-				pl.blockKind[sq] = BLOCK_KIND_NONE;
-			} else if (const CFeature* f = dynamic_cast<const CFeature*>(s)) {
-				pl.blockId[sq] = f->id;
-				pl.blockKind[sq] = BLOCK_KIND_FEATURE;
-			} else if (const CUnit* u = dynamic_cast<const CUnit*>(s)) {
-				pl.blockId[sq] = u->id;
-				pl.blockKind[sq] = BLOCK_KIND_UNIT;
-			} else {
-				pl.blockId[sq] = -1;
-				pl.blockKind[sq] = BLOCK_KIND_NONE;
-			}
-		};
-
 		const size_t nSquares = static_cast<size_t>(mapDims.mapx) * static_cast<size_t>(mapDims.mapy);
 
-		if (pl.blockingDrained != blockingVersion || pl.blockId.size() != nSquares) {
+		// live GetGroundBlocked classification order: feature cast first, then
+		// unit; anything else -> NONE (the twin's "neither" fall-through)
+		struct Occ { int32_t id; uint8_t kind; };
+		const auto classify = [](const CSolidObject* s) -> Occ {
+			if (s == nullptr)
+				return {-1, BLOCK_KIND_NONE};
+			if (const CFeature* f = dynamic_cast<const CFeature*>(s))
+				return {f->id, BLOCK_KIND_FEATURE};
+			if (const CUnit* u = dynamic_cast<const CUnit*>(s))
+				return {u->id, BLOCK_KIND_UNIT};
+			return {-1, BLOCK_KIND_NONE};
+		};
+
+		if (pl.blockingDrained != blockingVersion || pl.blockId.size() != nSquares || pl.fullCellOffset.size() != nSquares) {
 			// full path: this slot cannot trust its arrays (first drain,
-			// resize, or an overflow-class version bump)
-			pl.blockId.assign(nSquares, -1);
-			pl.blockKind.assign(nSquares, BLOCK_KIND_NONE);
+			// resize, or an overflow-class version bump); builds both mirrors,
+			// the full-cell pool tightly packed
+			pl.blockId.resize(nSquares);
+			pl.blockKind.resize(nSquares);
+			pl.fullCellOffset.resize(nSquares);
+			pl.fullCellCount.resize(nSquares);
+			pl.fullCellId.clear();
+			pl.fullCellKind.clear();
 
-			for (size_t sq = 0; sq < nSquares; ++sq)
-				classifySquare(sq);
+			for (size_t sq = 0; sq < nSquares; ++sq) {
+				const auto cell = groundBlockingObjectMap.GetCellUnsafeConst(static_cast<unsigned int>(sq));
+				const size_t n = cell.size();
 
+				pl.fullCellOffset[sq] = static_cast<int32_t>(pl.fullCellId.size());
+				for (size_t i = 0; i < n; ++i) {
+					const Occ o = classify(cell[i]);
+					// the blocking map only ever holds units/features, so
+					// "neither" never occurs; the skip mirrors the live nullptr
+					// fall-through (and the diff gate's)
+					if (o.kind == BLOCK_KIND_NONE)
+						continue;
+					pl.fullCellId.push_back(o.id);
+					pl.fullCellKind.push_back(o.kind);
+				}
+				pl.fullCellCount[sq] = static_cast<int32_t>(pl.fullCellId.size()) - pl.fullCellOffset[sq];
+
+				// GroundBlockedUnsafe: cell.empty() ? nullptr : cell[0]
+				const Occ head = classify((n == 0) ? nullptr : cell[0]);
+				pl.blockId[sq] = head.id;
+				pl.blockKind[sq] = head.kind;
+			}
+
+			pl.fullCellPoolTight = pl.fullCellId.size();
 			pl.blockingDrained = blockingVersion;
 			pl.blockingRectsDrained = blockingRectNextSerial; // log subsumed by the walk
 		} else if (pl.blockingRectsDrained != blockingRectNextSerial) {
 			// incremental path: apply the footprint rects logged since this
 			// slot's cursor (rects were clamped at the choke point; overlaps
-			// are idempotent -- classifySquare reads current live state)
+			// are idempotent -- each square re-reads current live state)
+			std::vector<Occ> row; // scratch: the in-place-or-relocate decision needs the length first
+
 			size_t idx = 0;
 			if (pl.blockingRectsDrained > blockingRectBaseSerial)
 				idx = static_cast<size_t>(pl.blockingRectsDrained - blockingRectBaseSerial);
 
 			for (; idx < blockingRects.size(); ++idx) {
-				const BlockingRect& r = blockingRects[idx];
+				const DirtyRect& r = blockingRects[idx];
 
 				for (int z = r.z1; z < r.z2; ++z) {
 					size_t sq = static_cast<size_t>(z) * static_cast<size_t>(mapDims.mapx) + static_cast<size_t>(r.x1);
 
-					for (int x = r.x1; x < r.x2; ++x, ++sq)
-						classifySquare(sq);
+					for (int x = r.x1; x < r.x2; ++x, ++sq) {
+						const auto cell = groundBlockingObjectMap.GetCellUnsafeConst(static_cast<unsigned int>(sq));
+						const size_t n = cell.size();
+
+						row.clear();
+						for (size_t i = 0; i < n; ++i) {
+							const Occ o = classify(cell[i]);
+							if (o.kind == BLOCK_KIND_NONE)
+								continue;
+							row.push_back(o);
+						}
+
+						const int32_t newCount = static_cast<int32_t>(row.size());
+						if (newCount > pl.fullCellCount[sq]) {
+							// grown row: relocate to the pool tail
+							pl.fullCellOffset[sq] = static_cast<int32_t>(pl.fullCellId.size());
+							for (const Occ& o : row) {
+								pl.fullCellId.push_back(o.id);
+								pl.fullCellKind.push_back(o.kind);
+							}
+						} else {
+							// fits: overwrite in place
+							const int32_t base = pl.fullCellOffset[sq];
+							for (int32_t i = 0; i < newCount; ++i) {
+								pl.fullCellId[base + i] = row[i].id;
+								pl.fullCellKind[base + i] = row[i].kind;
+							}
+						}
+						pl.fullCellCount[sq] = newCount;
+
+						const Occ head = classify((n == 0) ? nullptr : cell[0]);
+						pl.blockId[sq] = head.id;
+						pl.blockKind[sq] = head.kind;
+					}
 				}
 			}
 
 			pl.blockingRectsDrained = blockingRectNextSerial;
+
+			// repack once relocation garbage doubles the pool: copy each live
+			// row into a fresh tight pool (bounded, no GetCellUnsafeConst /
+			// dynamic_cast); the 64k floor keeps near-empty maps repack-free
+			if (pl.fullCellId.size() > std::max(pl.fullCellPoolTight * 2, size_t(1) << 16)) {
+				std::vector<int32_t> packedId;   packedId.reserve(pl.fullCellPoolTight);
+				std::vector<uint8_t> packedKind; packedKind.reserve(pl.fullCellPoolTight);
+
+				for (size_t sq = 0; sq < nSquares; ++sq) {
+					const int32_t base = pl.fullCellOffset[sq];
+					const int32_t cnt = pl.fullCellCount[sq];
+
+					pl.fullCellOffset[sq] = static_cast<int32_t>(packedId.size());
+					packedId.insert(packedId.end(), pl.fullCellId.begin() + base, pl.fullCellId.begin() + base + cnt);
+					packedKind.insert(packedKind.end(), pl.fullCellKind.begin() + base, pl.fullCellKind.begin() + base + cnt);
+				}
+
+				pl.fullCellId.swap(packedId);
+				pl.fullCellKind.swap(packedKind);
+				pl.fullCellPoolTight = pl.fullCellId.size();
+			}
 		}
 
 		// prune the log prefix every slot has applied (slots that never
@@ -333,68 +476,90 @@ void DrawMapMirrors::DrainAtBarrier(int slot)
 		}
 	}
 
-	// --- PLACEMENT REHOST: full-cell blocking mirror (CSR) ---
-	// Every object per square (not just cell[0]) for the move-placement OR-fold.
-	// Gated on fullCellVersion (bumped by MarkBlockingDirty on EVERY blocking
-	// mutation) -- unlike the PR 46 cell[0] mirror, the full-cell mirror does a
-	// whole-map re-walk rather than applying the rect log (correctness over the
-	// producer-cost optimisation; the move path is rare).
-	{
-		const size_t nSquares = static_cast<size_t>(mapDims.mapx) * static_cast<size_t>(mapDims.mapy);
-		if (pl.fullCellDrained != fullCellVersion || pl.fullCellOffset.size() != nSquares + 1) {
-			pl.fullCellOffset.assign(nSquares + 1, 0);
-			pl.fullCellId.clear();
-			pl.fullCellKind.clear();
-
-			for (size_t sq = 0; sq < nSquares; ++sq) {
-				pl.fullCellOffset[sq] = static_cast<int32_t>(pl.fullCellId.size());
-
-				const auto cell = groundBlockingObjectMap.GetCellUnsafeConst(static_cast<unsigned int>(sq));
-				const size_t n = cell.size();
-				for (size_t i = 0; i < n; ++i) {
-					const CSolidObject* s = cell[i];
-					if (s == nullptr)
-						continue;
-					// same feature-first/unit classification as cell[0]; the blocking
-					// map only ever holds units/features, so "neither" never occurs
-					if (const CFeature* f = dynamic_cast<const CFeature*>(s)) {
-						pl.fullCellId.push_back(f->id);
-						pl.fullCellKind.push_back(BLOCK_KIND_FEATURE);
-					} else if (const CUnit* u = dynamic_cast<const CUnit*>(s)) {
-						pl.fullCellId.push_back(u->id);
-						pl.fullCellKind.push_back(BLOCK_KIND_UNIT);
-					}
-				}
-			}
-			pl.fullCellOffset[nSquares] = static_cast<int32_t>(pl.fullCellId.size());
-			pl.fullCellDrained = fullCellVersion;
-		}
-	}
-
-	// --- PLACEMENT REHOST: height-derived layers (one shared version) ---
+	// --- PLACEMENT REHOST: height-derived layers (shared version + rect log) ---
 	// centerHeightMap / maxHeightMap / centerNormals2D are [mapx*mapy]; slopeMap
 	// is [hmapx*hmapy]. All four are recomputed together by UpdateHeightMapSynced
-	// (the MarkHeightDirty choke), so one version gate copies the set. Whole copy
-	// (the plan sanctions whole-map granularity; terraform is the only churn and
-	// the version gate makes a static map a first-drain-only cost).
+	// (the MarkHeightDirty choke), which logs its centerRect (INCLUSIVE bounds).
+	// Terraform is every explosion crater, so the original whole copy (~21MB on a
+	// 1024^2 map) ran nearly every combat drain; a caught-up slot now row-copies
+	// only the logged rects. The live recompute footprints differ per array:
+	// center/max = the rect itself, centerNormals2D = rect +/-1 (UpdateFaceNormals),
+	// slope = the rect's half-res projection +/-1 (UpdateSlopemap). We copy the
+	// +/-1-expanded rect for all three full-res arrays (over-copying from the live
+	// source is always correct) and reproduce the exact UpdateSlopemap bounds for
+	// the half-res one. Whole copy remains for the first drain, a resize, and a
+	// log-overflow version bump.
 	{
+		SCOPED_TIMER("Sim::EpochProduce::MirrorHeight");
+
 		const size_t nFull = static_cast<size_t>(mapDims.mapx) * static_cast<size_t>(mapDims.mapy);
 		const size_t nHalf = static_cast<size_t>(mapDims.hmapx) * static_cast<size_t>(mapDims.hmapy);
+
+		const float*  ch = readMap->GetCenterHeightMapSynced();
+		const float*  mh = readMap->GetMaxHeightMapSynced();
+		const float3* cn = readMap->GetCenterNormals2DSynced();
+		const float*  sl = readMap->GetSlopeMapSynced();
+
 		if (pl.heightDrained != heightVersion || pl.centerHeight.size() != nFull || pl.slope.size() != nHalf) {
-			const float*  ch = readMap->GetCenterHeightMapSynced();
-			const float*  mh = readMap->GetMaxHeightMapSynced();
-			const float3* cn = readMap->GetCenterNormals2DSynced();
-			const float*  sl = readMap->GetSlopeMapSynced();
 			pl.centerHeight.assign(ch, ch + nFull);
 			pl.maxHeight.assign(mh, mh + nFull);
 			pl.centerNormals2D.assign(cn, cn + nFull);
 			pl.slope.assign(sl, sl + nHalf);
 			pl.heightDrained = heightVersion;
+			pl.heightRectsDrained = heightRectNextSerial; // log subsumed by the copy
+		} else if (pl.heightRectsDrained != heightRectNextSerial) {
+			size_t idx = 0;
+			if (pl.heightRectsDrained > heightRectBaseSerial)
+				idx = static_cast<size_t>(pl.heightRectsDrained - heightRectBaseSerial);
+
+			for (; idx < heightRects.size(); ++idx) {
+				const DirtyRect& r = heightRects[idx];
+
+				// full-res rows (+/-1 margin covers the UpdateFaceNormals write)
+				const int x1 = std::max(r.x1 - 1, 0);
+				const int x2 = std::min(r.x2 + 1, mapDims.mapxm1);
+				const int z1 = std::max(r.z1 - 1, 0);
+				const int z2 = std::min(r.z2 + 1, mapDims.mapym1);
+				const size_t nRow = static_cast<size_t>(x2 - x1 + 1);
+
+				for (int z = z1; z <= z2; ++z) {
+					const size_t o = static_cast<size_t>(z) * static_cast<size_t>(mapDims.mapx) + static_cast<size_t>(x1);
+					std::memcpy(&pl.centerHeight[o],    ch + o, nRow * sizeof(float));
+					std::memcpy(&pl.maxHeight[o],       mh + o, nRow * sizeof(float));
+					std::memcpy(&pl.centerNormals2D[o], cn + o, nRow * sizeof(float3));
+				}
+
+				// half-res rows: the exact UpdateSlopemap bounds over the raw rect
+				const int sx = std::max(0,                 (r.x1 / 2) - 1);
+				const int ex = std::min(mapDims.hmapx - 1, (r.x2 / 2) + 1);
+				const int sy = std::max(0,                 (r.z1 / 2) - 1);
+				const int ey = std::min(mapDims.hmapy - 1, (r.z2 / 2) + 1);
+				const size_t nHRow = static_cast<size_t>(ex - sx + 1);
+
+				for (int y = sy; y <= ey; ++y) {
+					const size_t o = static_cast<size_t>(y) * static_cast<size_t>(mapDims.hmapx) + static_cast<size_t>(sx);
+					std::memcpy(&pl.slope[o], sl + o, nHRow * sizeof(float));
+				}
+			}
+
+			pl.heightRectsDrained = heightRectNextSerial;
+		}
+
+		// prune (same mechanism as the blocking log)
+		uint64_t minCursor = heightRectNextSerial;
+		for (const Payload& q : payloads)
+			minCursor = std::min(minCursor, q.heightRectsDrained);
+
+		while (heightRectBaseSerial < minCursor && !heightRects.empty()) {
+			heightRects.pop_front();
+			heightRectBaseSerial += 1;
 		}
 	}
 
 	// --- PLACEMENT REHOST: building-mask (half-res uint16, all-ones default) ---
 	{
+		SCOPED_TIMER("Sim::EpochProduce::MirrorBuildMask");
+
 		const size_t n = static_cast<size_t>(mapDims.hmapx) * static_cast<size_t>(mapDims.hmapy);
 		if (pl.buildMaskDrained != buildMaskVersion || pl.buildMask.size() != n) {
 			// guard against a barrier that drains before BuildingMaskMap::Init
@@ -413,8 +578,14 @@ void DrawMapMirrors::DrainAtBarrier(int slot)
 
 	// --- PLACEMENT REHOST: yard-status (full-res uint8, flat logical (x,z)) ---
 	// The live map stores 8x8 tiles; we flatten to z*mapx+x so the mirror accessor
-	// is a plain index. Low churn (factory yard open/close); version-gated whole copy.
+	// is a plain index. Every Set/Clear write sits inside a blocking-object
+	// footprint loop, which logs the same rect here (MarkYardStatusDirty); a
+	// caught-up slot re-flattens only the logged rects (the whole-map GetMapState
+	// flatten ran on every building add/remove). Whole flatten remains for the
+	// first drain, a resize, and a log-overflow version bump.
 	{
+		SCOPED_TIMER("Sim::EpochProduce::MirrorYardStatus");
+
 		const size_t n = static_cast<size_t>(mapDims.mapx) * static_cast<size_t>(mapDims.mapy);
 		if (pl.yardStatusDrained != yardStatusVersion || pl.yardStatus.size() != n) {
 			// guard against a barrier before InitNewYardmapStatusEffectsMap (leave
@@ -429,6 +600,33 @@ void DrawMapMirrors::DrainAtBarrier(int slot)
 			} else {
 				pl.yardStatus.clear();
 			}
+			// log subsumed either way: pre-init rects cover squares the full
+			// flatten (which runs once the map is sized) re-reads anyway
+			pl.yardRectsDrained = yardRectNextSerial;
+		} else if (pl.yardRectsDrained != yardRectNextSerial) {
+			size_t idx = 0;
+			if (pl.yardRectsDrained > yardRectBaseSerial)
+				idx = static_cast<size_t>(pl.yardRectsDrained - yardRectBaseSerial);
+
+			for (; idx < yardRects.size(); ++idx) {
+				const DirtyRect& r = yardRects[idx];
+
+				for (int z = r.z1; z < r.z2; ++z)
+					for (int x = r.x1; x < r.x2; ++x)
+						pl.yardStatus[static_cast<size_t>(z) * mapDims.mapx + x] = yardmapStatusEffectsMap.GetMapState(x, z);
+			}
+
+			pl.yardRectsDrained = yardRectNextSerial;
+		}
+
+		// prune (same mechanism as the blocking log)
+		uint64_t minCursor = yardRectNextSerial;
+		for (const Payload& q : payloads)
+			minCursor = std::min(minCursor, q.yardRectsDrained);
+
+		while (yardRectBaseSerial < minCursor && !yardRects.empty()) {
+			yardRects.pop_front();
+			yardRectBaseSerial += 1;
 		}
 	}
 
@@ -456,16 +654,21 @@ void DrawMapMirrors::Clear()
 	extractionVersion = 1;
 	blockingVersion = 1;
 
-	// PR 46: blocking dirty-rect log
+	// PR 46: dirty-rect logs
 	blockingRects.clear();
 	blockingRectNextSerial = 1;
 	blockingRectBaseSerial = 1;
+	heightRects.clear();
+	heightRectNextSerial = 1;
+	heightRectBaseSerial = 1;
+	yardRects.clear();
+	yardRectNextSerial = 1;
+	yardRectBaseSerial = 1;
 
 	// PLACEMENT REHOST
 	heightVersion = 1;
 	buildMaskVersion = 1;
 	yardStatusVersion = 1;
-	fullCellVersion = 1;
 }
 
 // PR 29: cell[0] id + kind at map square (x, z). Mirrors
@@ -488,7 +691,8 @@ int DrawMapMirrors::BlockedAt(int x, int z, uint8_t& kindOut) const
 	return pl.blockId[sq];
 }
 
-// PLACEMENT REHOST: full-cell mirror queries (CSR over fullCellOffset/Id/Kind).
+// PLACEMENT REHOST: full-cell mirror queries (per-square offset+count rows
+// into the fullCellId/fullCellKind pool).
 int DrawMapMirrors::FullCellCount(int x, int z) const
 {
 	if (static_cast<unsigned int>(x) >= static_cast<unsigned int>(mapDims.mapx) ||
@@ -496,9 +700,9 @@ int DrawMapMirrors::FullCellCount(int x, int z) const
 		return 0;
 	const Payload& pl = P();
 	const size_t sq = static_cast<size_t>(z) * mapDims.mapx + x;
-	if (sq + 1 >= pl.fullCellOffset.size())
+	if (sq >= pl.fullCellCount.size())
 		return 0;
-	return pl.fullCellOffset[sq + 1] - pl.fullCellOffset[sq];
+	return pl.fullCellCount[sq];
 }
 
 int DrawMapMirrors::FullCellObj(int x, int z, int i, uint8_t& kindOut) const
@@ -509,10 +713,10 @@ int DrawMapMirrors::FullCellObj(int x, int z, int i, uint8_t& kindOut) const
 		return -1;
 	const Payload& pl = P();
 	const size_t sq = static_cast<size_t>(z) * mapDims.mapx + x;
-	if (sq + 1 >= pl.fullCellOffset.size())
+	if (sq >= pl.fullCellOffset.size())
 		return -1;
 	const int base = pl.fullCellOffset[sq];
-	const int cnt = pl.fullCellOffset[sq + 1] - base;
+	const int cnt = pl.fullCellCount[sq];
 	if (i < 0 || i >= cnt)
 		return -1;
 	kindOut = pl.fullCellKind[base + i];
