@@ -516,6 +516,12 @@ void CGame::Load(const std::string& mapFileName)
 				auto lock = CLoadLock::GetUniqueLock();
 				saveFileHandler->LoadGame();
 				Watchdog::ClearTimer(WDT_LOAD);
+
+				// sim|draw WS-1 §5.4: a checkpoint/savegame load in-place
+				// (the replay-rewind flow) never passes through teardown's
+				// ClearCaches -- unit/feature ids, model pointers and piece
+				// read-set registrations alias across the load
+				LuaSnapshotServe::InvalidatePieceCaches();
 			}
 			LoadLua(false, true);
 			Watchdog::ClearTimer(WDT_LOAD);

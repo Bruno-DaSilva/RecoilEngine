@@ -370,6 +370,13 @@ namespace LuaSnapshotServe {
 	/// generation number
 	void ClearCaches();
 
+	/// sim|draw WS-1 §5.4: drop the piece serving caches, read-sets, death
+	/// journal and epoch stamps. Called by ClearCaches at teardown AND
+	/// explicitly on the checkpoint/savegame load path (Game.cpp LoadGame
+	/// step 7): an in-place load (replay rewind) never reaches teardown, and
+	/// ids / model pointers / journal positions alias across it
+	void InvalidatePieceCaches();
+
 	// ---- PR 38f: event-time command-queue presentation --------------------
 	// Synced command events (UnitCommand / UnitCmdDone) dispatch to unsynced
 	// Lua handlers. Under the split those handlers run DEFERRED at the

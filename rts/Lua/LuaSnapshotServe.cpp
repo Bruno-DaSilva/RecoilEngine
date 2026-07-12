@@ -78,6 +78,7 @@
 #include "Game/BoundaryStats.h" // sim|draw PR 30: block-copy telemetry
 #include "System/Matrix44f.h" // PR 33 GetUnitPieceMatrix (captured model-space matrix)
 #include "System/AABB.hpp" // GetUnitsInBox's boxCheck
+#include "System/Config/ConfigHandler.h" // WS-1 PieceSkipOracle knob
 #include "System/ContainerUtil.h" // spring::VectorSortUnique (GetTeamUnitsByDefs)
 #include "System/MainDefines.h" // STRCASECMP (PackBuildQueueSnap)
 #include "System/Cpp11Compat.hpp" // spring::random_shuffle (GetTeamUnitsByDefs)
@@ -88,6 +89,15 @@
 #include "System/StringHash.h" // hashString (GetUnitSensorRadius)
 #include "System/TimeProfiler.h" // ScopedDrawCallinContext
 #include "System/UnorderedSet.hpp"
+
+// WS-1 §6.2 DS oracle: every N produced epochs the producer re-captures every
+// piece slot the version-skip skipped and error-logs the first differing field
+// (the missed-mutation-choke detector). 0 disables; enable for at least one
+// full-length replay per gate battery and when investigating piece staleness.
+CONFIG(int, PieceSkipOracle)
+	.defaultValue(0)
+	.minimumValue(0)
+	.description("Every N produced epochs, re-capture skipped piece-cache slots and log mismatches (sim|draw WS-1 skip oracle); 0 = off.");
 
 namespace {
 	struct Pov {
@@ -7343,7 +7353,8 @@ namespace {
 		// park found the object dead/absent; repeat queries of this id in the
 		// same held window serve the miss WITHOUT re-parking (a dying-while-
 		// queried object otherwise re-parks on every query until the next
-		// epoch). Reset alongside `present` every producer refresh.
+		// epoch). Reset alongside `present` by the death-journal drain, and by
+		// any successful (re)capture of the slot.
 		bool deadMiss = false;
 		const void* metaKey = nullptr;   // ModelPieceMeta key (root original piece ptr)
 		int32_t rootPieceIndex = 0;
@@ -7357,6 +7368,20 @@ namespace {
 		CollisionVolume colVol;          // CFeature::collisionVolume
 		int32_t lastHitPieceIndex = -1;  // hitModelPieces[true] lmodel index, -1 = none
 		int32_t lastHitFrame = -1;       // pieceHitFrames[true]
+
+		// WS-1 skip key, stored by every successful RefreshObjectPieceSlot: a
+		// full key match proves the slot content is bit-identical to what a
+		// fresh capture would produce, so the capture is skipped. The version
+		// covers all choked piece-tree mutations (LocalModel counter); the
+		// value fields cover the un-choked object-level inputs. The object
+		// colvol needs no extra storage: memcmp `colVol` above vs the live one.
+		uint64_t captureVersion = 0;        // LocalModel::GetPieceTreeVersion(); 0 = never captured
+		float3 keyPos;                      // object pos + FULL dir basis: the world-space
+		float3 keyFrontdir;                 // emit points (GetObjectSpacePos/Vec) read all
+		float3 keyRightdir;                 // three axes, so frontdir alone would skip
+		float3 keyUpdir;                    // through a roll with stale emit points
+		int32_t keyHitFrame = -1;           // pieceHitFrames[true]
+		const void* keyHitPiece = nullptr;  // hitModelPieces[true]
 	};
 
 	// indexed by unitID / featureID, sized at first refresh.
@@ -7381,6 +7406,18 @@ namespace {
 	std::mutex pieceRegMtx;                     // guards the two pending lists
 	std::vector<int> pendingUnitPieceRegs;      // draw -> producer mailbox
 	std::vector<int> pendingFeaturePieceRegs;
+
+	// WS-1 §5.1: producer-owned death journal, replacing the all-slots
+	// present/deadMiss wipe loops. Appended when the producer's capture loop
+	// observes a registered id dead (the existing prune branches); each ring
+	// slot drains the entries it has not yet applied at the top of its next
+	// RefreshPieces, and the journal compacts once every slot has drained it.
+	struct PieceDeathEntry {
+		int id;
+		bool isFeature;
+	};
+	std::vector<PieceDeathEntry> pieceDeathJournal;
+	std::array<size_t, SimSnapshot::EPOCH_RING_SLOTS> pieceDeathDrainCursors = {};
 
 	// WS-6: est-path demand gate -- the pieces read-set model specialized to the
 	// GetUnitEstimatedPath waypoint block. Producer captures est-path only for
@@ -7494,6 +7531,87 @@ namespace {
 			slot.lastHitPieceIndex = static_cast<int32_t>(o->hitModelPieces[true]->GetLModelPieceIndex());
 			slot.lastHitFrame = o->pieceHitFrames[true];
 		}
+
+		// WS-1 §5.2: a dead-missed id can respawn before the next edge with the
+		// journal never seeing a death (the edge finds it alive) -- a successful
+		// capture must clear the tombstone (the retired wipe used to)
+		slot.deadMiss = false;
+
+		// WS-1 §4: store the skip key; the next refresh of this slot skips the
+		// whole capture when the key still matches
+		slot.captureVersion = lm.GetPieceTreeVersion();
+		slot.keyPos = o->pos;
+		slot.keyFrontdir = o->frontdir;
+		slot.keyRightdir = o->rightdir;
+		slot.keyUpdir = o->updir;
+		slot.keyHitFrame = o->pieceHitFrames[true];
+		slot.keyHitPiece = o->hitModelPieces[true];
+	}
+
+	// WS-1 §4: key match => the cached slot is bit-identical to what a fresh
+	// capture would produce. captureVersion equality proves both "same
+	// LocalModel instance" (instance-unique seed) and "no choked piece-tree
+	// mutation since capture"; the value fields cover the object-level inputs
+	// with no clean mutation choke (whole-object transform, last-hit pair,
+	// object colvol). Exact compares throughout -- any value change recaptures.
+	bool PieceSlotKeyMatches(const ObjectPieceSlot& slot, const CSolidObject* o)
+	{
+		return
+			(slot.captureVersion == o->localModel.GetPieceTreeVersion()) &&
+			slot.keyPos.same(o->pos) &&
+			slot.keyFrontdir.same(o->frontdir) &&
+			slot.keyRightdir.same(o->rightdir) &&
+			slot.keyUpdir.same(o->updir) &&
+			(slot.keyHitFrame == o->pieceHitFrames[true]) &&
+			(slot.keyHitPiece == static_cast<const void*>(o->hitModelPieces[true])) &&
+			slot.hasColVol &&
+			(std::memcmp(&slot.colVol, &o->collisionVolume, sizeof(CollisionVolume)) == 0);
+	}
+
+	// WS-1 §6.2 DS oracle (PieceSkipOracle=N): re-run the full capture for a
+	// SKIPPED slot into scratch and field-compare against the cache -- converts
+	// a bypassed mutation choke (a §4.1 inventory miss) from silent staleness
+	// into a named error line. Producer-thread only (static scratch).
+	const char* PieceSlotFirstDiff(const ObjectPieceSlot& a, const ObjectPieceSlot& b)
+	{
+		if (a.metaKey != b.metaKey) return "metaKey";
+		if (a.rootPieceIndex != b.rootPieceIndex) return "rootPieceIndex";
+		if (a.numPieces != b.numPieces) return "numPieces";
+		if (a.pieces.size() != b.pieces.size()) return "pieces.size";
+
+		for (size_t i = 0; i < a.pieces.size(); ++i) {
+			const PieceDynamic& pa = a.pieces[i];
+			const PieceDynamic& pb = b.pieces[i];
+
+			if (std::memcmp(&pa.absPos, &pb.absPos, sizeof(float3)) != 0) return "absPos";
+			if (std::memcmp(&pa.modelSpaceMat, &pb.modelSpaceMat, sizeof(CMatrix44f)) != 0) return "modelSpaceMat";
+			if (std::memcmp(&pa.posDirPos, &pb.posDirPos, sizeof(float3)) != 0) return "posDirPos";
+			if (std::memcmp(&pa.posDirDir, &pb.posDirDir, sizeof(float3)) != 0) return "posDirDir";
+			if (std::memcmp(&pa.pieceColVol, &pb.pieceColVol, sizeof(CollisionVolume)) != 0) return "pieceColVol";
+			if (pa.scriptVisible != pb.scriptVisible) return "scriptVisible";
+		}
+
+		if (a.scriptToModel != b.scriptToModel) return "scriptToModel";
+		if (a.hasColVol != b.hasColVol) return "hasColVol";
+		if (std::memcmp(&a.colVol, &b.colVol, sizeof(CollisionVolume)) != 0) return "colVol";
+		if (a.lastHitPieceIndex != b.lastHitPieceIndex) return "lastHitPieceIndex";
+		if (a.lastHitFrame != b.lastHitFrame) return "lastHitFrame";
+
+		return nullptr;
+	}
+
+	void RunPieceSkipOracle(const ObjectPieceSlot& slot, const CSolidObject* o,
+	                        bool isFeature, int id, bool captureScript, uint64_t epoch)
+	{
+		static ObjectPieceSlot scratch;
+		RefreshObjectPieceSlot(scratch, o, captureScript, /*colVol*/true, /*lastHit*/true);
+
+		const char* diff = PieceSlotFirstDiff(slot, scratch);
+		if (diff == nullptr)
+			return;
+
+		LOG_L(L_ERROR, "[PieceSkipOracle] %s id=%d field=%s epoch=%llu (a bumpless mutation path reached served piece state)",
+				isFeature ? "feature" : "unit", id, diff, static_cast<unsigned long long>(epoch));
 	}
 
 	const ObjectPieceSlot* GetUnitPieceSlot(int unitID)
@@ -7967,10 +8085,30 @@ void LuaSnapshotServe::RefreshPieces(int ringSlot, uint64_t targetEpoch)
 		}
 	}
 
-	for (ObjectPieceSlot& s: unitPieceCache) {
+	if (featurePieceCache.size() < featurePieceReadSet.size())
+		featurePieceCache.resize(featurePieceReadSet.size());
+
+	// WS-1 §5.1: drain the death journal into THIS ring slot's caches -- this
+	// replaces the retired all-slots present/deadMiss wipe loops (O(deaths
+	// since this slot last produced) instead of O(maxUnits + featureCacheSize)
+	// strided writes per epoch, which the skip key would defeat anyway)
+	for (size_t i = pieceDeathDrainCursors[ringSlot]; i < pieceDeathJournal.size(); ++i) {
+		const PieceDeathEntry& e = pieceDeathJournal[i];
+		std::vector<ObjectPieceSlot>& cache = e.isFeature ? featurePieceCache : unitPieceCache;
+
+		if (static_cast<size_t>(e.id) >= cache.size())
+			continue;
+
+		ObjectPieceSlot& s = cache[e.id];
 		s.present = false;
 		s.deadMiss = false;
+		s.captureVersion = 0;
 	}
+
+	// WS-1 §6.2: rate-limited oracle pass over the skipped slots (0 = off)
+	static uint64_t pieceSkipOracleEpochs = 0;
+	const int oracleN = configHandler->GetInt("PieceSkipOracle");
+	const bool oracleThisEpoch = (oracleN > 0) && ((++pieceSkipOracleEpochs % oracleN) == 0);
 
 	// PR 32: units also capture colVol + lastHit (GetUnitCollisionVolumeData /
 	// GetUnitPieceCollisionVolumeData / GetUnitLastAttackedPiece), like features.
@@ -7986,18 +8124,29 @@ void LuaSnapshotServe::RefreshPieces(int ringSlot, uint64_t targetEpoch)
 			const CUnit* u = unitHandler.GetUnit(id);
 			if (u == nullptr || u->isDead) {
 				unitPieceReadSet[id] = 0;
+
+				// WS-1 §5.1: journal the death for the other ring slots; clear
+				// THIS slot's entry inline (the cursor advances past the new
+				// entry at the end of this refresh)
+				pieceDeathJournal.push_back({static_cast<int>(id), false});
+				ObjectPieceSlot& s = unitPieceCache[id];
+				s.present = false;
+				s.deadMiss = false;
+				s.captureVersion = 0;
 				continue;
 			}
 
-			RefreshObjectPieceSlot(unitPieceCache[id], u, /*script*/true, /*colVol*/true, /*lastHit*/true);
-		}
-	}
+			ObjectPieceSlot& slot = unitPieceCache[id];
 
-	if (featurePieceCache.size() < featurePieceReadSet.size())
-		featurePieceCache.resize(featurePieceReadSet.size());
-	for (ObjectPieceSlot& s: featurePieceCache) {
-		s.present = false;
-		s.deadMiss = false;
+			// WS-1 §4: skip the capture when the key proves the slot current
+			if (slot.present && PieceSlotKeyMatches(slot, u)) {
+				if (oracleThisEpoch)
+					RunPieceSkipOracle(slot, u, /*isFeature*/false, static_cast<int>(id), /*script*/true, gen);
+				continue;
+			}
+
+			RefreshObjectPieceSlot(slot, u, /*script*/true, /*colVol*/true, /*lastHit*/true);
+		}
 	}
 
 	{
@@ -8010,11 +8159,35 @@ void LuaSnapshotServe::RefreshPieces(int ringSlot, uint64_t targetEpoch)
 			const CFeature* f = featureHandler.GetFeature(id);
 			if (f == nullptr) {
 				featurePieceReadSet[id] = 0;
+
+				pieceDeathJournal.push_back({static_cast<int>(id), true});
+				ObjectPieceSlot& s = featurePieceCache[id];
+				s.present = false;
+				s.deadMiss = false;
+				s.captureVersion = 0;
 				continue;
 			}
 
-			RefreshObjectPieceSlot(featurePieceCache[id], f, /*script*/false, /*colVol*/true, /*lastHit*/true);
+			ObjectPieceSlot& slot = featurePieceCache[id];
+
+			if (slot.present && PieceSlotKeyMatches(slot, f)) {
+				if (oracleThisEpoch)
+					RunPieceSkipOracle(slot, f, /*isFeature*/true, static_cast<int>(id), /*script*/false, gen);
+				continue;
+			}
+
+			RefreshObjectPieceSlot(slot, f, /*script*/false, /*colVol*/true, /*lastHit*/true);
 		}
+	}
+
+	// WS-1 §5.1: entries appended by this refresh were applied inline to this
+	// slot's cache, so the cursor advances over them too; compact the journal
+	// once every ring slot has drained it
+	pieceDeathDrainCursors[ringSlot] = pieceDeathJournal.size();
+
+	if (*std::min_element(pieceDeathDrainCursors.begin(), pieceDeathDrainCursors.end()) == pieceDeathJournal.size()) {
+		pieceDeathJournal.clear();
+		pieceDeathDrainCursors.fill(0);
 	}
 }
 
@@ -8750,6 +8923,41 @@ int LuaSnapshotServe::GetPieceProjectileName(lua_State* L, const char* caller)
 /* END PR 33 (pieces/scripts family) -- serving section */
 
 
+void LuaSnapshotServe::InvalidatePieceCaches()
+{
+	// WS-1 §5.4: also the explicit invalidation hook for an IN-PLACE checkpoint
+	// load (the replay-rewind flow), which never passes through game teardown's
+	// ClearCaches -- unit/feature ids, model pointers, read-set registrations
+	// and journal positions all alias across the load, and post-load skip
+	// hygiene must not hang on the SetModel PostLoad re-seed alone
+	for (auto* caches : {&unitPieceCaches, &featurePieceCaches}) {
+		for (auto& cache : *caches) {
+			cache.clear();
+			cache.shrink_to_fit();
+		}
+	}
+	{
+		std::lock_guard<std::mutex> lock(modelMetaMtx);
+		modelMetaCache.clear();
+	}
+	pieceCacheEpochs.fill(0);
+
+	// PR 46: the piece read-set restarts with the next game (ids alias)
+	{
+		std::lock_guard<std::mutex> lk(pieceRegMtx);
+		unitPieceReadSet.clear();
+		featurePieceReadSet.clear();
+		pendingUnitPieceRegs.clear();
+		pendingFeaturePieceRegs.clear();
+	}
+
+	// WS-1 §5.1: journal entries and drain cursors describe dead ids of the
+	// outgoing world; the caches they would be applied to were just dropped
+	pieceDeathJournal.clear();
+	pieceDeathJournal.shrink_to_fit();
+	pieceDeathDrainCursors.fill(0);
+}
+
 void LuaSnapshotServe::ClearCaches()
 {
 	teamUnitIndex.built = false;
@@ -8779,26 +8987,7 @@ void LuaSnapshotServe::ClearCaches()
 
 	// PR 33 piece caches: unit/feature ids and model pointers restart with the
 	// next game, so a surviving entry could alias fresh ones
-	for (auto* caches : {&unitPieceCaches, &featurePieceCaches}) {
-		for (auto& cache : *caches) {
-			cache.clear();
-			cache.shrink_to_fit();
-		}
-	}
-	{
-		std::lock_guard<std::mutex> lock(modelMetaMtx);
-		modelMetaCache.clear();
-	}
-	pieceCacheEpochs.fill(0);
-
-	// PR 46: the piece read-set restarts with the next game (ids alias)
-	{
-		std::lock_guard<std::mutex> lk(pieceRegMtx);
-		unitPieceReadSet.clear();
-		featurePieceReadSet.clear();
-		pendingUnitPieceRegs.clear();
-		pendingFeaturePieceRegs.clear();
-	}
+	InvalidatePieceCaches();
 
 	// WS-6: the est-path read-set likewise restarts with the next game
 	{
