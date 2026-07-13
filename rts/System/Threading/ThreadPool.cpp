@@ -80,6 +80,11 @@ static std::array<bool, ThreadPool::MAX_THREADS> exitFlags;
 static std::array<ThreadStats, ThreadPool::MAX_THREADS> threadStats[2];
 static spring::signal newTasksSignal[2];
 
+// number of threads currently blocked in WaitForFinished on a regular
+// (non-self-rescheduling) task group; while > 0, DoTask's unsynced-state
+// queue pick prefers the regular queue -- see the comment in tryDequeue
+static std::atomic<int> regularForkWaiters = {0};
+
 static _threadlocal int threadnum(0);
 
 #ifndef UNITSYNC
@@ -156,6 +161,17 @@ static bool DoTask(int tid, bool async)
 		auto tryDequeue = [&](ITaskGroup*& tg){
 		#ifndef UNIT_TEST
 			if (CSyncChecker::InSyncedCode()) {
+				return ( queue.try_dequeue(tg) || queue_background.try_dequeue(tg) );
+			}
+			else if (regularForkWaiters.load(std::memory_order_relaxed) > 0) {
+				// a thread is blocked in WaitForFinished on a regular
+				// fork-join: do NOT keep preferring the background queue.
+				// Background groups (e.g. QTPFS searches) single-step and
+				// requeue themselves, so with an unconditional
+				// background-first pick every worker can ping-pong on
+				// background slices indefinitely while the fork's slices
+				// sit unclaimed and the waiter executes them alone -- a
+				// priority inversion that serializes the fork.
 				return ( queue.try_dequeue(tg) || queue_background.try_dequeue(tg) );
 			}
 			else {
@@ -275,6 +291,23 @@ void WaitForFinished(std::shared_ptr<ITaskGroup>&& taskGroup)
 {
 	// can be any worker-thread (for_mt inside another for_mt, etc)
 	const int tid = GetThreadNum();
+
+	// flip DoTask's unsynced-state queue preference to regular-first while
+	// this fork-join is in flight (see tryDequeue); self-rescheduling
+	// (background) groups are exempt -- waiting on those must not starve
+	// the background queue they complete through
+	struct RegularWaiterGuard {
+		explicit RegularWaiterGuard(bool count_): count(count_) {
+			if (count)
+				regularForkWaiters.fetch_add(1, std::memory_order_relaxed);
+		}
+		~RegularWaiterGuard() {
+			if (count)
+				regularForkWaiters.fetch_sub(1, std::memory_order_relaxed);
+		}
+		const bool count;
+	};
+	RegularWaiterGuard waiterGuard(!taskGroup->ShouldReschedule());
 
 	{
 		#ifndef UNIT_TEST
