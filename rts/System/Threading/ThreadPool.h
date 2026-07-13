@@ -154,13 +154,22 @@ namespace ThreadPool {
 
 
 struct MultithreadedSection {
-	MultithreadedSection() {
+	// save/restore, NOT set/clear: WorkerLoop sets the thread-local flag ONCE
+	// at worker startup (a pool worker is "in a multithreaded section" for its
+	// whole lifetime), so a nested wrapper invoked from a task body -- whose
+	// destructor runs on the worker -- must not CLEAR the worker's flag on
+	// exit. With plain set/clear one nested for_mt/parallel call permanently
+	// disarmed every IsInMultiThreadedSection() guard on that worker (e.g.
+	// the HAPFS heat-map update branch in IPathFinder.cpp).
+	MultithreadedSection() : prevValue(ThreadPool::IsInMultiThreadedSection() != 0) {
 		ThreadPool::SetInMultiThreadedSection(true);
 	}
 
 	~MultithreadedSection() {
-		ThreadPool::SetInMultiThreadedSection(false);
+		ThreadPool::SetInMultiThreadedSection(prevValue);
 	}
+
+	const bool prevValue;
 };
 
 
