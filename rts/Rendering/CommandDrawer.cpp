@@ -9,6 +9,8 @@
 #include "Rendering/GL/glExtra.h"
 #include "Rendering/GL/myGL.h"
 #include "Rendering/GL/RenderBuffers.h"
+#include "Rendering/Units/UnitDrawer.h"
+#include "Rendering/Features/FeatureDrawer.h"
 #include "Sim/Features/Feature.h"
 #include "Sim/Features/FeatureHandler.h"
 #include "Sim/Units/CommandAI/Command.h"
@@ -21,6 +23,7 @@
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitHandler.h"
 #include "Sim/Units/UnitDefHandler.h"
+#include "System/SimDrawSplit.h"
 #include "System/SpringMath.h"
 #include "System/Log/ILog.h"
 
@@ -43,6 +46,17 @@ CommandDrawer* CommandDrawer::GetInstance() {
 
 
 void CommandDrawer::Draw(const CCommandAI* cai, int queueDrawDepth) const {
+	// PR 27b: cai and the commandQue it walks are live sim state. CUnit::
+	// PreDestruct() destructs the commandAI object at unit-death on the sim
+	// thread, so from the draw pass with the sim thread live and unparked a
+	// unit that died mid-burst leaves a dangling commandAI -- the dynamic_casts
+	// below fault on its vtable -- and the deque mutates under iteration.
+	// Suppress until this drawer is converted to the boundary-copied command
+	// queues (LuaSnapshotServe already serves the Lua callout family). Flag-off
+	// and sim-parked are byte-identical.
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() && !SimDrawSplit::IsSimParked())
+		return;
+
 	// note: {Air,Builder}CAI inherit from MobileCAI, so test that last
 	if ((dynamic_cast<const     CAirCAI*>(cai)) != nullptr) {     DrawAirCAICommands(static_cast<const     CAirCAI*>(cai), queueDrawDepth); return; }
 	if ((dynamic_cast<const CBuilderCAI*>(cai)) != nullptr) { DrawBuilderCAICommands(static_cast<const CBuilderCAI*>(cai), queueDrawDepth); return; }
@@ -100,7 +114,7 @@ void CommandDrawer::DrawCommands(const CCommandAI* cai, int queueDrawDepth) cons
 	if (queueDrawDepth <= 0)
 		queueDrawDepth = commandQue.size();
 
-	lineDrawer.StartPath(owner->GetObjDrawMidPos(), cmdColors.start);
+	lineDrawer.StartPath(CUnitDrawer::GetObjDrawMidPos(owner), cmdColors.start);
 
 	if (owner->selfDCountdown != 0)
 		lineDrawer.DrawIconAtLastPos(CMD_SELFD);
@@ -118,7 +132,7 @@ void CommandDrawer::DrawCommands(const CCommandAI* cai, int queueDrawDepth) cons
 					const CUnit* unit = GetTrackableUnit(owner, unitHandler.GetUnit(ci->GetParam(0)));
 
 					if (unit != nullptr)
-						lineDrawer.DrawLineAndIcon(cmdID, unit->GetObjDrawErrorPos(owner->allyteam), cmdColors.attack);
+						lineDrawer.DrawLineAndIcon(cmdID, CUnitDrawer::GetObjDrawErrorPos(unit, owner->allyteam), cmdColors.attack);
 
 				} else {
 					assert(ci->GetNumParams() >= 3);
@@ -157,7 +171,7 @@ void CommandDrawer::DrawAirCAICommands(const CAirCAI* cai, int queueDrawDepth) c
 	if (queueDrawDepth <= 0)
 		queueDrawDepth = commandQue.size();
 
-	lineDrawer.StartPath(owner->GetObjDrawMidPos(), cmdColors.start);
+	lineDrawer.StartPath(CUnitDrawer::GetObjDrawMidPos(owner), cmdColors.start);
 
 	if (owner->selfDCountdown != 0)
 		lineDrawer.DrawIconAtLastPos(CMD_SELFD);
@@ -184,7 +198,7 @@ void CommandDrawer::DrawAirCAICommands(const CAirCAI* cai, int queueDrawDepth) c
 					const CUnit* unit = GetTrackableUnit(owner, unitHandler.GetUnit(ci->GetParam(0)));
 
 					if (unit != nullptr)
-						lineDrawer.DrawLineAndIcon(cmdID, unit->GetObjDrawErrorPos(owner->allyteam), cmdColors.attack);
+						lineDrawer.DrawLineAndIcon(cmdID, CUnitDrawer::GetObjDrawErrorPos(unit, owner->allyteam), cmdColors.attack);
 
 				} else {
 					assert(ci->GetNumParams() >= 3);
@@ -212,7 +226,7 @@ void CommandDrawer::DrawAirCAICommands(const CAirCAI* cai, int queueDrawDepth) c
 				const CUnit* unit = GetTrackableUnit(owner, unitHandler.GetUnit(ci->GetParam(0)));
 
 				if (unit != nullptr)
-					lineDrawer.DrawLineAndIcon(cmdID, unit->GetObjDrawErrorPos(owner->allyteam), cmdColors.guard);
+					lineDrawer.DrawLineAndIcon(cmdID, CUnitDrawer::GetObjDrawErrorPos(unit, owner->allyteam), cmdColors.guard);
 
 			} break;
 
@@ -242,7 +256,7 @@ void CommandDrawer::DrawBuilderCAICommands(const CBuilderCAI* cai, int queueDraw
 	if (queueDrawDepth <= 0)
 		queueDrawDepth = commandQue.size();
 
-	lineDrawer.StartPath(owner->GetObjDrawMidPos(), cmdColors.start);
+	lineDrawer.StartPath(CUnitDrawer::GetObjDrawMidPos(owner), cmdColors.start);
 
 	if (owner->selfDCountdown != 0)
 		lineDrawer.DrawIconAtLastPos(CMD_SELFD);
@@ -288,7 +302,7 @@ void CommandDrawer::DrawBuilderCAICommands(const CBuilderCAI* cai, int queueDraw
 				const CUnit* unit = GetTrackableUnit(owner, unitHandler.GetUnit(ci->GetParam(0)));
 
 				if (unit != nullptr)
-					lineDrawer.DrawLineAndIcon(cmdID, unit->GetObjDrawErrorPos(owner->allyteam), cmdColors.guard);
+					lineDrawer.DrawLineAndIcon(cmdID, CUnitDrawer::GetObjDrawErrorPos(unit, owner->allyteam), cmdColors.guard);
 
 			} break;
 
@@ -309,7 +323,7 @@ void CommandDrawer::DrawBuilderCAICommands(const CBuilderCAI* cai, int queueDraw
 					const CUnit* unit = GetTrackableUnit(owner, unitHandler.GetUnit(ci->GetParam(0)));
 
 					if (unit != nullptr)
-						lineDrawer.DrawLineAndIcon(cmdID, unit->GetObjDrawErrorPos(owner->allyteam), cmdColors.attack);
+						lineDrawer.DrawLineAndIcon(cmdID, CUnitDrawer::GetObjDrawErrorPos(unit, owner->allyteam), cmdColors.attack);
 
 				} else {
 					assert(ci->GetNumParams() >= 3);
@@ -344,13 +358,13 @@ void CommandDrawer::DrawBuilderCAICommands(const CBuilderCAI* cai, int queueDraw
 						const CFeature* feature = featureHandler.GetFeature(id - unitHandler.MaxUnits());
 
 						if (feature != nullptr)
-							lineDrawer.DrawLineAndIcon(cmdID, feature->GetObjDrawMidPos(), color);
+							lineDrawer.DrawLineAndIcon(cmdID, CFeatureDrawer::GetObjDrawMidPos(feature), color);
 
 					} else {
 						const CUnit* unit = GetTrackableUnit(owner, unitHandler.GetUnit(id));
 
 						if (unit != nullptr && unit != owner)
-							lineDrawer.DrawLineAndIcon(cmdID, unit->GetObjDrawErrorPos(owner->allyteam), color);
+							lineDrawer.DrawLineAndIcon(cmdID, CUnitDrawer::GetObjDrawErrorPos(unit, owner->allyteam), color);
 
 					}
 				}
@@ -374,7 +388,7 @@ void CommandDrawer::DrawBuilderCAICommands(const CBuilderCAI* cai, int queueDraw
 						const CUnit* unit = GetTrackableUnit(owner, unitHandler.GetUnit(ci->GetParam(0)));
 
 						if (unit != nullptr)
-							lineDrawer.DrawLineAndIcon(cmdID, unit->GetObjDrawErrorPos(owner->allyteam), color);
+							lineDrawer.DrawLineAndIcon(cmdID, CUnitDrawer::GetObjDrawErrorPos(unit, owner->allyteam), color);
 
 					}
 				}
@@ -411,7 +425,7 @@ void CommandDrawer::DrawFactoryCAICommands(const CFactoryCAI* cai, int queueDraw
 	if (queueDrawDepth <= 0)
 		queueDrawDepth = newUnitCommands.size();
 
-	lineDrawer.StartPath(owner->GetObjDrawMidPos(), cmdColors.start);
+	lineDrawer.StartPath(CUnitDrawer::GetObjDrawMidPos(owner), cmdColors.start);
 
 	if (owner->selfDCountdown != 0)
 		lineDrawer.DrawIconAtLastPos(CMD_SELFD);
@@ -441,7 +455,7 @@ void CommandDrawer::DrawFactoryCAICommands(const CFactoryCAI* cai, int queueDraw
 					const CUnit* unit = GetTrackableUnit(owner, unitHandler.GetUnit(ci->GetParam(0)));
 
 					if (unit != nullptr)
-						lineDrawer.DrawLineAndIcon(cmdID, unit->GetObjDrawErrorPos(owner->allyteam), cmdColors.attack);
+						lineDrawer.DrawLineAndIcon(cmdID, CUnitDrawer::GetObjDrawErrorPos(unit, owner->allyteam), cmdColors.attack);
 
 				} else {
 					assert(ci->GetNumParams() >= 3);
@@ -458,7 +472,7 @@ void CommandDrawer::DrawFactoryCAICommands(const CFactoryCAI* cai, int queueDraw
 				const CUnit* unit = GetTrackableUnit(owner, unitHandler.GetUnit(ci->GetParam(0)));
 
 				if (unit != nullptr)
-					lineDrawer.DrawLineAndIcon(cmdID, unit->GetObjDrawErrorPos(owner->allyteam), cmdColors.guard);
+					lineDrawer.DrawLineAndIcon(cmdID, CUnitDrawer::GetObjDrawErrorPos(unit, owner->allyteam), cmdColors.guard);
 
 			} break;
 
@@ -505,7 +519,7 @@ void CommandDrawer::DrawMobileCAICommands(const CMobileCAI* cai, int queueDrawDe
 	if (queueDrawDepth <= 0)
 		queueDrawDepth = commandQue.size();
 
-	lineDrawer.StartPath(owner->GetObjDrawMidPos(), cmdColors.start);
+	lineDrawer.StartPath(CUnitDrawer::GetObjDrawMidPos(owner), cmdColors.start);
 
 	if (owner->selfDCountdown != 0)
 		lineDrawer.DrawIconAtLastPos(CMD_SELFD);
@@ -532,7 +546,7 @@ void CommandDrawer::DrawMobileCAICommands(const CMobileCAI* cai, int queueDrawDe
 					const CUnit* unit = GetTrackableUnit(owner, unitHandler.GetUnit(ci->GetParam(0)));
 
 					if (unit != nullptr)
-						lineDrawer.DrawLineAndIcon(cmdID, unit->GetObjDrawErrorPos(owner->allyteam), cmdColors.attack);
+						lineDrawer.DrawLineAndIcon(cmdID, CUnitDrawer::GetObjDrawErrorPos(unit, owner->allyteam), cmdColors.attack);
 
 				}
 
@@ -549,7 +563,7 @@ void CommandDrawer::DrawMobileCAICommands(const CMobileCAI* cai, int queueDrawDe
 				const CUnit* unit = GetTrackableUnit(owner, unitHandler.GetUnit(ci->GetParam(0)));
 
 				if (unit != nullptr)
-					lineDrawer.DrawLineAndIcon(cmdID, unit->GetObjDrawErrorPos(owner->allyteam), cmdColors.guard);
+					lineDrawer.DrawLineAndIcon(cmdID, CUnitDrawer::GetObjDrawErrorPos(unit, owner->allyteam), cmdColors.guard);
 
 			} break;
 
@@ -572,7 +586,7 @@ void CommandDrawer::DrawMobileCAICommands(const CMobileCAI* cai, int queueDrawDe
 					const CUnit* unit = GetTrackableUnit(owner, unitHandler.GetUnit(ci->GetParam(0)));
 
 					if (unit != nullptr)
-						lineDrawer.DrawLineAndIcon(cmdID, unit->GetObjDrawErrorPos(owner->allyteam), cmdColors.load);
+						lineDrawer.DrawLineAndIcon(cmdID, CUnitDrawer::GetObjDrawErrorPos(unit, owner->allyteam), cmdColors.load);
 
 				}
 			} break;
@@ -649,7 +663,7 @@ void CommandDrawer::DrawDefaultCommand(const Command& c, const CUnit* owner) con
 	if (unit == nullptr)
 		return;
 
-	lineDrawer.DrawLineAndIcon(dd->cmdIconID, unit->GetObjDrawErrorPos(owner->allyteam), dd->color);
+	lineDrawer.DrawLineAndIcon(dd->cmdIconID, CUnitDrawer::GetObjDrawErrorPos(unit, owner->allyteam), dd->color);
 }
 
 void CommandDrawer::DrawQuedBuildingSquares(const CBuilderCAI* cai) const

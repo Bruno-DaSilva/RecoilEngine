@@ -10,6 +10,7 @@
 #include "Sim/Features/Feature.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Units/Unit.h"
+#include "Rendering/Common/SimSnapshotWriteThrough.h"
 #include "Sim/Units/Scripts/CobInstance.h"
 #include "Sim/Weapons/Weapon.h"
 #include "System/SpringMath.h"
@@ -100,6 +101,10 @@ void FPSUnitController::RecvStateUpdate(const unsigned char* buf) {
 		controllee->AttackUnit(nullptr, true, true, true);
 
 	mouse2 = newMouse2;
+
+	// WS-3 fpsNoFire choke: mouse state is an input of the controllee's column
+	if (controllee != nullptr)
+		SimSnapshotWT::NoteFpsControl(controllee);
 
 	const short int h = *((short int*) &buf[3]);
 	const short int p = *((short int*) &buf[5]);

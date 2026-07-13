@@ -80,7 +80,7 @@ void CExpGenSpawnable::Init(const CUnit* owner, const float3& offset)
 	UpdateRotation();
 }
 
-void CExpGenSpawnable::UpdateRotation()
+void CExpGenSpawnable::UpdateRotation() const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	const float t = (gs->frameNum - createFrame + globalRendering->timeOffset);

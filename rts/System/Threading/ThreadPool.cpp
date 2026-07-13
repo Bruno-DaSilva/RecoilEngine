@@ -23,6 +23,7 @@
 #undef unlikely
 #endif
 
+#include <bit>
 #include <utility>
 #include <functional>
 #include <cinttypes>
@@ -78,6 +79,11 @@ static std::vector<void*> workerThreads[2];
 static std::array<bool, ThreadPool::MAX_THREADS> exitFlags;
 static std::array<ThreadStats, ThreadPool::MAX_THREADS> threadStats[2];
 static spring::signal newTasksSignal[2];
+
+// number of threads currently blocked in WaitForFinished on a regular
+// (non-self-rescheduling) task group; while > 0, DoTask's unsynced-state
+// queue pick prefers the regular queue -- see the comment in tryDequeue
+static std::atomic<int> regularForkWaiters = {0};
 
 static _threadlocal int threadnum(0);
 
@@ -155,6 +161,17 @@ static bool DoTask(int tid, bool async)
 		auto tryDequeue = [&](ITaskGroup*& tg){
 		#ifndef UNIT_TEST
 			if (CSyncChecker::InSyncedCode()) {
+				return ( queue.try_dequeue(tg) || queue_background.try_dequeue(tg) );
+			}
+			else if (regularForkWaiters.load(std::memory_order_relaxed) > 0) {
+				// a thread is blocked in WaitForFinished on a regular
+				// fork-join: do NOT keep preferring the background queue.
+				// Background groups (e.g. QTPFS searches) single-step and
+				// requeue themselves, so with an unconditional
+				// background-first pick every worker can ping-pong on
+				// background slices indefinitely while the fork's slices
+				// sit unclaimed and the waiter executes them alone -- a
+				// priority inversion that serializes the fork.
 				return ( queue.try_dequeue(tg) || queue_background.try_dequeue(tg) );
 			}
 			else {
@@ -274,6 +291,23 @@ void WaitForFinished(std::shared_ptr<ITaskGroup>&& taskGroup)
 {
 	// can be any worker-thread (for_mt inside another for_mt, etc)
 	const int tid = GetThreadNum();
+
+	// flip DoTask's unsynced-state queue preference to regular-first while
+	// this fork-join is in flight (see tryDequeue); self-rescheduling
+	// (background) groups are exempt -- waiting on those must not starve
+	// the background queue they complete through
+	struct RegularWaiterGuard {
+		explicit RegularWaiterGuard(bool count_): count(count_) {
+			if (count)
+				regularForkWaiters.fetch_add(1, std::memory_order_relaxed);
+		}
+		~RegularWaiterGuard() {
+			if (count)
+				regularForkWaiters.fetch_sub(1, std::memory_order_relaxed);
+		}
+		const bool count;
+	};
+	RegularWaiterGuard waiterGuard(!taskGroup->ShouldReschedule());
 
 	{
 		#ifndef UNIT_TEST
@@ -629,10 +663,34 @@ void SetDefaultThreadCount()
 	return;
 	#endif
 
-	const int threadCount = GetDefaultNumWorkers();
+	// PR 46 (sim|draw split): the split adds a second full-time orchestrator
+	// thread (the sim thread) that the pre-split topology never budgeted a
+	// core for -- unpinned, it preempts whichever pinned worker it lands on
+	// and every for_mt in flight waits on that worker's chunk (the
+	// TickAllAnims straggler class). Under the per-perf-core pin policy with
+	// the AUTO worker count: spawn one fewer worker and reserve the freed
+	// core for the sim thread below (an explicit WorkerThreadCount is
+	// respected verbatim -- no reservation, exactly the old layout).
+	// Config read directly: this runs at app init, before CGame's ctor caches
+	// the flag into SimDrawSplit::Enabled().
+	#ifndef UNIT_TEST
+	const bool reserveSimCore =
+		(configHandler->GetInt("SimDrawSplit") != 0) &&
+		(Threading::GetChosenThreadPinPolicy() == cpu_topology::THREAD_PIN_POLICY_PER_PERF_CORE) &&
+		(GetConfigNumWorkers() < 0);
+	#else
+	const bool reserveSimCore = false;
+	#endif
+
+	int threadCount = GetDefaultNumWorkers();
+
+	if (reserveSimCore)
+		threadCount = std::max(2, threadCount - 1);
+
 	SetThreadCount(threadCount);
 
-	std::uint32_t systemCores = Threading::GetSystemAffinityMask(threadCount);
+	// size the shared-cache mask for every busy thread, including the sim one
+	std::uint32_t systemCores = Threading::GetSystemAffinityMask(threadCount + reserveSimCore);
 	std::uint32_t mainAffinity = systemCores;
 
 	const cpu_topology::ThreadPinPolicy threadPinPolicy = Threading::GetChosenThreadPinPolicy();
@@ -647,6 +705,17 @@ void SetDefaultThreadCount()
 	#endif
 
 	std::uint32_t workerAvailCores = systemCores & ~mainAffinity;
+
+	// PR 46: carve the sim thread's core out of the worker set (the top core,
+	// i.e. the slot the dropped worker would have taken); the sim thread pins
+	// itself to it at spawn (CGame::SimThreadProc)
+	if (reserveSimCore && workerAvailCores != 0) {
+		const std::uint32_t simAffinity = 0x80000000u >> std::countl_zero(workerAvailCores);
+
+		workerAvailCores &= ~simAffinity;
+		Threading::SetReservedSimAffinityMask(simAffinity);
+		LOG("[ThreadPool] Sim thread affinity reserved as 0x%08x", simAffinity);
+	}
 
 	{
 		// parallel_reduce now folds over shared_ptrs to futures

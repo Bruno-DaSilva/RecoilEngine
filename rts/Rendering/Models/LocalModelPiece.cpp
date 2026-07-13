@@ -3,6 +3,8 @@
 #include "3DModelPiece.hpp"
 #include "LocalModel.hpp"
 #include "Rendering/GL/myGL.h"
+#include "System/Platform/Threading.h"
+#include "System/SimDrawSplit.h"
 #include "System/Misc/TracyDefs.h"
 
 CR_BIND(LocalModelPiece, )
@@ -34,7 +36,6 @@ CR_REG_METADATA(LocalModelPiece, (
 
 	// reload
 	CR_IGNORED(original),
-	CR_IGNORED(lodDispLists), //FIXME GL idx!
 
 	CR_POSTLOAD(PostLoad)
 ))
@@ -76,8 +77,20 @@ LocalModelPiece::~LocalModelPiece()
 	spring::SafeDelete(colvol);
 }
 
+void LocalModelPiece::BumpTreeVersion()
+{
+	assert(localModel != nullptr);
+	localModel->BumpPieceTreeVersion();
+}
+
 void LocalModelPiece::SetDirty() {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// WS-1 §4.1-A/B: the piece pos/rot/scale + matrix-poke mutation choke.
+	// Bumping only on the SetFloat3/SetFloat !dirty entry is sufficient because
+	// every capture/extraction edge leaves all pieces clean (accessor recompute
+	// or the anim-tick BFS), so any later value change re-enters here (§3.3).
+	// The child recursion over-bumps (once per non-dirty child) -- harmless.
+	BumpTreeVersion();
 	dirty = true;
 
 	for (LocalModelPiece* child: children) {
@@ -120,12 +133,12 @@ void LocalModelPiece::ResetWasUpdated() const
 {
 	// wasUpdated needs to trigger twice because otherwise
 	// once all animation of piece stops and dirty is no longer triggered
-	// UpdateObjectTrasform() would exit too early and wouldn't update
+	// ExtractObjectTransforms() would exit too early and wouldn't update
 	// prevModelSpaceTra, causing the piece transform to jerk between the
 	// up-to-date modelSpaceTra and stale prevModelSpaceTra
 	// By passing values from right to left we make sure to trigger
 	// wasUpdated[0] || wasUpdated[1] at least twice after such situation
-	// happens, thus uploading prevModelSpaceTra in UpdateObjectTrasform() too
+	// happens, thus uploading prevModelSpaceTra in ExtractObjectTransforms() too
 	wasUpdated[1] = std::exchange(wasUpdated[0], false);
 
 	// use this call to also reset noInterpolation
@@ -139,7 +152,14 @@ bool LocalModelPiece::SetPieceSpaceMatrix(const CMatrix44f& mat)
 
 const Transform& LocalModelPiece::GetModelSpaceTransform() const
 {
-	if (dirty)
+	// PR 27b: a MAIN-thread reader may not recompute in place while the sim
+	// runs -- the sim side owns piece mutation (script ticks, incl. its
+	// for_mt workers), and a concurrent recompute would write the cached
+	// matrices under it. Inside the pause window (sim parked: the barrier,
+	// the drawer extraction) recomputing stays legal, so eager extraction
+	// (PR 8) is unaffected; this only leaves out-of-LOS legacy draws (e.g.
+	// gl.Unit on a hidden unit) one recompute stale mid-frame.
+	if (dirty && !(SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() && Threading::IsMainThread() && !SimDrawSplit::IsSimParked()))
 		UpdateParentMatricesRec();
 
 	return modelSpaceTra;
@@ -147,7 +167,8 @@ const Transform& LocalModelPiece::GetModelSpaceTransform() const
 
 const CMatrix44f& LocalModelPiece::GetModelSpaceMatrix() const
 {
-	if (dirty)
+	// PR 27b: see GetModelSpaceTransform
+	if (dirty && !(SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() && Threading::IsMainThread() && !SimDrawSplit::IsSimParked()))
 		UpdateParentMatricesRec();
 
 	return modelSpaceMat;
@@ -155,6 +176,9 @@ const CMatrix44f& LocalModelPiece::GetModelSpaceMatrix() const
 
 void LocalModelPiece::SetScriptVisible(bool b)
 {
+	// WS-1 §4.1-C (conservative: bumps on a same-value write too)
+	BumpTreeVersion();
+
 	scriptSetVisible = b;
 	wasUpdated[0] = true; //update for current frame
 }
@@ -275,7 +299,7 @@ void LocalModelPiece::Draw() const
 	glPopMatrix();
 }
 
-void LocalModelPiece::DrawLOD(uint32_t lod) const
+void LocalModelPiece::DrawLOD(uint32_t lod, const std::vector<uint32_t>& pieceLodLists) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (!scriptSetVisible)
@@ -286,7 +310,7 @@ void LocalModelPiece::DrawLOD(uint32_t lod) const
 
 	glPushMatrix();
 	glMultMatrixf(GetModelSpaceMatrix());
-	if (const auto ldl = lodDispLists[lod]; ldl == 0) {
+	if (const auto ldl = pieceLodLists[lod]; ldl == 0) {
 		S3DModelHelpers::BindLegacyAttrVBOs();
 		original->DrawElements();
 		S3DModelHelpers::UnbindLegacyAttrVBOs();
@@ -294,19 +318,6 @@ void LocalModelPiece::DrawLOD(uint32_t lod) const
 		glCallList(ldl);
 	}
 	glPopMatrix();
-}
-
-
-
-void LocalModelPiece::SetLODCount(uint32_t count)
-{
-	RECOIL_DETAILED_TRACY_ZONE;
-	// any new LOD's get null-lists first
-	lodDispLists.resize(count, 0);
-
-	for (uint32_t i = 0; i < children.size(); i++) {
-		children[i]->SetLODCount(count);
-	}
 }
 
 

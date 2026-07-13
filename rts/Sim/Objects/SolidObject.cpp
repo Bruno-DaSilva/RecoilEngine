@@ -8,6 +8,7 @@
 #include "Sim/Misc/DamageArray.h"
 #include "Sim/Misc/GroundBlockingObjectMap.h"
 #include "Sim/MoveTypes/MoveDefHandler.h"
+#include "Game/BoundaryStats.h"
 #include "Game/GameHelper.h"
 #include "System/SpringMath.h"
 #include "System/Quaternion.h"
@@ -15,6 +16,10 @@
 #include "System/Misc/TracyDefs.h"
 
 int CSolidObject::deletingRefID = -1;
+// PR 46: global serial source for modParamsVersion (synced-code/sim-thread
+// mutations only, so a plain counter suffices; never reset -- uniqueness
+// across the whole game session is the aliasing guard)
+uint64_t CSolidObject::modParamsVersionSource = 0;
 
 
 CR_BIND_DERIVED_INTERFACE(CSolidObject, CWorldObject)
@@ -75,11 +80,11 @@ CR_REG_METADATA(CSolidObject,
 
 	CR_MEMBER(dragScales),
 
-	CR_MEMBER(drawPos),
-	CR_MEMBER(drawMidPos),
-
 	CR_MEMBER(buildFacing),
 	CR_MEMBER(modParams),
+	// PR 46: deliberately unserialized -- 0 after load means "unversioned",
+	// which forces the snapshot extraction to recopy (always safe)
+	CR_IGNORED(modParamsVersion),
 
 	CR_POSTLOAD(PostLoad)
 ))
@@ -309,10 +314,6 @@ YardMapStatus CSolidObject::GetGroundBlockingMaskAtPos(float3 gpos) const
 }
 
 
-// unsynced mid-{position,vector}s
-float3 CSolidObject::GetMdlDrawMidPos() const { return (GetObjectSpaceDrawPos(WORLD_TO_OBJECT_SPACE * localModel.GetRelMidPos())); }
-float3 CSolidObject::GetObjDrawMidPos() const { return (GetObjectSpaceDrawPos(WORLD_TO_OBJECT_SPACE * relMidPos                )); }
-
 int2 CSolidObject::GetMapPosStatic(const float3& position, int xsize, int zsize)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
@@ -463,11 +464,34 @@ void CSolidObject::CondUpdatePrevTransform()
 
 void CSolidObject::UpdatePrevFrameTransform()
 {
+	// boundary-size measurement (read-only, unsynced counters): per-sim-frame
+	// piece-pose churn = pieces whose model-space transform changed since the
+	// previous save; root churn = objects whose unit-space transform changed
+	if (BoundaryStats::Active()) {
+		uint64_t changed = 0;
+
+		for (const auto& lmp : localModel.pieces) {
+			changed += !lmp.GetModelSpaceTransform().equals(lmp.GetPrevModelSpaceTransformRaw());
+		}
+
+		BoundaryStats::Add(BoundaryStats::ctr.pieceSampled, localModel.pieces.size());
+		BoundaryStats::Add(BoundaryStats::ctr.pieceChanged, changed);
+		BoundaryStats::Add(BoundaryStats::ctr.objSampled);
+
+		if (changed > 0)
+			BoundaryStats::Add(BoundaryStats::ctr.objPieceChanged);
+	}
+
 	for (auto& lmp : localModel.pieces) {
 		lmp.SavePrevModelSpaceTransform();
 	}
 
-	preFrameTra = Transform{ CQuaternion::MakeFrom(GetTransformMatrix(true)), pos };
+	const Transform newPreFrameTra = Transform{ CQuaternion::MakeFrom(GetTransformMatrix()), pos };
+
+	if (BoundaryStats::Active() && !newPreFrameTra.equals(preFrameTra))
+		BoundaryStats::Add(BoundaryStats::ctr.objMoved);
+
+	preFrameTra = newPreFrameTra;
 }
 
 void CSolidObject::ForcedSpin(const float3& zdir)
@@ -523,9 +547,6 @@ const CollisionVolume* CSolidObject::GetCollisionVolume(const LocalModelPiece* l
 
 	return (lmp->GetCollisionVolume());
 }
-
-      LuaObjectMaterialData* CSolidObject::GetLuaMaterialData()       { return (localModel.GetLuaMaterialData()); }
-const LuaObjectMaterialData* CSolidObject::GetLuaMaterialData() const { return (localModel.GetLuaMaterialData()); }
 
 
 float CSolidObject::GetDrawRadius() const { return localModel.GetDrawRadius(); }

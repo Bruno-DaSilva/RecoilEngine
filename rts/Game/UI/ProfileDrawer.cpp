@@ -21,6 +21,7 @@
 #include "Sim/Projectiles/ProjectileMemPool.h"
 #include "Sim/Weapons/WeaponMemPool.h"
 #include "System/EventHandler.h"
+#include "System/SimDrawSplit.h"
 #include "System/TimeProfiler.h"
 #include "System/Threading/ThreadPool.h"
 #include "System/SafeUtil.h"
@@ -43,8 +44,12 @@ typedef std::pair<spring_time, spring_time> TimeSlice;
 static std::deque<TimeSlice> vidFrames;
 static std::deque<TimeSlice> simFrames;
 static std::deque<TimeSlice> lgcFrames;
+static std::deque<TimeSlice> sgcFrames;
 static std::deque<TimeSlice> swpFrames;
 static std::deque<TimeSlice> uusFrames;
+static std::deque<TimeSlice> gteFrames;
+static std::deque<TimeSlice> prkFrames;
+static std::deque<TimeSlice> eppFrames;
 
 
 ProfileDrawer::ProfileDrawer()
@@ -270,22 +275,63 @@ static void DrawFrameBarcode(TypedRenderBuffer<VA_TYPE_C   >& rb)
 		rb.AddVertex({ {drawArea[0] - 10.0f * globalRendering->pixelX, drawArea[1] - 10.0f * globalRendering->pixelY, 0.0f}, barColor }); // tl
 	}
 
+	const bool splitRows = SimDrawSplit::Enabled();
+
 	// title and legend
-	font->glFormat(drawArea[0], drawArea[3] + 10 * globalRendering->pixelY, 0.7f, FONT_TOP | DBG_FONT_FLAGS | FONT_BUFFERED,
+	constexpr const char* legendSingleRow =
+		"Frame Grapher (%.2fsec)"
+		"\xff\xff\x80\xff  GC"
+		"\xff\xff\xff\x01  Unsynced"
+		"\xff\x01\x01\xff  Swap"
+		"\xff\x01\xff\x01  Video"
+		"\xff\xff\x01\x01  Sim";
+	constexpr const char* legendSplitRows =
 		"Frame Grapher (%.2fsec)"
 		"\xff\xff\x80\xff  GC"
 		"\xff\xff\xff\x01  Unsynced"
 		"\xff\x01\x01\xff  Swap"
 		"\xff\x01\xff\x01  Video"
 		"\xff\xff\x01\x01  Sim"
-		, MAX_FRAMES_HIST_TIME
+		"\xff\x01\xff\xff  Epoch"
+		"\xff\xff\x80\x01  Gate"
+		"\xff\xb4\xb4\xb4  Parked";
+
+	font->glFormat(drawArea[0], drawArea[3] + 10 * globalRendering->pixelY, 0.7f, FONT_TOP | DBG_FONT_FLAGS | FONT_BUFFERED,
+		splitRows ? legendSplitRows : legendSingleRow, MAX_FRAMES_HIST_TIME
 	);
 
-	DrawTimeSlices(lgcFrames, maxTime, drawArea, {1.0f, 0.5f, 1.0f, 0.55f}); // gc frames
-	DrawTimeSlices(uusFrames, maxTime, drawArea, {1.0f, 1.0f, 0.0f, 0.90f}); // unsynced-update frames
-	DrawTimeSlices(swpFrames, maxTime, drawArea, {0.0f, 0.0f, 1.0f, 0.55f}); // video swap frames
-	DrawTimeSlices(vidFrames, maxTime, drawArea, {0.0f, 1.0f, 0.0f, 0.55f}); // video frames
-	DrawTimeSlices(simFrames, maxTime, drawArea, {1.0f, 0.0f, 0.0f, 0.55f}); // sim frames
+	// under the sim|draw split the sim phase runs on its own thread, so its
+	// slices overlap the draw-thread ones in wall-clock time; give each
+	// thread its own row instead of interleaving everything in one
+	float4 drawRow = {drawArea[0], drawArea[1], drawArea[2], drawArea[3]};
+	float4 simRow  = drawRow;
+
+	if (splitRows) {
+		const float rowGap = 2.0f * globalRendering->pixelY;
+		const float rowMid = (drawArea[1] + drawArea[3]) * 0.5f;
+
+		drawRow.y = rowMid + rowGap; // draw thread on top
+		simRow.w  = rowMid - rowGap; // sim thread below
+
+		font->glFormat(drawArea[2] + 12.0f * globalRendering->pixelX, drawRow.w, 0.5f, FONT_TOP | DBG_FONT_FLAGS | FONT_BUFFERED, "draw");
+		font->glFormat(drawArea[2] + 12.0f * globalRendering->pixelX,  simRow.w, 0.5f, FONT_TOP | DBG_FONT_FLAGS | FONT_BUFFERED, "sim");
+	}
+
+	// draw-thread row (everything but the sim phase); the gate slice is the
+	// split's sync cost on this side: pause-wait + valve service + barrier
+	DrawTimeSlices(gteFrames, maxTime, drawRow, {1.0f, 0.5f, 0.0f, 0.55f}); // sim|draw gate
+	DrawTimeSlices(lgcFrames, maxTime, drawRow, {1.0f, 0.5f, 1.0f, 0.55f}); // gc frames
+	DrawTimeSlices(uusFrames, maxTime, drawRow, {1.0f, 1.0f, 0.0f, 0.90f}); // unsynced-update frames
+	DrawTimeSlices(swpFrames, maxTime, drawRow, {0.0f, 0.0f, 1.0f, 0.55f}); // video swap frames
+	DrawTimeSlices(vidFrames, maxTime, drawRow, {0.0f, 1.0f, 0.0f, 0.55f}); // video frames
+
+	// sim-thread row (sim frames + synced-handle GC); same row as everything
+	// else when the split is off. The parked slice is the pause window the
+	// gate holds the sim thread for -- any remaining gap is genuinely idle.
+	DrawTimeSlices(prkFrames, maxTime,  simRow, {0.7f, 0.7f, 0.7f, 0.35f}); // sim parked at the gate
+	DrawTimeSlices(eppFrames, maxTime,  simRow, {0.0f, 1.0f, 1.0f, 0.55f}); // epoch extraction+publish (PR 46)
+	DrawTimeSlices(sgcFrames, maxTime,  simRow, {1.0f, 0.5f, 1.0f, 0.55f}); // gc frames (sim phase)
+	DrawTimeSlices(simFrames, maxTime,  simRow, {1.0f, 0.0f, 0.0f, 0.55f}); // sim frames
 
 	{
 		// draw 'feeder' (indicates current time pos)
@@ -352,6 +398,8 @@ static void DrawProfiler(TypedRenderBuffer<VA_TYPE_C   >& rb)
 
 		// print percent of CPU time used within the last 500ms
 		font->glPrint(fStartX += 0.06f, fStartY, textSize, FONT_SHADOW | FONT_DESCENDER | FONT_SCALE | FONT_NORM | FONT_RIGHT | FONT_BUFFERED, "cur-%usage");
+		// self-time %: cur-%usage minus time spent in differently-named child zones
+		font->glPrint(fStartX += 0.04f, fStartY, textSize, FONT_SHADOW | FONT_DESCENDER | FONT_SCALE | FONT_NORM | FONT_RIGHT | FONT_BUFFERED, "self-%");
 		font->glPrint(fStartX += 0.04f, fStartY, textSize, FONT_SHADOW | FONT_DESCENDER | FONT_SCALE | FONT_NORM | FONT_RIGHT | FONT_BUFFERED, "max-%usage");
 		font->glPrint(fStartX += 0.04f, fStartY, textSize, FONT_SHADOW | FONT_DESCENDER | FONT_SCALE | FONT_NORM | FONT_RIGHT | FONT_BUFFERED, "lag");
 
@@ -373,6 +421,8 @@ static void DrawProfiler(TypedRenderBuffer<VA_TYPE_C   >& rb)
 
 		// print percent of CPU time used within the last 500ms
 		font->glFormat(fStartX += 0.06f, fStartY, textSize, FONT_DESCENDER | FONT_SCALE | FONT_NORM | FONT_RIGHT | FONT_BUFFERED, "%.2f%%", profileData.stats.y * 100.0f);
+		// self-time %
+		font->glFormat(fStartX += 0.04f, fStartY, textSize, FONT_DESCENDER | FONT_SCALE | FONT_NORM | FONT_RIGHT | FONT_BUFFERED, "%.2f%%", profileData.selfPercent * 100.0f);
 		font->glFormat(fStartX += 0.04f, fStartY, textSize, FONT_DESCENDER | FONT_SCALE | FONT_NORM | FONT_RIGHT | FONT_BUFFERED, "\xff\xff%c%c%.2f%%", profileData.newPeak? 1: 255, profileData.newPeak? 1: 255, profileData.stats.z * 100.0f);
 		font->glFormat(fStartX += 0.04f, fStartY, textSize, FONT_DESCENDER | FONT_SCALE | FONT_NORM | FONT_RIGHT | FONT_BUFFERED, "\xff\xff%c%c%.0fms", profileData.newLagPeak? 1: 255, profileData.newLagPeak? 1: 255, profileData.stats.x);
 
@@ -637,6 +687,18 @@ void ProfileDrawer::DbgTimingInfo(DbgTimingInfoType type, const spring_time star
 		case TIMING_GC: {
 			lgcFrames.emplace_back(start, end);
 		} break;
+		case TIMING_GC_SIM: {
+			sgcFrames.emplace_back(start, end);
+		} break;
+		case TIMING_BARRIER: {
+			gteFrames.emplace_back(start, end);
+		} break;
+		case TIMING_SIM_PARKED: {
+			prkFrames.emplace_back(start, end);
+		} break;
+		case TIMING_EPOCH_PRODUCE: {
+			eppFrames.emplace_back(start, end);
+		} break;
 		case TIMING_SWAP: {
 			swpFrames.emplace_back(start, end);
 		} break;
@@ -668,10 +730,14 @@ void ProfileDrawer::Update()
 
 	// cleanup old frame records
 	DiscardOldTimeSlices(lgcFrames, curTime, maxTime);
+	DiscardOldTimeSlices(sgcFrames, curTime, maxTime);
 	DiscardOldTimeSlices(uusFrames, curTime, maxTime);
 	DiscardOldTimeSlices(swpFrames, curTime, maxTime);
 	DiscardOldTimeSlices(vidFrames, curTime, maxTime);
 	DiscardOldTimeSlices(simFrames, curTime, maxTime);
+	DiscardOldTimeSlices(gteFrames, curTime, maxTime);
+	DiscardOldTimeSlices(prkFrames, curTime, maxTime);
+	DiscardOldTimeSlices(eppFrames, curTime, maxTime);
 
 	// old ThreadProfile records get cleaned up inside TimeProfiler and DrawThreadBarcode
 }

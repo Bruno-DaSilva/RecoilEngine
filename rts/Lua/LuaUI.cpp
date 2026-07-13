@@ -43,6 +43,7 @@
 #include "lib/luasocket/src/luasocket.h"
 
 #include <cctype>
+#include "Game/Game.h" // ScopedExternalSimPause (PR 27b)
 
 CONFIG(bool, LuaSocketEnabled)
 	.defaultValue(true)

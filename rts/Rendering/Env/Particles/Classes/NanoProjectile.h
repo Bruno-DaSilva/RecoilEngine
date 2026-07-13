@@ -15,8 +15,10 @@ public:
 	CNanoProjectile(float3 pos, float3 speed, int lifeTime, SColor color);
 	~CNanoProjectile();
 
+	void PreDestruct() override;
+
 	void Update() override;
-	void Draw() override;
+	void Draw() const override;
 	void DrawOnMinimap() const override;
 
 	int GetProjectilesCount() const override;

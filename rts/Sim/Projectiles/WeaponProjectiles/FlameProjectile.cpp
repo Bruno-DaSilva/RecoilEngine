@@ -2,6 +2,7 @@
 
 
 #include "FlameProjectile.h"
+#include "Rendering/Env/Particles/ProjectileDrawer.h"
 #include "Game/Camera.h"
 #include "Map/Ground.h"
 #include "Rendering/GL/RenderBuffers.h"
@@ -83,8 +84,9 @@ void CFlameProjectile::Update()
 	);
 }
 
-void CFlameProjectile::Draw()
+void CFlameProjectile::Draw() const
 {
+	const float3 drawPos = projectileDrawer->GetDrawPos(this);
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (!validTextures[0])
 		return;

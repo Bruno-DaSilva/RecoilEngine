@@ -2,6 +2,7 @@
 
 
 #include "ExplosiveProjectile.h"
+#include "Rendering/Env/Particles/ProjectileDrawer.h"
 #include "Game/Camera.h"
 #include "Map/Ground.h"
 #include "Rendering/GL/RenderBuffers.h"
@@ -78,8 +79,9 @@ void CExplosiveProjectile::Update()
 	UpdateInterception();
 }
 
-void CExplosiveProjectile::Draw()
+void CExplosiveProjectile::Draw() const
 {
+	const float3 drawPos = projectileDrawer->GetDrawPos(this);
 	RECOIL_DETAILED_TRACY_ZONE;
 	// do not draw if a 3D model has been defined for us
 	if (model != nullptr)

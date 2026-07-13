@@ -120,6 +120,43 @@ class CCollisionHandler {
 			const CollisionVolume* v,
 			CollisionQuery* cq = nullptr
 		);
+		// draw-side picking variant (PR 25 sim/draw decoupling): the object's
+		// midpos-relative offset and in-void state are passed explicitly so the
+		// hit-test needs no live CSolidObject (the caller reads them from the
+		// render-side SimSnapshot). The piece-tree branch (DefaultToPieceTree)
+		// is NOT served here -- it returns false and the caller falls back to a
+		// live sim read (see TraceRay.cpp). Simple-volume math is byte-identical
+		// to the object overload (same Intersect(v, mr, ...)).
+		static bool MouseHit(
+			const float3& relMidPos,
+			bool isInVoid,
+			const CMatrix44f& m,
+			const float3& p0,
+			const float3& p1,
+			const CollisionVolume* v,
+			CollisionQuery* cq = nullptr
+		);
+		// object-free DetectHit variant (sim/draw split trace re-host): the
+		// object's midPos / relMidPos / in-void state are passed explicitly (read
+		// from the render-side SimSnapshot rows / derived transform), so the test
+		// needs no live CSolidObject. Mirrors the object DetectHit overload
+		// (disc/ray + forceTrace) with simple-volume math byte-identical to it.
+		// Two volume classes need a live read and are NOT served here (the caller
+		// pre-checks the volume and falls back, exactly like the object-free
+		// MouseHit defers the piece tree): DefaultToPieceTree (per-piece hit
+		// volumes -> demand piece cache) and DefaultToFootPrint (blocking-map
+		// object identity) both return false.
+		static bool DetectHit(
+			const float3& midPos,
+			const float3& relMidPos,
+			bool isInVoid,
+			const CollisionVolume* v,
+			const CMatrix44f& m,
+			const float3 p0,
+			const float3 p1,
+			CollisionQuery* cq = nullptr,
+			bool forceTrace = false
+		);
 
 	private:
 		// HITTEST_DISC helpers for DetectHit
@@ -158,11 +195,14 @@ class CCollisionHandler {
 		 * @param p0 start of ray (in world-coordinates)
 		 * @param p1 end of ray (in world-coordinates)
 		 */
-		static bool Intersect(const CollisionVolume* v, const CMatrix44f& m, const float3& p0, const float3& p1, CollisionQuery* cq);
 		static bool IntersectPieceTree(const CSolidObject* o, const CMatrix44f& m, const float3& p0, const float3& p1, CollisionQuery* cq);
 		static bool IntersectPiecesHelper(const CSolidObject* o, const CMatrix44f& m, const float3& p0, const float3& p1, CollisionQuery* cqp);
 
 	public:
+		// volume-only ray intersect -- public for the sim/draw split trace re-host's
+		// object-free per-piece path (mirrors IntersectPiecesHelper over the demand
+		// piece-cache colvols; same rationale as the object-free MouseHit)
+		static bool Intersect(const CollisionVolume* v, const CMatrix44f& m, const float3& p0, const float3& p1, CollisionQuery* cq);
 		static bool IntersectEllipsoid(const CollisionVolume* v, const float3& pi0, const float3& pi1, CollisionQuery* cq);
 		static bool IntersectCylinder(const CollisionVolume* v, const float3& pi0, const float3& pi1, CollisionQuery* cq);
 		static bool IntersectBox(const CollisionVolume* v, const float3& pi0, const float3& pi1, CollisionQuery* cq);

@@ -479,6 +479,9 @@ void CMouseHandler::GetSelectionBoxCoeff(
 
 void CMouseHandler::MouseRelease(int x, int y, int button)
 {
+	// PR 27b: selection-box release runs GuiTraceRay + unit walks; park the
+	// sim (nest-safe, no-op flag-off/parked)
+	CGame::ScopedExternalSimPause simPause(CGame::SimPauseSite::MOUSE_RELEASE);
 	RECOIL_DETAILED_TRACY_ZONE;
 	const CUnit *_lastClicked = lastClicked;
 	lastClicked = nullptr;

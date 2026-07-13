@@ -7,6 +7,7 @@
 #include "FactoryCAI.h"
 #include "ExternalAI/EngineOutHandler.h"
 #include "ExternalAI/SkirmishAIHandler.h"
+#include "Rendering/Common/SimSnapshotWriteThrough.h"
 #include "Game/GlobalUnsynced.h"
 #include "Game/SelectedUnitsHandler.h"
 #include "Game/WaitCommandsAI.h"
@@ -26,6 +27,7 @@
 #include "Sim/Weapons/Weapon.h"
 #include "Sim/Weapons/WeaponDef.h"
 #include "System/EventHandler.h"
+#include "System/SimDrawSplit.h"
 #include "System/SpringMath.h"
 #include "System/Log/ILog.h"
 #include "System/SafeUtil.h"
@@ -55,7 +57,8 @@ CR_BIND(CCommandQueue, )
 CR_REG_METADATA(CCommandQueue, (
 	CR_MEMBER(queue),
 	CR_MEMBER(queueType),
-	CR_MEMBER(tagCounter)
+	CR_MEMBER(tagCounter),
+	CR_IGNORED(version) // ctor-unique on load; the serving cache must not match a pre-load copy
 ))
 
 CR_BIND_DERIVED(CCommandAI, CObject, )
@@ -78,6 +81,7 @@ CR_REG_METADATA(CCommandAI, (
 	CR_MEMBER(inCommand),
 	CR_MEMBER(commandDeathDependences),
 	CR_MEMBER(targetLostTimer),
+	CR_IGNORED(cmdDescVersion), // sim|draw PR 30: ctor-unique on load; serving cache must not match a pre-load copy (CCommandQueue::version precedent)
 
 	CR_PREALLOC(GetPreallocContainer)
 ))
@@ -93,7 +97,8 @@ CCommandAI::CCommandAI():
 	inCommand(CMD_STOP),
 	repeatOrders(false),
 	lastSelectedCommandPage(0),
-	targetLostTimer(TARGET_LOST_TIMER)
+	targetLostTimer(TARGET_LOST_TIMER),
+	cmdDescVersion(++nextGlobalCmdDescVersion) // sim|draw PR 30, see GetCmdDescVersion
 {}
 
 CCommandAI::CCommandAI(CUnit* owner):
@@ -107,8 +112,13 @@ CCommandAI::CCommandAI(CUnit* owner):
 	inCommand(CMD_STOP),
 	repeatOrders(false),
 	lastSelectedCommandPage(0),
-	targetLostTimer(TARGET_LOST_TIMER)
+	targetLostTimer(TARGET_LOST_TIMER),
+	cmdDescVersion(++nextGlobalCmdDescVersion) // sim|draw PR 30, see GetCmdDescVersion
 {
+	// sim|draw WS-5: plumb the owning unit id so queue/desc bumps push the
+	// dirty-list (owner->id is finalized in CUnit::PreInit before commandAI)
+	commandQue.ownerId = owner->id;
+
 	{
 		SCommandDescription c;
 
@@ -368,6 +378,11 @@ CCommandAI::CCommandAI(CUnit* owner):
 	}
 
 	UpdateNonQueueingCommands();
+
+	// sim|draw WS-5: creation choke -- arm every ring slot so each captures the
+	// fresh queue/descs (the ctor version draws already differ from any stale
+	// cache; this is what puts the new id into the drain domain)
+	CCommandQueue::MarkDirty(owner->id);
 }
 
 CCommandAI::~CCommandAI()
@@ -384,6 +399,7 @@ void CCommandAI::UpdateCommandDescription(unsigned int cmdDescIdx, const Command
 	cd.params[0] = IntToString(int(cmd.GetParam(0)), "%d");
 	commandDescriptionCache.DecRef(*possibleCommands[cmdDescIdx]);
 	possibleCommands[cmdDescIdx] = commandDescriptionCache.GetPtr(std::move(cd));
+	BumpCmdDescVersion(); // sim|draw PR 30 desc-surface choke point
 }
 
 void CCommandAI::UpdateCommandDescription(unsigned int cmdDescIdx, SCommandDescription&& modCmdDesc) {
@@ -414,6 +430,7 @@ void CCommandAI::UpdateCommandDescription(unsigned int cmdDescIdx, SCommandDescr
 	if (boUpdate)
 		HandleBuildOptionInsertion(possibleCommands[cmdDescIdx]->id);
 
+	BumpCmdDescVersion(); // sim|draw PR 30 desc-surface choke point
 	selectedUnitsHandler.PossibleCommandChange(owner);
 }
 
@@ -435,6 +452,7 @@ void CCommandAI::InsertCommandDescription(unsigned int cmdDescIdx, SCommandDescr
 	if (!cmdDesc.queueing)
 		nonQueingCommands.insert(cmdDesc.id);
 
+	BumpCmdDescVersion(); // sim|draw PR 30 desc-surface choke point
 	selectedUnitsHandler.PossibleCommandChange(owner);
 }
 
@@ -454,6 +472,7 @@ bool CCommandAI::RemoveCommandDescription(unsigned int cmdDescIdx)
 	commandDescriptionCache.DecRef(*cmdDescPtr);
 	// preserve order
 	possibleCommands.erase(possibleCommands.begin() + cmdDescIdx);
+	BumpCmdDescVersion(); // sim|draw PR 30 desc-surface choke point
 	selectedUnitsHandler.PossibleCommandChange(owner);
 	return true;
 }
@@ -930,6 +949,7 @@ bool CCommandAI::ExecuteStateCommand(const Command& c)
 
 			stockpileWeapon->numStockpileQued += change;
 			stockpileWeapon->numStockpileQued = std::max(stockpileWeapon->numStockpileQued, 0);
+			SimSnapshotWT::NoteStockpile(owner);
 
 			UpdateStockpileIcon();
 			return true;
@@ -1103,8 +1123,17 @@ void CCommandAI::GiveWaitCommand(const Command& c)
 	}
 
 	if (commandQue.empty()) {
-		if (owner->GetGroup() == nullptr)
-			eoh->UnitIdle(*owner);
+		// GetGroup() reads uiGroupHandlers[team].unitGroups on the sim thread;
+		// under the split that map is mutated by the draw thread (rehash UB,
+		// not just staleness) so gate on the lock-free draw-owned mirror
+		// instead. See doc/sim-draw-pr44-prerequisites.md "Gap A".
+		if (!SimDrawSplit::Enabled()) {
+			if (owner->GetGroup() == nullptr)
+				eoh->UnitIdle(*owner);
+		} else {
+			if (!owner->inUiGroup.load(std::memory_order_relaxed))
+				eoh->UnitIdle(*owner);
+		}
 
 		eventHandler.UnitIdle(owner);
 	} else {
@@ -1409,10 +1438,13 @@ std::vector<Command> CCommandAI::GetOverlapQueued(const Command& c) const
 }
 
 
-std::vector<Command> CCommandAI::GetOverlapQueued(const Command& c, const CCommandQueue& q) const
+// shared body for both static overloads (CCommandQueue and std::vector<Command>);
+// uses only c and the queue's bidirectional iteration -- see the header note.
+template<class Queue>
+static std::vector<Command> GetOverlapQueuedImpl(const Command& c, const Queue& q)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	CCommandQueue::const_iterator ci = q.end();
+	auto ci = q.end();
 	std::vector<Command> v;
 	BuildInfo cbi(c);
 
@@ -1463,6 +1495,16 @@ std::vector<Command> CCommandAI::GetOverlapQueued(const Command& c, const CComma
 		} while (ci != q.begin());
 	}
 	return v;
+}
+
+std::vector<Command> CCommandAI::GetOverlapQueued(const Command& c, const CCommandQueue& q)
+{
+	return GetOverlapQueuedImpl(c, q);
+}
+
+std::vector<Command> CCommandAI::GetOverlapQueued(const Command& c, const std::vector<Command>& q)
+{
+	return GetOverlapQueuedImpl(c, q);
 }
 
 
@@ -1681,8 +1723,14 @@ void CCommandAI::FinishCommand()
 	ClearTargetLock(cmd);
 
 	if (commandQue.empty()) {
-		if (owner->GetGroup() == nullptr)
-			eoh->UnitIdle(*owner);
+		// see the FinishCommand idle-gate note above (Gap A draw-owned mirror)
+		if (!SimDrawSplit::Enabled()) {
+			if (owner->GetGroup() == nullptr)
+				eoh->UnitIdle(*owner);
+		} else {
+			if (!owner->inUiGroup.load(std::memory_order_relaxed))
+				eoh->UnitIdle(*owner);
+		}
 
 		eventHandler.UnitIdle(owner);
 	}
@@ -1715,6 +1763,7 @@ void CCommandAI::AddStockpileWeapon(CWeapon* weapon)
 	c.iconname = "bitmaps/armsilo1.bmp";
 
 	possibleCommands.push_back(commandDescriptionCache.GetPtr(std::move(c)));
+	BumpCmdDescVersion(); // sim|draw PR 30 desc-surface choke point (runtime add: stockpile weapon)
 }
 
 void CCommandAI::StockpileChanged(CWeapon* weapon)
@@ -1801,6 +1850,7 @@ void CCommandAI::PushOrUpdateReturnFight(const float3& cmdPos1, const float3& cm
 	const float3 pos = ClosestPointOnLine(cmdPos1, cmdPos2, owner->pos);
 	if (c.GetNumParams() >= 6) {
 		c.SetPos(0, pos);
+		commandQue.BumpVersion(); // in-place edit of the queued front command
 	} else {
 		// make the new fight command inherit <c>'s options
 		Command c2(CMD_FIGHT, c.GetOpts(), pos);

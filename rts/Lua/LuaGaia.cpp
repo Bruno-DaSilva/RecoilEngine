@@ -11,6 +11,7 @@
 #include "System/FileSystem/VFSHandler.h"
 #include "System/StringUtil.h"
 #include "System/Threading/SpringThreading.h"
+#include "Game/Game.h" // ScopedExternalSimPause (PR 27b)
 
 
 CLuaGaia* luaGaia = nullptr;

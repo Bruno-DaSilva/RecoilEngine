@@ -26,7 +26,7 @@ protected:
 	bool highTrajectory = false;
 
 public:
-	CCannon(CUnit* owner = nullptr, const WeaponDef* def = nullptr): CWeapon(owner, def) {}
+	CCannon(CUnit* owner = nullptr, const WeaponDef* def = nullptr): CWeapon(owner, def) { weaponClass = trace::WeaponClass::Cannon; }
 
 	void Init() override final;
 	void UpdateRange(const float val) override final;
@@ -40,6 +40,12 @@ public:
 	// projConsts{.x := speed, .y := gravity}
 	// boostFacts{.x := range, .y := height}
 	static float GetStaticRange2D(const float2& baseConsts, const float2& projConsts, const float2& boostFacts);
+
+	// TRACE REHOST: the ballistic members the draw-side epoch predicate stack
+	// captures (CCannon overrides GetRange2D / HaveFreeLineOfFire).
+	float GetGravity() const { return gravity; }
+	float GetRangeBoostFactor() const { return rangeBoostFactor; }
+	bool GetHighTrajectory() const { return highTrajectory; }
 
 private:
 	/// tells where to point the gun to hit the point at pos+diff

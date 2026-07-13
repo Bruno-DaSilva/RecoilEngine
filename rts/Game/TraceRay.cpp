@@ -6,7 +6,12 @@
 #include "GlobalUnsynced.h"
 #include "Map/Ground.h"
 #include "Rendering/GlobalRendering.h"
+#include "Rendering/Common/SimSnapshot.h"
+#include "Rendering/Common/SnapshotPickGrid.h"
+#include "Rendering/Units/UnitDrawer.h"
+#include "Rendering/Features/FeatureDrawer.h"
 #include "Sim/Features/Feature.h"
+#include "Sim/Features/FeatureHandler.h"
 #include "Sim/Misc/CollisionHandler.h"
 #include "Sim/Misc/CollisionVolume.h"
 #include "Sim/Misc/GeometricObjects.h"
@@ -14,11 +19,13 @@
 #include "Sim/Misc/QuadField.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Units/UnitDef.h"
+#include "Sim/Units/UnitDefHandler.h"
 #include "Sim/Units/UnitHandler.h"
 #include "Sim/Units/UnitTypes/Factory.h"
 #include "Sim/Weapons/PlasmaRepulser.h"
 #include "Sim/Weapons/WeaponDef.h"
 #include "System/GlobalConfig.h"
+#include "System/SimDrawSplit.h"
 #include "System/SpringMath.h"
 
 #include <algorithm>
@@ -136,7 +143,7 @@ inline static bool TestTrajectoryConeHelper(
 
 	CollisionQuery cq;
 	// chord check to hitPos
-	const CMatrix44f objTransform = obj->GetTransformMatrix(true);
+	const CMatrix44f objTransform = obj->GetTransformMatrix();
 
 	// use heuristic to choose which chord to check
 	// if projectile is traveling upwards, check from muzzle to position
@@ -252,7 +259,7 @@ float TraceRay(
 					if (!f->HasCollidableStateBit(CSolidObject::CSTATE_BIT_QUADMAPRAYS))
 						continue;
 
-					if (CCollisionHandler::DetectHit(f, f->GetTransformMatrix(true), pos, pos + dir * traceLength, &cq, true)) {
+					if (CCollisionHandler::DetectHit(f, f->GetTransformMatrix(), pos, pos + dir * traceLength, &cq, true)) {
 						const float len = cq.GetHitPosDist(pos, dir);
 
 						// we want the closest feature (intersection point) on the ray
@@ -290,7 +297,7 @@ float TraceRay(
 					if (!doHitTest)
 						continue;
 
-					if (CCollisionHandler::DetectHit(u, u->GetTransformMatrix(true), pos, pos + dir * traceLength, &cq, true)) {
+					if (CCollisionHandler::DetectHit(u, u->GetTransformMatrix(), pos, pos + dir * traceLength, &cq, true)) {
 						const float len = cq.GetHitPosDist(pos, dir);
 
 						// we want the closest unit (intersection point) on the ray
@@ -349,7 +356,7 @@ void TraceRayShields(
 			if (!r->CanIntercept(emitter->weaponDef->interceptedByShieldType, emitter->owner->allyteam))
 				continue;
 
-			if (CCollisionHandler::DetectHit(r->owner, &r->collisionVolume, r->owner->GetTransformMatrix(true), start, start + dir * length, &cq, true)) {
+			if (CCollisionHandler::DetectHit(r->owner, &r->collisionVolume, r->owner->GetTransformMatrix(), start, start + dir * length, &cq, true)) {
 				if (cq.InsideHit() && r->weaponDef->exteriorShield)
 					continue;
 
@@ -377,11 +384,16 @@ float GuiTraceRay(
 	const CFeature*& hitFeature,
 	bool useRadar,
 	bool groundOnly,
-	bool ignoreWater
+	bool ignoreWater,
+	int* hitUnitIDOut,
+	int* hitFeatureIDOut
 ) {
 	RECOIL_DETAILED_TRACY_ZONE;
 	hitUnit = nullptr;
 	hitFeature = nullptr;
+
+	if (hitUnitIDOut    != nullptr) *hitUnitIDOut    = -1;
+	if (hitFeatureIDOut != nullptr) *hitFeatureIDOut = -1;
 
 	if (dir == ZeroVector)
 		return -1.0f;
@@ -418,107 +430,162 @@ float GuiTraceRay(
 	}
 	maxRayLength = std::min(maxRayLength + globalConfig.selectThroughGround, length);
 
+	// PR 25: draw-side picking against the SimSnapshot + the draw-side spatial
+	// grid (section D). The grid coarse phase replaces the sim quadfield walk;
+	// the precise CCollisionHandler::MouseHit test (against the snapshot
+	// selection volume + the drawer's unsynced transform) still decides the
+	// winner, so the pick is identical to the live path apart from how
+	// candidates are discovered. Reads the last published boundary -- for
+	// synchronous input-side callers that is <=1 draw frame stale, the decided
+	// pick-latency contract (SimSnapshot.h / research doc section D).
+	const SimSnapshot::UnitRows& urows = simSnapshot.Read();
+	const SimSnapshot::FeatureRows& frows = simSnapshot.ReadFeatures();
+
+	// under the running split the sim thread may free/reuse a slot a
+	// boundary-stale candidate id names; gate every live id->object resolve
+	// (piece-tree collision fallback + the terminal winner lookup) behind the
+	// snapshot Valid check so no freed sim object is dereferenced in draw
+	// context. Flag-off (or sim thread not spawned) keeps the exact live path.
+	const bool splitRunning = SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning();
+
+	const int myAllyTeam = gu->myAllyTeam;
+	const bool fullView = gu->spectatingFullView;
+	const int excludeID = (exclude != nullptr) ? exclude->id : -1;
+	const float3 segEnd = start + dir * guiRayLength;
+
+	const float wideErr = (useRadar && myAllyTeam >= 0 && myAllyTeam < urows.numAllyTeams)
+		? urows.radarErrorSizes[myAllyTeam] : 0.0f;
+
+	// candidate id lists reused across calls (main-thread only)
+	static std::vector<int> candUnits;
+	static std::vector<int> candFeatures;
+	snapshotPickGrid.QueryRay(start, dir, maxRayLength, wideErr, candUnits, candFeatures);
+
 	CollisionQuery cq;
+	int hitUnitID = -1;
+	int hitFeatureID = -1;
 
-	QuadFieldQuery qfQuery;
-	if (useRadar) {
-		const float allyTeamError = losHandler->GetAllyTeamRadarErrorSize(gu->myAllyTeam);
-		quadField.GetQuadsOnWideRay(qfQuery, start, dir, maxRayLength, allyTeamError);
-	} else {
-		quadField.GetQuadsOnRay(qfQuery, start, dir, maxRayLength);
-	}
+	// Unit intersection (ascending snapshot id -- deterministic; only exact-tie
+	// / factory-overlap ordering differs from master's sim-quad walk order)
+	for (const int id: candUnits) {
+		const bool unitIsEnemy = !urows.Allied(urows.AllyTeam(id), myAllyTeam);
+		const bool unitOnRadar = (useRadar && urows.InRadar(id, myAllyTeam));
+		const bool unitInSight = (urows.LosStatus(id, myAllyTeam) & (LOS_INLOS | LOS_CONTRADAR)) != 0;
+		const bool unitVisible = !unitIsEnemy || unitOnRadar || unitInSight || fullView;
 
-	for (const int quadIdx: *qfQuery.quads) {
-		const CQuadField::Quad& quad = quadField.GetQuad(quadIdx);
+		if (id == excludeID)
+			continue;
+		if (urows.NoSelect(id))
+			continue;
+		if (!unitVisible)
+			continue;
 
-		// Unit Intersection
-		for (const CUnit* u: quad.units) {
-			const bool unitIsEnemy = !teamHandler.Ally(u->allyteam, gu->myAllyTeam);
-			const bool unitOnRadar = (useRadar && losHandler->InRadar(u, gu->myAllyTeam));
-			const bool unitInSight = (u->losStatus[gu->myAllyTeam] & (LOS_INLOS | LOS_CONTRADAR));
-			const bool unitVisible = !unitIsEnemy || unitOnRadar || unitInSight || gu->spectatingFullView;
+		CollisionVolume cv = urows.SelVol(id);
 
-			if (u == exclude)
-				continue;
-			#if 0
-			// test this bit only in synced traces, rely on noSelect here
-			if (!u->HasCollidableStateBit(CSolidObject::CSTATE_BIT_QUADMAPRAYS))
-				continue;
-			#endif
-			if (u->noSelect)
-				continue;
-			if (!unitVisible)
-				continue;
+		// for iconified units (and enemy radar blips) pretend the volume is a
+		// sphere of the icon radius; GetIsIcon / GetUnitIconRadius stay drawer-
+		// owned, addressed by id
+		if (CUnitDrawer::GetIsIcon(id) || (!unitInSight && unitOnRadar && unitIsEnemy))
+			cv.InitSphere(CUnitDrawer::GetUnitIconRadius(id));
 
-			CollisionVolume cv = u->selectionVolume;
+		bool hit;
+		if (cv.DefaultToPieceTree()) {
+			// piece-tree selection volumes are deferred draw-side (PR 25; unused
+			// in BAR) -- fall back to a live sim read for these objects. This is
+			// the ONLY live-sim read remaining on the unit pick path; TODO remove
+			// at split-enable (PR 27). See SimSnapshot.h PR-25 note. Under the
+			// running split gate the resolve behind Valid (the candidate came
+			// from the boundary grid, so this never changes the pick).
+			const CUnit* lu = (!splitRunning || urows.Valid(id)) ? unitHandler.GetUnit(id) : nullptr;
+			hit = (lu != nullptr) && CCollisionHandler::MouseHit(lu, CUnitDrawer::GetUnsyncedTransformMatrix(lu), start, segEnd, &cv, &cq);
+		} else {
+			// reconstruct the unsynced (drawPos-based) transform from the
+			// snapshot basis + the drawer drawPos + the snapshot error vector --
+			// exactly CUnitDrawerData::GetUnsyncedTransformMatrix, id-keyed
+			float3 interPos = CUnitDrawer::GetDrawPos(id);
+			if (!fullView)
+				interPos += urows.ErrorVector(id, myAllyTeam);
+			const CMatrix44f m(interPos, -urows.Rightdir(id), urows.Updir(id), urows.Frontdir(id));
 
-			// for iconified units, just pretend the collision
-			// volume is a sphere of radius <unit->IconRadius>
-			// (count radar blips as such too)
-			if (u->GetIsIcon() || (!unitInSight && unitOnRadar && unitIsEnemy))
-				cv.InitSphere(u->iconRadius);
-
-			if (CCollisionHandler::MouseHit(u, u->GetTransformMatrix(false), start, start + dir * guiRayLength, &cv, &cq)) {
-				// get the distance to the ray-volume ingress point
-				// (not likely to generate inside-hit special cases)
-				const float ingressDist = cq.GetIngressPosDist(start, dir);
-				const float  egressDist = cq.GetEgressPosDist(start, dir);
-
-				const bool factoryUnderCursor = u->unitDef->IsFactoryUnit();
-				const bool factoryHitBeforeUnit = ((hitFactory && ingressDist < minIngressDist) || (!hitFactory &&  egressDist < minIngressDist));
-				const bool unitHitInsideFactory = ((hitFactory && ingressDist <  minEgressDist) || (!hitFactory && ingressDist < minIngressDist));
-
-				// give units in a factory higher priority than the factory itself
-				if (hitUnit == nullptr || (factoryUnderCursor && factoryHitBeforeUnit) || (!factoryUnderCursor && unitHitInsideFactory)) {
-					hitFactory = factoryUnderCursor;
-					minIngressDist = ingressDist;
-					minEgressDist = egressDist;
-
-					hitUnit = u;
-					hitFeature = nullptr;
-				}
-			}
+			hit = CCollisionHandler::MouseHit(urows.relMidPos[id], urows.InVoid(id), m, start, segEnd, &cv, &cq);
 		}
 
-		// Feature Intersection
-		for (const CFeature* f: quad.features) {
-			if (!gu->spectatingFullView && !f->IsInLosForAllyTeam(gu->myAllyTeam))
-				continue;
-			#if 0
-			// test this bit only in synced traces, rely on noSelect here
-			if (!f->HasCollidableStateBit(CSolidObject::CSTATE_BIT_QUADMAPRAYS))
-				continue;
-			#endif
-			if (f->noSelect)
-				continue;
+		if (hit) {
+			// get the distance to the ray-volume ingress point
+			const float ingressDist = cq.GetIngressPosDist(start, dir);
+			const float  egressDist = cq.GetEgressPosDist(start, dir);
 
-			const CollisionVolume& cv = f->selectionVolume;
+			const UnitDef* ud = unitDefHandler->GetUnitDefByID(urows.DefID(id));
+			const bool factoryUnderCursor = ud->IsFactoryUnit();
+			const bool factoryHitBeforeUnit = ((hitFactory && ingressDist < minIngressDist) || (!hitFactory &&  egressDist < minIngressDist));
+			const bool unitHitInsideFactory = ((hitFactory && ingressDist <  minEgressDist) || (!hitFactory && ingressDist < minIngressDist));
 
-			if (CCollisionHandler::MouseHit(f, f->GetTransformMatrix(false), start, start + dir * guiRayLength, &cv, &cq)) {
-				const float hitDist = cq.GetHitPosDist(start, dir);
+			// give units in a factory higher priority than the factory itself
+			if (hitUnitID < 0 || (factoryUnderCursor && factoryHitBeforeUnit) || (!factoryUnderCursor && unitHitInsideFactory)) {
+				hitFactory = factoryUnderCursor;
+				minIngressDist = ingressDist;
+				minEgressDist = egressDist;
 
-				const bool factoryHitBeforeUnit = ( hitFactory && hitDist <  minEgressDist);
-				const bool unitHitInsideFactory = (!hitFactory && hitDist < minIngressDist);
+				hitUnitID = id;
+				hitFeatureID = -1;
+			}
+		}
+	}
 
-				// we want the closest feature (intersection point) on the ray
-				// give features in a factory (?) higher priority than the factory itself
-				if (hitUnit == nullptr || factoryHitBeforeUnit || unitHitInsideFactory) {
-					hitFactory = false;
-					minIngressDist = hitDist;
+	// Feature intersection
+	for (const int id: candFeatures) {
+		if (!fullView && !frows.IsInLosForAllyTeam(id, myAllyTeam))
+			continue;
+		if (frows.NoSelect(id))
+			continue;
 
-					hitFeature = f;
-					hitUnit = nullptr;
-				}
+		const CollisionVolume& cv = frows.SelVol(id);
+
+		bool hit;
+		if (cv.DefaultToPieceTree()) {
+			// piece-tree fallback: see the unit-path comment above (Valid-gated
+			// live resolve under the running split; byte-identical flag-off).
+			const CFeature* lf = (!splitRunning || frows.Valid(id)) ? featureHandler.GetFeature(id) : nullptr;
+			hit = (lf != nullptr) && CCollisionHandler::MouseHit(lf, CFeatureDrawer::GetUnsyncedTransformMatrix(lf), start, segEnd, &cv, &cq);
+		} else {
+			hit = CCollisionHandler::MouseHit(frows.relMidPos[id], frows.InVoid(id), CFeatureDrawer::GetUnsyncedTransformMatrix(id), start, segEnd, &cv, &cq);
+		}
+
+		if (hit) {
+			const float hitDist = cq.GetHitPosDist(start, dir);
+
+			const bool factoryHitBeforeUnit = ( hitFactory && hitDist <  minEgressDist);
+			const bool unitHitInsideFactory = (!hitFactory && hitDist < minIngressDist);
+
+			// we want the closest feature (intersection point) on the ray;
+			// a held unit (hitUnitID >= 0) is never displaced by a feature
+			if (hitUnitID < 0 || factoryHitBeforeUnit || unitHitInsideFactory) {
+				hitFactory = false;
+				minIngressDist = hitDist;
+
+				hitFeatureID = id;
+				hitUnitID = -1;
 			}
 		}
 	}
 
 	if ((minRayLength > 0.0f) && (maxRayLength < minIngressDist)) {
 		minIngressDist = minRayLength;
-
-		hitUnit    = nullptr;
-		hitFeature = nullptr;
+		hitUnitID = -1;
+		hitFeatureID = -1;
 	}
+
+	// serve the winning snapshot ids directly (PR 27b): draw-context callers
+	// (TraceScreenRay) consume these instead of dereferencing the sim object.
+	if (hitUnitIDOut    != nullptr) *hitUnitIDOut    = hitUnitID;
+	if (hitFeatureIDOut != nullptr) *hitFeatureIDOut = hitFeatureID;
+
+	// resolve the winning snapshot id to a live pointer for the pointer-taking
+	// callers (engine mouse/GUI paths, which park the sim before calling). Under
+	// the running split gate the resolve behind Valid so a boundary-stale id
+	// never yields a freed sim pointer; flag-off keeps the exact legacy lookup.
+	hitUnit = (hitUnitID >= 0 && (!splitRunning || urows.Valid(hitUnitID))) ? unitHandler.GetUnit(hitUnitID) : nullptr;
+	hitFeature = (hitFeatureID >= 0 && (!splitRunning || frows.Valid(hitFeatureID))) ? featureHandler.GetFeature(hitFeatureID) : nullptr;
 
 	return minIngressDist;
 }

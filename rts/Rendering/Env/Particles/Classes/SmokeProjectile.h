@@ -25,7 +25,7 @@ public:
 	);
 
 	void Update() override;
-	void Draw() override;
+	void Draw() const override;
 	void Init(const CUnit* owner, const float3& offset) override;
 
 	int GetProjectilesCount() const override;

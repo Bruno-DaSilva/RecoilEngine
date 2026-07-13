@@ -9,6 +9,8 @@
 
 #include <cstdint>
 #include "System/Misc/TracyDefs.h"
+#include "System/SimDrawSplit.h"
+#include "System/UnsyncedBoundaryQueue.h"
 #include "Lua/LuaUI.h"
 
 CR_BIND(CCobEngine, )
@@ -69,7 +71,7 @@ bool CCobEngine::RemoveThread(int threadID) {
 }
 
 void CCobEngine::ProcessQueuedThreads() {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 
 	// Remove threads killed during Tick by other thread (SIGNAL), we do it
 	// here as nothing is actively referencing any thread's memory here.
@@ -135,7 +137,7 @@ void CCobEngine::TickThread(CCobThread* thread)
 
 void CCobEngine::WakeSleepingThreads()
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	// check on the sleeping threads, remove any whose owner died
 	while (!sleepingThreadIDs.empty()) {
 		CCobThread* zzzThread = GetThread((sleepingThreadIDs.top()).id);
@@ -172,7 +174,7 @@ void CCobEngine::WakeSleepingThreads()
 
 void CCobEngine::TickRunningThreads()
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	// advance all currently running threads
 	for (const int threadID: runningThreadIDs) {
 		TickThread(GetThread(threadID));
@@ -233,6 +235,22 @@ void CCobEngine::RunDeferredCallins()
 		deferredCallins.erase(it);
 
 		const LuaHashString cmdStr = LuaHashString(callins[0].funcName.c_str());
+
+		// PR 27b: these run unsynced Lua from the sim phase -- boundary-defer
+		// under the split (args are already plain-data copies; the CUnit*
+		// each callin carries stays readable until the drain per PR 13)
+		if (SimDrawSplit::DeferUnsyncedNow()) {
+			UnsyncedBoundaryQueue::Defer([cmdStr, callins = std::move(callins)]() mutable {
+				// re-check the handles at drain time (a handle can be
+				// disabled between the defer and the boundary)
+				if (luaRules != nullptr)
+					luaRules->unsyncedLuaHandle.Cob2LuaBatch(cmdStr, callins);
+				if (luaUI != nullptr)
+					luaUI->Cob2LuaBatch(cmdStr, callins);
+			});
+			continue;
+		}
+
 		luaRules->unsyncedLuaHandle.Cob2LuaBatch(cmdStr, callins);
 		if (luaUI)
 			luaUI->Cob2LuaBatch(cmdStr, callins);

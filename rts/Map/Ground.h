@@ -58,7 +58,7 @@ public:
 	static float LinePlaneCol(const float3 pos, const float3 dir, float len, float hgt);
 	static float LineGroundWaterCol(const float3 pos, const float3 dir, float len, bool testWater, bool synced = true);
 
-	static float TrajectoryGroundCol(const float3& trajStartPos, const float3& trajTargetDir, float length, float linCoeff, float qdrCoeff);
+	static float TrajectoryGroundCol(const float3& trajStartPos, const float3& trajTargetDir, float length, float linCoeff, float qdrCoeff, bool synced = true);
 	static float SimTrajectoryGroundColDist(const float3& startPos, const float3& trajStartDir, const float3& acc, const float2& args);
 
 	static int GetSquare(const float3& pos);

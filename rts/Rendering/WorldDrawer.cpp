@@ -51,6 +51,7 @@
 #include "System/Log/ILog.h"
 #include "System/Config/ConfigHandler.h"
 #include "System/LoadLock.h"
+#include "System/SimDrawSplit.h"
 
 CONFIG(bool, PreloadModels).defaultValue(true).description("The engine will preload all models");
 
@@ -164,7 +165,10 @@ void CWorldDrawer::InitPost() const
 			}
 			mv.SetSafeToDeleteVectors();
 			modelLoader.LogErrors();
-			CModelsLock::SetThreadSafety(false); //all models are already preloaded
+			// PR 27b: under the split, runtime model loads happen on the sim
+		// thread (unit creation) while preload futures and the draw side
+		// touch the same caches -- the lock must stay real
+		CModelsLock::SetThreadSafety(SimDrawSplit::Enabled()); //all models are already preloaded otherwise
 		}
 	}
 }
@@ -208,7 +212,8 @@ void CWorldDrawer::Update(bool newSimFrame)
 	SCOPED_TIMER("Update::WorldDrawer");
 
 	LuaObjectDrawer::Update(numUpdates == 0);
-	readMap->UpdateDraw(numUpdates == 0);
+	// readMap->UpdateDraw (the heightmap dirty-rect drain) moved to
+	// CGame::SimDrawBarrier (PR 26): it is boundary work, sim owns the queue
 
 	if (globalRendering->drawGround) {
 		ZoneScopedN("GroundDrawer::Update");

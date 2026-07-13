@@ -10,6 +10,7 @@
 #include "Sim/Misc/DamageArray.h"
 #include "Sim/Projectiles/ProjectileParams.h"
 #include "Sim/Weapons/WeaponTarget.h"
+#include "Sim/Weapons/WeaponTraceClass.h"
 #include "System/float3.h"
 
 class CUnit;
@@ -34,6 +35,7 @@ public:
 	virtual void Init();
 
 	void SetWeaponNum(int num) { weaponNum = num; }
+	trace::WeaponClass GetWeaponClass() const { return weaponClass; }
 	void DependentDied(CObject* o) override;
 	virtual void SlowUpdate();
 	virtual void Update();
@@ -144,6 +146,12 @@ public:
 	CWeapon* slavedTo;                      // use this weapon to choose target
 
 	const WeaponDef* weaponDef;
+
+	// concrete-class tag, set by each subclass ctor BEFORE its creg
+	// null-def early-return (class-constant, so not creg-serialized): the hot
+	// per-weapon SimSnapshot extraction and the live trace predicates read it
+	// instead of walking a dynamic_cast chain
+	trace::WeaponClass weaponClass = trace::WeaponClass::Base;
 
 	const DynDamageArray* damages;
 

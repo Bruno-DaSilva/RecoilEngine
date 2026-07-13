@@ -13,6 +13,7 @@
 #include "TooltipConsole.h"
 #include "Game/Camera.h"
 #include "Game/CameraHandler.h"
+#include "Game/Game.h"
 #include "Game/GameHelper.h"
 #include "Game/GlobalUnsynced.h"
 #include "Game/SelectedUnitsHandler.h"
@@ -25,6 +26,7 @@
 #include "Map/Ground.h"
 #include "Map/ReadMap.h"
 #include "Rendering/CommandDrawer.h"
+#include "Rendering/Common/SimSnapshot.h"
 #include "Rendering/IconHandler.h"
 #include "Rendering/LineDrawer.h"
 #include "Rendering/ShadowHandler.h"
@@ -650,7 +652,7 @@ void CMiniMap::SelectUnits(int x, int y)
 		if (gu->spectatingFullSelect) {
 			unit = CGameHelper::GetClosestUnit(pos, unitSelectRadius);
 		} else {
-			unit = CGameHelper::GetClosestFriendlyUnit(nullptr, pos, unitSelectRadius, gu->myAllyTeam);
+			unit = CGameHelper::GetClosestFriendlyUnit(nullptr, pos, unitSelectRadius, gu->myAllyTeam, false); // draw/UI picking -> unsynced scratch
 		}
 
 		selectedUnitsHandler.HandleSingleUnitClickSelection(lastClicked = unit, false, bp.lastRelease >= (gu->gameTime - mouse->doubleClickTime) && unit == _lastClicked);
@@ -859,10 +861,24 @@ CUnit* CMiniMap::GetSelectUnit(const float3& pos) const
 	if (unit == nullptr)
 		return unit;
 
-	if ((unit->losStatus[gu->myAllyTeam] & (LOS_INLOS | LOS_INRADAR)) || gu->spectatingFullView)
+	// snapshot-served losStatus (SimSnapshot contract): row for the local
+	// allyteam as of the last completed sim frame; a unit the snapshot does
+	// not cover yet reads as 0, i.e. not selectable
+	if (gu->spectatingFullView || (simSnapshot.Read().LosStatus(unit->id, gu->myAllyTeam) & (LOS_INLOS | LOS_INRADAR)))
 		return unit;
 
 	return nullptr;
+}
+
+
+int CMiniMap::GetSelectUnitID(const float3& pos) const
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	// §4.6: the id deref stays inside the draw-owned pick helper so a draw-context
+	// caller (Lua TraceScreenRay) consumes the picked id without a live CUnit*
+	// crossing the seam. Pick + LOS gate are already snapshot-served (see above).
+	const CUnit* unit = GetSelectUnit(pos);
+	return (unit != nullptr) ? unit->id : -1;
 }
 
 
@@ -918,9 +934,9 @@ void CMiniMap::ProxyMousePress(int x, int y, int button)
 
 	if (unit != nullptr) {
 		if (gu->spectatingFullView) {
-			mapPos = unit->midPos;
+			mapPos = simSnapshot.Read().MidPos(unit->id); // PR 25: boundary snapshot (fullView -> exact)
 		} else {
-			mapPos = unit->GetObjDrawErrorPos(gu->myAllyTeam);
+			mapPos = CUnitDrawer::GetObjDrawErrorPos(unit, gu->myAllyTeam);
 			mapPos.y = readMap->GetCurrMaxHeight();
 		}
 	}
@@ -941,9 +957,9 @@ void CMiniMap::ProxyMouseRelease(int x, int y, int button)
 
 	if (unit != nullptr) {
 		if (gu->spectatingFullView) {
-			mapPos = unit->midPos;
+			mapPos = simSnapshot.Read().MidPos(unit->id); // PR 25: boundary snapshot (fullView -> exact)
 		} else {
-			mapPos = unit->GetObjDrawErrorPos(gu->myAllyTeam);
+			mapPos = CUnitDrawer::GetObjDrawErrorPos(unit, gu->myAllyTeam);
 			mapPos.y = readMap->GetCurrMaxHeight();
 		}
 	}
@@ -1411,6 +1427,12 @@ void CMiniMap::DrawForReal(bool useNormalizedCoors, bool updateTex, bool luaCall
 void CMiniMap::DrawCameraFrustumAndMouseSelection()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// sim|draw PR 44 (prereq D): park dropped. The frustum GuiTraceRay consumes
+	// ONLY the returned hit distance (to pick the frustum draw height); it ignores
+	// the resolved unit/feature pointers. GuiTraceRay's pick is snapshot-backed
+	// (SimSnapshot rows + snapshotPickGrid, Valid-gated), so it is draw-safe under
+	// the running split -- the same park-free draw-context read TraceScreenRay does.
+	// The selection box below reads only draw-owned mouse/map state.
 	glEnable(GL_SCISSOR_TEST);
 	glScissor(curPos.x, curPos.y, curDim.x, curDim.y);
 
@@ -1925,6 +1947,10 @@ void CMiniMap::DrawUnitRanges() const
 
 	for (const int unitID: selUnits) {
 		const CUnit* unit = unitHandler.GetUnit(unitID);
+		// PR 27b: draw pass with the sim thread live -- skip a selected unit
+		// killed mid-frame (null handler slot)
+		if (unit == nullptr)
+			continue;
 
 		// LOS Ranges
 		if (unit->radarRadius && !unit->beingBuilt && unit->activated) {

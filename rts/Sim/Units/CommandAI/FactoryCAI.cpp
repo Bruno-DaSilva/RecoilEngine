@@ -58,6 +58,10 @@ CFactoryCAI::CFactoryCAI(CUnit* owner): CCommandAI(owner)
 {
 	commandQue.SetQueueType(CCommandQueue::BuildQueueType);
 	newUnitCommands.SetQueueType(CCommandQueue::NewUnitQueueType);
+	// sim|draw WS-5: the second queue shares the factory's unit id so its bumps
+	// push the same dirty-list entry (the base ctor already fired the creation
+	// choke for this id)
+	newUnitCommands.ownerId = owner->id;
 
 	if (owner->unitDef->canmove) {
 		SCommandDescription c;
@@ -264,6 +268,7 @@ void CFactoryCAI::GiveCommandReal(const Command& c, bool fromSynced)
 				}
 			}
 		}
+		commandQue.BumpVersion(); // in-place STOP overwrites through operator[]
 	} else {
 		if (c.GetOpts() & ALT_KEY) {
 			Command nc(c);
@@ -328,6 +333,7 @@ bool CFactoryCAI::RemoveBuildCommand(CCommandQueue::iterator& it)
 	if (cmd.GetID() < 0) {
 		// build command, convert into a stop command
 		cmd = Command(CMD_STOP);
+		commandQue.BumpVersion(); // in-place overwrite through the iterator
 	}
 
 	return false;
@@ -472,6 +478,7 @@ void CFactoryCAI::UpdateIconName(int cmdID, const int& numQueued)
 
 		commandDescriptionCache.DecRef(*cd);
 		cd = commandDescriptionCache.GetPtr(std::move(ucd));
+		BumpCmdDescVersion(); // sim|draw PR 30 desc-surface choke point (factory build-count badge)
 		break;
 	}
 

@@ -6,6 +6,7 @@
 #include "Rendering/Shaders/ShaderHandler.h"
 #include "Rendering/Shaders/Shader.h"
 #include "Rendering/GL/SubState.h"
+#include "Rendering/Common/DrawMapMirrors.h" // PR 42: read the boundary-drained LOS mirror, not live losHandler
 #include "Sim/Misc/LosHandler.h"
 #include "System/Exceptions.h"
 #include "System/Log/ILog.h"
@@ -86,7 +87,8 @@ CLosTexture::~CLosTexture()
 void CLosTexture::Update()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	if (losHandler->GetGlobalLOS(gu->myAllyTeam)) {
+	// PR 42: read the boundary-drained mirror so this can run with the sim live
+	if (drawMapMirrors.GlobalLos(gu->myAllyTeam)) {
 		fbo.Bind();
 		glViewport(0, 0, texSize.x, texSize.y);
 		glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
@@ -102,7 +104,10 @@ void CLosTexture::Update()
 	static std::vector<uint8_t> infoTexMem;
 	infoTexMem.resize(texSize.x * texSize.y);
 
-	const auto& myLos = losHandler->los.losMaps[gu->myAllyTeam].GetLosMap();
+	const std::vector<uint16_t>* myLosP = drawMapMirrors.LosMap(DrawMapMirrors::LOS_MIRROR_TYPE_LOS, gu->myAllyTeam);
+	if (!drawMapMirrors.Ready() || myLosP == nullptr || myLosP->empty())
+		return; // mirror not drained yet (first frame); skip this update
+	const auto& myLos = *myLosP;
 	assert(myLos.size() == texSize.x * texSize.y);
 
 	auto binding = uploadTex.ScopedBind();

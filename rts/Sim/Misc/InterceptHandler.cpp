@@ -31,9 +31,12 @@ CInterceptHandler interceptHandler;
 
 
 void CInterceptHandler::Update(bool forced) {
-	RECOIL_DETAILED_TRACY_ZONE;
 	if (((gs->frameNum % UNIT_SLOWUPDATE_RATE) != 0) && !forced)
 		return;
+
+	// always-on parent so the per-target AllowWeaponInterceptTarget event
+	// zones nest under one zone instead of swarming the frame unparented
+	ZoneScopedN("InterceptHandler::Update");
 
 	for (CWeapon* w: interceptors) {
 		const WeaponDef* wDef = w->weaponDef;

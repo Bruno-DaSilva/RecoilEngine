@@ -21,6 +21,7 @@
 #include "CommandAI/BuilderCaches.h"
 
 #include "ExternalAI/EngineOutHandler.h"
+#include "Game/BoundaryStats.h"
 #include "Game/GameHelper.h"
 #include "Game/GameSetup.h"
 #include "Game/GlobalUnsynced.h"
@@ -36,6 +37,8 @@
 
 #include "Game/UI/Groups/Group.h"
 #include "Game/UI/Groups/GroupHandler.h"
+#include "System/SimDrawSplit.h"
+#include "System/UnsyncedBoundaryQueue.h"
 #include "Sim/Features/Feature.h"
 #include "Sim/Features/FeatureDef.h"
 #include "Sim/Features/FeatureDefHandler.h"
@@ -59,6 +62,9 @@
 #include "Sim/Weapons/Weapon.h"
 #include "Sim/Weapons/WeaponDefHandler.h"
 #include "Sim/Weapons/WeaponLoader.h"
+#include "Rendering/Common/RenderEventQueue.h"
+#include "Rendering/Common/SimSnapshot.h"
+#include "Rendering/Common/SimSnapshotWriteThrough.h"
 #include "System/EventHandler.h"
 #include "System/Log/ILog.h"
 #include "System/Matrix44f.h"
@@ -73,6 +79,10 @@
 #include "System/Misc/TracyDefs.h"
 
 GlobalUnitParams globalUnitParams;
+
+// global serial source for damagesVersion (synced-code/sim-thread writes only;
+// see the Unit.h comment -- the CSolidObject::modParamsVersionSource pattern)
+uint64_t CUnit::damagesVersionSource = 0;
 
 // See end of source for member bindings
 //////////////////////////////////////////////////////////////////////
@@ -95,12 +105,25 @@ CUnit::CUnit(): CSolidObject()
 	moveState = MOVESTATE_MANEUVER;
 
 	lastNanoAdd = gs->frameNum;
+
+	BumpDamagesVersion();
 }
 
 CUnit::~CUnit()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(unitMemPool.mapped(this));
+
+	// deferred-deleted units (CUnitHandler::DeleteUnit) already ran
+	// PreDestruct() at the old free site; direct frees (teardown) run
+	// the sync-observable half here, exactly where it used to run
+	if (!detached)
+		CUnit::PreDestruct();
+}
+
+void CUnit::PreDestruct()
+{
+	RECOIL_DETAILED_TRACY_ZONE;
 	// clean up if we are still under MoveCtrl here
 	DisableScriptMoveType();
 
@@ -132,8 +155,15 @@ CUnit::~CUnit()
 	// but we always want to call this for ourselves
 	UnBlock();
 
-	// Remove us from our group, if we were in one
-	SetGroup(nullptr);
+	// Remove us from our group, if we were in one.
+	// Under the sim|draw split this touches draw-owned UI control-groups from
+	// the sim thread, so it is deferred to the boundary in
+	// CGame::DeliverBoundaryDeaths (team is unchanged on death -> plain
+	// SetGroup(nullptr) resolves there). See doc/sim-draw-pr44-prerequisites.md
+	// "Gap A". Flag-off stays byte-identical.
+	if (!SimDrawSplit::Enabled()) {
+		SetGroup(nullptr);
+	}
 
 	// delete script first so any callouts still see valid ptrs
 	DeleteScript();
@@ -145,6 +175,8 @@ CUnit::~CUnit()
 	// ScriptCallback may reference weapons, so delete the script first
 	CWeaponLoader::FreeWeapons(this);
 	quadField.RemoveUnit(this);
+
+	CSolidObject::PreDestruct();
 }
 
 
@@ -376,8 +408,7 @@ void CUnit::PostInit(const CUnit* builder)
 		commandAI->GiveCommand(Command(CMD_FIRE_STATE, 0, fireState));
 	}
 
-	UpdateRenderParams();
-	eventHandler.RenderUnitPreCreated(this);
+	renderEventQueue.RenderUnitPreCreated(this);
 
 	// Lua might call SetUnitHealth within UnitCreated
 	// and trigger FinishedBuilding before we get to it
@@ -391,16 +422,15 @@ void CUnit::PostInit(const CUnit* builder)
 	if (!preBeingBuilt && !beingBuilt)
 		FinishedBuilding(true);
 
-	eventHandler.RenderUnitCreated(this, isCloaked);
+	renderEventQueue.RenderUnitCreated(this, isCloaked);
 }
 
 
 void CUnit::PostLoad()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	UpdateRenderParams();
-	eventHandler.RenderUnitPreCreated(this);
-	eventHandler.RenderUnitCreated(this, isCloaked);
+	renderEventQueue.RenderUnitPreCreated(this);
+	renderEventQueue.RenderUnitCreated(this, isCloaked);
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -545,8 +575,35 @@ void CUnit::SetLeavesGhost(bool newLeavesGhost, bool leaveDeadGhost)
 	bool prevValue = leavesGhost;
 	leavesGhost = newLeavesGhost;
 
-	if (prevValue != newLeavesGhost)
-		unitDrawer->UnitLeavesGhostChanged(this, leaveDeadGhost);
+	if (prevValue == newLeavesGhost)
+		return;
+
+	// the drawer's ghost bookkeeping reads losStatus before the clears below
+	unitDrawer->UnitLeavesGhostChanged(this, leaveDeadGhost);
+
+	// LOS_PREVLOS is synced state (read by weapon targeting, GetErrorVector and
+	// synced Lua), so the ghost accounting that clears it must run here; draw
+	// code never writes losStatus
+	if (newLeavesGhost) {
+		// reinstating leavesGhost: disable PREVLOS where contact was lost, else
+		// specs would see the unit after going in and out of player mode
+		for (int at = 0; at < teamHandler.ActiveAllyTeams(); ++at) {
+			if ((losStatus[at] & (LOS_INLOS | LOS_CONTRADAR)) == 0)
+				losStatus[at] &= ~LOS_PREVLOS;
+		}
+		return;
+	}
+
+	if (!leaveDeadGhost || !gameSetup->ghostedBuildings)
+		return;
+
+	// a dead ghost now stands in for this unit: allyteams that received one
+	// treat the unit as not previously seen
+	for (int at = 0; at < teamHandler.ActiveAllyTeams(); ++at) {
+		const auto ls = losStatus[at];
+		if ((ls & (LOS_INLOS | LOS_CONTRADAR | LOS_INRADAR)) == 0 && (ls & LOS_PREVLOS) != 0)
+			losStatus[at] &= ~LOS_PREVLOS;
+	}
 }
 
 
@@ -676,6 +733,7 @@ void CUnit::Update()
 
 	recentDamage *= 0.9f;
 	flankingBonusMobility += flankingBonusMobilityAdd;
+	SimSnapshotWT::NoteFlankingMobility(this);
 
 	if (IsStunned()) {
 		// paralyzed weapons shouldn't reload
@@ -691,7 +749,7 @@ void CUnit::Update()
 
 void CUnit::UpdateWeaponVectors()
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 
 	if (!CanUpdateWeapons())
 		return;
@@ -704,7 +762,7 @@ void CUnit::UpdateWeaponVectors()
 
 void CUnit::UpdateWeapons()
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 
 	if (!CanUpdateWeapons())
 			return;
@@ -733,7 +791,7 @@ void CUnit::UpdateTransportees()
 		if (unitDef->holdSteady) {
 			// slave transportee orientation to piece
 			if (tu.piece >= 0) {
-				const CMatrix44f& transMat = GetTransformMatrix(true);
+				const CMatrix44f& transMat = GetTransformMatrix();
 				const auto pieceMat = script->GetPieceMatrix(tu.piece);
 
 				transportee->SetDirVectors(transMat * pieceMat);
@@ -878,12 +936,14 @@ void CUnit::SetLosStatus(int at, unsigned short newStatus)
 	if (diffBits) {
 		if (diffBits & LOS_INLOS) {
 			if (newStatus & LOS_INLOS) {
+				BoundaryStats::Add(BoundaryStats::ctr.losEnterLos);
 				eventHandler.UnitEnteredLos(this, at);
 				eoh->UnitEnteredLos(*this, at);
 			} else {
 				// clear before sending the event
 				losStatus[at] &= ~LOS_INLOS;
 
+				BoundaryStats::Add(BoundaryStats::ctr.losLeaveLos);
 				eventHandler.UnitLeftLos(this, at);
 				eoh->UnitLeftLos(*this, at);
 			}
@@ -891,12 +951,14 @@ void CUnit::SetLosStatus(int at, unsigned short newStatus)
 
 		if (diffBits & LOS_INRADAR) {
 			if (newStatus & LOS_INRADAR) {
+				BoundaryStats::Add(BoundaryStats::ctr.losEnterRadar);
 				eventHandler.UnitEnteredRadar(this, at);
 				eoh->UnitEnteredRadar(*this, at);
 			} else {
 				// clear before sending the event
 				losStatus[at] &= ~LOS_INRADAR;
 
+				BoundaryStats::Add(BoundaryStats::ctr.losLeaveRadar);
 				eventHandler.UnitLeftRadar(this, at);
 				eoh->UnitLeftRadar(*this, at);
 			}
@@ -976,7 +1038,7 @@ static auto SplitResourcePackIntoPositiveNegative (const SResourcePack &pack)
 
 void CUnit::SlowUpdate()
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	UpdatePosErrorParams(false, true);
 
 	DoWaterDamage();
@@ -1112,7 +1174,7 @@ void CUnit::SlowUpdate()
 
 void CUnit::SlowUpdateWeapons()
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	if (!CanUpdateWeapons())
 		return;
 
@@ -1204,6 +1266,7 @@ float CUnit::GetFlankingDamageBonus(const float3& attackDir)
 		flankingBonus = (flankingBonusAvgDamage - adirRelative.dot(flankingBonusDir) * flankingBonusDifDamage);
 	}
 
+	SimSnapshotWT::NoteFlanking(this);
 	return flankingBonus;
 }
 
@@ -1413,15 +1476,10 @@ void CUnit::ApplyImpulse(const float3& impulse) {
 /******************************************************************************/
 /******************************************************************************/
 
-CMatrix44f CUnit::GetTransformMatrix(bool synced, bool fullread) const
+CMatrix44f CUnit::GetTransformMatrix() const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	float3 interPos = synced ? pos : drawPos;
-
-	if (!synced && !fullread && !gu->spectatingFullView)
-		interPos += GetErrorVector(gu->myAllyTeam);
-
-	return (ComposeMatrix(interPos));
+	return (ComposeMatrix(pos));
 }
 
 /******************************************************************************/
@@ -1452,8 +1510,10 @@ void CUnit::AddExperience(float exp)
 	if (globalUnitParams.expPowerScale > 0.0f)
 		power = unitDef->power * (1.0f + (limExperience * globalUnitParams.expPowerScale));
 
-	if (globalUnitParams.expReloadScale > 0.0f)
+	if (globalUnitParams.expReloadScale > 0.0f) {
 		reloadSpeed = (1.0f + (limExperience * globalUnitParams.expReloadScale));
+		SimSnapshotWT::NoteReloadSpeed(this);
+	}
 
 	if (globalUnitParams.expHealthScale > 0.0f) {
 		maxHealth = std::max(0.1f, unitDef->health * (1.0f + (limExperience * globalUnitParams.expHealthScale)));
@@ -1536,8 +1596,24 @@ bool CUnit::ChangeTeam(int newteam, ChangeType type)
 
 	const int oldteam = team;
 
-	selectedUnitsHandler.RemoveUnit(this);
-	SetGroup(nullptr);
+	// Both the selection prune and the group prune are draw-owned/unsynced.
+	// Under the sim|draw split they defer to the boundary so the sim thread
+	// never touches uiGroupHandlers / selectedUnitsHandler. By drain time our
+	// team is newteam, so the group must be pruned by unit id on the OLDTEAM
+	// handler (team-guard-free RemoveUnitFromGroups); see
+	// doc/sim-draw-pr44-prerequisites.md "Gap A". Flag-off stays byte-identical.
+	if (!SimDrawSplit::Enabled()) {
+		selectedUnitsHandler.RemoveUnit(this);
+		SetGroup(nullptr);
+	} else {
+		CUnit* self = this;
+		const int unitID = id;
+		const int prevTeam = oldteam;
+		UnsyncedBoundaryQueue::Defer([self, unitID, prevTeam]() {
+			selectedUnitsHandler.RemoveUnit(self);
+			uiGroupHandlers[prevTeam].RemoveUnitFromGroups(unitID);
+		});
+	}
 
 	eventHandler.UnitTaken(this, oldteam, newteam);
 	eoh->UnitCaptured(*this, oldteam, newteam);
@@ -1565,6 +1641,10 @@ bool CUnit::ChangeTeam(int newteam, ChangeType type)
 	neutral = false;
 
 	unitHandler.ChangeUnitTeam(this, oldteam, newteam);
+
+	// transfers driven by net messages (resign/share/take) run between sim
+	// frames; tell the snapshot its frameNum-based due-check will not see this
+	simSnapshot.MarkMutatedOutsideFrame();
 
 	for (int at = 0; at < teamHandler.ActiveAllyTeams(); ++at) {
 		if (teamHandler.Ally(at, allyteam)) {
@@ -1955,11 +2035,6 @@ bool CUnit::SetGroup(CGroup* newGroup, bool fromFactory, bool autoSelect)
 
 const CGroup* CUnit::GetGroup() const { return uiGroupHandlers[team].GetUnitGroup(id); }
       CGroup* CUnit::GetGroup()       { return uiGroupHandlers[team].GetUnitGroup(id); }
-
-void CUnit::UpdateRenderParams()
-{
-	definedIconName = unitDef->iconName;
-}
 
 
 /******************************************************************************/
@@ -2895,6 +2970,7 @@ CR_REG_METADATA(CUnit, (
 	CR_MEMBER(stockpileWeapon),
 	CR_MEMBER(selfdExpDamages),
 	CR_MEMBER(deathExpDamages),
+	CR_IGNORED(damagesVersion),
 
 	CR_MEMBER(featureDefID),
 
@@ -3049,11 +3125,6 @@ CR_REG_METADATA(CUnit, (
 
 	CR_MEMBER(selfDCountdown),
 
-	CR_MEMBER(definedIconName),
-	CR_MEMBER_UN(currentIconIndex),
-	CR_MEMBER(customIconIndex),
-	CR_MEMBER_UN(drawIcon),
-
 	CR_MEMBER(transportedUnits),
 	CR_MEMBER(incomingMissiles),
 
@@ -3063,10 +3134,10 @@ CR_REG_METADATA(CUnit, (
 	CR_MEMBER_UN(leaveTracks),
 
 	CR_MEMBER_UN(isSelected),
-	CR_MEMBER(iconRadius),
 
 	CR_MEMBER(stunned),
 	CR_MEMBER_UN(noGroup),
+	CR_IGNORED(inUiGroup), // runtime draw-owned mirror, rebuilt via group ops
 
 //	CR_MEMBER(expMultiplier),
 //	CR_MEMBER(expPowerScale),

@@ -162,6 +162,7 @@ void CPlasmaRepulser::Update()
 		const float powerRegen = weaponDef->shieldPowerRegen     * INV_GAME_SPEED;
 
 		curPower += (powerRegen * owner->UseResources(regenCost));
+		SimSnapshotWT::NoteShieldState(owner);
 	}
 
 	UpdateWeaponVectors();
@@ -231,6 +232,8 @@ bool CPlasmaRepulser::IncomingProjectile(CWeaponProjectile* p, const float3& hit
 			} break;
 		}
 
+		SimSnapshotWT::NoteShieldState(owner);
+
 		if (spring::VectorInsertUnique(repulsedProjectiles, p, true)) {
 			// projectile was not repulsed before
 			AddDeathDependence(p, DEPENDENCE_REPULSED);
@@ -254,6 +257,7 @@ bool CPlasmaRepulser::IncomingProjectile(CWeaponProjectile* p, const float3& hit
 		if (weaponDef->shieldPower != 0.0f) {
 			curPower -= shieldDamage;
 			curPower = std::min(weaponDef->shieldPower, curPower); // damage can be negative
+			SimSnapshotWT::NoteShieldState(owner);
 		}
 
 		p->Collision(this);
@@ -297,6 +301,7 @@ bool CPlasmaRepulser::IncomingBeam(const CWeapon* emitter, const float3& startPo
 		return false;
 
 	curPower -= (shieldDamage * damageMultiplier * (weaponDef->shieldPower > 0.0f));
+	SimSnapshotWT::NoteShieldState(owner);
 	return true;
 }
 

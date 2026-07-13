@@ -108,11 +108,100 @@ public:
 	bool ActionPressed(const Action& action, bool isRepeat);
 	bool ActionReleased(const Action& action);
 
+	// §4.5 pause-surface telemetry: which mid-gameplay ScopedExternalSimPause
+	// call site actually ENGAGED a sim park (i.e. re-parked the running sim,
+	// not a nested no-op). Counted per site so the pre-44c disposition can
+	// separate per-frame parks (must be served before the flip) from rare
+	// input/display-gated parks (accepted). LIFECYCLE covers the untagged
+	// save/Lua-handle/teardown brackets. Dumped at game shutdown.
+	enum class SimPauseSite : int {
+		LIFECYCLE = 0,       // untagged: saves, Lua handle (re)load/kill, path infotex, etc.
+		GUI_TRY_TARGET,      // GuiHandler::TryTarget (attack-cursor GuiTraceRay)
+		GUI_TEST_BUILDSQUARE,// GuiHandler::SetCursorIcon minimap build-proxy (Gap B narrow park)
+		GUI_GET_COMMAND,     // GuiHandler::GetCommand (mouse-release order build)
+		GUI_GET_BUILDPOS,    // GuiHandler::GetBuildPositions (blocking/yardmap)
+		GUI_DRAW_MAPSTUFF,   // GuiHandler::DrawMapStuff (PR 44 prereq D: whole-pass park
+		                     // dropped; now only the residual weapon-range / build-preview
+		                     // interior blocks -- all input-gated, ~0 in steady state)
+		GUI_GET_DEFAULT_CMD, // GuiHandler::GetDefaultCommand fallback (PR 44 prereq D served
+		                     // the per-frame draw-path callers; only rare input-path /
+		                     // pregame calls still park)
+		MOUSE_RELEASE,       // MouseHandler::MouseRelease (selection box)
+		MINIMAP_FRUSTUM,     // MiniMap frustum -- RETIRED (PR 44 prereq D: GuiTraceRay is
+		                     // snapshot-backed + distance-only, park dropped; enum kept for
+		                     // telemetry-id stability, no longer counted)
+		LUA_SEND_COMMANDS,   // LuaUnsyncedCtrl::SendCommands (console-action batch)
+		LUA_GIVE_ORDER,      // LuaUnsyncedCtrl::GiveOrder family
+		PIECE_FIRST_TOUCH,   // PR 46: read-set piece serving, first query of an
+		                     // unregistered object (rare; registered thereafter)
+		EST_PATH_FIRST_TOUCH,// WS-6: read-set est-path serving, first query of an
+		                     // unregistered ground unit (rare; 0 in stock BAR)
+		COUNT
+	};
+	static void DumpSimPauseSurvey();
+
+	// PR 27b: external sim-quiescence bracket (game saves, Lua handler
+	// (re)loads, other whole-sim walks); no-op when the split is off, the
+	// game is null, or a pause is already held (nest-safe: only the
+	// outermost bracket releases). The site tag is telemetry-only (§4.5).
+	struct ScopedExternalSimPause {
+		explicit ScopedExternalSimPause(SimPauseSite site = SimPauseSite::LIFECYCLE);
+		~ScopedExternalSimPause();
+	private:
+		bool acquired = false;
+	};
+
 	const ActionList& GetLastActionList();
 private:
 	bool Draw() override;
 	bool Update() override;
 	bool UpdateUnsynced(const spring_time currentTime);
+
+	/// the sim|draw extract barrier (PR 26); called once, at the top of Draw()
+	void SimDrawBarrier();
+
+	// the sim|draw thread split (PR 27b; active only with SimDrawSplit=1):
+	// the sim thread runs SimThreadProc (ClientReadNet -> SimFrames); Draw
+	// brackets [barrier .. end of drawer extraction] with Acquire/Release
+	void SpawnSimThread();
+	void JoinSimThread();
+	void SimThreadProc();
+	/// PR 44a: the epoch producer -- runs on the sim thread at its frame
+	/// edges (SimThreadProc loop top); extraction+publish overlap the draw
+	/// thread's rendering instead of running under the park. PR 44c: `force`
+	/// (the pool valve's mid-frame tail publish, sim thread) bypasses the
+	/// due-check gating; the §3.2 pacing gate still applies.
+	void ProduceEpochAtSimEdge(bool forceProduce = false);
+	void AcquireSimPause();
+	void ReleaseSimPause();
+	void DeliverBoundaryDeaths();
+	bool CanConsumeSimFrameNow() const;
+	/// PR 46: split-only pacing bypass -- true when the sim thread should
+	/// consume net messages at full capacity (no msgProcTimeLeft budget, no
+	/// per-call wall cap): local/replay server, raised speed, or catch-up.
+	bool SplitFullThrottleConsume() const;
+
+	// ---- PR 44b remainder (§9 ruling): the no-park consumer ----
+	/// consume-complete signal (§3.2 pacing): stamped when ALL consumer-side
+	/// drawer consumption for the held epoch finished (batch dispatch +
+	/// drawer Update + SSBO upload) -- the producer's next extraction is
+	/// mutually exclusive with it by the pacing gate, which reproduces the
+	/// removed park's exclusion without blocking the sim. (PR 44c:
+	/// backpressure is keyed to epoch retirement, not signalled here.)
+	void SignalEpochConsumeComplete();
+
+public:
+	/// PR 44c (§3.4): the pool valve's forced mid-frame tail publish --
+	/// called by DeferredObjectDeleter::WaitForEpochRetirementAtValve on the
+	/// SIM thread; a thin ProduceEpochAtSimEdge(force) wrapper (there is no
+	/// main-thread valve service anymore)
+	void ProduceEpochForPoolValve();
+	/// dispatch-scoped lazy park (§9 ruling, option-1 fallback): on-demand
+	/// quiescence for a dispatch-window read the epoch cannot serve (SYNCED
+	/// cross-hop first-touch / non-scalar value); held to the window close
+	/// (SimDrawBarrier's dispatch-window close releases it)
+	void AcquireLazyDispatchPark();
+private:
 
 	void DrawSkip(bool blackscreen = true);
 	void DrawInputReceivers();
@@ -184,6 +273,18 @@ public:
 	bool skipping = false;
 	bool playing = false;
 	bool paused = false; // unsynced
+
+	// first-call flag for the heightmap dirty-rect drain inside SimDrawBarrier
+	// (was worldDrawer.numUpdates == 0 while the drain lived in
+	// CWorldDrawer::Update; CGame and the world drawer share lifetime)
+	bool firstUnsyncedHeightMapDrain = true;
+
+	// main-thread-only: Draw currently holds the sim thread parked (PR 27b);
+	// ReleaseSimPause is idempotent so every Draw exit path may call it
+	bool simPauseHeld = false;
+	// PR 44b remainder: a dispatch-scoped lazy park engaged this window
+	// (released at the barrier's dispatch-window close)
+	bool lazyDispatchParkHeld = false;
 
 	/// Prevents spectator msgs from being seen by players
 	bool noSpectatorChat = false;

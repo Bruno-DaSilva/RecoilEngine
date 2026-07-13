@@ -49,67 +49,71 @@ void CFeatureDrawer::InitStatic()
 	SelectImplementation();
 }
 
-bool CFeatureDrawer::ShouldDrawOpaqueFeature(CFeature* f, uint8_t thisPassMask)
+bool CFeatureDrawer::ShouldDrawOpaqueFeature(const CFeature* f, uint8_t thisPassMask)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(f);
 	assert(f->model);
 
-	if (f->drawFlag == 0)
+	const auto& rr = CFeatureDrawer::GetRenderRecord(f);
+
+	if (GetDrawFlag(f) == 0)
 		return false;
 
-	if (f->HasDrawFlag(DrawFlags::SO_ALPHAF_FLAG))
+	if (HasDrawFlag(f, DrawFlags::SO_ALPHAF_FLAG))
 		return false;
 
-	if (thisPassMask == DrawFlags::SO_REFLEC_FLAG && !f->HasDrawFlag(DrawFlags::SO_REFLEC_FLAG))
+	if (thisPassMask == DrawFlags::SO_REFLEC_FLAG && !HasDrawFlag(f, DrawFlags::SO_REFLEC_FLAG))
 		return false;
 
-	if (thisPassMask == DrawFlags::SO_REFRAC_FLAG && !f->HasDrawFlag(DrawFlags::SO_REFRAC_FLAG))
+	if (thisPassMask == DrawFlags::SO_REFRAC_FLAG && !HasDrawFlag(f, DrawFlags::SO_REFRAC_FLAG))
 		return false;
 
-	if (thisPassMask == DrawFlags::SO_OPAQUE_FLAG && !f->HasDrawFlag(DrawFlags::SO_OPAQUE_FLAG))
+	if (thisPassMask == DrawFlags::SO_OPAQUE_FLAG && !HasDrawFlag(f, DrawFlags::SO_OPAQUE_FLAG))
 		return false;
 
 	if (LuaObjectDrawer::AddOpaqueMaterialObject(f, LUAOBJ_FEATURE))
 		return false;
 
-	if ((f->engineDrawMask & thisPassMask) != thisPassMask)
+	if ((rr.engineDrawMask & thisPassMask) != thisPassMask)
 		return false;
 
 	return true;
 }
 
-bool CFeatureDrawer::ShouldDrawAlphaFeature(CFeature* f, uint8_t thisPassMask)
+bool CFeatureDrawer::ShouldDrawAlphaFeature(const CFeature* f, uint8_t thisPassMask)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(f);
 	assert(f->model);
 
-	if (f->drawFlag == 0)
+	const auto& rr = CFeatureDrawer::GetRenderRecord(f);
+
+	if (GetDrawFlag(f) == 0)
 		return false;
 
-	if (f->HasDrawFlag(DrawFlags::SO_OPAQUE_FLAG))
+	if (HasDrawFlag(f, DrawFlags::SO_OPAQUE_FLAG))
 		return false;
 
-	if (thisPassMask == DrawFlags::SO_REFLEC_FLAG && !f->HasDrawFlag(DrawFlags::SO_REFLEC_FLAG))
+	if (thisPassMask == DrawFlags::SO_REFLEC_FLAG && !HasDrawFlag(f, DrawFlags::SO_REFLEC_FLAG))
 		return false;
 
-	if (thisPassMask == DrawFlags::SO_REFRAC_FLAG && !f->HasDrawFlag(DrawFlags::SO_REFRAC_FLAG))
+	if (thisPassMask == DrawFlags::SO_REFRAC_FLAG && !HasDrawFlag(f, DrawFlags::SO_REFRAC_FLAG))
 		return false;
 
-	if (thisPassMask == DrawFlags::SO_ALPHAF_FLAG && !f->HasDrawFlag(DrawFlags::SO_ALPHAF_FLAG))
+	if (thisPassMask == DrawFlags::SO_ALPHAF_FLAG && !HasDrawFlag(f, DrawFlags::SO_ALPHAF_FLAG))
 		return false;
 
 	if (LuaObjectDrawer::AddAlphaMaterialObject(f, LUAOBJ_FEATURE))
 		return false;
 
-	if ((f->engineDrawMask & thisPassMask) != thisPassMask)
+	if ((rr.engineDrawMask & thisPassMask) != thisPassMask)
 		return false;
 
 	return true;
 }
 
-bool CFeatureDrawer::ShouldDrawFeatureShadow(CFeature* f)
+bool CFeatureDrawer::ShouldDrawFeatureShadow(const CFeature* f)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(f);
@@ -117,13 +121,15 @@ bool CFeatureDrawer::ShouldDrawFeatureShadow(CFeature* f)
 
 	static constexpr uint8_t thisPassMask = DrawFlags::SO_SHOPAQ_FLAG;
 
-	if (!f->HasDrawFlag(DrawFlags::SO_SHOPAQ_FLAG))
+	const auto& rr = CFeatureDrawer::GetRenderRecord(f);
+
+	if (!HasDrawFlag(f, DrawFlags::SO_SHOPAQ_FLAG))
 		return false;
 
 	if (LuaObjectDrawer::AddShadowMaterialObject(f, LUAOBJ_FEATURE))
 		return false;
 
-	if ((f->engineDrawMask & thisPassMask) != thisPassMask)
+	if ((rr.engineDrawMask & thisPassMask) != thisPassMask)
 		return false;
 
 	return true;
@@ -132,9 +138,10 @@ bool CFeatureDrawer::ShouldDrawFeatureShadow(CFeature* f)
 void CFeatureDrawer::PushIndividualState(const CFeature* feature, bool deferredPass) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	const auto& rr = CFeatureDrawer::GetRenderRecord(feature);
 	SetupOpaqueDrawing(false);
 	CModelDrawerHelper::PushModelRenderState(feature);
-	SetTeamColor(feature->team);
+	SetTeamColor(rr.team);
 }
 
 void CFeatureDrawer::PopIndividualState(const CFeature* feature, bool deferredPass) const
@@ -214,8 +221,8 @@ void CFeatureDrawerLegacy::DrawObjectsShadow(int modelType) const
 		const auto* texMat = textureHandlerS3O.GetTexture(mdlRenderer.GetObjectBinKey(i));
 		CModelDrawerHelper::modelDrawerHelpers[modelType]->BindShadowTex(texMat);
 
-		for (auto* o : mdlRenderer.GetObjectBin(i)) {
-			DrawFeatureShadow(o);
+		for (const int featureID : mdlRenderer.GetObjectBin(i)) {
+			DrawFeatureShadow(DrawerGetObjectByID<CFeature>(featureID));
 		}
 
 		CModelDrawerHelper::modelDrawerHelpers[modelType]->UnbindShadowTex();
@@ -238,8 +245,8 @@ void CFeatureDrawerLegacy::DrawOpaqueObjects(int modelType, bool drawReflection,
 
 		CModelDrawerHelper::BindModelTypeTexture(modelType, mdlRenderer.GetObjectBinKey(i));
 
-		for (auto* o : mdlRenderer.GetObjectBin(i)) {
-			DrawOpaqueFeature(o, thisPassMask);
+		for (const int featureID : mdlRenderer.GetObjectBin(i)) {
+			DrawOpaqueFeature(DrawerGetObjectByID<CFeature>(featureID), thisPassMask);
 		}
 	}
 }
@@ -260,34 +267,38 @@ void CFeatureDrawerLegacy::DrawAlphaObjects(int modelType, bool drawReflection, 
 
 		CModelDrawerHelper::BindModelTypeTexture(modelType, mdlRenderer.GetObjectBinKey(i));
 
-		for (auto* o : mdlRenderer.GetObjectBin(i)) {
-			DrawAlphaFeature(o, thisPassMask);
+		for (const int featureID : mdlRenderer.GetObjectBin(i)) {
+			DrawAlphaFeature(DrawerGetObjectByID<CFeature>(featureID), thisPassMask);
 		}
 	}
 }
 
-void CFeatureDrawerLegacy::DrawOpaqueFeature(CFeature* f, uint8_t thisPassMask) const
+void CFeatureDrawerLegacy::DrawOpaqueFeature(const CFeature* f, uint8_t thisPassMask) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (!ShouldDrawOpaqueFeature(f, thisPassMask))
 		return;
 
+	const auto& rr = CFeatureDrawer::GetRenderRecord(f);
+
 	// draw the unit with the default (non-Lua) material
-	SetTeamColor(f->team);
+	SetTeamColor(rr.team);
 	DrawFeatureTrans(f, 0, 0, false, false);
 }
 
-void CFeatureDrawerLegacy::DrawAlphaFeature(CFeature* f, uint8_t thisPassMask) const
+void CFeatureDrawerLegacy::DrawAlphaFeature(const CFeature* f, uint8_t thisPassMask) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (!ShouldDrawAlphaFeature(f, thisPassMask))
 		return;
 
-	SetTeamColor(f->team, IModelDrawerState::alphaValues.x);
+	const auto& rr = CFeatureDrawer::GetRenderRecord(f);
+
+	SetTeamColor(rr.team, IModelDrawerState::alphaValues.x);
 	DrawFeatureTrans(f, 0, 0, false, false);
 }
 
-void CFeatureDrawerLegacy::DrawFeatureShadow(CFeature* f) const
+void CFeatureDrawerLegacy::DrawFeatureShadow(const CFeature* f) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (ShouldDrawFeatureShadow(f))
@@ -297,10 +308,11 @@ void CFeatureDrawerLegacy::DrawFeatureShadow(CFeature* f) const
 void CFeatureDrawerLegacy::DrawFeatureModel(const CFeature* feature, bool noLuaCall) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	if (!noLuaCall && feature->luaDraw && eventHandler.DrawFeature(feature))
+	const auto& rr = CFeatureDrawer::GetRenderRecord(feature);
+	if (!noLuaCall && rr.luaDraw && eventHandler.DrawFeature(feature))
 		return;
 
-	feature->localModel.Draw();
+	rr.localModel->Draw(&CFeatureDrawer::GetLuaMaterialData(feature->id), &CFeatureDrawer::GetLodDispLists(feature->id));
 }
 
 void CFeatureDrawerGL4::DrawObjectsShadow(int modelType) const
@@ -320,7 +332,9 @@ void CFeatureDrawerGL4::DrawObjectsShadow(int modelType) const
 
 		const auto& bin = mdlRenderer.GetObjectBin(i);
 
-		for (auto* o : bin) {
+		for (const int featureID : bin) {
+			const CFeature* o = DrawerGetObjectByID<CFeature>(featureID);
+
 			if (!ShouldDrawFeatureShadow(o))
 				continue;
 
@@ -357,7 +371,9 @@ void CFeatureDrawerGL4::DrawOpaqueObjects(int modelType, bool drawReflection, bo
 
 		CModelDrawerHelper::BindModelTypeTexture(modelType, mdlRenderer.GetObjectBinKey(i));
 
-		for (auto* o : mdlRenderer.GetObjectBin(i)) {
+		for (const int featureID : mdlRenderer.GetObjectBin(i)) {
+			const CFeature* o = DrawerGetObjectByID<CFeature>(featureID);
+
 			if (!ShouldDrawOpaqueFeature(o, thisPassMask))
 				continue;
 
@@ -394,7 +410,9 @@ void CFeatureDrawerGL4::DrawAlphaObjects(int modelType, bool drawReflection, boo
 
 		const auto& bin = mdlRenderer.GetObjectBin(i);
 
-		for (auto* o : bin) {
+		for (const int featureID : bin) {
+			const CFeature* o = DrawerGetObjectByID<CFeature>(featureID);
+
 			if (!ShouldDrawAlphaFeature(o, thisPassMask))
 				continue;
 

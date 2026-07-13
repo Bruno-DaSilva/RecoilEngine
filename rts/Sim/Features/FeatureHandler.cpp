@@ -2,6 +2,7 @@
 
 #include "FeatureHandler.h"
 #include "Feature.h"
+#include "Game/BoundaryStats.h"
 #include "FeatureDef.h"
 #include "FeatureDefHandler.h"
 #include "FeatureMemPool.h"
@@ -9,8 +10,10 @@
 #include "Map/ReadMap.h"
 #include "Sim/Ecs/Registry.h"
 #include "Sim/Misc/QuadField.h"
+#include "Sim/Objects/DeferredObjectDeleter.h"
 #include "Sim/Units/CommandAI/BuilderCaches.h"
 #include "System/creg/STL_Set.h"
+#include "Rendering/Common/RenderEventQueue.h"
 #include "System/EventHandler.h"
 #include "System/TimeProfiler.h"
 
@@ -140,6 +143,8 @@ bool CFeatureHandler::AddFeature(CFeature* feature)
 	// LoadFeature should make sure this is true
 	assert(CanAddFeature(feature->id));
 
+	BoundaryStats::Add(BoundaryStats::ctr.featCreated);
+
 	InsertActiveFeature(feature);
 	SetFeatureUpdateable(feature);
 	return true;
@@ -237,9 +242,11 @@ bool CFeatureHandler::UpdateFeature(CFeature* feature)
 	assert(feature->inUpdateQue);
 
 	if (feature->deleteMe) {
+		BoundaryStats::Add(BoundaryStats::ctr.featDestroyed);
+
 		Sim::registry.destroy(feature->entityReference);
 
-		eventHandler.RenderFeatureDestroyed(feature);
+		renderEventQueue.RenderFeatureDestroyed(feature);
 		eventHandler.FeatureDestroyed(feature);
 
 		deletedFeatureIDs.push_back(feature->id);
@@ -249,8 +256,9 @@ bool CFeatureHandler::UpdateFeature(CFeature* feature)
 
 		// ID must match parameter for object commands, just use this
 		CSolidObject::SetDeletingRefID(feature->GetBlockingMapID());
-		// destructor removes feature from update-queue
-		featureMemPool.free(feature);
+		// PR 13: sync-observable teardown (PreDestruct) runs here, at the old
+		// free site; the slot is released after the draw boundary drain
+		deferredObjectDeleter.Defer(feature);
 		CSolidObject::SetDeletingRefID(-1);
 		return true;
 	}

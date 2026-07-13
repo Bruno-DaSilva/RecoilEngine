@@ -65,7 +65,16 @@ CNanoProjectile::CNanoProjectile(float3 pos, float3 speed, int lifeTime, SColor 
 CNanoProjectile::~CNanoProjectile()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	if (!detached)
+		CNanoProjectile::PreDestruct();
+}
+
+void CNanoProjectile::PreDestruct()
+{
+	RECOIL_DETAILED_TRACY_ZONE;
 	projectileHandler.currentNanoParticles -= 1;
+
+	CProjectile::PreDestruct();
 }
 
 void CNanoProjectile::Update()
@@ -76,8 +85,9 @@ void CNanoProjectile::Update()
 	deleteMe |= (gs->frameNum >= deathFrame);
 }
 
-void CNanoProjectile::Draw()
+void CNanoProjectile::Draw() const
 {
+	const float3 drawPos = projectileDrawer->GetDrawPos(this);
 	RECOIL_DETAILED_TRACY_ZONE;
 	{
 		const float t = (gs->frameNum - createFrame + globalRendering->timeOffset);

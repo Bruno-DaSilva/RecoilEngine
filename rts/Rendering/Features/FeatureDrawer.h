@@ -26,20 +26,55 @@ public:
 	virtual void DrawIndividual(const CFeature* feature, bool noLuaCall) const = 0;
 	virtual void DrawIndividualNoTrans(const CFeature* feature, bool noLuaCall) const = 0;
 protected:
-	virtual void DrawOpaqueFeature(CFeature* f, uint8_t thisPassMask) const = 0;
-	virtual void DrawAlphaFeature(CFeature* f, uint8_t thisPassMask) const = 0;
+	virtual void DrawOpaqueFeature(const CFeature* f, uint8_t thisPassMask) const = 0;
+	virtual void DrawAlphaFeature(const CFeature* f, uint8_t thisPassMask) const = 0;
 public:
 	// modelDrawerData proxies
 	void ConfigNotify(const std::string& key, const std::string& value) { modelDrawerData->ConfigNotify(key, value); }
-	static const std::vector<CFeature*>& GetUnsortedFeatures() { return modelDrawerData->GetUnsortedObjects(); }
+	static const std::vector<int>& GetUnsortedFeatures() { return modelDrawerData->GetUnsortedObjects(); } // feature ids (PR 14)
+
+	// drawer-owned draw-time positions/transforms (sim/draw §A drawPos eviction)
+	static const float3& GetDrawPos(const CFeature* feature) { return modelDrawerData->GetDrawPos(feature); }
+	static const float3& GetDrawMidPos(const CFeature* feature) { return modelDrawerData->GetDrawMidPos(feature); }
+	// id-keyed forms for the sim|draw PR 40 frustum/screen-rect twins
+	static const float3& GetDrawPos(int featureID) { return modelDrawerData->GetDrawPos(featureID); }
+	static const float3& GetDrawMidPos(int featureID) { return modelDrawerData->GetDrawMidPos(featureID); }
+	static float GetDrawRadius(int featureID) { return modelDrawerData->GetDrawRadius(featureID); }
+	static float3 GetObjDrawMidPos(const CFeature* feature) { return modelDrawerData->GetObjDrawMidPos(feature); }
+	static const CMatrix44f& GetUnsyncedTransformMatrix(const CFeature* feature) { return modelDrawerData->GetUnsyncedTransformMatrix(feature); }
+	static const CMatrix44f& GetUnsyncedTransformMatrix(int featureID) { return modelDrawerData->GetUnsyncedTransformMatrix(featureID); }
+
+	// drawer-owned distance-fade alpha (sim/draw §A drawAlpha eviction, PR 6)
+	static float GetDrawAlpha(const CFeature* feature) { return modelDrawerData->GetDrawAlpha(feature); }
+
+	// drawer-owned draw-visibility flags (sim/draw §A drawFlag eviction, PR 4)
+	static uint8_t GetDrawFlag(const CFeature* feature) { return modelDrawerData->GetDrawFlag(feature); }
+	static uint8_t GetDrawFlag(int featureID) { return modelDrawerData->GetDrawFlag(featureID); } // sim|draw PR 40 (GetVisibleFeatures noIcons)
+	static uint8_t GetPreviousDrawFlag(const CFeature* feature) { return modelDrawerData->GetPreviousDrawFlag(feature); }
+	static bool HasDrawFlag(const CFeature* feature, DrawFlags f) { return modelDrawerData->HasDrawFlag(feature, f); }
 
 	static void ClearPreviousDrawFlags() { modelDrawerData->ClearPreviousDrawFlags(); }
+
+	// SCOPE-1: drawer-owned per-feature render record (immutable header + sim-owned
+	// mutable fields the draw-window passes read); never dereference live CFeature
+	static const CFeatureDrawerData::FeatureRenderRecord& GetRenderRecord(const CFeature* feature) { return modelDrawerData->GetRenderRecord(feature); }
+	static const CFeatureDrawerData::FeatureRenderRecord& GetRenderRecord(int featureID) { return modelDrawerData->GetRenderRecord(featureID); }
+	// PR 43 (3b): barrier step 8 / valve hook (see CFeatureDrawerData)
+	static void ClearDeadRetainedRecords() { if (modelDrawerData != nullptr) modelDrawerData->ClearDeadRetainedRecords(); }
+	// PR 44a: producer-side transform extraction (sim thread, frame edge,
+	// forced-serial -- see CModelDrawerDataBase::ExtractTransforms)
+	static void ExtractTransformsAtSimEdge() { if (modelDrawerData != nullptr) modelDrawerData->ExtractTransformsAtSimEdge(); }
+
+	// drawer-owned Lua material state + per-piece LOD display lists evicted from
+	// LocalModel/LocalModelPiece (sim/draw PR 10)
+	static LuaObjectMaterialData& GetLuaMaterialData(int featureID) { return modelDrawerData->GetLuaMaterialDataRef(featureID); }
+	static std::vector<std::vector<uint32_t>>& GetLodDispLists(int featureID) { return modelDrawerData->GetLodDispListsRef(featureID); }
 public:
 	virtual void DrawFeatureModel(const CFeature* feature, bool noLuaCall) const = 0;
 protected:
-	static bool ShouldDrawOpaqueFeature(CFeature* f, uint8_t thisPassMask);
-	static bool ShouldDrawAlphaFeature(CFeature* f, uint8_t thisPassMask);
-	static bool ShouldDrawFeatureShadow(CFeature* f);
+	static bool ShouldDrawOpaqueFeature(const CFeature* f, uint8_t thisPassMask);
+	static bool ShouldDrawAlphaFeature(const CFeature* f, uint8_t thisPassMask);
+	static bool ShouldDrawFeatureShadow(const CFeature* f);
 
 	void PushIndividualState(const CFeature* feature, bool deferredPass) const;
 	void PopIndividualState(const CFeature* feature, bool deferredPass) const;
@@ -91,9 +126,9 @@ protected:
 	void DrawOpaqueObjects(int modelType, bool drawReflection, bool drawRefraction) const override;
 	void DrawAlphaObjects(int modelType, bool drawReflection, bool drawRefraction) const override;
 
-	void DrawOpaqueFeature(CFeature* f, uint8_t thisPassMask) const override;
-	void DrawAlphaFeature(CFeature* f, uint8_t thisPassMask) const override;
-	void DrawFeatureShadow(CFeature* f) const;
+	void DrawOpaqueFeature(const CFeature* f, uint8_t thisPassMask) const override;
+	void DrawAlphaFeature(const CFeature* f, uint8_t thisPassMask) const override;
+	void DrawFeatureShadow(const CFeature* f) const;
 
 	void DrawFeatureModel(const CFeature* feature, bool noLuaCall) const override;
 };

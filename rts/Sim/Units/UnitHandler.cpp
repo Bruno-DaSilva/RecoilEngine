@@ -19,8 +19,11 @@
 #include "Sim/MoveTypes/Systems/GeneralMoveSystem.h"
 #include "Sim/MoveTypes/Systems/GroundMoveSystem.h"
 #include "Sim/MoveTypes/Systems/UnitTrapCheckSystem.h"
+#include "Sim/Objects/DeferredObjectDeleter.h"
 #include "Sim/Path/IPathManager.h"
 #include "Sim/Weapons/Weapon.h"
+#include "Game/BoundaryStats.h"
+#include "Rendering/Common/RenderEventQueue.h"
 #include "System/EventHandler.h"
 #include "System/Log/ILog.h"
 #include "System/SpringMath.h"
@@ -219,6 +222,8 @@ bool CUnitHandler::AddUnit(CUnit* unit)
 	// LoadUnit should make sure this is true
 	assert(CanAddUnit(unit->id));
 
+	BoundaryStats::Add(BoundaryStats::ctr.unitCreated);
+
 	InsertActiveUnit(unit);
 	teamHandler.Team(unit->team)->AddUnit(unit, CTeam::AddBuilt);
 
@@ -252,7 +257,7 @@ bool CUnitHandler::GarbageCollectUnit(unsigned int id)
 
 void CUnitHandler::QueueDeleteUnits()
 {
-	ZoneScoped;
+	SCOPED_TIMER("Sim::Unit::QueueDelete");
 	// gather up dead units
 	for (activeUpdateUnit = 0; activeUpdateUnit < activeUnits.size(); ++activeUpdateUnit) {
 		QueueDeleteUnit(activeUnits[activeUpdateUnit]);
@@ -276,7 +281,7 @@ bool CUnitHandler::QueueDeleteUnit(CUnit* unit)
 
 void CUnitHandler::DeleteUnits()
 {
-	ZoneScopedC(tracy::Color::Goldenrod);
+	SCOPED_TIMER("Sim::Unit::DeleteUnits");
 	while (!unitsToBeRemoved.empty()) {
 		DeleteUnit(unitsToBeRemoved.back());
 		unitsToBeRemoved.pop_back();
@@ -288,8 +293,15 @@ void CUnitHandler::DeleteUnit(CUnit* delUnit)
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(delUnit->isDead);
 
+	BoundaryStats::Add(BoundaryStats::ctr.unitDestroyed);
+
+	// sim|draw WS-5: death choke -- arm every ring slot so each revisits the id
+	// and clears its stale queue to the nil shape (the drain re-reads GetUnit and
+	// finds null); required for completeness, preserves "dead ids serve nil".
+	CCommandQueue::MarkDirty(delUnit->id);
+
 	// we want to call RenderUnitDestroyed while the unit is still valid
-	eventHandler.RenderUnitDestroyed(delUnit);
+	renderEventQueue.RenderUnitDestroyed(delUnit);
 
 	const auto it = std::find(activeUnits.begin(), activeUnits.end(), delUnit);
 
@@ -318,7 +330,10 @@ void CUnitHandler::DeleteUnit(CUnit* delUnit)
 	entt::entity delUnitEntity = delUnit->entityReference;
 
 	CSolidObject::SetDeletingRefID(delUnit->id);
-	unitMemPool.free(delUnit);
+	// PR 13: runs the sync-observable destructor half (PreDestruct) here, at
+	// the old free site; the shell stays readable for the queued render
+	// records and its pool slot is released after the draw boundary drain
+	deferredObjectDeleter.Defer(delUnit);
 	CSolidObject::SetDeletingRefID(-1);
 
 	assert( Sim::registry.valid(delUnitEntity) );
@@ -336,7 +351,7 @@ void CUnitHandler::UpdateUnitMoveTypes()
 
 void CUnitHandler::UpdateUnitLosStates()
 {
-	ZoneScopedC(tracy::Color::Goldenrod);
+	SCOPED_TIMER("Sim::Unit::LosStates");
 	for (CUnit* unit: activeUnits) {
 		for (int at = 0; at < teamHandler.ActiveAllyTeams(); ++at) {
 			unit->UpdateLosStatus(at);
@@ -441,6 +456,10 @@ void CUnitHandler::UpdatePreFrame()
 
 void CUnitHandler::Update()
 {
+	// parent timer so the Sim::Unit::* sub-steps nest under one zone
+	// instead of floating as siblings directly under the SimFrame marker
+	SCOPED_TIMER("Sim::Unit");
+
 	inUpdateCall = true;
 
 	DeleteUnits();

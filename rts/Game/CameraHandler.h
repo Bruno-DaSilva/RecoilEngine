@@ -4,6 +4,7 @@
 #define _CAMERA_HANDLER_H
 
 #include <array>
+#include <atomic>
 #include <vector>
 #include <string>
 
@@ -137,6 +138,16 @@ public:
 
 	const std::array<CCameraController*, CAMERA_MODE_LAST>& GetControllers() const { return camControllers; }
 
+	// §8.1 (sim|draw): the FPS direct-control camera-rotY nudge is authored by the
+	// SIM thread (CGroundMoveType::UpdateDirectControl) while the camera is
+	// draw-owned. Under the split the sim ACCUMULATES the additive delta here (no
+	// live camera touch -- would race the draw thread) and the draw side applies
+	// it before its controller update. Flag-off the sim writes the camera inline
+	// and this stays zero. The nudge is purely additive, so summing per-sim-frame
+	// deltas and applying once per draw frame yields the same total rotation.
+	void AddFPSDirectControlRotY(float d) { fpsDCRotYAccum.fetch_add(d, std::memory_order_relaxed); }
+	void ApplyPendingFPSDirectControlRotY();
+
 private:
 	void UpdateController(CCameraController& camCon, bool keyMove, bool wheelMove, bool edgeMove);
 	bool LoadViewData(const ViewData& vd);
@@ -144,6 +155,9 @@ private:
 private:
 	float3 lastCamRot;
 	float3 lastCamPos;
+
+	// §8.1: sim-authored FPS direct-control camera-rotY delta, drained draw-side
+	std::atomic<float> fpsDCRotYAccum{0.0f};
 
 	unsigned int currCamCtrlNum = CAMERA_MODE_DUMMY;
 	unsigned int currCamTransitionNum = CAMERA_TRANSITION_MODE_EXP_DECAY;

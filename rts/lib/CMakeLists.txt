@@ -149,6 +149,14 @@ option(TRACY_PROFILE_MEMORY "Profile memory allocations" OFF)
 
 add_subdirectory(tracy)
 
+# Propagate the memory-profiling opt-in to the engine the same way TRACY_ENABLE
+# reaches it: as a PUBLIC definition on the Tracy client every engine TU links.
+# Without this the mimalloc operator new/delete overrides (MemoryOverride.cpp)
+# would instrument every allocation whenever TRACY_ENABLE alone is set.
+if (TRACY_ENABLE AND TRACY_PROFILE_MEMORY)
+	target_compile_definitions(TracyClient PUBLIC TRACY_PROFILE_MEMORY)
+endif()
+
 if (TRACY_ENABLE)
 	option(RMLUI_TRACY_PROFILING "Enable RmlUi profiling with Tracy." ON)
 	# We have our own memory profiling, never enable RmlUi one.

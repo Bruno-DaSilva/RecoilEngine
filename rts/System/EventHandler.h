@@ -6,7 +6,11 @@
 #include <string>
 #include <vector>
 
+#include <cassert>
+
 #include "System/EventClient.h"
+#include "System/SimDrawSplit.h"
+#include "System/UnsyncedBoundaryQueue.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Features/Feature.h"
 #include "Sim/Projectiles/Projectile.h"
@@ -314,7 +318,10 @@ class CEventHandler
 		/// percentage when reconnecting to a running game
 		void GameProgress(int gameFrame);
 
-		void CollectGarbage(bool forced);
+		// PR 27b: GC ownership splits across the threads (see the .cpp);
+		// GC_ALL is the exact legacy iteration
+		enum GCFilter { GC_ALL, GC_SYNCED_ONLY, GC_UNSYNCED_ONLY };
+		void CollectGarbage(bool forced, GCFilter filter = GC_ALL);
 		void DbgTimingInfo(DbgTimingInfoType type, const spring_time start, const spring_time end);
 		void Pong(uint8_t pingTag, const spring_time pktSendTime, const spring_time pktRecvTime);
 		void MetalMapChanged(const int x, const int z);
@@ -381,7 +388,35 @@ extern CEventHandler eventHandler;
 // Inlined call-in loops
 //
 
+/* PR 27b: dispatch one event to one client, deferring to the SimDrawBarrier
+ * when the sim phase fired it and the client is unsynced (the tier-(a)
+ * deviation; see UnsyncedBoundaryQueue.h). A single cached-bool load when
+ * the split flag is off. std::bind copies every argument by value; sim-object
+ * pointer args stay dereferenceable until the drain (PR-13 deferred-deletion
+ * epoch). Gating predicates (CanReadAllyTeam etc.) always evaluate at fire
+ * time, exactly as master's synchronous dispatch did. */
+#define EVENTCLIENT_DISPATCH(ec, name, ...)                                        \
+	if (UnsyncedBoundaryQueue::ShouldDefer(ec)) {                                  \
+		UnsyncedBoundaryQueue::DeferFor(ec,                                        \
+			std::bind(&CEventClient::name, ec __VA_OPT__(,) __VA_ARGS__));         \
+	} else {                                                                       \
+		ec->name(__VA_ARGS__);                                                     \
+	}
+
 #define ITERATE_EVENTCLIENTLIST(name, ...)                         \
+	for (size_t i = 0; i < list##name.size(); ) {                  \
+		CEventClient* ec = list##name[i];                          \
+		EVENTCLIENT_DISPATCH(ec, name, __VA_ARGS__)                \
+                                                                   \
+		/* the call-in may remove itself from the list */          \
+		i += (i < list##name.size() && ec == list##name[i]);       \
+	}
+
+/* the boundary-drained Render* dispatches and UnsyncedHeightMapUpdate ARE
+ * the boundary mechanism -- they must never re-defer (they fire from the
+ * drain / heightmap drain on the draw side, or from the PR-13 pool-pressure
+ * valve, where in-place dispatch is the contract) */
+#define ITERATE_EVENTCLIENTLIST_IMMEDIATE(name, ...)               \
 	for (size_t i = 0; i < list##name.size(); ) {                  \
 		CEventClient* ec = list##name[i];                          \
 		ec->name(__VA_ARGS__);                                     \
@@ -394,8 +429,29 @@ extern CEventHandler eventHandler;
 	for (size_t i = 0; i < list##name.size(); ) {                  \
 		CEventClient* ec = list##name[i];                          \
                                                                    \
-		if (ec->CanReadAllyTeam(allyTeam))                         \
-			ec->name(__VA_ARGS__);                                 \
+		if (ec->CanReadAllyTeam(allyTeam)) {                       \
+			EVENTCLIENT_DISPATCH(ec, name, __VA_ARGS__)            \
+		}                                                          \
+                                                                   \
+		/* the call-in may remove itself from the list */          \
+		i += (i < list##name.size() && ec == list##name[i]);       \
+	}
+
+/* LOS-transition variant: the fire-time capture clients (CUnitDrawerData --
+ * the RenderEventQueue enqueue layer, whose handlers record event-time facts
+ * like the leavesGhost bit and are sim-thread-safe by design) receive these
+ * at fire time even under the split; everyone else defers as usual */
+#define ITERATE_ALLYTEAM_EVENTCLIENTLIST_LOSCAPTURE(name, allyTeam, ...) \
+	for (size_t i = 0; i < list##name.size(); ) {                  \
+		CEventClient* ec = list##name[i];                          \
+                                                                   \
+		if (ec->CanReadAllyTeam(allyTeam)) {                       \
+			if (ec->IsSimPhaseCaptureClient()) {                   \
+				ec->name(__VA_ARGS__);                             \
+			} else {                                               \
+				EVENTCLIENT_DISPATCH(ec, name, __VA_ARGS__)        \
+			}                                                      \
+		}                                                          \
                                                                    \
 		/* the call-in may remove itself from the list */          \
 		i += (i < list##name.size() && ec == list##name[i]);       \
@@ -406,8 +462,9 @@ extern CEventHandler eventHandler;
 	for (size_t i = 0; i < list##name.size(); ) {                  \
 		CEventClient* ec = list##name[i];                          \
                                                                    \
-		if (ec->CanReadAllyTeam(unitAllyTeam))                     \
-			ec->name(unit, __VA_ARGS__);                           \
+		if (ec->CanReadAllyTeam(unitAllyTeam)) {                   \
+			EVENTCLIENT_DISPATCH(ec, name, unit, __VA_ARGS__)      \
+		}                                                          \
                                                                    \
 		/* the call-in may remove itself from the list */          \
 		i += (i < list##name.size() && ec == list##name[i]);       \
@@ -425,6 +482,23 @@ inline void CEventHandler::UnitDestroyed(const CUnit* unit, const CUnit* attacke
 }
 
 #define UNIT_CALLIN_NO_PARAM(name)                                 \
+	inline void CEventHandler:: name (const CUnit* unit)           \
+	{                                                              \
+		const auto unitAllyTeam = unit->allyteam;                  \
+		for (size_t i = 0; i < list##name.size(); ) {              \
+			CEventClient* ec = list##name[i];                      \
+                                                                   \
+			if (ec->CanReadAllyTeam(unitAllyTeam)) {               \
+				EVENTCLIENT_DISPATCH(ec, name, unit)               \
+			}                                                      \
+                                                                   \
+			i += (i < list##name.size() && ec == list##name[i]);   \
+		}                                                          \
+	}
+
+/* immediate variant for the boundary-drained Render* dispatches (see the
+ * ITERATE_EVENTCLIENTLIST_IMMEDIATE comment) */
+#define RENDER_UNIT_CALLIN_NO_PARAM(name)                          \
 	inline void CEventHandler:: name (const CUnit* unit)           \
 	{                                                              \
 		const auto unitAllyTeam = unit->allyteam;                  \
@@ -461,16 +535,18 @@ UNIT_CALLIN_INT_PARAMS(Taken)
 UNIT_CALLIN_INT_PARAMS(Given)
 
 
-#define UNIT_CALLIN_LOS_PARAM(name)                                        \
-	inline void CEventHandler:: Unit ## name (const CUnit* unit, int at)   \
-	{                                                                      \
-		ITERATE_ALLYTEAM_EVENTCLIENTLIST(Unit ## name, at, unit, at)       \
+#define UNIT_CALLIN_LOS_PARAM(name)                                              \
+	inline void CEventHandler:: Unit ## name (const CUnit* unit, int at)         \
+	{                                                                            \
+		ITERATE_ALLYTEAM_EVENTCLIENTLIST_LOSCAPTURE(Unit ## name, at, unit, at)  \
 	}
 
 UNIT_CALLIN_LOS_PARAM(EnteredRadar)
 UNIT_CALLIN_LOS_PARAM(EnteredLos)
 UNIT_CALLIN_LOS_PARAM(LeftRadar)
-UNIT_CALLIN_LOS_PARAM(LeftLos)
+// PR 38f: UnitLeftLos specializes the LOSCAPTURE loop to present event-time
+// (pre-transition) LOS visibility to deferred unsynced handlers -- defined
+// out-of-line in EventHandler.cpp
 
 
 inline void CEventHandler::UnitConstructionDecayed(const CUnit* unit,
@@ -536,15 +612,9 @@ inline bool CEventHandler::UnitFeatureCollision(const CUnit* collider, const CFe
 
 
 
-inline void CEventHandler::UnitCommand(const CUnit* unit, const Command& command, int playerNum, bool fromSynced, bool fromLua)
-{
-	ITERATE_UNIT_ALLYTEAM_EVENTCLIENTLIST(UnitCommand, unit, command, playerNum, fromSynced, fromLua)
-}
-
-inline void CEventHandler::UnitCmdDone(const CUnit* unit, const Command& command)
-{
-	ITERATE_UNIT_ALLYTEAM_EVENTCLIENTLIST(UnitCmdDone, unit, command)
-}
+// PR 38f: UnitCommand / UnitCmdDone specialize the dispatch loop to present the
+// EVENT-TIME command queue to deferred unsynced handlers (see EventHandler.cpp,
+// the GameID out-of-line dispatcher is the precedent)
 
 
 inline void CEventHandler::UnitDamaged(
@@ -593,7 +663,7 @@ inline void CEventHandler::UnitLoaded(const CUnit* unit,
 		if (ec->GetFullRead() ||
 		    (ecAllyTeam == unit->allyteam) ||
 		    (ecAllyTeam == transport->allyteam)) {
-			ec->UnitLoaded(unit, transport);
+			EVENTCLIENT_DISPATCH(ec, UnitLoaded, unit, transport)
 		}
 	}
 }
@@ -610,7 +680,7 @@ inline void CEventHandler::UnitUnloaded(const CUnit* unit,
 		if (ec->GetFullRead() ||
 		    (ecAllyTeam == unit->allyteam) ||
 		    (ecAllyTeam == transport->allyteam)) {
-			ec->UnitUnloaded(unit, transport);
+			EVENTCLIENT_DISPATCH(ec, UnitUnloaded, unit, transport)
 		}
 	}
 }
@@ -623,8 +693,9 @@ inline void CEventHandler::FeatureCreated(const CFeature* feature)
 	for (size_t i = 0; i < count; i++) {
 		CEventClient* ec = listFeatureCreated[i];
 
-		if ((featureAllyTeam < 0) || ec->CanReadAllyTeam(featureAllyTeam))
-			ec->FeatureCreated(feature);
+		if ((featureAllyTeam < 0) || ec->CanReadAllyTeam(featureAllyTeam)) {
+			EVENTCLIENT_DISPATCH(ec, FeatureCreated, feature)
+		}
 	}
 }
 
@@ -636,8 +707,9 @@ inline void CEventHandler::FeatureDestroyed(const CFeature* feature)
 	for (size_t i = 0; i < count; i++) {
 		CEventClient* ec = listFeatureDestroyed[i];
 
-		if ((featureAllyTeam < 0) || ec->CanReadAllyTeam(featureAllyTeam))
-			ec->FeatureDestroyed(feature);
+		if ((featureAllyTeam < 0) || ec->CanReadAllyTeam(featureAllyTeam)) {
+			EVENTCLIENT_DISPATCH(ec, FeatureDestroyed, feature)
+		}
 	}
 }
 
@@ -654,8 +726,9 @@ inline void CEventHandler::FeatureDamaged(
 	for (size_t i = 0; i < count; i++) {
 		CEventClient* ec = listFeatureDamaged[i];
 
-		if (featureAllyTeam < 0 || ec->CanReadAllyTeam(featureAllyTeam))
-			ec->FeatureDamaged(feature, attacker, damage, weaponDefID, projectileID);
+		if (featureAllyTeam < 0 || ec->CanReadAllyTeam(featureAllyTeam)) {
+			EVENTCLIENT_DISPATCH(ec, FeatureDamaged, feature, attacker, damage, weaponDefID, projectileID)
+		}
 	}
 }
 
@@ -666,8 +739,9 @@ inline void CEventHandler::FeatureMoved(const CFeature* feature, const float3& o
 	for (size_t i = 0; i < count; i++) {
 		CEventClient* ec = listFeatureMoved[i];
 
-		if ((featureAllyTeam < 0) || ec->CanReadAllyTeam(featureAllyTeam))
-			ec->FeatureMoved(feature, oldpos);
+		if ((featureAllyTeam < 0) || ec->CanReadAllyTeam(featureAllyTeam)) {
+			EVENTCLIENT_DISPATCH(ec, FeatureMoved, feature, oldpos)
+		}
 	}
 }
 
@@ -679,7 +753,7 @@ inline void CEventHandler::ProjectileCreated(const CProjectile* proj, int allyTe
 		CEventClient* ec = listProjectileCreated[i];
 		if ((allyTeam < 0) || // projectile had no owner at creation
 		    ec->CanReadAllyTeam(allyTeam)) {
-			ec->ProjectileCreated(proj);
+			EVENTCLIENT_DISPATCH(ec, ProjectileCreated, proj)
 		}
 	}
 }
@@ -693,7 +767,7 @@ inline void CEventHandler::ProjectileDestroyed(const CProjectile* proj, int ally
 		CEventClient* ec = listProjectileDestroyed[i];
 		if ((allyTeam < 0) || // projectile had no owner at creation
 		    ec->CanReadAllyTeam(allyTeam)) {
-			ec->ProjectileDestroyed(proj);
+			EVENTCLIENT_DISPATCH(ec, ProjectileDestroyed, proj)
 		}
 	}
 }
@@ -701,7 +775,9 @@ inline void CEventHandler::ProjectileDestroyed(const CProjectile* proj, int ally
 
 inline void CEventHandler::UnsyncedHeightMapUpdate(const SRectangle& rect)
 {
-	ITERATE_EVENTCLIENTLIST(UnsyncedHeightMapUpdate, rect)
+	// fired from the barrier's heightmap drain (readMap->UpdateDraw), i.e.
+	// already on the draw side -- never defer
+	ITERATE_EVENTCLIENTLIST_IMMEDIATE(UnsyncedHeightMapUpdate, rect)
 }
 
 
@@ -729,16 +805,16 @@ inline bool CEventHandler::Explosion(int weaponDefID, const WeaponDef* weaponDef
 }
 
 
-inline void CEventHandler::StockpileChanged(const CUnit* unit,
-                                                const CWeapon* weapon,
-                                                int oldCount)
-{
-	ITERATE_UNIT_ALLYTEAM_EVENTCLIENTLIST(StockpileChanged, unit, weapon, oldCount)
-}
+// defined in EventHandler.cpp: the CWeapon* arg is not lifetime-protected by
+// the deferred-deletion epoch (PreDestruct frees the weapons), so the
+// deferred dispatch re-validates the unit at drain time
 
 
 inline void CEventHandler::DefaultCommand(const CUnit* unit, const CFeature* feature, int& cmd)
 {
+	// mouse/input-driven with an out-param; never fired from the sim phase
+	assert(!SimDrawSplit::DeferUnsyncedNow());
+
 	const size_t count = listDefaultCommand.size();
 
 	for (size_t i = 0; i < count; i++) {
@@ -753,43 +829,47 @@ UNIT_CALLIN_NO_PARAM(RenderUnitPreCreated)
 
 inline void CEventHandler::RenderUnitCreated(const CUnit* unit, int cloaked)
 {
-	ITERATE_EVENTCLIENTLIST(RenderUnitCreated, unit, cloaked)
+	ITERATE_EVENTCLIENTLIST_IMMEDIATE(RenderUnitCreated, unit, cloaked)
 }
 
-UNIT_CALLIN_NO_PARAM(RenderUnitDestroyed)
+RENDER_UNIT_CALLIN_NO_PARAM(RenderUnitDestroyed)
 
 inline void CEventHandler::RenderFeaturePreCreated(const CFeature* feature)
 {
-	ITERATE_EVENTCLIENTLIST(RenderFeaturePreCreated, feature)
+	ITERATE_EVENTCLIENTLIST_IMMEDIATE(RenderFeaturePreCreated, feature)
 }
 
 inline void CEventHandler::RenderFeatureCreated(const CFeature* feature)
 {
-	ITERATE_EVENTCLIENTLIST(RenderFeatureCreated, feature)
+	ITERATE_EVENTCLIENTLIST_IMMEDIATE(RenderFeatureCreated, feature)
 }
 
 inline void CEventHandler::RenderFeatureDestroyed(const CFeature* feature)
 {
-	ITERATE_EVENTCLIENTLIST(RenderFeatureDestroyed, feature)
+	ITERATE_EVENTCLIENTLIST_IMMEDIATE(RenderFeatureDestroyed, feature)
 }
 
 
 inline void CEventHandler::RenderProjectileCreated(const CProjectile* proj)
 {
-	ITERATE_EVENTCLIENTLIST(RenderProjectileCreated, proj)
+	ITERATE_EVENTCLIENTLIST_IMMEDIATE(RenderProjectileCreated, proj)
 }
 
 inline void CEventHandler::RenderProjectileDestroyed(const CProjectile* proj)
 {
-	ITERATE_EVENTCLIENTLIST(RenderProjectileDestroyed, proj)
+	ITERATE_EVENTCLIENTLIST_IMMEDIATE(RenderProjectileDestroyed, proj)
 }
 
 
 #undef ITERATE_EVENTCLIENTLIST
+#undef ITERATE_EVENTCLIENTLIST_IMMEDIATE
 #undef ITERATE_ALLYTEAM_EVENTCLIENTLIST
+#undef ITERATE_ALLYTEAM_EVENTCLIENTLIST_LOSCAPTURE
 #undef ITERATE_UNIT_ALLYTEAM_EVENTCLIENTLIST
 #undef UNIT_CALLIN_NO_PARAM
+#undef RENDER_UNIT_CALLIN_NO_PARAM
 #undef UNIT_CALLIN_INT_PARAMS
 #undef UNIT_CALLIN_LOS_PARAM
+#undef EVENTCLIENT_DISPATCH
 
 #endif /* EVENT_HANDLER_H */

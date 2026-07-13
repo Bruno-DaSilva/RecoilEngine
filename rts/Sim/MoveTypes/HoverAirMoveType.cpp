@@ -137,6 +137,8 @@ CHoverAirMoveType::CHoverAirMoveType(CUnit* owner) :
 	waitCounter(0),
 	lastMoveRate(0)
 {
+	moveTypeClass = MT_HOVER_AIR;
+
 	// creg
 	if (owner == nullptr)
 		return;

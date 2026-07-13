@@ -3,6 +3,7 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
 #include <vector>
 
 #include "Rendering/Models/3DModelDefs.hpp"
@@ -18,12 +19,32 @@ public:
 	size_t operator()(const TObject* o) const { return size_t(o->model->textureType); }
 };
 
+// what the bins store per object (PR 14: drawer containers hold IDs, not
+// pointers; draw passes resolve the id through the object's handler)
+template<typename TObject>
+struct ModelRenderContainerTraits {
+	using Handle = int;
+	static Handle ToHandle(const TObject* o) { return o->id; }
+};
+
+// projectile ids live in two namespaces (synced/unsynced), so their handle
+// carries the namespace bit; ToHandle is defined in ProjectileDrawer.h,
+// which sees the complete CProjectile type
+class CProjectile;
+template<>
+struct ModelRenderContainerTraits<CProjectile> {
+	using Handle = uint32_t; // (id << 1) | synced
+	static Handle ToHandle(const CProjectile* o);
+};
+
 template<typename TObject, typename TObjectSelector = ModelRenderContainerSelector<TObject>>
 class ModelRenderContainer {
+public:
+	using Handle = typename ModelRenderContainerTraits<TObject>::Handle;
 private:
 	// note: there can be no more texture-types than S3DModel instances
 	std::array< int, MAX_MODEL_OBJECTS > keys;
-	std::vector< std::vector<TObject*> > bins;
+	std::vector< std::vector<Handle> > bins;
 
 	size_t numObjs = 0;
 	size_t numBins = 0;
@@ -78,8 +99,7 @@ public:
 			bin.reserve(256);
 
 		// numBins += (ki == ke);
-		// cast since updating an object's draw-position requires mutability
-		numObjs += spring::VectorInsertUnique(bin, const_cast<TObject*>(o));
+		numObjs += spring::VectorInsertUnique(bin, ModelRenderContainerTraits<TObject>::ToHandle(o));
 	}
 
 	void DelObject(const TObject* o) {
@@ -97,7 +117,7 @@ public:
 		// and alpha containers (since it does not know the
 		// cloaked state) which also means the tex-type key
 		// might not exist here
-		numObjs -= spring::VectorErase(bin, const_cast<TObject*>(o));
+		numObjs -= spring::VectorErase(bin, ModelRenderContainerTraits<TObject>::ToHandle(o));
 		numBins -= (bin.empty());
 
 		if (!bin.empty())

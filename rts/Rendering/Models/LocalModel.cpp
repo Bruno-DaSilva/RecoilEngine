@@ -10,9 +10,22 @@ CR_REG_METADATA(LocalModel, (
 	CR_MEMBER(pieces),
 
 	CR_MEMBER(boundingVolume),
-	CR_IGNORED(luaMaterialData),
-	CR_MEMBER(needsBoundariesRecalc)
+	CR_MEMBER(needsBoundariesRecalc),
+
+	// unsynced serving-cache state; SetModel re-seeds it on the PostLoad path,
+	// and a serialized value would be wrong under the process-wide seed source
+	CR_IGNORED(pieceTreeVersion)
 ))
+
+// WS-1: instanceSeed source for pieceTreeVersion; incremented only from
+// SeedPieceTreeVersion (SetModel), never from the per-mutation bump sites --
+// see the GetPieceTreeVersion comment for the threading argument
+static uint32_t pieceTreeVersionSeedSource = 0;
+
+void LocalModel::SeedPieceTreeVersion()
+{
+	pieceTreeVersion = static_cast<uint64_t>(++pieceTreeVersionSeedSource) << 32;
+}
 
 /** ****************************************************************************************************
  * LocalModel
@@ -26,24 +39,30 @@ void LocalModel::DrawPieces() const
 	}
 }
 
-void LocalModel::DrawPiecesLOD(uint32_t lod) const
+void LocalModel::DrawPiecesLOD(uint32_t lod, const LuaObjectMaterialData* lmd, const std::vector<std::vector<uint32_t>>* lodLists) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	if (!luaMaterialData.ValidLOD(lod))
+	if (!lmd->ValidLOD(lod))
 		return;
 
-	for (const auto& p: pieces) {
-		p.DrawLOD(lod);
+	for (size_t i = 0; i < pieces.size(); ++i) {
+		pieces[i].DrawLOD(lod, (*lodLists)[i]);
 	}
 }
 
-void LocalModel::SetLODCount(uint32_t lodCount)
+void LocalModel::SetLODCount(uint32_t lodCount, LuaObjectMaterialData* lmd, std::vector<std::vector<uint32_t>>* lodLists) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(Initialized());
 
-	luaMaterialData.SetLODCount(lodCount);
-	pieces[0].SetLODCount(lodCount);
+	lmd->SetLODCount(lodCount);
+
+	// the record's lists are a flat [pieceIndex] vector sized to pieces.size(),
+	// each holding lodCount null display-list ids (replaces the old per-piece
+	// SetLODCount recursion over LocalModelPiece::lodDispLists)
+	lodLists->assign(pieces.size(), std::vector<uint32_t>());
+	for (auto& v : *lodLists)
+		v.assign(lodCount, 0u);
 }
 
 
@@ -53,6 +72,10 @@ void LocalModel::SetModel(const S3DModel* model, bool initialize)
 	// make sure we do not get called for trees, etc
 	assert(model != nullptr);
 	assert(model->numPieces >= 1);
+
+	// (re)seed the capture version on BOTH paths: a fresh instance-unique value
+	// proves instance identity to the version-skip keys (id reuse, creg load)
+	SeedPieceTreeVersion();
 
 	if (!initialize) {
 		assert(pieces.size() == model->numPieces);
@@ -119,7 +142,7 @@ LocalModelPiece* LocalModel::CreateLocalModelPieces(const S3DModelPiece* mpParen
 
 void LocalModel::UpdateBoundingVolume()
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 
 	// bounding-box extrema (local space)
 	float3 bbMins = DEF_MIN_SIZE;

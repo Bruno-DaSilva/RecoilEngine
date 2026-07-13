@@ -21,7 +21,7 @@ public:
 
 	void Serialize(creg::ISerializer* s);
 
-	void Draw() override;
+	void Draw() const override;
 	void Update() override;
 	void Init(const CUnit* owner, const float3& offset) override;
 

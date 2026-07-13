@@ -106,7 +106,7 @@ void CSmokeProjectile2::Update()
 	deleteMe |= (age >= 1.0f);
 }
 
-void CSmokeProjectile2::Draw()
+void CSmokeProjectile2::Draw() const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	const float interAge = std::min(1.0f, age + ageSpeed * globalRendering->timeOffset);

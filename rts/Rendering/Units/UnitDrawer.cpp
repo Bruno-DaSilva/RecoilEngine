@@ -6,6 +6,8 @@
 #include "Game/CameraHandler.h"
 #include "Game/Game.h"
 #include "Game/GameHelper.h"
+#include "Lua/LuaSnapshotServe.h" // sim|draw split (Stage 0): served build-square verdict
+#include "System/SimDrawSplit.h"  // sim|draw split (Stage 0): splitRunning gate
 #include "Game/GameSetup.h"
 #include "Game/GlobalUnsynced.h"
 #include "Game/Players/Player.h"
@@ -28,6 +30,7 @@
 #include "Rendering/Textures/3DOTextureHandler.h"
 #include "Rendering/Textures/S3OTextureHandler.h"
 #include "Rendering/Common/ModelDrawerHelpers.h"
+#include "Rendering/Common/SimSnapshot.h"
 #include "Rendering/Models/3DModelVAO.hpp"
 #include "Rendering/Models/ModelsMemStorage.h"
 
@@ -101,7 +104,8 @@ public:
 	}
 
 	static inline float GetUnitIconScale(const CUnit* unit) {
-		const auto& iconData = icon::iconHandler.GetIconData(unit->currentIconIndex);
+		const auto& rr = CUnitDrawer::GetRenderRecord(unit);
+		const auto& iconData = icon::iconHandler.GetIconData(CUnitDrawer::GetUnitIconIndex(unit));
 		float scale = iconData.GetSize();
 
 		if (!minimap->UseUnitIcons())
@@ -109,12 +113,12 @@ public:
 		if (!iconData.GetRadiusAdjust())
 			return scale;
 
-		const unsigned short losStatus = unit->losStatus[gu->myAllyTeam];
+		const unsigned short losStatus = simSnapshot.Read().LosStatus(unit->id, gu->myAllyTeam);
 		const unsigned short prevMask = (LOS_PREVLOS | LOS_CONTRADAR);
 		const bool unitVisible = ((losStatus & LOS_INLOS) || ((losStatus & LOS_INRADAR) && ((losStatus & prevMask) == prevMask)));
 
 		if ((unitVisible || gu->spectatingFullView)) {
-			scale *= (unit->radius / iconData.GetRadiusScale());
+			scale *= (rr.radius / iconData.GetRadiusScale());
 		}
 
 		return scale;
@@ -176,7 +180,7 @@ void CUnitDrawer::KillStatic(bool reload)
 	icons3DShader = nullptr;
 }
 
-bool CUnitDrawer::ShouldDrawOpaqueUnit(CUnit* u, uint8_t thisPassMask)
+bool CUnitDrawer::ShouldDrawOpaqueUnit(const CUnit* u, uint8_t thisPassMask)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (u == ((thisPassMask == DrawFlags::SO_REFLEC_FLAG) ? nullptr : (gu->GetMyPlayer())->fpsController.GetControllee()))
@@ -185,81 +189,87 @@ bool CUnitDrawer::ShouldDrawOpaqueUnit(CUnit* u, uint8_t thisPassMask)
 	assert(u);
 	assert(u->model);
 
-	if (u->drawFlag == 0)
+	const auto& rr = CUnitDrawer::GetRenderRecord(u);
+
+	if (GetDrawFlag(u) == 0)
 		return false;
 
-	if (u->GetIsIcon())
+	if (GetIsIcon(u))
 		return false;
 
-	if (u->HasDrawFlag(DrawFlags::SO_ALPHAF_FLAG))
+	if (HasDrawFlag(u, DrawFlags::SO_ALPHAF_FLAG))
 		return false;
 
-	if (thisPassMask == DrawFlags::SO_REFLEC_FLAG && !u->HasDrawFlag(DrawFlags::SO_REFLEC_FLAG))
+	if (thisPassMask == DrawFlags::SO_REFLEC_FLAG && !HasDrawFlag(u, DrawFlags::SO_REFLEC_FLAG))
 		return false;
 
-	if (thisPassMask == DrawFlags::SO_REFRAC_FLAG && !u->HasDrawFlag(DrawFlags::SO_REFRAC_FLAG))
+	if (thisPassMask == DrawFlags::SO_REFRAC_FLAG && !HasDrawFlag(u, DrawFlags::SO_REFRAC_FLAG))
 		return false;
 
-	if (thisPassMask == DrawFlags::SO_OPAQUE_FLAG && !u->HasDrawFlag(DrawFlags::SO_OPAQUE_FLAG))
+	if (thisPassMask == DrawFlags::SO_OPAQUE_FLAG && !HasDrawFlag(u, DrawFlags::SO_OPAQUE_FLAG))
 		return false;
 
 	if (LuaObjectDrawer::AddOpaqueMaterialObject(u, LUAOBJ_UNIT))
 		return false;
 
-	if ((u->engineDrawMask & thisPassMask) != thisPassMask)
+	if ((rr.engineDrawMask & thisPassMask) != thisPassMask)
 		return false;
 
 	return true;
 }
 
-bool CUnitDrawer::ShouldDrawAlphaUnit(CUnit* u, uint8_t thisPassMask)
+bool CUnitDrawer::ShouldDrawAlphaUnit(const CUnit* u, uint8_t thisPassMask)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(u);
 	assert(u->model);
 
-	if (u->drawFlag == 0)
+	const auto& rr = CUnitDrawer::GetRenderRecord(u);
+
+	if (GetDrawFlag(u) == 0)
 		return false;
 
-	if (u->GetIsIcon())
+	if (GetIsIcon(u))
 		return false;
 
-	if (u->HasDrawFlag(DrawFlags::SO_OPAQUE_FLAG))
+	if (HasDrawFlag(u, DrawFlags::SO_OPAQUE_FLAG))
 		return false;
 
-	if (thisPassMask == DrawFlags::SO_REFLEC_FLAG && !u->HasDrawFlag(DrawFlags::SO_REFLEC_FLAG))
+	if (thisPassMask == DrawFlags::SO_REFLEC_FLAG && !HasDrawFlag(u, DrawFlags::SO_REFLEC_FLAG))
 		return false;
 
-	if (thisPassMask == DrawFlags::SO_REFRAC_FLAG && !u->HasDrawFlag(DrawFlags::SO_REFRAC_FLAG))
+	if (thisPassMask == DrawFlags::SO_REFRAC_FLAG && !HasDrawFlag(u, DrawFlags::SO_REFRAC_FLAG))
 		return false;
 
-	if (thisPassMask == DrawFlags::SO_ALPHAF_FLAG && !u->HasDrawFlag(DrawFlags::SO_ALPHAF_FLAG))
+	if (thisPassMask == DrawFlags::SO_ALPHAF_FLAG && !HasDrawFlag(u, DrawFlags::SO_ALPHAF_FLAG))
 		return false;
 
 	if (LuaObjectDrawer::AddAlphaMaterialObject(u, LUAOBJ_UNIT))
 		return false;
 
-	if ((u->engineDrawMask & thisPassMask) != thisPassMask)
+	if ((rr.engineDrawMask & thisPassMask) != thisPassMask)
 		return false;
 
 	return true;
 }
 
-bool CUnitDrawer::ShouldDrawUnitShadow(CUnit* u)
+bool CUnitDrawer::ShouldDrawUnitShadow(const CUnit* u)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(u);
 	assert(u->model);
 
+	const auto& rr = CUnitDrawer::GetRenderRecord(u);
+
 	static constexpr uint8_t thisPassMask = DrawFlags::SO_SHOPAQ_FLAG;
 
-	if (!u->HasDrawFlag(DrawFlags::SO_SHOPAQ_FLAG))
+	if (!HasDrawFlag(u, DrawFlags::SO_SHOPAQ_FLAG))
 		return false;
 
 	if (LuaObjectDrawer::AddShadowMaterialObject(u, LUAOBJ_UNIT))
 		return false;
 
-	if ((u->engineDrawMask & thisPassMask) != thisPassMask)
+	if ((rr.engineDrawMask & thisPassMask) != thisPassMask)
 		return false;
 
 	return true;
@@ -285,16 +295,18 @@ CUnitDrawerGLSL::~CUnitDrawerGLSL()
 void CUnitDrawerGLSL::DrawUnitModel(const CUnit* unit, bool noLuaCall) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	if (!noLuaCall && unit->luaDraw && eventHandler.DrawUnit(unit))
+	const auto& rr = CUnitDrawer::GetRenderRecord(unit);
+	if (!noLuaCall && rr.luaDraw && eventHandler.DrawUnit(unit))
 		return;
 
-	unit->localModel.Draw();
+	rr.localModel->Draw(&CUnitDrawer::GetLuaMaterialData(unit->id), &CUnitDrawer::GetLodDispLists(unit->id));
 }
 
 void CUnitDrawerGLSL::DrawUnitNoTrans(const CUnit* unit, uint32_t preList, uint32_t postList, bool lodCall, bool noLuaCall) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	const bool noNanoDraw = lodCall || !unit->beingBuilt || !unit->unitDef->showNanoFrame;
+	const auto& rr = CUnitDrawer::GetRenderRecord(unit);
+	const bool noNanoDraw = lodCall || !rr.beingBuilt || !rr.def->showNanoFrame;
 	const bool shadowPass = shadowHandler.InShadowPass();
 
 	if (preList != 0) {
@@ -330,7 +342,7 @@ void CUnitDrawerGLSL::DrawUnitTrans(const CUnit* unit, uint32_t preList, uint32_
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	glPushMatrix();
-	glMultMatrixf(unit->GetTransformMatrix());
+	glMultMatrixf(GetUnsyncedTransformMatrix(unit));
 
 	DrawUnitNoTrans(unit, preList, postList, lodCall, noLuaCall);
 
@@ -398,20 +410,25 @@ void CUnitDrawerGLSL::DrawUnitMiniMapIcons() const
 	const auto isFullView = gu->spectatingFullView;
 	const float ghostIconDimming = modelDrawerData->ghostIconDimming;
 	const auto defIconIdx = icon::iconHandler.GetDefaultIconIdx();
+	// snapshot-served losStatus (SimSnapshot contract): row for the local
+	// allyteam as of the sim frame the drawer containers were drained at
+	const auto& snapshot = simSnapshot.Read();
 
-	for (auto* unit : modelDrawerData->GetUnsortedObjects()) {
-		const size_t iconIndex = minimap->UseUnitIcons() ? unit->currentIconIndex : defIconIdx;
+	for (const int unitID : modelDrawerData->GetUnsortedObjects()) {
+		const CUnit* unit = DrawerGetObjectByID<CUnit>(unitID);
+		const auto& rr = CUnitDrawer::GetRenderRecord(unit);
+		const size_t iconIndex = minimap->UseUnitIcons() ? modelDrawerData->GetUnitIconIndex(unit) : defIconIdx;
 
 		if (iconIndex == icon::INVALID_ICON_INDEX)
 			continue;
 
-		if (unit->noMinimap)
+		if (rr.noMinimap)
 			continue;
 
-		if (!unit->drawIcon)
+		if (!modelDrawerData->GetUnitDrawIcon(unit))
 			continue;
 
-		if (unit->IsInVoid())
+		if (rr.isInVoid)
 			continue;
 
 		if (unit->isSelected) {
@@ -419,10 +436,10 @@ void CUnitDrawerGLSL::DrawUnitMiniMapIcons() const
 		}
 		else {
 			if (minimap->UseSimpleColors()) {
-				if (unit->team == gu->myTeam) {
+				if (rr.team == gu->myTeam) {
 					currentColor = minimap->GetMyTeamIconColor();
 				}
-				else if (teamHandler.Ally(myAllyTeam, unit->allyteam)) {
+				else if (teamHandler.Ally(myAllyTeam, rr.allyteam)) {
 					currentColor = minimap->GetAllyTeamIconColor();
 				}
 				else {
@@ -430,10 +447,10 @@ void CUnitDrawerGLSL::DrawUnitMiniMapIcons() const
 				}
 			}
 			else {
-				currentColor = teamHandler.Team(unit->team)->color;
+				currentColor = teamHandler.Team(rr.team)->color;
 			}
 
-			if (!isFullView && !(unit->losStatus[myAllyTeam] & LOS_INRADAR)) {
+			if (!isFullView && !(snapshot.LosStatus(unit->id, myAllyTeam) & LOS_INRADAR)) {
 				if (ghostIconDimming == 0.0f)
 					continue;
 
@@ -445,8 +462,8 @@ void CUnitDrawerGLSL::DrawUnitMiniMapIcons() const
 
 		const float iconScale = CUnitDrawerHelper::GetUnitIconScale(unit);
 		const float3& pos = (!isFullView) ?
-			unit->GetObjDrawErrorPos(myAllyTeam) :
-			unit->GetObjDrawMidPos();
+			GetObjDrawErrorPos(unit, myAllyTeam) :
+			GetObjDrawMidPos(unit);
 
 		DrawUnitMiniMapIcon(rb, iconIndex, iconScale, pos, currentColor);
 	}
@@ -501,7 +518,7 @@ void CUnitDrawerGLSL::DrawUnitMiniMapIcons() const
 	glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, 0);
 }
 
-float CUnitDrawerGLSL::DrawUnitIcon(TypedRenderBuffer<VA_TYPE_TC3>& rb, size_t iconIdx, const float iconRadius, const float unitRadius, float3 pos, const SColor& color) const
+float CUnitDrawerGLSL::DrawUnitIcon(TypedRenderBuffer<VA_TYPE_TC3>& rb, size_t iconIdx, const float unitRadius, float3 pos, const SColor& color) const
 {
 	const auto& iconData = icon::iconHandler.GetIconData(iconIdx);
 
@@ -557,27 +574,29 @@ void CUnitDrawerGLSL::DrawUnitIcons() const
 	static auto& rb = RenderBuffer::GetTypedRenderBuffer<VA_TYPE_TC3>();
 	rb.AssertSubmission();
 
-	for (auto* unit : modelDrawerData->GetUnsortedObjects()) {
-		if (unit->currentIconIndex == icon::INVALID_ICON_INDEX)
+	for (const int unitID : modelDrawerData->GetUnsortedObjects()) {
+		const CUnit* unit = DrawerGetObjectByID<CUnit>(unitID);
+		const auto& rr = CUnitDrawer::GetRenderRecord(unit);
+		const size_t iconIndex = modelDrawerData->GetUnitIconIndex(unit);
+
+		if (iconIndex == icon::INVALID_ICON_INDEX)
 			continue;
 
-		if (!unit->GetIsIcon())
+		if (!GetIsIcon(unit))
 			continue;
 
-		if (!unit->drawIcon)
+		if (!modelDrawerData->GetUnitDrawIcon(unit))
 			continue;
-
-		const auto& iconData = icon::iconHandler.GetIconData(unit->currentIconIndex);
 
 		// drawMidPos is auto-calculated now; can wobble on its own as pieces move
 		float3 pos = (!gu->spectatingFullView) ?
-			unit->GetObjDrawErrorPos(gu->myAllyTeam) :
-			unit->GetObjDrawMidPos();
+			GetObjDrawErrorPos(unit, gu->myAllyTeam) :
+			GetObjDrawMidPos(unit);
 
 		// use white for selected units
-		const auto& iconColor = unit->isSelected ? color4::white : teamHandler.Team(unit->team)->color;
+		const auto& iconColor = unit->isSelected ? color4::white : teamHandler.Team(rr.team)->color;
 
-		unit->iconRadius = DrawUnitIcon(rb, unit->currentIconIndex, unit->iconRadius, unit->radius, pos, iconColor);
+		modelDrawerData->SetUnitIconRadius(unit, DrawUnitIcon(rb, iconIndex, rr.radius, pos, iconColor));
 	}
 
 	if (!rb.ShouldSubmit())
@@ -667,25 +686,29 @@ void CUnitDrawerGLSL::DrawUnitIconsScreen() const
 	const auto isFullView = gu->spectatingFullView;
 	const float ghostIconDimming = modelDrawerData->ghostIconDimming;
 
-	for (auto* unit : modelDrawerData->GetUnsortedObjects()) {
-		if (unit->currentIconIndex == icon::INVALID_ICON_INDEX)
+	for (const int unitID : modelDrawerData->GetUnsortedObjects()) {
+		const CUnit* unit = DrawerGetObjectByID<CUnit>(unitID);
+		const auto& rr = CUnitDrawer::GetRenderRecord(unit);
+		const size_t iconIndex = modelDrawerData->GetUnitIconIndex(unit);
+
+		if (iconIndex == icon::INVALID_ICON_INDEX)
 			continue;
 
-		if (!unit->drawIcon)
+		if (!modelDrawerData->GetUnitDrawIcon(unit))
 			continue;
 
 		// needed?
-		const bool canSee = gu->spectatingFullView || (unit->losStatus[gu->myAllyTeam] && (LOS_INLOS | LOS_CONTRADAR | LOS_PREVLOS) == (LOS_INLOS | LOS_CONTRADAR | LOS_PREVLOS));
+		const bool canSee = gu->spectatingFullView || (simSnapshot.Read().LosStatus(unit->id, myAllyTeam) && (LOS_INLOS | LOS_CONTRADAR | LOS_PREVLOS) == (LOS_INLOS | LOS_CONTRADAR | LOS_PREVLOS));
 		if (!canSee)
 			continue;
 
-		assert(!unit->IsInVoid());
+		assert(!rr.isInVoid);
 
 
 		// drawMidPos is auto-calculated now; can wobble on its own as pieces move
 		float3 pos = (!isFullView) ?
-			unit->GetObjDrawErrorPos(myAllyTeam) :
-			unit->GetObjDrawMidPos();
+			GetObjDrawErrorPos(unit, myAllyTeam) :
+			GetObjDrawMidPos(unit);
 
 		pos = camera->CalcViewPortCoordinates(pos);
 		if (pos.z > 1.0f || pos.z < 0.0f)
@@ -695,8 +718,8 @@ void CUnitDrawerGLSL::DrawUnitIconsScreen() const
 			currentColor = color4::white; // selected color
 		}
 		else {
-			currentColor = teamHandler.Team(unit->team)->color;
-			if (!isFullView && !(unit->losStatus[myAllyTeam] & LOS_INRADAR)) {
+			currentColor = teamHandler.Team(rr.team)->color;
+			if (!isFullView && !(simSnapshot.Read().LosStatus(unit->id, myAllyTeam) & LOS_INRADAR)) {
 				if (ghostIconDimming == 0.0f)
 					continue;
 
@@ -706,7 +729,7 @@ void CUnitDrawerGLSL::DrawUnitIconsScreen() const
 			}
 		}
 
-		DrawUnitIconScreen(rb, unit->currentIconIndex, pos, currentColor, unit->radius, unit->GetIsIcon());
+		DrawUnitIconScreen(rb, iconIndex, pos, currentColor, rr.radius, GetIsIcon(unit));
 	}
 	
 	if (!isFullView && ghostIconDimming > 0.0f) {
@@ -773,8 +796,8 @@ void CUnitDrawerGLSL::DrawObjectsShadow(int modelType) const
 			continue;
 
 		CModelDrawerHelper::BindModelTypeTexture(modelType, mdlRenderer.GetObjectBinKey(i));
-		for (auto* o : mdlRenderer.GetObjectBin(i)) {
-			DrawUnitShadow(o);
+		for (const int unitID : mdlRenderer.GetObjectBin(i)) {
+			DrawUnitShadow(DrawerGetObjectByID<CUnit>(unitID));
 		}
 
 		CModelDrawerHelper::modelDrawerHelpers[modelType]->UnbindShadowTex();
@@ -797,8 +820,8 @@ void CUnitDrawerGLSL::DrawOpaqueObjects(int modelType, bool drawReflection, bool
 
 		CModelDrawerHelper::BindModelTypeTexture(modelType, mdlRenderer.GetObjectBinKey(i));
 
-		for (auto* o : mdlRenderer.GetObjectBin(i)) {
-			DrawOpaqueUnit(o, thisPassMask);
+		for (const int unitID : mdlRenderer.GetObjectBin(i)) {
+			DrawOpaqueUnit(DrawerGetObjectByID<CUnit>(unitID), thisPassMask);
 		}
 	}
 }
@@ -819,8 +842,8 @@ void CUnitDrawerGLSL::DrawAlphaObjects(int modelType, bool drawReflection, bool 
 
 		CModelDrawerHelper::BindModelTypeTexture(modelType, mdlRenderer.GetObjectBinKey(i));
 
-		for (auto* o : mdlRenderer.GetObjectBin(i)) {
-			DrawAlphaUnit(o, modelType, thisPassMask, false);
+		for (const int unitID : mdlRenderer.GetObjectBin(i)) {
+			DrawAlphaUnit(DrawerGetObjectByID<CUnit>(unitID), modelType, thisPassMask, false);
 		}
 	}
 
@@ -881,44 +904,47 @@ void CUnitDrawerGLSL::DrawGhostedBuildings(int modelType) const
 		}
 	}
 
-	for (CUnit* lgb : liveGhostedBuildings) {
-		DrawAlphaUnit(lgb, modelType, DrawFlags::SO_ALPHAF_FLAG, true);
+	for (const int unitID : liveGhostedBuildings) {
+		DrawAlphaUnit(DrawerGetObjectByID<CUnit>(unitID), modelType, DrawFlags::SO_ALPHAF_FLAG, true);
 	}
 }
 
-void CUnitDrawerGLSL::DrawOpaqueUnit(CUnit* unit, uint8_t thisPassMask) const
+void CUnitDrawerGLSL::DrawOpaqueUnit(const CUnit* unit, uint8_t thisPassMask) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (!ShouldDrawOpaqueUnit(unit, thisPassMask))
 		return;
 
+	const auto& rr = CUnitDrawer::GetRenderRecord(unit);
+
 	// draw the unit with the default (non-Lua) material
-	SetTeamColor(unit->team);
+	SetTeamColor(rr.team);
 	DrawUnitTrans(unit, 0, 0, false, false);
 }
 
-void CUnitDrawerGLSL::DrawUnitShadow(CUnit* unit) const
+void CUnitDrawerGLSL::DrawUnitShadow(const CUnit* unit) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (ShouldDrawUnitShadow(unit))
 		DrawUnitTrans(unit, 0, 0, false, false);
 }
 
-void CUnitDrawerGLSL::DrawAlphaUnit(CUnit* unit, int modelType, uint8_t thisPassMask, bool drawGhostBuildingsPass) const
+void CUnitDrawerGLSL::DrawAlphaUnit(const CUnit* unit, int modelType, uint8_t thisPassMask, bool drawGhostBuildingsPass) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (!drawGhostBuildingsPass && !ShouldDrawAlphaUnit(unit, thisPassMask))
 		return;
 
-	const unsigned short losStatus = unit->losStatus[gu->myAllyTeam];
+	const auto& rr = CUnitDrawer::GetRenderRecord(unit);
+	const unsigned short losStatus = simSnapshot.Read().LosStatus(unit->id, gu->myAllyTeam);
 
 	if (drawGhostBuildingsPass) {
 		// check for decoy models
-		const UnitDef* decoyDef = unit->unitDef->decoyDef;
+		const UnitDef* decoyDef = rr.def->decoyDef;
 		const S3DModel* model = nullptr;
 
 		if (decoyDef == nullptr) {
-			model = unit->model;
+			model = rr.model;
 		}
 		else {
 			model = decoyDef->LoadModel();
@@ -937,8 +963,8 @@ void CUnitDrawerGLSL::DrawAlphaUnit(CUnit* unit, int modelType, uint8_t thisPass
 		}
 
 		glPushMatrix();
-		glTranslatef3(unit->drawPos);
-		glRotatef(unit->buildFacing * 90.0f, 0, 1, 0);
+		glTranslatef3(GetDrawPos(unit));
+		glRotatef(rr.buildFacing * 90.0f, 0, 1, 0);
 
 		// the units in liveGhostedBuildings[modelType] are not
 		// sorted by textureType, but we cannot merge them with
@@ -946,7 +972,7 @@ void CUnitDrawerGLSL::DrawAlphaUnit(CUnit* unit, int modelType, uint8_t thisPass
 		// not actually cloaked
 		CModelDrawerHelper::BindModelTypeTexture(modelType, model->textureType);
 
-		SetTeamColor(unit->team, (losStatus & LOS_CONTRADAR) ? IModelDrawerState::alphaValues.z : IModelDrawerState::alphaValues.y);
+		SetTeamColor(rr.team, (losStatus & LOS_CONTRADAR) ? IModelDrawerState::alphaValues.z : IModelDrawerState::alphaValues.y);
 		model->DrawStatic();
 		glPopMatrix();
 
@@ -954,11 +980,11 @@ void CUnitDrawerGLSL::DrawAlphaUnit(CUnit* unit, int modelType, uint8_t thisPass
 		return;
 	}
 
-	if (unit->GetIsIcon())
+	if (GetIsIcon(unit))
 		return;
 
 	if ((losStatus & LOS_INLOS) || gu->spectatingFullView) {
-		SetTeamColor(unit->team, IModelDrawerState::alphaValues.x);
+		SetTeamColor(rr.team, IModelDrawerState::alphaValues.x);
 		DrawUnitTrans(unit, 0, 0, false, false);
 	}
 }
@@ -1045,7 +1071,8 @@ void CUnitDrawerGLSL::DrawAlphaAIUnitBorder(const CUnitDrawerData::TempDrawUnit&
 void CUnitDrawerGLSL::DrawUnitModelBeingBuiltShadow(const CUnit* unit, bool noLuaCall) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	const float3 stageBounds = { 0.0f, unit->model->CalcDrawHeight(), unit->buildProgress };
+	const auto& rr = CUnitDrawer::GetRenderRecord(unit);
+	const float3 stageBounds = { 0.0f, rr.model->CalcDrawHeight(), rr.buildProgress };
 
 	// draw-height defaults to maxs.y - mins.y, but can be overridden for non-3DO models
 	// the default value derives from the model vertices and makes more sense to use here
@@ -1138,16 +1165,17 @@ void CUnitDrawerGLSL::DrawModelFillBuildStageShadow(const CUnit* unit, const dou
 void CUnitDrawerGLSL::DrawUnitModelBeingBuiltOpaque(const CUnit* unit, bool noLuaCall) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	const S3DModel* model = unit->model;
-	const    CTeam* team = teamHandler.Team(unit->team);
+	const auto& rr = CUnitDrawer::GetRenderRecord(unit);
+	const S3DModel* model = rr.model;
+	const    CTeam* team = teamHandler.Team(rr.team);
 	const   SColor  color = team->color;
 
 	const float wireColorMult = std::fabs(128.0f - ((gs->frameNum * 4) & 255)) / 255.0f + 0.5f;
 	const float flatColorMult = 1.5f - wireColorMult;
 
-	const float3 frameColors[2] = { unit->unitDef->nanoColor, {color.r / 255.0f, color.g / 255.0f, color.b / 255.0f} };
+	const float3 frameColors[2] = { rr.def->nanoColor, {color.r / 255.0f, color.g / 255.0f, color.b / 255.0f} };
 	const float3 stageColors[2] = { frameColors[globalRendering->teamNanospray], frameColors[globalRendering->teamNanospray] };
-	const float3 stageBounds = { 0.0f, model->CalcDrawHeight(), unit->buildProgress };
+	const float3 stageBounds = { 0.0f, model->CalcDrawHeight(), rr.buildProgress };
 
 	// draw-height defaults to maxs.y - mins.y, but can be overridden for non-3DO models
 	// the default value derives from the model vertices and makes more sense to use here
@@ -1426,16 +1454,25 @@ bool CUnitDrawerGLSL::ShowUnitBuildSquare(const BuildInfo& buildInfo, const std:
 		canBuild = it->canBuild;
 	}
 	else {
-		canBuild = !!CGameHelper::TestUnitBuildSquare(
-			buildInfo,
-			feature,
-			-1,
-			false,
-			&buildableSquares,
-			&featureSquares,
-			&illegalSquares,
-			&commands
-		);
+		// sim|draw split (Stage 0): under the running split the live build-square
+		// test (groundBlockingObjectMap / losHandler / quadField derefs) would race
+		// the sim; serve the verdict from the epoch instead (placement::EpochView).
+		// The per-square predicate is identical -- only the data source differs.
+		if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() && !SimDrawSplit::IsSimParked()) {
+			canBuild = !!LuaSnapshotServe::TestUnitBuildSquareUIEpoch(
+				buildInfo, commands, buildableSquares, featureSquares, illegalSquares);
+		} else {
+			canBuild = !!CGameHelper::TestUnitBuildSquare(
+				buildInfo,
+				feature,
+				-1,
+				false,
+				&buildableSquares,
+				&featureSquares,
+				&illegalSquares,
+				&commands
+			);
+		}
 		buildCache.emplace_back();
 		auto& buildCacheItem = buildCache.back();
 
@@ -1633,11 +1670,14 @@ void CUnitDrawerGL4::DrawObjectsShadow(int modelType) const
 		static vector<const ObjType*> beingBuilt;
 		beingBuilt.clear();
 
-		for (auto* o : bin) {
+		for (const int unitID : bin) {
+			const CUnit* o = DrawerGetObjectByID<CUnit>(unitID);
+			const auto& rr = CUnitDrawer::GetRenderRecord(o);
+
 			if (!ShouldDrawUnitShadow(o))
 				continue;
 
-			if (o->beingBuilt && o->unitDef->showNanoFrame) {
+			if (rr.beingBuilt && rr.def->showNanoFrame) {
 				beingBuilt.emplace_back(o);
 				continue;
 			}
@@ -1682,11 +1722,14 @@ void CUnitDrawerGL4::DrawOpaqueObjects(int modelType, bool drawReflection, bool 
 		static vector<const ObjType*> beingBuilt;
 		beingBuilt.clear();
 
-		for (auto* o : mdlRenderer.GetObjectBin(i)) {
+		for (const int unitID : mdlRenderer.GetObjectBin(i)) {
+			const CUnit* o = DrawerGetObjectByID<CUnit>(unitID);
+			const auto& rr = CUnitDrawer::GetRenderRecord(o);
+
 			if (!ShouldDrawOpaqueUnit(o, thisPassMask))
 				continue;
 
-			if (o->beingBuilt && o->unitDef->showNanoFrame) {
+			if (rr.beingBuilt && rr.def->showNanoFrame) {
 				beingBuilt.emplace_back(o);
 				continue;
 			}
@@ -1728,7 +1771,9 @@ void CUnitDrawerGL4::DrawAlphaObjects(int modelType, bool drawReflection, bool d
 
 		const auto& bin = mdlRenderer.GetObjectBin(i);
 
-		for (auto* o : bin) {
+		for (const int unitID : bin) {
+			const CUnit* o = DrawerGetObjectByID<CUnit>(unitID);
+
 			if (!ShouldDrawAlphaUnit(o, thisPassMask))
 				continue;
 
@@ -1779,16 +1824,19 @@ void CUnitDrawerGL4::DrawAlphaObjects(int modelType, bool drawReflection, bool d
 
 		int prevModelType = -1;
 		int prevTexType = -1;
-		for (const auto* lgb : liveGhostedBuildings) {
-			if (!camera->InView(lgb->pos, lgb->model->GetDrawRadius()))
+		for (const int unitID : liveGhostedBuildings) {
+			const CUnit* lgb = DrawerGetObjectByID<CUnit>(unitID);
+			const auto& rr = CUnitDrawer::GetRenderRecord(lgb);
+
+			if (!camera->InView(rr.pos, rr.model->GetDrawRadius()))
 				continue;
 
 			// check for decoy models
-			const UnitDef* decoyDef = lgb->unitDef->decoyDef;
+			const UnitDef* decoyDef = rr.def->decoyDef;
 			const S3DModel* model = nullptr;
 
 			if (decoyDef == nullptr) {
-				model = lgb->model;
+				model = rr.model;
 			}
 			else {
 				model = decoyDef->LoadModel();
@@ -1801,20 +1849,20 @@ void CUnitDrawerGL4::DrawAlphaObjects(int modelType, bool drawReflection, bool d
 			static CMatrix44f staticWorldMat;
 
 			staticWorldMat.LoadIdentity();
-			staticWorldMat.Translate(lgb->pos);
+			staticWorldMat.Translate(rr.pos);
 
-			staticWorldMat.RotateY(-lgb->buildFacing * math::DEG_TO_RAD * 90.0f);
+			staticWorldMat.RotateY(-rr.buildFacing * math::DEG_TO_RAD * 90.0f);
 
-			const unsigned short losStatus = lgb->losStatus[gu->myAllyTeam];
+			const unsigned short losStatus = simSnapshot.Read().LosStatus(lgb->id, gu->myAllyTeam);
 
 			// ghosted enemy units
 			if (losStatus & LOS_CONTRADAR) {
 				modelDrawerState->SetColorMultiplier(0.9f, 0.9f, 0.9f, IModelDrawerState::alphaValues.z);
-				modelDrawerState->SetTeamColor(lgb->team, IModelDrawerState::alphaValues.z);
+				modelDrawerState->SetTeamColor(rr.team, IModelDrawerState::alphaValues.z);
 			}
 			else {
 				modelDrawerState->SetColorMultiplier(0.6f, 0.6f, 0.6f, IModelDrawerState::alphaValues.y);
-				modelDrawerState->SetTeamColor(lgb->team, IModelDrawerState::alphaValues.y);
+				modelDrawerState->SetTeamColor(rr.team, IModelDrawerState::alphaValues.y);
 			}
 
 			if (prevModelType != modelType || prevTexType != model->textureType) {
@@ -1931,7 +1979,8 @@ void CUnitDrawerGL4::DrawUnitModelBeingBuiltShadow(const CUnit* unit, bool noLua
 	RECOIL_DETAILED_TRACY_ZONE;
 	auto& smv = S3DModelVAO::GetInstance();
 
-	const float3 stageBounds = { 0.0f, unit->model->CalcDrawHeight(), unit->buildProgress };
+	const auto& rr = CUnitDrawer::GetRenderRecord(unit);
+	const float3 stageBounds = { 0.0f, rr.model->CalcDrawHeight(), rr.buildProgress };
 
 	const float4 upperPlanes[] = {
 		{0.0f, -1.0f, 0.0f,  stageBounds.x + stageBounds.y * (stageBounds.z * 3.0f       )},
@@ -2007,17 +2056,18 @@ void CUnitDrawerGL4::DrawUnitModelBeingBuiltOpaque(const CUnit* unit, bool noLua
 	RECOIL_DETAILED_TRACY_ZONE;
 	auto& smv = S3DModelVAO::GetInstance();
 
-	const    CTeam* team = teamHandler.Team(unit->team);
+	const auto& rr = CUnitDrawer::GetRenderRecord(unit);
+	const    CTeam* team = teamHandler.Team(rr.team);
 	const   SColor  color = team->color;
 
 	const float wireColorMult = std::fabs(128.0f - ((gs->frameNum * 4) & 255)) / 255.0f + 0.5f;
 	const float flatColorMult = 1.5f - wireColorMult;
 
-	const float3 frameColors[2] = { unit->unitDef->nanoColor, {color.r / 255.0f, color.g / 255.0f, color.b / 255.0f} };
+	const float3 frameColors[2] = { rr.def->nanoColor, {color.r / 255.0f, color.g / 255.0f, color.b / 255.0f} };
 	const float3 stageColors[2] = { frameColors[globalRendering->teamNanospray], frameColors[globalRendering->teamNanospray] };
 
 
-	const float3 stageBounds = { 0.0f, unit->model->CalcDrawHeight(), unit->buildProgress };
+	const float3 stageBounds = { 0.0f, rr.model->CalcDrawHeight(), rr.buildProgress };
 
 	// draw-height defaults to maxs.y - mins.y, but can be overridden for non-3DO models
 	// the default value derives from the model vertices and makes more sense to use here

@@ -359,7 +359,7 @@ bool MoveDef::DoRawSearch(
 	int2* nearestSquare,
 	int thread
 ) const {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	assert(testTerrain || testObjects);
 
 	// if the endPos sits on a cross section, shift the pos slightly to pick the most appropriate

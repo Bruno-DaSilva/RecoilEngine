@@ -6,6 +6,7 @@
 #include <memory>
 
 #include "Sim/Projectiles/Projectile.h"
+#include "Sim/Projectiles/ProjectileHandler.h" // GroundFlashContainer / FlyingPieceContainer (PR 27b barrier copies)
 #include "Rendering/GL/myGL.h"
 #include "Rendering/GL/RenderBuffers.h"
 #include "Rendering/GL/FBO.h"
@@ -22,6 +23,13 @@ struct AtlasedTexture;
 class CGroundFlash;
 struct FlyingPiece;
 class LuaTable;
+
+// packed projectile handle for the drawer containers (PR 14): the id plus
+// the namespace bit, matching ModelRenderContainerTraits<CProjectile>
+inline uint32_t ModelRenderContainerTraits<CProjectile>::ToHandle(const CProjectile* o)
+{
+	return (uint32_t(o->id) << 1) | uint32_t(o->synced);
+}
 
 
 class CProjectileDrawer: public CEventClient {
@@ -60,6 +68,70 @@ public:
 
 	void RenderProjectileCreated(const CProjectile* projectile);
 	void RenderProjectileDestroyed(const CProjectile* projectile);
+
+	// drawer-owned interpolated draw position, keyed by id per namespace
+	// (sim/draw §A drawPos eviction; was a CProjectile field; PR 14 rekeyed
+	// renderIndex -> [synced][id]). Zero for projectiles not (yet)
+	// registered, as the old member default was.
+	const float3& GetDrawPos(const CProjectile* p) const {
+		static const float3 zero;
+		const auto& v = drawPositions[p->synced];
+		return (size_t(p->id) < v.size()) ? v[p->id] : zero;
+	}
+	// draw-time transform (was CProjectile::GetTransformMatrix, "UNSYNCED ONLY")
+	CMatrix44f GetTransformMatrix(const CProjectile* p, bool offsetPos) const;
+
+	// drawer-owned draw-visibility flags, keyed by id per namespace (sim/draw §A
+	// drawFlag eviction; was a CProjectile field). SO_NODRAW_FLAG for projectiles not
+	// (yet) registered, as the old member default was. (previousDrawFlag was dropped:
+	// it was a per-frame dead store for projectiles — no reader ever consumed it, the
+	// GetRenderObjectsDrawFlagChanged consumer only queries units/features.)
+	// PR 40: producer-captured deferred-safe handle store, keyed [synced][id]
+	// (replaces the PR-27b barrier-built splitResolveCache). The draw passes
+	// resolve a registered handle to its object through this store instead of
+	// walking the sim-owned FreeListMapCompact containers: the pointer is
+	// captured at RenderProjectileCreated and is deferred-deletion-safe (the
+	// sim Defer()s the dead object; the shell stays readable until the draw
+	// boundary ack) for the whole draw frame it is referenced. nullptr for ids
+	// not (yet) registered. Under the flip the passes run concurrent with the
+	// sim, so they may never resolve through projectileHandler.
+	const CProjectile* GetRenderObject(int id, bool synced) const {
+		const auto& v = renderObjects[synced];
+		return (size_t(id) < v.size()) ? v[id] : nullptr;
+	}
+
+	// PR 40: barrier snapshot of the sim-owned effect containers the draw
+	// passes iterate (ground flashes + flying pieces). Sim-quiescent producer
+	// work (was folded into the deleted BuildSplitResolveCache); moves to the
+	// sim frame edge under the flip.
+	void SnapshotEffectContainers();
+
+	// PR 44b (flip): producer-side staging + consumer swap. The SIM thread
+	// copies the containers at its produce edge (it owns them there) into the
+	// staged pair; the barrier swaps the staged copies into the serving
+	// split* members BEFORE the draw passes run and before the batch ack
+	// (staged flash shells stay readable exactly like the barrier-copy ones).
+	// No lock: the producer only stages between a consume-complete signal and
+	// the next publish, the consumer only swaps between acquire and its
+	// consume-complete -- serialized by the epoch pacing gate.
+	void StageEffectContainersAtSimEdge();
+	void CommitStagedEffectContainers();
+
+	uint8_t GetDrawFlag(const CProjectile* p) const {
+		const auto& v = drawFlags[p->synced];
+		return (size_t(p->id) < v.size()) ? v[p->id] : DrawFlags::SO_NODRAW_FLAG;
+	}
+	bool HasDrawFlag(const CProjectile* p, DrawFlags f) const { return (GetDrawFlag(p) & f) == f; }
+
+	// drawer-owned per-camera z-sort keys, keyed by id per namespace (sim/draw §A
+	// sortDist eviction; was a CProjectile field). Written by UpdateDrawFlags for the
+	// cameras a projectile is in view of (stale slots keep their last value, as the
+	// old member did); zero for projectiles not (yet) registered, as the old member
+	// default was. Includes the sim-authored p->sortDistOffset, like the old setter.
+	float GetSortDist(const CProjectile* p, uint32_t camType) const {
+		const auto& v = sortDists[p->synced];
+		return (size_t(p->id) < v.size()) ? v[p->id][camType] : 0.0f;
+	}
 
 	unsigned int NumSmokeTextures() const { return (smokeTextures.size()); }
 
@@ -126,7 +198,8 @@ public:
 	AtlasedTexture* seismictex = nullptr;
 public:
 	static bool CanDrawProjectile(const CProjectile* pro, int allyTeam);
-	static bool ShouldDrawProjectile(const CProjectile* pro, uint8_t thisPassMask);
+	// non-static: reads the drawer-owned drawFlags storage (PR 4)
+	bool ShouldDrawProjectile(const CProjectile* pro, uint8_t thisPassMask) const;
 
 	static TypedRenderBuffer<VA_TYPE_C>& GetMiniMapLinesRB();
 	static TypedRenderBuffer<VA_TYPE_C>& GetMiniMapPointsRB();
@@ -161,14 +234,52 @@ private:
 
 	std::vector<const AtlasedTexture*> smokeTextures;
 
-	/// projectiles container
-	std::vector<CProjectile*> renderProjectiles;
+	/// interpolated draw positions, keyed [synced][id] (see GetDrawPos)
+	std::array<std::vector<float3>, 2> drawPositions;
+
+	/// draw-visibility flags, keyed [synced][id] (see GetDrawFlag)
+	std::array<std::vector<uint8_t>, 2> drawFlags;
+
+	/// per-camera z-sort keys, keyed [synced][id] (see GetSortDist)
+	std::array<std::vector<std::array<float, 3>>, 2> sortDists;
+
+	/// registered projectiles: packed (id << 1 | synced) handles in
+	/// registration order -- the drawer's persistent iteration set, mutated
+	/// only by the render events (PR 14: no object pointers)
+	std::vector<uint32_t> renderHandles;
+
+	// PR 40: producer-captured handle->object store, keyed [synced][id] (see
+	// GetRenderObject). Maintained by RenderProjectileCreated/Destroyed in
+	// lockstep with renderHandles/renderIndices -- every registered handle
+	// resolves here, so the draw passes never touch projectileHandler.
+	std::array<std::vector<const CProjectile*>, 2> renderObjects;
+
+	// PR 27b: barrier copies of the sim-owned effect containers the passes
+	// iterate live flag-off (the sim mutates both mid-frame under the split;
+	// dead flashes are shells until the next barrier ack)
+	GroundFlashContainer splitGroundFlashes;
+	std::array<FlyingPieceContainer, MODELTYPE_CNT> splitFlyingPieces;
+	// PR 44b: the producer-written staging pair (see StageEffectContainers-
+	// AtSimEdge); swapped into the serving members at the barrier
+	GroundFlashContainer stagedGroundFlashes;
+	std::array<FlyingPieceContainer, MODELTYPE_CNT> stagedFlyingPieces;
+	bool stagedEffectContainersValid = false;
+
+	/// position of a handle in renderHandles, keyed [synced][id]; -1u when
+	/// not registered (replaces the old CProjectile::renderIndex backref)
+	std::array<std::vector<uint32_t>, 2> renderIndices;
+
+	/// per-draw-frame pointer resolution of renderHandles, parallel to it;
+	/// rebuilt by UpdateDrawFlags right after the boundary drain and only
+	/// valid for the draw passes of the same frame (never crosses a sim
+	/// boundary: every id resolves to a live object, asserted at rebuild)
+	std::vector<const CProjectile*> renderProjectiles;
 
 	/// projectiles with a model, binned by model type and textures
 	std::array<ModelRenderContainer<CProjectile>, MODELTYPE_CNT> modelRenderers;
 
 	/// used to render particle effects in back-to-front order. {unsorted, sorted}
-	std::array<std::vector<CProjectile*>, 2> drawParticles;
+	std::array<std::vector<const CProjectile*>, 2> drawParticles;
 
 	bool drawSorted = true;
 

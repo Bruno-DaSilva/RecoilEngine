@@ -309,6 +309,12 @@ namespace Threading {
 	#endif
 	}
 
+	// PR 46: the sim thread's reserved core (see Threading.h)
+	static std::uint32_t reservedSimAffinityMask = 0;
+
+	void     SetReservedSimAffinityMask(std::uint32_t mask) { reservedSimAffinityMask = mask; }
+	std::uint32_t GetReservedSimAffinityMask() { return reservedSimAffinityMask; }
+
 	void SetAffinityHelper(const char* threadName, std::uint32_t affinity) {
 		const std::uint32_t cpuMask = Threading::SetAffinity(affinity);
 
@@ -487,6 +493,12 @@ namespace Threading {
 	void    SetAudioThread() { SetThreadID(THREAD_IDX_SND ); }
 	void  SetFileSysThread() { SetThreadID(THREAD_IDX_VFSI); }
 	void SetWatchDogThread() { SetThreadID(THREAD_IDX_WDOG); }
+	// falls through SetThreadID's switch so SetupCurrentThreadControls runs
+	// (the sim thread must be suspendable for watchdog/crash stack dumps)
+	void      SetSimThread() { SetThreadID(THREAD_IDX_SIM ); }
+	// the sim thread is joined at game teardown and respawned per game;
+	// clear the slot on join so a recycled OS thread id cannot alias it
+	void    ClearSimThread() { nativeThreadIDs[THREAD_IDX_SIM] = NativeThreadId{}; }
 
 	bool IsMainThread(NativeThreadId threadID) { return NativeThreadIdsEqual(threadID, nativeThreadIDs[THREAD_IDX_MAIN]); }
 	bool IsMainThread(                       ) { return IsMainThread(Threading::GetCurrentThreadId()); }
@@ -502,6 +514,9 @@ namespace Threading {
 
 	bool IsWatchDogThread(NativeThreadId threadID) { return NativeThreadIdsEqual(threadID, nativeThreadIDs[THREAD_IDX_WDOG]); }
 	bool IsWatchDogThread(                       ) { return IsWatchDogThread(Threading::GetCurrentThreadId()); }
+
+	bool IsSimThread(NativeThreadId threadID) { return NativeThreadIdsEqual(threadID, nativeThreadIDs[THREAD_IDX_SIM]); }
+	bool IsSimThread(                       ) { return IsSimThread(Threading::GetCurrentThreadId()); }
 
 	void SetThreadName(const std::string& newname)
 	{

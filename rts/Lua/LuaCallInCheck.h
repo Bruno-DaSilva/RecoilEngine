@@ -12,5 +12,20 @@
 #  define LUA_CALL_IN_CHECK_NAMED(L, name, ...) SCOPED_SPECIAL_TIMER_NOREG(name);
 #endif
 
-#define LUA_CALL_IN_CHECK(L, ...) LUA_CALL_IN_CHECK_NAMED(L, (GetLuaContextData(L)->synced)? "Lua::Callins::Synced": "Lua::Callins::Unsynced", __VA_ARGS__);
+// nested per-callin timer (child of the synced/unsynced aggregate above), named
+// "Lua::Callins::{Synced,Unsynced}::<callin>" via __func__ at the call site. Non-
+// special, so it only does work when the profiler is enabled (or a dump is active)
+// — no per-callin overhead during normal play. The draw-callin context bracket is
+// unconditional (a TLS int bump on Draw* callins only), so the callout census'
+// draw-context attribution works whenever callout counting is on, independent of
+// the profiler timers.
+#define SCOPED_CALLIN_TIMER(L) \
+	static CallinTimerNames __citn(__func__); \
+	ScopedTimer __callinScopedTimer((GetLuaContextData(L)->synced)? __citn.syncedHash: __citn.unsyncedHash, false, false); \
+	ScopedDrawCallinContext __drawCallinCtx(__citn.isDrawCallin)
+
+#define LUA_CALL_IN_CHECK(L, ...) \
+	LUA_CALL_IN_CHECK_NAMED(L, (GetLuaContextData(L)->synced)? "Lua::Callins::Synced": "Lua::Callins::Unsynced", __VA_ARGS__); \
+	SCOPED_CALLIN_TIMER(L); \
+	ScopedZoneStackGuard __zoneStackGuard;
 #endif /* LUA_CALL_IN_CHECK_H */

@@ -11,6 +11,8 @@
 #include "Game/Camera.h"
 #include "Game/Game.h"
 #include "Game/GameHelper.h"
+#include "Game/UnsyncedGameCommands.h"      // sim|draw PR 44 prereq E: per-action park scoping
+#include "Game/UnsyncedActionExecutor.h"    // sim|draw PR 44 prereq E: TouchesSimState()
 #include "Game/GlobalUnsynced.h"
 #include "Game/SelectedUnitsHandler.h"
 #include "Game/TraceRay.h"
@@ -26,6 +28,8 @@
 #include "Rendering/Fonts/glFont.h"
 #include "Rendering/IconHandler.h"
 #include "Rendering/Units/UnitDrawer.h"
+#include "Rendering/Common/SimSnapshot.h"
+#include "Lua/LuaSnapshotServe.h" // sim|draw split: served weapon range-ring primitives (Stage 0)
 #include "Rendering/GL/glExtra.h"
 #include "Rendering/Map/InfoTexture/IInfoTextureHandler.h"
 #include "Rendering/Textures/Bitmap.h"
@@ -36,13 +40,16 @@
 #include "Sim/Units/CommandAI/BuilderCAI.h"
 #include "Sim/Units/UnitDefHandler.h"
 #include "Sim/Units/Unit.h"
+#include "Sim/Features/FeatureHandler.h"
 #include "Sim/Units/UnitHandler.h"
 #include "Sim/Units/UnitLoader.h"
 #include "Sim/Weapons/WeaponDefHandler.h"
 #include "Sim/Weapons/Weapon.h"
+#include "Rendering/Common/SnapshotDiffGate.h" // sim|draw PR 44: default-cmd field-pass
 #include "System/Config/ConfigHandler.h"
 #include "System/EventHandler.h"
 #include "System/GlobalConfig.h"
+#include "System/SimDrawSplit.h" // sim|draw PR 44: served default-cmd gating
 #include "System/Log/ILog.h"
 #include "System/SpringMath.h"
 #include "System/UnorderedMap.hpp"
@@ -56,6 +63,8 @@
 
 #include <SDL_keycode.h>
 #include <SDL_mouse.h>
+
+#include <optional>
 
 #include "System/Misc/TracyDefs.h"
 
@@ -1101,6 +1110,13 @@ void CGuiHandler::SetCursorIcon() const
 		}
 
 		if (useMinimap && (cmdDesc.id < 0)) {
+			// sim|draw PR 44 (Gap B): Pos2BuildPos + TestUnitBuildSquare read the
+			// live blocking map / heightmap. guihandler->Update now runs sim-live,
+			// so this rare minimap build-proxy branch parks the sim for the read
+			// (nest-safe, no-op flag-off / when already parked -- like TryTarget).
+			// The placement query/reply channel is the eventual served fix (§4.5).
+			CGame::ScopedExternalSimPause simPause(CGame::SimPauseSite::GUI_TEST_BUILDSQUARE);
+
 			BuildInfo bi;
 			bi.pos = minimap->GetMapPosition(mouse->lastx, mouse->lasty);
 			bi.buildFacing = buildFacing;
@@ -1126,8 +1142,32 @@ void CGuiHandler::SetCursorIcon() const
 
 		if (mouse->buttons[SDL_BUTTON_RIGHT].pressed && ((activeReceiver == this) || (minimap->ProxyMode()))) {
 			defcmd = defaultCmdMemory;
+		} else if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() && !SimDrawSplit::IsSimParked()) {
+			// sim|draw PR 44 (Gap B): under the running split the deep-CAI
+			// GetDefaultCmd + GuiTraceRay cannot run from draw context. Read the
+			// last committed reply (the context cursor is one draw frame stale)
+			// and stage a re-eval query for the sim thread (PR 44b re-host:
+			// evaluation at the sim's frame edges, presentation at the barrier
+			// commit -- see StageDefaultCmdQuery).
+			defcmd = defaultCmdReplyValid ? defaultCmdReplyCmd : -1;
+			StageDefaultCmdQuery();
 		} else {
+			// flag-off / sim parked / pregame: live inline (byte-identical).
 			defcmd = GetDefaultCommand(mouse->lastx, mouse->lasty);
+
+			// armed diff-gate (flag-off): exercise the reply-storage plumbing and
+			// confirm it hands back the same RAW engine answer a direct call
+			// produces (the served value IS a relocated GetDefaultCommandImpl, so
+			// equality is by construction; fireEvent=false avoids double-firing the
+			// DefaultCommand widget callin the live leg above already fired once).
+			if (snapshotDiffGate.Armed()) {
+				const int liveRaw = GetDefaultCommandImpl(mouse->lastx, mouse->lasty, camera->GetPos(), mouse->dir, false);
+				defaultCmdQueryPending = true;
+				defaultCmdReplyCmd = GetDefaultCommandImpl(mouse->lastx, mouse->lasty, camera->GetPos(), mouse->dir, false);
+				defaultCmdReplyValid = true;
+				defaultCmdQueryPending = false;
+				snapshotDiffGate.CheckDefaultCmd(defaultCmdReplyCmd, liveRaw);
+			}
 		}
 
 		if ((defcmd >= 0) && ((size_t)defcmd < commands.size())) {
@@ -1151,6 +1191,9 @@ void CGuiHandler::SetCursorIcon() const
 bool CGuiHandler::TryTarget(const SCommandDescription& cmdDesc) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// PR 27b: GuiTraceRay + weapon-state reads walk sim state; park the sim
+	// (nest-safe, no-op flag-off/parked) -- master ran this serially anyway
+	CGame::ScopedExternalSimPause simPause(CGame::SimPauseSite::GUI_TRY_TARGET);
 	if (cmdDesc.id != CMD_ATTACK)
 		return true;
 
@@ -1170,6 +1213,9 @@ bool CGuiHandler::TryTarget(const SCommandDescription& cmdDesc) const
 
 	for (const int unitID: selectedUnitsHandler.selectedUnits) {
 		const CUnit* u = unitHandler.GetUnit(unitID);
+		// PR 27b: skip a selected unit killed mid-frame under the split (null slot)
+		if (u == nullptr)
+			continue;
 
 		// mobile kamikaze can always move into range
 		//FIXME do a range check in case of immobile kamikaze (-> mines)
@@ -1597,9 +1643,36 @@ void CGuiHandler::RunCustomCommands(const std::vector<std::string>& cmds, bool r
 				if (outMods.shift != DontCare)  { KeyInput::SetKeyModState(KMOD_SHIFT, int(outMods.shift == Required)); }
 
 				Action action(copy);
+
+				// sim|draw PR 44 prereq E: scope the sim park PER ACTION.
+				// Console actions dispatch arbitrary executors, most of which
+				// (DRAW-UI / NET-SEND: camera, rendering, config, sound, chat,
+				// net-send) read no live sim and are marked sim-safe at
+				// registration -> they dispatch WITHOUT parking. Only the
+				// SIM-POKE minority (selection/group/team/give/destroy/particle-
+				// limits/DumpState, plus any unclassified or guihandler-local /
+				// unknown action -- conservative default) takes the park. This
+				// replaces the old full-batch park in LuaUnsyncedCtrl::SendCommands,
+				// which was measured to re-park the running sim ~per draw frame
+				// headful (stock-BAR widgets calling Spring.SendCommands). The
+				// park is nest-safe (nested calls no-op) and inert flag-off, so
+				// flag-off behaviour is byte-identical. Order is preserved:
+				// actions still dispatch in sequence; the sim may advance a frame
+				// edge between two parked actions, which is safe (console actions
+				// are independent, deadlock-safe -- no executor blocks on the sim;
+				// see doc/sim-draw-pre44c-pause-surface-clearing.md §4.5-SendCommands).
+				const IUnsyncedActionExecutor* uExec =
+					unsyncedGameCommands->GetActionExecutor(action.command);
+				const bool actionTouchesSim = (uExec == nullptr) || uExec->TouchesSimState();
+
+				std::optional<CGame::ScopedExternalSimPause> simPause;
+				if (actionTouchesSim)
+					simPause.emplace(CGame::SimPauseSite::LUA_SEND_COMMANDS);
+
 				if (!ProcessLocalActions(action)) {
 					game->ProcessAction(action);
 				}
+				simPause.reset();
 
 				KeyInput::SetKeyModState(KMOD_ALT,   tmpAlt);
 				KeyInput::SetKeyModState(KMOD_CTRL,  tmpCtrl);
@@ -1682,6 +1755,35 @@ float CGuiHandler::GetNumberInput(const SCommandDescription& cd) const
 int CGuiHandler::GetDefaultCommand(int x, int y, const float3& cameraPos, const float3& mouseDir) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// PR 27b: GuiTraceRay + commandAI possibleCommands walks (the windowed
+	// dogfood SIGSEGV at SelectedUnitsHandler::GetDefaultCmd); see TryTarget
+	CGame::ScopedExternalSimPause simPause(CGame::SimPauseSite::GUI_GET_DEFAULT_CMD);
+	return GetDefaultCommandImpl(x, y, cameraPos, mouseDir, true);
+}
+
+// sim|draw PR 44 (prereq D): served read for the per-frame draw-path callers.
+int CGuiHandler::GetDefaultCommandServed(int x, int y, const float3& cameraPos, const float3& mouseDir) const
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	// The single standing reply slot is keyed on the CURRENT mouse ray
+	// (mouse->lastx/lasty), evaluated at the barrier by EvaluateDefaultCmdQuery.
+	// Serve it only when the split sim is running (draw runs post-ReleaseSimPause,
+	// so the sim is live, not parked) AND the query is for the current mouse pos.
+	// Otherwise (flag-off / sim parked / pregame / a different (x,y)) run the live
+	// parking path -- byte-identical, and the only case that engages the park.
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() && !SimDrawSplit::IsSimParked()
+	    && x == mouse->lastx && y == mouse->lasty) {
+		StageDefaultCmdQuery();
+		return defaultCmdReplyValid ? defaultCmdReplyCmd : -1;
+	}
+
+	return GetDefaultCommand(x, y, cameraPos, mouseDir);
+}
+
+// sim|draw PR 44 (Gap B): the GetDefaultCommand body, park-free (the caller/hook
+// owns the sim-quiescence). `fireEvent` gates the DefaultCommand widget callin.
+int CGuiHandler::GetDefaultCommandImpl(int x, int y, const float3& cameraPos, const float3& mouseDir, bool fireEvent) const
+{
 	CInputReceiver* ir = nullptr;
 
 	if (!game->hideInterface && !mouse->offscreen)
@@ -1708,7 +1810,7 @@ int CGuiHandler::GetDefaultCommand(int x, int y, const float3& cameraPos, const 
 				return -1;
 		}
 
-		cmdID = selectedUnitsHandler.GetDefaultCmd(unit, feature);
+		cmdID = selectedUnitsHandler.GetDefaultCmd(unit, feature, fireEvent);
 	}
 
 	// make sure the command is currently available
@@ -1718,6 +1820,157 @@ int CGuiHandler::GetDefaultCommand(int x, int y, const float3& cameraPos, const 
 		}
 	}
 	return -1;
+}
+
+
+void CGuiHandler::EvaluateDefaultCmdQuery()
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	// LOCKSTEP SimDrawBarrier hook (sim quiescent). Recompute the requested
+	// context-cursor default command against live sim and publish it for the
+	// next draw frame. No-op unless a re-eval was requested since the last
+	// barrier. (The flip uses the re-hosted Stage/EvaluateAtSimEdge/Commit
+	// channel below instead.)
+	if (!defaultCmdQueryPending)
+		return;
+
+	defaultCmdQueryPending = false;
+	defaultCmdReplyCmd = GetDefaultCommandImpl(mouse->lastx, mouse->lasty, camera->GetPos(), mouse->dir, true);
+	defaultCmdReplyValid = true;
+}
+
+
+// PR 44b: DRAW side, at request time (SetCursorIcon / GetDefaultCommandServed,
+// once per draw frame). Runs the DRAW-side half of GetDefaultCommandImpl --
+// the input-receiver early-out and the PICK (GuiTraceRay / minimap
+// GetSelectUnit: both are PR-25 snapshot/pick-grid-backed draw-side searches
+// with draw-owned scratch, so they must run HERE, not on the sim thread; the
+// first strict-Rosetta gate SIGSEGV'd on exactly that -- the sim-side pick
+// raced the pick grid's per-epoch rebuild and GetClosestUnit's static
+// scratch, corrupting the heap) -- and captures the picked ids + the
+// selection-id snapshot into the standing query slot the sim thread
+// evaluates at its next frame edge.
+void CGuiHandler::StageDefaultCmdQuery() const
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	DefaultCmdQueryInput in;
+	in.pending = true;
+
+	CInputReceiver* ir = nullptr;
+
+	if (!game->hideInterface && !mouse->offscreen)
+		ir = GetReceiverAt(mouse->lastx, mouse->lasty);
+
+	if ((ir != nullptr) && (ir != minimap)) {
+		// the live impl returns -1 here without firing the widget callin
+		in.noCommand = true;
+	} else if ((ir == minimap) && (minimap->FullProxy())) {
+		// snapshot pick grid + snapshot LOS gate (PR 25), draw-side
+		const CUnit* unit = minimap->GetSelectUnit(minimap->GetMapPosition(mouse->lastx, mouse->lasty));
+
+		in.tracedUnitID = (unit != nullptr) ? unit->id : -1;
+	} else {
+		const CUnit* unit = nullptr;
+		const CFeature* feature = nullptr;
+
+		const float viewRange = camera->GetFarPlaneDist() * 1.4f;
+		const float dist = TraceRay::GuiTraceRay(camera->GetPos(), mouse->dir, viewRange, nullptr, unit, feature, true);
+		const float3 hit = camera->GetPos() + mouse->dir * dist;
+
+		// make sure the ray hit in the map (the live impl's -1 early-out,
+		// which fires no widget callin)
+		if (unit == nullptr && feature == nullptr && !hit.IsInBounds())
+			in.noCommand = true;
+
+		in.tracedUnitID = (unit != nullptr) ? unit->id : -1;
+		in.tracedFeatureID = (feature != nullptr) ? feature->id : -1;
+	}
+
+	if (!in.noCommand)
+		in.selectedIDs.assign(selectedUnitsHandler.selectedUnits.begin(), selectedUnitsHandler.selectedUnits.end());
+
+	std::lock_guard<std::mutex> lock(defaultCmdQueryMtx);
+	defaultCmdQueryIn = std::move(in);
+}
+
+
+// PR 44b: SIM thread, at its frame edges + the paused-idle query servicing
+// (ProduceEpochAtSimEdge). Runs the LIVE-SIM half only: re-resolve the
+// stage-time picked ids (a died-since-stage id degrades to no-target, the
+// same shape as the live impl's null handling) and the deep-CAI leader walk.
+// Stages {unit, feature, raw cmd} for the consumer's commit.
+void CGuiHandler::EvaluateDefaultCmdQueryAtSimEdge()
+{
+	DefaultCmdQueryInput in;
+	{
+		std::lock_guard<std::mutex> lock(defaultCmdQueryMtx);
+
+		if (!defaultCmdQueryIn.pending)
+			return;
+
+		in = std::move(defaultCmdQueryIn);
+		defaultCmdQueryIn = DefaultCmdQueryInput();
+	}
+
+	DefaultCmdEvalResult out;
+	out.valid = true;
+
+	if (!in.noCommand) {
+		const CUnit* unit = (in.tracedUnitID >= 0) ? unitHandler.GetUnit(in.tracedUnitID) : nullptr;
+		const CFeature* feature = (in.tracedFeatureID >= 0) ? featureHandler.GetFeature(in.tracedFeatureID) : nullptr;
+
+		out.fireCallin = true;
+		out.unit = unit;
+		out.feature = feature;
+		out.rawCmdID = selectedUnitsHandler.GetDefaultCmdEval(in.selectedIDs, unit, feature, out.leaderFound);
+	}
+
+	std::lock_guard<std::mutex> lock(defaultCmdQueryMtx);
+	defaultCmdEvalOut = out;
+}
+
+
+// PR 44b: DRAW side, at the barrier (before the batch ack -- staged pointers
+// of objects that died since the eval are parked shells, readable until then).
+// The PRESENTATION half: fire the DefaultCommand widget callin with the
+// staged eval results (cursor overrides apply exactly as on the live path,
+// which fires only when the leader walk ran), map the command id to its
+// commands[] index and publish the reply.
+void CGuiHandler::CommitDefaultCmdReply()
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	DefaultCmdEvalResult out;
+	{
+		std::lock_guard<std::mutex> lock(defaultCmdQueryMtx);
+
+		if (!defaultCmdEvalOut.valid)
+			return;
+
+		out = defaultCmdEvalOut;
+		defaultCmdEvalOut = DefaultCmdEvalResult();
+	}
+
+	int index = -1;
+
+	if (out.fireCallin) {
+		int cmdID = out.rawCmdID;
+
+		// live fires the event only when a leader was found (GetDefaultCmd's
+		// early CMD_STOP returns skip it); widget overrides mutate cmdID
+		if (out.leaderFound)
+			eventHandler.DefaultCommand(out.unit, out.feature, cmdID);
+
+		// make sure the command is currently available (the live impl's tail)
+		for (int c = 0; c < (int)commands.size(); c++) {
+			if (cmdID == commands[c].id) {
+				index = c;
+				break;
+			}
+		}
+	}
+
+	defaultCmdReplyCmd = index;
+	defaultCmdReplyValid = true;
 }
 
 
@@ -2142,6 +2395,10 @@ inline Command CheckCommand(Command c) {
 
 	for (const int unitID: selectedUnitsHandler.selectedUnits) {
 		const CUnit* u = unitHandler.GetUnit(unitID);
+		// PR 27b: skip a selected unit killed mid-frame under the split (null
+		// slot; commandAI destructed on death)
+		if (u == nullptr)
+			continue;
 		CCommandAI* cai = u->commandAI;
 
 		if (cai->AllowedCommand(c, false))
@@ -2169,6 +2426,8 @@ bool ZeroRadiusAllowed(const Command &c) {
 Command CGuiHandler::GetCommand(int mouseX, int mouseY, int buttonHint, bool preview, const float3& cameraPos, const float3& mouseDir)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// PR 27b: see TryTarget
+	CGame::ScopedExternalSimPause simPause(CGame::SimPauseSite::GUI_GET_COMMAND);
 	const Command defaultRet(CMD_FAILED);
 
 	int tempInCommand = inCommand;
@@ -2471,6 +2730,9 @@ static bool WouldCancelAnyQueued(const BuildInfo& b)
 
 	for (const int unitID: selectedUnitsHandler.selectedUnits) {
 		const CUnit* u = unitHandler.GetUnit(unitID);
+		// PR 27b: skip a selected unit killed mid-frame under the split (null slot)
+		if (u == nullptr)
+			continue;
 
 		if (u->commandAI->WillCancelQueued(c))
 			return true;
@@ -2499,6 +2761,8 @@ static void FillRowOfBuildPos(const BuildInfo& startInfo, float x, float z, floa
 size_t CGuiHandler::GetBuildPositions(const BuildInfo& startInfo, const BuildInfo& endInfo, const float3& cameraPos, const float3& mouseDir)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// PR 27b: blocking-map + yardmap reads; see TryTarget
+	CGame::ScopedExternalSimPause simPause(CGame::SimPauseSite::GUI_GET_BUILDPOS);
 	// both builds must have the same unitdef
 	assert(startInfo.def == endInfo.def);
 
@@ -3420,7 +3684,12 @@ static inline void DrawSensorRange(int radius, const float* color, const float3&
 }
 
 
-static void DrawUnitDefRanges(const CUnit* unit, const UnitDef* unitdef, const float3 pos)
+// sim|draw split (Stage 0): the live-unit sensor radii are passed in (from the
+// live CUnit flag-off, or the served UnitRows under the running split) plus the
+// decoy-test result `useUnitSensors` (== was the picked unitdef the unit's real
+// unitDef), so this helper never dereferences a live CUnit.
+static void DrawUnitDefRanges(const UnitDef* unitdef, const float3 pos, bool useUnitSensors,
+                              int radarRadius, int sonarRadius, int seismicRadius, int jammerRadius, int sonarJamRadius)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	// draw build range for immobile builders
@@ -3436,12 +3705,12 @@ static void DrawUnitDefRanges(const CUnit* unit, const UnitDef* unitdef, const f
 	}
 	// draw sensor and jammer ranges
 	if (unitdef->onoffable || unitdef->activateWhenBuilt) {
-		if (unit != nullptr && unitdef == unit->unitDef) { // test if it's a decoy
-			DrawSensorRange(unit->radarRadius   , cmdColors.rangeRadar,       pos);
-			DrawSensorRange(unit->sonarRadius   , cmdColors.rangeSonar,       pos);
-			DrawSensorRange(unit->seismicRadius , cmdColors.rangeSeismic,     pos);
-			DrawSensorRange(unit->jammerRadius  , cmdColors.rangeJammer,      pos);
-			DrawSensorRange(unit->sonarJamRadius, cmdColors.rangeSonarJammer, pos);
+		if (useUnitSensors) { // live/served unit's own radii (not a decoy)
+			DrawSensorRange(radarRadius   , cmdColors.rangeRadar,       pos);
+			DrawSensorRange(sonarRadius   , cmdColors.rangeSonar,       pos);
+			DrawSensorRange(seismicRadius , cmdColors.rangeSeismic,     pos);
+			DrawSensorRange(jammerRadius  , cmdColors.rangeJammer,      pos);
+			DrawSensorRange(sonarJamRadius, cmdColors.rangeSonarJammer, pos);
 		} else {
 			DrawSensorRange(unitdef->radarRadius   , cmdColors.rangeRadar,       pos);
 			DrawSensorRange(unitdef->sonarRadius   , cmdColors.rangeSonar,       pos);
@@ -3541,6 +3810,20 @@ static inline void DrawWeaponArc(const CUnit* unit)
 void CGuiHandler::DrawMapStuff(bool onMiniMap)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// sim|draw PR 44 (prereq D): the whole-pass park is gone. The one per-frame
+	// live read -- the context-cursor default command near the end -- is served
+	// (GetDefaultCommandServed); GuiTraceRay picks are snapshot-backed (draw-safe);
+	// the ground/build-pos snap reads the draw-safe unsynced heightmap.
+	// sim|draw split (Stage 0): the input-gated interior reads (weapon range/sensor/
+	// decloak/interceptor rings on shift-hover + the attack-command range rings + the
+	// build preview: builder circles, queued-command overlap, build-square verdict)
+	// are now SERVED draw-side under the running split -- UnitRows + trace::/placement::
+	// EpochView + the barrier command-queue cache -- so each block runs park-free when
+	// the split is live. Their GUI_DRAW_MAPSTUFF parks are retained ONLY for the
+	// flag-off / already-parked / pregame case (byte-identical live path, inert there).
+	// Still parked under the split: the cheat+drawDebug DrawWeaponArc (live weapon
+	// wantedDir/muzzlePos, no twin) and GetBuildPositions' own separate GUI_GET_BUILDPOS
+	// park (an input-gated ctrl circle-build read, a distinct follow-up item).
 	if (!onMiniMap) {
 		glEnable(GL_DEPTH_TEST);
 		glDepthMask(GL_FALSE);
@@ -3726,6 +4009,10 @@ void CGuiHandler::DrawMapStuff(bool onMiniMap)
 	      float rayTraceDist = -1.0f;
 
 	if (GetQueueKeystate()) {
+		// sim|draw split (Stage 0): the hovered unit's range rings. The pick itself
+		// (GetSelectUnit / GuiTraceRay) is snapshot-backed (draw-safe) either way.
+		const bool splitRunning = SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() && !SimDrawSplit::IsSimParked();
+
 		const CUnit* unit = nullptr;
 		const CFeature* feature = nullptr;
 
@@ -3736,59 +4023,169 @@ void CGuiHandler::DrawMapStuff(bool onMiniMap)
 			TraceRay::GuiTraceRay(tracePos, traceDir, maxTraceDist, nullptr, unit, feature, false);
 		}
 
-		if (unit != nullptr && (gu->spectatingFullView || unit->IsInLosForAllyTeam(gu->myAllyTeam))) {
-			pointeeUnit = unit;
+		if (splitRunning) {
+			// PARK RETIRED: read the hovered unit's ranges from the published epoch
+			// (UnitRows sensor radii / decloak / stockpile + the served weapon ring),
+			// never a live CUnit deref -> no sim park. Only the immutable unitDef
+			// (decoy/decloakSpherical/maxCoverage/shield) is read directly.
+			const auto& snap = simSnapshot.Read();
+			const int uid = (unit != nullptr) ? unit->id : -1;
 
-			const UnitDef* unitdef = unit->unitDef;
-			const bool enemyUnit = ((unit->allyteam != gu->myAllyTeam) && !gu->spectatingFullView);
+			if (snap.Valid(uid) && (gu->spectatingFullView || (snap.LosStatus(uid, gu->myAllyTeam) & LOS_INLOS) != 0)) {
+				pointeeUnit = unit;
 
-			if (enemyUnit && unitdef->decoyDef != nullptr)
-				unitdef = unitdef->decoyDef;
+				const UnitDef* realDef = unitDefHandler->GetUnitDefByID(snap.DefID(uid));
+				const UnitDef* unitdef = realDef;
+				const bool enemyUnit = ((snap.AllyTeam(uid) != gu->myAllyTeam) && !gu->spectatingFullView);
 
-			DrawUnitDefRanges(unit, unitdef, unit->pos);
+				if (enemyUnit && unitdef != nullptr && unitdef->decoyDef != nullptr)
+					unitdef = unitdef->decoyDef;
 
-			// draw (primary) weapon range
-			if (!unit->weapons.empty()) {
-				glDisable(GL_DEPTH_TEST);
-				glBallisticCircle(unit->weapons[0], { cmdColors.rangeAttack }, 40, unit->pos, {unit->maxRange, 0.0f, mapInfo->map.gravity});
-				glEnable(GL_DEPTH_TEST);
-			}
-			// draw decloak distance
-			if (pointeeUnit->decloakDistance > 0.0f) {
-				if (pointeeUnit->unitDef->decloakSpherical && globalRendering->drawDebug) {
-					CMatrix44f mat;
-					mat.Translate(unit->midPos);
-					mat.RotateX(90.0f * math::DEG_TO_RAD);
-					mat.Scale(OnesVector * pointeeUnit->decloakDistance);
+				if (unitdef != nullptr && realDef != nullptr) {
+					const float3 uPos = snap.Pos(uid);
 
-					GL::shapes.DrawWireSphere(16, 16, mat, cmdColors.rangeDecloak);
-				} else { // cylindrical
-					glSurfaceCircle(unit->pos, unit->decloakDistance, { cmdColors.rangeDecloak }, 40);
+					// useUnitSensors == not a decoy (unitdef is still the real def)
+					DrawUnitDefRanges(unitdef, uPos, (unitdef == realDef),
+						snap.RadarRadius(uid), snap.SonarRadius(uid), snap.SeismicRadius(uid), snap.JammerRadius(uid), snap.SonarJamRadius(uid));
+
+					// draw (primary) weapon range
+					if (snap.WeaponCount(uid) > 0) {
+						const float heightMod = LuaSnapshotServe::SplitServedWeaponHeightMod(uid, 0);
+						glDisable(GL_DEPTH_TEST);
+						glBallisticCircle({ cmdColors.rangeAttack }, 40, uPos, { snap.MaxRange(uid), 0.0f, mapInfo->map.gravity }, heightMod,
+							[uid](float modHeightDiff) { return LuaSnapshotServe::SplitServedWeaponRange2D(uid, 0, modHeightDiff); });
+						glEnable(GL_DEPTH_TEST);
+					}
+					// draw decloak distance
+					const float decloak = snap.DecloakDistance(uid);
+					if (decloak > 0.0f) {
+						if (realDef->decloakSpherical && globalRendering->drawDebug) {
+							CMatrix44f mat;
+							mat.Translate(snap.MidPos(uid));
+							mat.RotateX(90.0f * math::DEG_TO_RAD);
+							mat.Scale(OnesVector * decloak);
+
+							GL::shapes.DrawWireSphere(16, 16, mat, cmdColors.rangeDecloak);
+						} else { // cylindrical
+							glSurfaceCircle(uPos, decloak, { cmdColors.rangeDecloak }, 40);
+						}
+					}
+
+					// draw interceptor range
+					if (unitdef->maxCoverage > 0.0f) {
+						// enemy stockpile-weapon interceptor readiness, served: w!=null
+						// <=> enemyUnit && (stockpileWeapon && weaponDef->interceptor)
+						const bool haveInterceptor = enemyUnit && snap.StockpileIsInterceptor(uid);
+
+						// shows as on if not enemy, a non-interceptor stockpile, or if the stockpile has a missile
+						const SColor rangeInterceptorColor = (!enemyUnit || !haveInterceptor || snap.StockpileNumStockpiled(uid)) ?
+							SColor{ cmdColors.rangeInterceptorOn  }:
+							SColor{ cmdColors.rangeInterceptorOff };
+
+						glSurfaceCircle(uPos, unitdef->maxCoverage, rangeInterceptorColor, 40);
+					}
 				}
 			}
+		} else {
+			// flag-off / sim parked / pregame: the live path (byte-identical to
+			// master). The park is nest-safe and a no-op flag-off / when parked.
+			CGame::ScopedExternalSimPause simPause(CGame::SimPauseSite::GUI_DRAW_MAPSTUFF);
 
-			// draw interceptor range
-			if (unitdef->maxCoverage > 0.0f) {
-				const CWeapon* w = enemyUnit? unit->stockpileWeapon: nullptr; // will be checked if any missiles are ready
+			if (unit != nullptr && (gu->spectatingFullView || unit->IsInLosForAllyTeam(gu->myAllyTeam))) {
+				pointeeUnit = unit;
 
-				// if this isn't the interceptor, then don't use it
-				if (w != nullptr && !w->weaponDef->interceptor)
-					w = nullptr;
+				const UnitDef* unitdef = unit->unitDef;
+				const bool enemyUnit = ((unit->allyteam != gu->myAllyTeam) && !gu->spectatingFullView);
 
-				// shows as on if enemy, a non-stockpiled weapon, or if the stockpile has a missile
-				const SColor rangeInterceptorColor = (!enemyUnit || (w == nullptr) || w->numStockpiled) ?
-					SColor{ cmdColors.rangeInterceptorOn  }:
-					SColor{ cmdColors.rangeInterceptorOff };
+				if (enemyUnit && unitdef->decoyDef != nullptr)
+					unitdef = unitdef->decoyDef;
 
-				glSurfaceCircle(unit->pos, unitdef->maxCoverage, rangeInterceptorColor, 40);
+				DrawUnitDefRanges(unitdef, unit->pos, (unitdef == unit->unitDef),
+					unit->radarRadius, unit->sonarRadius, unit->seismicRadius, unit->jammerRadius, unit->sonarJamRadius);
+
+				// draw (primary) weapon range
+				if (!unit->weapons.empty()) {
+					glDisable(GL_DEPTH_TEST);
+					glBallisticCircle(unit->weapons[0], { cmdColors.rangeAttack }, 40, unit->pos, {unit->maxRange, 0.0f, mapInfo->map.gravity});
+					glEnable(GL_DEPTH_TEST);
+				}
+				// draw decloak distance
+				if (pointeeUnit->decloakDistance > 0.0f) {
+					if (pointeeUnit->unitDef->decloakSpherical && globalRendering->drawDebug) {
+						CMatrix44f mat;
+						mat.Translate(unit->midPos);
+						mat.RotateX(90.0f * math::DEG_TO_RAD);
+						mat.Scale(OnesVector * pointeeUnit->decloakDistance);
+
+						GL::shapes.DrawWireSphere(16, 16, mat, cmdColors.rangeDecloak);
+					} else { // cylindrical
+						glSurfaceCircle(unit->pos, unit->decloakDistance, { cmdColors.rangeDecloak }, 40);
+					}
+				}
+
+				// draw interceptor range
+				if (unitdef->maxCoverage > 0.0f) {
+					const CWeapon* w = enemyUnit? unit->stockpileWeapon: nullptr; // will be checked if any missiles are ready
+
+					// if this isn't the interceptor, then don't use it
+					if (w != nullptr && !w->weaponDef->interceptor)
+						w = nullptr;
+
+					// shows as on if enemy, a non-stockpiled weapon, or if the stockpile has a missile
+					const SColor rangeInterceptorColor = (!enemyUnit || (w == nullptr) || w->numStockpiled) ?
+						SColor{ cmdColors.rangeInterceptorOn  }:
+						SColor{ cmdColors.rangeInterceptorOff };
+
+					glSurfaceCircle(unit->pos, unitdef->maxCoverage, rangeInterceptorColor, 40);
+				}
 			}
 		}
 	}
 
 	// draw buildings we are about to build
 	if ((size_t(inCommand) < commands.size()) && (commands[inCommand].type == CMDTYPE_ICON_BUILDING)) {
-		{
-			// draw build distance for all immobile builders during build commands
+		// sim|draw split (Stage 0): PARK RETIRED under the running split. The builder
+		// distance loop and the queued-command overlap are served from the epoch
+		// (UnitRows + the barrier command-queue cache), and ShowUnitBuildSquare tests
+		// the build square draw-side (placement::EpochView) -- nothing here derefs live
+		// sim. flag-off / parked keeps the live path under the outer park (byte-
+		// identical). GetBuildPositions keeps its own separate nest-safe GUI_GET_BUILDPOS
+		// park (an input-gated circle-build read, a distinct follow-up item).
+		const bool splitRunning = SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() && !SimDrawSplit::IsSimParked();
+
+		std::optional<CGame::ScopedExternalSimPause> outerPark;
+		if (!splitRunning)
+			outerPark.emplace(CGame::SimPauseSite::GUI_DRAW_MAPSTUFF);
+
+		// draw build distance for all immobile builders during build commands
+		if (splitRunning) {
+			// served: scan UnitRows for my-team builders (pos/team/def from rows +
+			// immutable def; selection is the draw-owned id set).
+			const auto& snap = simSnapshot.Read();
+			const int maxU = static_cast<int>(snap.MaxUnits());
+			const auto& selSet = selectedUnitsHandler.selectedUnits;
+			for (int bid = 0; bid < maxU; ++bid) {
+				if (!snap.Valid(bid))
+					continue;
+				if (pointeeUnit != nullptr && bid == pointeeUnit->id)
+					continue;
+				if (snap.Team(bid) != gu->myTeam)
+					continue;
+				const UnitDef* builderDef = unitDefHandler->GetUnitDefByID(snap.DefID(bid));
+				if (builderDef == nullptr || !builderDef->builder)
+					continue;
+				if (builderDef->canmove && selSet.find(bid) == selSet.end())
+					continue;
+
+				const float radius = builderDef->buildDistance;
+				static constexpr float mult[] = {1.0f, 1.0f, 1.0f, 0.3333f};
+				SColor color = SColor{ cmdColors.rangeBuild } * mult;
+				if (radius > 0.0f) {
+					glDisable(GL_TEXTURE_2D);
+					glSurfaceCircle(snap.Pos(bid), radius, color, 40);
+				}
+			}
+		} else {
 			for (const auto& [bid, builderCAI]: unitHandler.GetBuilderCAIs()) {
 				const CUnit* builder = builderCAI->owner;
 				const UnitDef* builderDef = builder->unitDef;
@@ -3834,7 +4231,8 @@ void CGuiHandler::DrawMapStuff(bool onMiniMap)
 				for (const BuildInfo& bi: buildInfos) {
 					const float3& buildPos = bi.pos;
 
-					DrawUnitDefRanges(nullptr, buildeeDef, buildPos);
+					// build preview: no live unit yet -> def sensors (useUnitSensors=false)
+					DrawUnitDefRanges(buildeeDef, buildPos, false, 0, 0, 0, 0, 0);
 
 					// draw (primary) weapon range
 					if (buildeeDef->HasWeapons()) {
@@ -3860,7 +4258,18 @@ void CGuiHandler::DrawMapStuff(bool onMiniMap)
 						const Command c = bi.CreateCommand();
 
 						for (const int unitID: selectedUnitsHandler.selectedUnits) {
+							if (splitRunning) {
+								// served overlap over the barrier command-queue cache
+								for (const Command& cmd: LuaSnapshotServe::GetServedOverlapQueued(unitID, c))
+									buildCommands.push_back(cmd);
+								continue;
+							}
 							const CUnit* su = unitHandler.GetUnit(unitID);
+							// PR 27b: draw pass with the sim thread live -- a selected
+							// unit may have died mid-frame (null slot, destructed
+							// commandAI); skip it instead of dereferencing
+							if (su == nullptr)
+								continue;
 							const CCommandAI* cai = su->commandAI;
 
 							for (const Command& cmd: cai->GetOverlapQueued(c)) {
@@ -3894,40 +4303,103 @@ void CGuiHandler::DrawMapStuff(bool onMiniMap)
 	}
 
 	{
-		// draw range circles (for immobile units) if attack orders are imminent
-		const int defcmd = GetDefaultCommand(mouse->lastx, mouse->lasty, tracePos, traceDir);
+		// draw range circles (for immobile units) if attack orders are imminent.
+		// sim|draw PR 44 (prereq D): this default-command read is the ONE per-frame
+		// live read of DrawMapStuff -- served from the barrier reply (no park).
+		const int defcmd = GetDefaultCommandServed(mouse->lastx, mouse->lasty, tracePos, traceDir);
 
 		const bool  playerAttackCmd = (size_t(inCommand) < commands.size() && commands[inCommand].id == CMD_ATTACK);
 		const bool defaultAttackCmd = (inCommand == -1 && defcmd > 0 && commands[defcmd].id == CMD_ATTACK);
 		const bool   drawWeaponArcs = (!onMiniMap && gs->cheatEnabled && globalRendering->drawDebug);
 
 		if (playerAttackCmd || defaultAttackCmd) {
-			for (const int unitID: selectedUnitsHandler.selectedUnits) {
-				const CUnit* unit = unitHandler.GetUnit(unitID);
+			// sim|draw split (Stage 0): the selected units' attack range rings.
+			const bool splitRunning = SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() && !SimDrawSplit::IsSimParked();
 
-				// handled above
-				if (unit == pointeeUnit)
-					continue;
+			if (splitRunning) {
+				// PARK RETIRED: serve pos / maxRange / weapon count / LOS from the
+				// published epoch (UnitRows) and the range curve from trace::EpochView
+				// (SplitServedWeaponRange2D == CWeapon::GetLiveRange2D, already gated
+				// bit-exact epoch-vs-live by the TestRange trace dual-run). No live
+				// CUnit deref, so no sim park.
+				const auto& snap = simSnapshot.Read();
 
-				if (unit->maxRange <= 0.0f)
-					continue;
-				if (unit->weapons.empty())
-					continue;
-				// only consider (armed) static structures for the minimap
-				if (onMiniMap && !unit->unitDef->IsImmobileUnit())
-					continue;
+				for (const int unitID: selectedUnitsHandler.selectedUnits) {
+					if (!snap.Valid(unitID))
+						continue;
+					// handled above
+					if (pointeeUnit != nullptr && unitID == pointeeUnit->id)
+						continue;
 
-				if (!gu->spectatingFullView && !unit->IsInLosForAllyTeam(gu->myAllyTeam))
-					continue;
+					const float maxRange = snap.MaxRange(unitID);
+					if (maxRange <= 0.0f)
+						continue;
+					if (snap.WeaponCount(unitID) <= 0)
+						continue;
+					// only consider (armed) static structures for the minimap
+					const UnitDef* uDef = unitDefHandler->GetUnitDefByID(snap.DefID(unitID));
+					if (onMiniMap && (uDef == nullptr || !uDef->IsImmobileUnit()))
+						continue;
 
-				glDisable(GL_DEPTH_TEST);
-				glBallisticCircle(unit->weapons[0], { cmdColors.rangeAttack }, 40, unit->pos, { unit->maxRange, 0.0f, mapInfo->map.gravity });
-				glEnable(GL_DEPTH_TEST);
+					if (!gu->spectatingFullView && (snap.LosStatus(unitID, gu->myAllyTeam) & LOS_INLOS) == 0)
+						continue;
 
-				if (!drawWeaponArcs)
-					continue;
+					const float heightMod = LuaSnapshotServe::SplitServedWeaponHeightMod(unitID, 0);
 
-				DrawWeaponArc(unit);
+					glDisable(GL_DEPTH_TEST);
+					glBallisticCircle({ cmdColors.rangeAttack }, 40, snap.Pos(unitID), { maxRange, 0.0f, mapInfo->map.gravity }, heightMod,
+						[unitID](float modHeightDiff) { return LuaSnapshotServe::SplitServedWeaponRange2D(unitID, 0, modHeightDiff); });
+					glEnable(GL_DEPTH_TEST);
+
+					if (!drawWeaponArcs)
+						continue;
+
+					// DrawWeaponArc is cheat + drawDebug-only and reads the live weapon
+					// wantedDir / muzzlePos (no served twin) -- keep it behind a narrow
+					// nested park (engages only under cheats+debug, ~never in play).
+					const CUnit* unit = unitHandler.GetUnit(unitID);
+					if (unit == nullptr)
+						continue;
+					CGame::ScopedExternalSimPause simPause(CGame::SimPauseSite::GUI_DRAW_MAPSTUFF);
+					DrawWeaponArc(unit);
+				}
+			} else {
+				// flag-off / sim parked / pregame: the live path (byte-identical to
+				// master). The park is nest-safe and a no-op flag-off / when parked.
+				CGame::ScopedExternalSimPause simPause(CGame::SimPauseSite::GUI_DRAW_MAPSTUFF);
+
+				for (const int unitID: selectedUnitsHandler.selectedUnits) {
+					const CUnit* unit = unitHandler.GetUnit(unitID);
+
+					// PR 27b: draw pass with the sim thread live -- skip a selected
+					// unit the sim killed mid-frame (null handler slot)
+					if (unit == nullptr)
+						continue;
+
+					// handled above
+					if (unit == pointeeUnit)
+						continue;
+
+					if (unit->maxRange <= 0.0f)
+						continue;
+					if (unit->weapons.empty())
+						continue;
+					// only consider (armed) static structures for the minimap
+					if (onMiniMap && !unit->unitDef->IsImmobileUnit())
+						continue;
+
+					if (!gu->spectatingFullView && !unit->IsInLosForAllyTeam(gu->myAllyTeam))
+						continue;
+
+					glDisable(GL_DEPTH_TEST);
+					glBallisticCircle(unit->weapons[0], { cmdColors.rangeAttack }, 40, unit->pos, { unit->maxRange, 0.0f, mapInfo->map.gravity });
+					glEnable(GL_DEPTH_TEST);
+
+					if (!drawWeaponArcs)
+						continue;
+
+					DrawWeaponArc(unit);
+				}
 			}
 		}
 	}
@@ -4006,7 +4478,8 @@ void CGuiHandler::DrawCentroidCursor()
 		if (mouse->buttons[SDL_BUTTON_RIGHT].pressed && ((activeReceiver == this) || (minimap->ProxyMode()))) {
 			defcmd = defaultCmdMemory;
 		} else {
-			defcmd = GetDefaultCommand(mouse->lastx, mouse->lasty);
+			// sim|draw PR 44 (prereq D): served (per-frame draw-path caller).
+			defcmd = GetDefaultCommandServed(mouse->lastx, mouse->lasty);
 		}
 
 		if (defcmd < commands.size())
@@ -4031,8 +4504,11 @@ void CGuiHandler::DrawCentroidCursor()
 
 	float3 pos;
 
+	// snapshot-served midPos (SimSnapshot / §C torn-read policy, PR 24): selected
+	// units are own units (always in LOS) so the raw boundary midPos is exact.
+	const auto& snapshot = simSnapshot.Read();
 	for (const int unitID: selUnits) {
-		pos += (unitHandler.GetUnit(unitID))->midPos;
+		pos += snapshot.MidPos(unitID);
 	}
 	pos /= (float)selUnits.size();
 

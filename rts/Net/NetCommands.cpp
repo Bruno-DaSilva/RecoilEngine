@@ -23,6 +23,7 @@
 #include "Lua/LuaHandle.h"
 #include "Net/Protocol/NetProtocol.h"
 #include "Rendering/GlobalRendering.h"
+#include "Rendering/Common/SimSnapshot.h" // PR 44a: between-frames mutation marks
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Path/IPathManager.h"
@@ -31,8 +32,10 @@
 #include "System/EventHandler.h"
 #include "System/GlobalConfig.h"
 #include "System/Log/ILog.h"
+#include "System/SimDrawSplit.h"
 #include "System/SpringMath.h"
 #include "System/TimeProfiler.h"
+#include "System/UnsyncedBoundaryQueue.h"
 #include "System/LoadSave/DemoRecorder.h"
 #include "System/Net/UnpackPacket.h"
 #include "System/Sound/ISound.h"
@@ -47,6 +50,27 @@ CONFIG(bool, LogClientData).defaultValue(false);
 LOG_REGISTER_SECTION_GLOBAL(LOG_SECTION_NET)
 
 static spring::unordered_map<int32_t, uint32_t> localSyncChecksums;
+
+// PR 27b: wordCompletion is the draw/UI-owned text-input dictionary; pokes
+// from net-message handling (which runs on the sim thread under the split)
+// boundary-defer. All net-side AddWord callers pass (false, false, false).
+static void NetDeferrableWordAdd(std::string word)
+{
+	if (SimDrawSplit::DeferUnsyncedNow()) {
+		UnsyncedBoundaryQueue::Defer([word = std::move(word)]() { wordCompletion.AddWord(word, false, false, false); });
+	} else {
+		wordCompletion.AddWord(word, false, false, false);
+	}
+}
+
+static void NetDeferrableWordRemove(std::string word)
+{
+	if (SimDrawSplit::DeferUnsyncedNow()) {
+		UnsyncedBoundaryQueue::Defer([word = std::move(word)]() { wordCompletion.RemoveWord(word); });
+	} else {
+		wordCompletion.RemoveWord(word);
+	}
+}
 
 
 void CGame::AddTraffic(int playerID, int packetCode, int length)
@@ -108,8 +132,16 @@ void CGame::SendClientProcUsage()
 			// LOG("%s: simProcUsage=%f, drawProcUsage=%f, maxCpuAdjust=%f, totalProcUsage=%f, lowThreshold=%f, highThreshold=%f"
 			// 		, __func__, simProcUsage, drawProcUsage, cpuUsageAdjust, totalProcUsage, lowThreshold, highThreshold);
 
+			// PR 46 (split only): draw no longer competes with the sim for a
+			// thread, and the drawProcUsage fold-in (Draw%/FPS * minDrawFPS)
+			// inflates at low FPS -- a remote server would throttle sim speed
+			// on draw load that cannot delay the split sim. Report the pure
+			// sim share (the "Sim" scope's wall fraction approximates the sim
+			// thread's busy share under the split).
+			const bool simOnlyUsage = SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning();
+
 			// take the minimum drawframes into account, too
-			clientNet->Send(CBaseNetProtocol::Get().SendCPUUsage(totalProcUsage));
+			clientNet->Send(CBaseNetProtocol::Get().SendCPUUsage(simOnlyUsage ? simProcUsage : totalProcUsage));
 		} else {
 			// the CPU-load percentage is undefined prior to SimFrame()
 			clientNet->Send(CBaseNetProtocol::Get().SendCPUUsage(0.0f));
@@ -256,8 +288,65 @@ float CGame::GetNetMessageProcessingTimeLimit() const
 	return std::clamp(simDrawRatio * gu->avgSimFrameTime, 5.0f, 1000.0f / globalConfig.minDrawFPS);
 }
 
+// PR 27b backpressure predicate (split only; see the loop in ClientReadNet).
+// True unless the next packet is a NEWFRAME/KEYFRAME that would advance the
+// sim while the epoch ring already holds N-1 unretired epochs (PR 44c §3.4,
+// replacing the LastBoundaryFrame()+1 park-era gate) and interpolation is
+// active.
+bool CGame::CanConsumeSimFrameNow() const
+{
+	const std::shared_ptr<const netcode::RawPacket> pkt = clientNet->Peek(0);
+
+	if (pkt == nullptr || pkt->length == 0)
+		return true;
+	if (pkt->data[0] != NETMSG_NEWFRAME && pkt->data[0] != NETMSG_KEYFRAME)
+		return true;
+
+	// PR 44c (§3.4): sim runs ahead <= N-1 unretired epochs. An epoch
+	// retires when the draw side's acquire releases it (needing nothing from
+	// the sim), so the wait is deadlock-free. At N=3 the 1x cadence matches
+	// the old gate (publish -> blocked until the next acquire retires the
+	// previous epoch); it is looser only while the consumer is mid-consume
+	// or stalled -- blessed "unchanged-or-looser" (§5.13).
+	if (simSnapshot.UnretiredEpochCount() < SimSnapshot::EPOCH_RING_SLOTS - 1)
+		return true;
+
+	// free-run carve-outs (§5.13 -- these must survive the rekey: a
+	// free-running sim is extraction-SKIPPED by the producer's pacing gate,
+	// never ring-BLOCKED): fast-forward, demo skip, catch-up (no recent sim
+	// progress -- the same predicate that disables interpolation), and
+	// video capture's single-stepped server
+	if (gs->speedFactor > 1.01f || skipping || IsSimLagging() || videoCapturing->AllowRecord())
+		return true;
+
+	SimDrawSplit::g_ringBlockCount.fetch_add(1, std::memory_order_relaxed);
+	return false;
+}
+
+// PR 46 (split only): consume net messages at full capacity -- no
+// msgProcTimeLeft budget, no per-call wall cap. Scoped to where throughput
+// can actually be gained: the local/replay server host (replays, SP), a
+// server-raised speed, or catch-up -- the same carve-out family as
+// CanConsumeSimFrameNow's free-run set. Remote-server 1x play deliberately
+// keeps master's budget pacing (the net-smoothing trailing buffer exists to
+// absorb link jitter; bypassing it there gains nothing, the sim is
+// supply-bound at 30 frames/sec). The pre-spawn lockstep window keeps master
+// pacing too: there ClientReadNet still shares the main thread with
+// rendering, so master's caps ARE the draw-starvation protection.
+bool CGame::SplitFullThrottleConsume() const
+{
+	if (!SimDrawSplit::Enabled() || !SimDrawSplit::SimThreadRunning())
+		return false;
+
+	return (gameServer != nullptr || gs->speedFactor > 1.01f || IsSimLagging());
+}
+
 void CGame::ClientReadNet()
 {
+	// parent zone so the per-message Net::* zones (and the SimFrame()s this
+	// loop issues) nest here instead of floating unparented between frames
+	ZoneScopedN("Net::ClientReadNet");
+
 	// first look ahead so we can adapt consumeSpeedMult to network fluctuations
 	// (smooths simframes across each full second, and balances the time spent in
 	// sim & drawing)
@@ -269,12 +358,51 @@ void CGame::ClientReadNet()
 	const bool haveServerDemo = (gameServer != nullptr && gameServer->GetDemoReader() != nullptr);
 	const bool haveClientDemo = (clientNet->GetDemoRecorder() != nullptr);
 
+	// PR 46 (split only): under full throttle the budget/wall exits are
+	// replaced by (a) "the draw side consumed the last published epoch and a
+	// new frame edge exists" -- returning then lets SimThreadProc's
+	// ProduceEpochAtSimEdge publish immediately (NewestEpochConsumed()
+	// guarantees the §3.2 pacing gate will not skip), so publish cadence
+	// tracks the draw acquire rate with zero sim idle -- and (b) a coarse
+	// hygiene backstop so the SimThreadProc loop top (watchdog clear, pause
+	// yield, retired-pool servicing) runs even when draw stops acquiring.
+	const bool fullThrottle = SplitFullThrottleConsume();
+	const spring_time splitBackstopEndTime = spring_gettime() + spring_msecs(250.0f);
+	bool consumedSimFrame = false;
+
 	// now really process the messages
 	while (true) {
-		if (msgProcTimeLeft <= 0.0f)
-			break;
-		if (spring_gettime() > msgProcEndTime)
-			break;
+		if (fullThrottle) {
+			if (consumedSimFrame && simSnapshot.NewestEpochConsumed())
+				break;
+			if (spring_gettime() > splitBackstopEndTime) {
+				SimDrawSplit::g_ffBackstopExitCount.fetch_add(1, std::memory_order_relaxed);
+				break;
+			}
+			// no deficit carry-over: NEWFRAME consumption still costs 1000
+			// below, and a deeply negative budget would stall the sim for
+			// seconds when the bypass condition next turns off (master
+			// pacing resumes from a clean zero instead)
+			msgProcTimeLeft = std::max(msgProcTimeLeft, 0.0f);
+		} else {
+			if (msgProcTimeLeft <= 0.0f)
+				break;
+			if (spring_gettime() > msgProcEndTime)
+				break;
+		}
+
+		// PR 27b (split only): park promptly at a frame edge when the draw
+		// side requested the barrier, and hold the sim at most N-1 unretired
+		// epochs ahead during interpolated play (PR 44c §3.4; free-running
+		// under fast-forward / catch-up / skip / capture) -- budget and
+		// order below are untouched, so consumption stays bit-for-bit the
+		// master logic
+		if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
+			if (SimDrawSplit::PauseRequested())
+				break;
+			if (!CanConsumeSimFrameNow())
+				break;
+		}
 
 		lastNetPacketProcessTime = spring_gettime();
 
@@ -345,6 +473,12 @@ void CGame::ClientReadNet()
 				playerHandler.PlayerLeft(playerNum, inbuf[2]);
 				eventHandler.PlayerRemoved(playerNum, inbuf[2]);
 
+				// PR 44a: between-frames mutation of published team/player/
+				// global rows -- the flip producer re-extracts on this mark
+				// (the lockstep in-place refresh this replaces is gone)
+				if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning())
+					simSnapshot.MarkMutatedOutsideFrame();
+
 				AddTraffic(playerNum, packetCode, dataLength);
 			} break;
 
@@ -353,7 +487,13 @@ void CGame::ClientReadNet()
 				const uint32_t timeToStart = *reinterpret_cast<const uint32_t*>(inbuf + 1);
 
 				if (timeToStart > 0) {
-					GameSetupDrawer::StartCountdown(timeToStart);
+					// PR 27b: the countdown lives in the UI-owned
+					// GameSetupDrawer singleton -- boundary-defer the poke
+					if (SimDrawSplit::DeferUnsyncedNow()) {
+						UnsyncedBoundaryQueue::Defer([timeToStart]() { GameSetupDrawer::StartCountdown(timeToStart); });
+					} else {
+						GameSetupDrawer::StartCountdown(timeToStart);
+					}
 				} else {
 					StartPlaying();
 				}
@@ -395,6 +535,13 @@ void CGame::ClientReadNet()
 				LOG("%s %s the game", playerHandler.Player(playerNum)->name.c_str(), (gs->paused ? "paused" : "unpaused"));
 
 				eventHandler.GamePaused(playerNum, gs->paused);
+
+				// PR 44a: between-frames mutation of published team/player/
+				// global rows -- the flip producer re-extracts on this mark
+				// (the lockstep in-place refresh this replaces is gone)
+				if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning())
+					simSnapshot.MarkMutatedOutsideFrame();
+
 				AddTraffic(playerNum, packetCode, dataLength);
 
 				lastReadNetTime = spring_gettime();
@@ -402,8 +549,25 @@ void CGame::ClientReadNet()
 
 			case NETMSG_INTERNAL_SPEED: {
 				ZoneScopedN("Net::InternalSpeed");
-				sound->PitchAdjust(gs->speedFactor = *reinterpret_cast<const float*>(&inbuf[1]));
+				gs->speedFactor = *reinterpret_cast<const float*>(&inbuf[1]);
+
+				// PR 27b: the audio pitch poke is main-thread/audio-owned;
+				// the speedFactor assignment above is the sim side and stays
+				if (SimDrawSplit::DeferUnsyncedNow()) {
+					const float newSpeedFactor = gs->speedFactor;
+					UnsyncedBoundaryQueue::Defer([newSpeedFactor]() { sound->PitchAdjust(newSpeedFactor); });
+				} else {
+					sound->PitchAdjust(gs->speedFactor);
+				}
+
 				TracyPlot(tracingSpeedFactor, gs->speedFactor);
+
+				// PR 44a: between-frames mutation of published team/player/
+				// global rows -- the flip producer re-extracts on this mark
+				// (the lockstep in-place refresh this replaces is gone)
+				if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning())
+					simSnapshot.MarkMutatedOutsideFrame();
+
 				AddTraffic(-1, packetCode, dataLength);
 			} break;
 
@@ -422,6 +586,13 @@ void CGame::ClientReadNet()
 				TracyPlot(tracingWantedSpeedFactor, gs->wantedSpeedFactor);
 
 				LOG("Speed set to %.1f [%s]", gs->wantedSpeedFactor, pName);
+
+				// PR 44a: between-frames mutation of published team/player/
+				// global rows -- the flip producer re-extracts on this mark
+				// (the lockstep in-place refresh this replaces is gone)
+				if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning())
+					simSnapshot.MarkMutatedOutsideFrame();
+
 				AddTraffic(playerNum, packetCode, dataLength);
 			} break;
 
@@ -445,6 +616,12 @@ void CGame::ClientReadNet()
 				p->cpuUsage = *reinterpret_cast<const    float*>(&inbuf[2]);
 				p->ping     = *reinterpret_cast<const uint32_t*>(&inbuf[6]);
 
+				// PR 44a: between-frames mutation of published team/player/
+				// global rows -- the flip producer re-extracts on this mark
+				// (the lockstep in-place refresh this replaces is gone)
+				if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning())
+					simSnapshot.MarkMutatedOutsideFrame();
+
 				AddTraffic(playerNum, packetCode, dataLength);
 			} break;
 
@@ -465,7 +642,7 @@ void CGame::ClientReadNet()
 					player->SetReadyToStart(gameSetup->startPosType != CGameSetup::StartPos_ChooseInGame);
 					player->active = true;
 
-					wordCompletion.AddWord(player->name, false, false, false); // required?
+					NetDeferrableWordAdd(player->name); // required?
 					AddTraffic(playerID, packetCode, dataLength);
 				} catch (const netcode::UnpackPacketException& ex) {
 					LOG_L(L_ERROR, "[Game::%s][NETMSG_PLAYERNAME] exception \"%s\"", __func__, ex.what());
@@ -614,6 +791,7 @@ void CGame::ClientReadNet()
 				
 				msgProcTimeLeft -= 1000.0f;
 				lastSimFrameNetPacketTime = spring_gettime();
+				consumedSimFrame = true; // PR 46: full-throttle exit predicate
 
 				SimFrame();
 
@@ -1126,11 +1304,30 @@ void CGame::ClientReadNet()
 				if (eventHandler.AllowResourceLevel(teamNum, "e", energyShare))
 					team->resShare.energy = energyShare;
 
+				// PR 44a: between-frames team/player row mutation -- see the
+				// NETMSG_PLAYERINFO mark
+				if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning())
+					simSnapshot.MarkMutatedOutsideFrame();
+
 				AddTraffic(playerNum, packetCode, dataLength);
 			} break;
 
 			case NETMSG_MAPDRAW: {
 				ZoneScopedN("Net::MapDraw");
+
+				// PR 27b: GotNetMsg mutates the draw-owned map-marker model
+				// (inMapDrawerModel AddPoint/AddLine/EraseNear) -- boundary-
+				// defer the whole dispatch; the traffic tally reads the
+				// sender byte from the packet directly
+				if (SimDrawSplit::DeferUnsyncedNow()) {
+					// packet layout: [0]=code, [1]=size, [2]=playerNum
+					if (dataLength > 2 && playerHandler.IsValidPlayer(inbuf[2]))
+						AddTraffic(inbuf[2], packetCode, dataLength);
+
+					UnsyncedBoundaryQueue::Defer([packet]() mutable { inMapDrawer->GotNetMsg(packet); });
+					break;
+				}
+
 				const int32_t playerNum = inMapDrawer->GotNetMsg(packet);
 
 				if (playerNum >= 0)
@@ -1245,6 +1442,11 @@ void CGame::ClientReadNet()
 					}
 				}
 
+				// PR 44a: between-frames team/player row mutation -- see the
+				// NETMSG_PLAYERINFO mark
+				if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning())
+					simSnapshot.MarkMutatedOutsideFrame();
+
 				AddTraffic(playerNum, packetCode, dataLength);
 			} break;
 
@@ -1287,7 +1489,7 @@ void CGame::ClientReadNet()
 							#endif
 						} else {
 							// we will end up here for local AIs defined mid-game, eg. with /aicontrol
-							wordCompletion.AddWord(aiData.name + " ", false, false, false);
+							NetDeferrableWordAdd(aiData.name + " ");
 							skirmishAIHandler.AddSkirmishAI(aiData, aiNum);
 						}
 					} else {
@@ -1297,7 +1499,7 @@ void CGame::ClientReadNet()
 						aiData.name       = aiName;
 						aiData.shortName  = "n/a"; // determines validity for GetSkirmishAI
 
-						wordCompletion.AddWord(aiData.name + " ", false, false, false);
+						NetDeferrableWordAdd(aiData.name + " ");
 						skirmishAIHandler.AddSkirmishAI(aiData, aiNum);
 					}
 
@@ -1363,7 +1565,7 @@ void CGame::ClientReadNet()
 
 						LOG("[Game::%s] %s skirmish AI \"%s\" (ID: %i) being removed from team %i", __func__, types[isLocal], aiData->name.c_str(), aiNum, aiTeamId);
 
-						wordCompletion.RemoveWord(aiData->name + " ");
+						NetDeferrableWordRemove(aiData->name + " ");
 						skirmishAIHandler.RemoveSkirmishAI(aiNum);
 
 						CPlayer::UpdateControlledTeams();

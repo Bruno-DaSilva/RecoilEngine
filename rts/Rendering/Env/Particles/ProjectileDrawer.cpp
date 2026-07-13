@@ -43,17 +43,79 @@
 #include "System/ScopedResource.h"
 
 #include "System/Misc/TracyDefs.h"
+#include "System/SimDrawSplit.h"
 
 CONFIG(int, SoftParticles).defaultValue(1).safemodeValue(0).description("Soften up CEG particles on clipping edges");
 
 static uint32_t sortCamType = 0;
 static bool CProjectileDrawOrderSortingPredicate(const CProjectile* p1, const CProjectile* p2) noexcept {
-	return std::forward_as_tuple(p2->drawOrder, p1->GetSortDist(sortCamType), p1) > std::forward_as_tuple(p1->drawOrder, p2->GetSortDist(sortCamType), p2);
+	return std::forward_as_tuple(p2->drawOrder, projectileDrawer->GetSortDist(p1, sortCamType), p1) > std::forward_as_tuple(p1->drawOrder, projectileDrawer->GetSortDist(p2, sortCamType), p2);
 }
 
 static bool CProjectileSortingPredicate(const CProjectile* p1, const CProjectile* p2) noexcept {
-	return std::forward_as_tuple(p1->GetSortDist(sortCamType), p1) > std::forward_as_tuple(p2->GetSortDist(sortCamType), p2);
+	return std::forward_as_tuple(projectileDrawer->GetSortDist(p1, sortCamType), p1) > std::forward_as_tuple(projectileDrawer->GetSortDist(p2, sortCamType), p2);
 };
+
+// resolve a packed (id << 1 | synced) drawer handle to its object through the
+// producer-captured store (PR 40); every registered handle resolves to a
+// deferred-safe object pointer. Post-release / concurrent-sim passes may not
+// resolve through the sim-owned FreeListMapCompact containers (the sim thread
+// rehashes them mid-frame), so the store -- not projectileHandler -- is the
+// only resolution path.
+static const CProjectile* ResolveProjectileHandle(uint32_t handle)
+{
+	const int id = int(handle >> 1);
+	const bool synced = ((handle & 1u) != 0);
+
+	const CProjectile* p = projectileDrawer->GetRenderObject(id, synced);
+
+	assert(p != nullptr);
+	return p;
+}
+
+void CProjectileDrawer::SnapshotEffectContainers()
+{
+	// barrier copies of the sim-owned effect containers (see the members);
+	// dead flashes are deferred shells until the next ack, so every copied
+	// pointer stays readable for the whole draw frame
+	splitGroundFlashes = projectileHandler.groundFlashes;
+
+	for (int mt = 0; mt < MODELTYPE_CNT; ++mt) {
+		splitFlyingPieces[mt] = projectileHandler.flyingPieces[mt];
+	}
+}
+
+void CProjectileDrawer::StageEffectContainersAtSimEdge()
+{
+	// PR 44b: the SIM thread owns the source containers at its produce edge;
+	// copy into the staging pair (assignment recycles capacity)
+	stagedGroundFlashes = projectileHandler.groundFlashes;
+
+	for (int mt = 0; mt < MODELTYPE_CNT; ++mt) {
+		stagedFlyingPieces[mt] = projectileHandler.flyingPieces[mt];
+	}
+
+	stagedEffectContainersValid = true;
+}
+
+void CProjectileDrawer::CommitStagedEffectContainers()
+{
+	// PR 44b consumer half (barrier): swap the staged copies into the serving
+	// members the draw passes read. Swap (not assign) hands the old serving
+	// buffers back as staging capacity. A no-publish barrier keeps serving
+	// the previous copies (their flash shells are epoch-pinned until their
+	// destroy records' batch acks, which cannot precede this commit).
+	if (!stagedEffectContainersValid)
+		return;
+
+	stagedEffectContainersValid = false;
+
+	splitGroundFlashes.swap(stagedGroundFlashes);
+
+	for (int mt = 0; mt < MODELTYPE_CNT; ++mt) {
+		splitFlyingPieces[mt].swap(stagedFlyingPieces[mt]);
+	}
+}
 
 CProjectileDrawer* projectileDrawer = nullptr;
 
@@ -283,6 +345,7 @@ void CProjectileDrawer::Init() {
 	}
 
 
+	renderHandles.reserve(projectileHandler.maxParticles + projectileHandler.maxNanoParticles);
 	renderProjectiles.reserve(projectileHandler.maxParticles + projectileHandler.maxNanoParticles);
 	for (auto& mr : modelRenderers) { mr.Clear(); }
 
@@ -348,7 +411,16 @@ void CProjectileDrawer::Kill() {
 
 	smokeTextures.clear();
 
+	renderHandles.clear();
 	renderProjectiles.clear();
+
+	for (int ns = 0; ns < 2; ns++) {
+		renderIndices[ns].clear();
+		renderObjects[ns].clear();
+		drawPositions[ns].clear();
+		drawFlags[ns].clear();
+		sortDists[ns].clear();
+	}
 
 	for (auto& dp : drawParticles)
 		dp.clear();
@@ -372,19 +444,35 @@ void CProjectileDrawer::UpdateDrawFlags()
 {
 	ZoneScopedN("ProjectileDrawer::UpdateDrawFlags");
 
-	for_mt(0, renderProjectiles.size(), [this](int i) {
-		CProjectile* p = renderProjectiles[i];
+	// resolve the registered handles into this draw frame's pointer set from
+	// the producer-captured store (PR 40), never projectileHandler: under the
+	// flip this pass runs concurrent with the sim and may not walk the
+	// sim-owned containers. Every later pass (alpha passes, minimap,
+	// transparent shadows) iterates the resolved pointers
+	renderProjectiles.resize(renderHandles.size());
+
+	for_mt(0, renderHandles.size(), [this](int i) {
+		const uint32_t handle = renderHandles[i];
+		const bool synced = (handle & 1u) != 0;
+		const int id = int(handle >> 1);
+
+		const CProjectile* p = GetRenderObject(id, synced);
+
+		// post-drain invariant: every registered id resolves to a live object
+		assert(p != nullptr);
+		renderProjectiles[i] = p;
+
 		const bool hasModel = (p->model != nullptr);
 
-		p->drawPos = p->GetDrawPos(globalRendering->timeOffset);
+		const float3& drawPos = (drawPositions[synced][id] = p->GetDrawPos(globalRendering->timeOffset));
 
-		p->previousDrawFlag = p->drawFlag;
-		p->ResetDrawFlag();
+		uint8_t& drawFlag = drawFlags[synced][id];
+		drawFlag = DrawFlags::SO_NODRAW_FLAG;
 
 		if (!CanDrawProjectile(p, p->GetAllyteamID()))
 			return;
 
-		p->SetDrawFlag(DrawFlags::SO_DRICON_FLAG); //reuse as a minimap draw indication
+		drawFlag = DrawFlags::SO_DRICON_FLAG; //reuse as a minimap draw indication
 
 		for (uint32_t camType = CCamera::CAMTYPE_PLAYER; camType < CCamera::CAMTYPE_ENVMAP; ++camType) {
 			if (camType == CCamera::CAMTYPE_UWREFL && !IWater::GetWater()->CanDrawReflectionPass())
@@ -397,39 +485,39 @@ void CProjectileDrawer::UpdateDrawFlags()
 				continue;
 
 			const CCamera* cam = CCameraHandler::GetCamera(camType);
-			if (!cam->InView(p->drawPos, p->GetDrawRadius()))
+			if (!cam->InView(drawPos, p->GetDrawRadius()))
 				continue;
 
-			p->SetSortDist(camType, cam->ProjectedDistance(p->drawPos));
+			sortDists[synced][id][camType] = cam->ProjectedDistance(drawPos) + p->sortDistOffset;
 
 			switch (camType)
 			{
 				case CCamera::CAMTYPE_PLAYER: {
 					if (hasModel)
-						p->AddDrawFlag(DrawFlags::SO_OPAQUE_FLAG);
+						drawFlag |= DrawFlags::SO_OPAQUE_FLAG;
 					else
-						p->AddDrawFlag(DrawFlags::SO_ALPHAF_FLAG);
+						drawFlag |= DrawFlags::SO_ALPHAF_FLAG;
 
-					if (p->drawPos.y - p->GetDrawRadius() < 0.0f)
-						p->AddDrawFlag(DrawFlags::SO_REFRAC_FLAG);
+					if (drawPos.y - p->GetDrawRadius() < 0.0f)
+						drawFlag |= DrawFlags::SO_REFRAC_FLAG;
 
 					// Special case of piece projectile, since it has a model and fire particle
 					if (p->piece)
-						p->AddDrawFlag(DrawFlags::SO_ALPHAF_FLAG);
+						drawFlag |= DrawFlags::SO_ALPHAF_FLAG;
 				} break;
 				case CCamera::CAMTYPE_UWREFL: {
-					if (CModelDrawerHelper::ObjectVisibleReflection(p->drawPos, cam->GetPos(), p->GetDrawRadius()))
-						p->AddDrawFlag(DrawFlags::SO_REFLEC_FLAG);
+					if (CModelDrawerHelper::ObjectVisibleReflection(drawPos, cam->GetPos(), p->GetDrawRadius()))
+						drawFlag |= DrawFlags::SO_REFLEC_FLAG;
 				} break;
 				case CCamera::CAMTYPE_SHADOW: {
 					if unlikely(hasModel)
-						p->AddDrawFlag(DrawFlags::SO_SHOPAQ_FLAG);
+						drawFlag |= DrawFlags::SO_SHOPAQ_FLAG;
 					else
-						p->AddDrawFlag(DrawFlags::SO_SHTRAN_FLAG);
+						drawFlag |= DrawFlags::SO_SHTRAN_FLAG;
 
 					// Special case of piece projectile, since it has a model and fire particle
 					if (p->piece)
-						p->AddDrawFlag(DrawFlags::SO_SHTRAN_FLAG);
+						drawFlag |= DrawFlags::SO_SHTRAN_FLAG;
 				} break;
 			}
 		}
@@ -583,16 +671,16 @@ bool CProjectileDrawer::CanDrawProjectile(const CProjectile* pro, int allyTeam)
 	return (gu->spectatingFullView || (th.IsValidAllyTeam(allyTeam) && th.Ally(allyTeam, gu->myAllyTeam)) || lh->InLos(pro, gu->myAllyTeam));
 }
 
-bool CProjectileDrawer::ShouldDrawProjectile(const CProjectile* p, uint8_t thisPassMask)
+bool CProjectileDrawer::ShouldDrawProjectile(const CProjectile* p, uint8_t thisPassMask) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(p);
 
-	if (p->drawFlag == 0)
+	if (GetDrawFlag(p) == 0)
 		return false;
 
 	assert(std::popcount(thisPassMask) == 1);
-	return p->HasDrawFlag(static_cast<DrawFlags>(thisPassMask));
+	return HasDrawFlag(p, static_cast<DrawFlags>(thisPassMask));
 }
 
 void CProjectileDrawer::DrawProjectilesMiniMap()
@@ -600,7 +688,7 @@ void CProjectileDrawer::DrawProjectilesMiniMap()
 	ZoneScopedN("ProjectileDrawer::DrawMiniMap");
 
 	// draw opaque first
-	for (CProjectile* p : renderProjectiles) {
+	for (const CProjectile* p : renderProjectiles) {
 		if (!p->model)
 			continue;
 
@@ -611,7 +699,7 @@ void CProjectileDrawer::DrawProjectilesMiniMap()
 	}
 
 	// draw alpha second
-	for (CProjectile* p : renderProjectiles) {
+	for (const CProjectile* p : renderProjectiles) {
 		if (p->model)
 			continue;
 
@@ -650,7 +738,9 @@ void CProjectileDrawer::DrawProjectilesMiniMap()
 void CProjectileDrawer::DrawFlyingPieces(int modelType) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	const FlyingPieceContainer& container = projectileHandler.flyingPieces[modelType];
+	// PR 27b: see DrawGroundFlashes
+	const bool splitLive = (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning());
+	const FlyingPieceContainer& container = splitLive ? splitFlyingPieces[modelType] : projectileHandler.flyingPieces[modelType];
 
 	if (container.empty())
 		return;
@@ -706,7 +796,9 @@ void CProjectileDrawer::DrawOpaque(bool drawReflection, bool drawRefraction)
 
 			CModelDrawerHelper::BindModelTypeTexture(modelType, mdlRenderer.GetObjectBinKey(i));
 
-			for (CProjectile* p : mdlRenderer.GetObjectBin(i)) {
+			for (const uint32_t handle : mdlRenderer.GetObjectBin(i)) {
+				const CProjectile* p = ResolveProjectileHandle(handle);
+
 				if (!ShouldDrawProjectile(p, thisPassMask))
 					continue;
 
@@ -747,7 +839,7 @@ void CProjectileDrawer::DrawAlpha(bool drawAboveWater, bool drawBelowWater, bool
 
 	{
 		ZoneScopedN("ProjectileDrawer::DrawAlpha(DP)");
-		for (CProjectile* p : renderProjectiles) {
+		for (const CProjectile* p : renderProjectiles) {
 			if (!ShouldDrawProjectile(p, thisPassMask))
 				continue;
 
@@ -849,7 +941,9 @@ void CProjectileDrawer::DrawShadowOpaque()
 
 			CModelDrawerHelper::BindModelTypeTexture(modelType, mdlRenderer.GetObjectBinKey(i));
 
-			for (CProjectile* p : mdlRenderer.GetObjectBin(i)) {
+			for (const uint32_t handle : mdlRenderer.GetObjectBin(i)) {
+				const CProjectile* p = ResolveProjectileHandle(handle);
+
 				if (!ShouldDrawProjectile(p, DrawFlags::SO_SHOPAQ_FLAG))
 					continue;
 
@@ -875,7 +969,7 @@ void CProjectileDrawer::DrawShadowTransparent()
 	// 1) Render opaque objects into depth stencil texture from light's point of view - done elsewhere
 
 	// draw the model-less projectiles
-	for (CProjectile* p : renderProjectiles) {
+	for (const CProjectile* p : renderProjectiles) {
 		if (!ShouldDrawProjectile(p, DrawFlags::SO_SHTRAN_FLAG))
 			continue;
 
@@ -939,7 +1033,7 @@ void CProjectileDrawer::DrawProjectileModel(const CProjectile* p)
 			CUnitDrawer::SetTeamColor(wp->GetTeamID());
 
 			glPushMatrix();
-				glMultMatrixf(wp->GetTransformMatrix(wp->GetProjectileType() == WEAPON_MISSILE_PROJECTILE));
+				glMultMatrixf(projectileDrawer->GetTransformMatrix(wp, wp->GetProjectileType() == WEAPON_MISSILE_PROJECTILE));
 
 				if (!p->luaDraw || !eventHandler.DrawProjectile(p))
 					wp->model->DrawStatic();
@@ -956,7 +1050,7 @@ void CProjectileDrawer::DrawProjectileModel(const CProjectile* p)
 
 			auto scopedPushPop = spring::ScopedNullResource(glPushMatrix, glPopMatrix);
 
-			glTranslatef3(pp->drawPos);
+			glTranslatef3(projectileDrawer->GetDrawPos(pp));
 			glRotatef(pp->GetDrawAngle(), pp->spinVec.x, pp->spinVec.y, pp->spinVec.z);
 
 			if (p->luaDraw && eventHandler.DrawProjectile(p)) {
@@ -989,7 +1083,10 @@ void CProjectileDrawer::DrawProjectileModel(const CProjectile* p)
 void CProjectileDrawer::DrawGroundFlashes()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	const GroundFlashContainer& gfc = projectileHandler.groundFlashes;
+	// PR 27b: with the split running, iterate the barrier copy -- the sim
+	// thread mutates the live container mid-frame
+	const bool splitLive = (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning());
+	const GroundFlashContainer& gfc = splitLive ? splitGroundFlashes : projectileHandler.groundFlashes;
 
 	if (gfc.empty())
 		return;
@@ -1211,9 +1308,39 @@ void CProjectileDrawer::GenerateNoiseTex(uint32_t tex)
 void CProjectileDrawer::RenderProjectileCreated(const CProjectile* p)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	const bool synced = p->synced;
+	const size_t id = p->id;
+
 	{
-		const_cast<CProjectile*>(p)->SetRenderIndex(renderProjectiles.size());
-		renderProjectiles.push_back(const_cast<CProjectile*>(p));
+		// fresh slots for a fresh projectile (the id may be recycled)
+		auto& positions = drawPositions[synced];
+		auto& flags = drawFlags[synced];
+		auto& dists = sortDists[synced];
+		auto& indices = renderIndices[synced];
+		auto& objects = renderObjects[synced];
+
+		if (id >= indices.size()) {
+			positions.resize(id + 1);
+			flags.resize(id + 1, DrawFlags::SO_NODRAW_FLAG);
+			dists.resize(id + 1);
+			indices.resize(id + 1, uint32_t(-1));
+			objects.resize(id + 1, nullptr);
+		}
+
+		// NB: not "= {}" -- float3 has operator=(const float f[3]) and an empty
+		// braced list binds to it as a null pointer, not to a zeroed float3
+		positions[id] = ZeroVector; // zero until the first UpdateDrawFlags, as the old member was
+		flags[id] = DrawFlags::SO_NODRAW_FLAG; // as the old member default was
+		dists[id] = {}; // zero until first in view, as the old member default was
+
+		// PR 40: producer-captured deferred-safe handle -- every registered
+		// renderHandle resolves through this store, so the draw passes never
+		// walk projectileHandler (see GetRenderObject)
+		objects[id] = p;
+
+		assert(indices[id] == uint32_t(-1));
+		indices[id] = renderHandles.size();
+		renderHandles.push_back(ModelRenderContainerTraits<CProjectile>::ToHandle(p));
 	}
 
 	if (p->model != nullptr)
@@ -1223,17 +1350,49 @@ void CProjectileDrawer::RenderProjectileCreated(const CProjectile* p)
 void CProjectileDrawer::RenderProjectileDestroyed(const CProjectile* p)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	const auto ri = p->GetRenderIndex();
-	if (ri >= renderProjectiles.size()) {
+	const bool synced = p->synced;
+	const size_t id = p->id;
+
+	auto& indices = renderIndices[synced];
+
+	if (id >= indices.size() || indices[id] == uint32_t(-1)) {
 		assert(false);
 		return;
 	}
 
-	renderProjectiles[ri] = renderProjectiles.back();
-	renderProjectiles[ri]->SetRenderIndex(ri);
-	renderProjectiles.pop_back();
+	const uint32_t ri = indices[id];
+
+	renderHandles[ri] = renderHandles.back();
+	renderHandles.pop_back();
+
+	// rewire the swapped-in handle's backref (skipped when <p> was the back
+	// element, so the reset below is what sticks)
+	if (ri < renderHandles.size()) {
+		const uint32_t movedHandle = renderHandles[ri];
+		renderIndices[movedHandle & 1u][movedHandle >> 1] = ri;
+	}
+
+	indices[id] = uint32_t(-1);
+	renderObjects[synced][id] = nullptr; // PR 40: drop the captured handle
 
 	if (p->model != nullptr)
 		modelRenderers[MDL_TYPE(p)].DelObject(p);
+}
+
+CMatrix44f CProjectileDrawer::GetTransformMatrix(const CProjectile* p, bool offsetPos) const
+{
+	float3 xdir;
+	float3 ydir;
+
+	if (math::fabs(p->dir.y) < 0.95f) {
+		xdir = p->dir.cross(UpVector);
+		xdir.SafeANormalize();
+	} else {
+		xdir.x = 1.0f;
+	}
+
+	ydir = xdir.cross(p->dir);
+
+	return (CMatrix44f(GetDrawPos(p) + (p->dir * p->radius * 0.9f * offsetPos), -xdir, ydir, p->dir));
 }
 

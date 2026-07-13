@@ -109,7 +109,7 @@ void CFlareProjectile::Update()
 	deleteMe |= (gs->frameNum >= deathFrame);
 }
 
-void CFlareProjectile::Draw()
+void CFlareProjectile::Draw() const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (gs->frameNum <= activateFrame)

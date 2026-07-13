@@ -96,6 +96,9 @@ public:
 	bool HasStarted() const { return gameHasStarted; }
 	bool HasGameID() const { return generatedGameID; }
 	bool HasLocalClient() const { return (localClientNumber != -1u); }
+	/// PR 46: any INGAME participant besides the local client that the CPU
+	/// speed controller must protect (mirrors LagProtection's counting rule)
+	bool HasRemotePacedClient() const;
 	/// Is the server still running?
 	bool HasFinished() const;
 

@@ -1,6 +1,8 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "GameHelper.h"
+#include "PlacementPredicates.h" // PLACEMENT REHOST (stage 2): templated predicate stack
+#include "Rendering/Common/PlacementEpochView.h" // PLACEMENT REHOST (stage 3b): ClosestBuildPosT<EpochView> instantiation
 
 #include "Camera.h"
 #include "GameSetup.h"
@@ -9,8 +11,11 @@
 #include "Map/Ground.h"
 #include "Map/MapDamage.h"
 #include "Map/ReadMap.h"
+#include "Rendering/Common/SimSnapshot.h"
+#include "Rendering/Common/SnapshotPickGrid.h"
 #include "Sim/Features/Feature.h"
 #include "Sim/Features/FeatureDef.h"
+#include "Sim/Features/FeatureHandler.h" // PLACEMENT REHOST: resolve served featureId -> CFeature*
 #include "Sim/Misc/BuildingMaskMap.h"
 #include "Sim/Misc/CollisionHandler.h"
 #include "Sim/Misc/CollisionVolume.h"
@@ -38,9 +43,12 @@
 #include "Sim/Weapons/Weapon.h"
 #include "System/EventHandler.h"
 #include "System/SpringMath.h"
+#include "System/TimeProfiler.h"
 #include "System/Sound/ISoundChannels.h"
 
 #include "System/Misc/TracyDefs.h"
+#include "System/SimDrawSplit.h"
+#include "System/UnsyncedBoundaryQueue.h"
 
 
 static CGameHelper gGameHelper;
@@ -61,7 +69,7 @@ void CGameHelper::Kill()
 
 void CGameHelper::Update()
 {
-	ZoneScopedC(tracy::Color::Goldenrod);
+	SCOPED_TIMER("Sim::Helper");
 	const int wdIdx = gs->frameNum & (waitingDamages.size() - 1);
 
 	// need to use explicit indexing because CUnit::DoDamage
@@ -268,8 +276,20 @@ void CGameHelper::Explosion(const CExplosionParams& params) {
 	// NOTE: event triggers before damage is applied to objects
 	const bool noGfx = eventHandler.Explosion(weaponDefID, weaponDef, params);
 
-	if (luaUI != nullptr && weaponDef != nullptr)
-		luaUI->ShockFront(params.pos, weaponDef->cameraShake, damageAOE);
+	if (luaUI != nullptr && weaponDef != nullptr) {
+		// PR 27b: LuaUI belongs to the draw thread; explosions fire from the
+		// sim frame (args captured by value, exactly what master passed)
+		if (SimDrawSplit::DeferUnsyncedNow()) {
+			const float3 shockPos = params.pos;
+			const float cameraShake = weaponDef->cameraShake;
+			UnsyncedBoundaryQueue::DeferFor(luaUI, [shockPos, cameraShake, damageAOE]() {
+				if (luaUI != nullptr)
+					luaUI->ShockFront(shockPos, cameraShake, damageAOE);
+			});
+		} else {
+			luaUI->ShockFront(params.pos, weaponDef->cameraShake, damageAOE);
+		}
+	}
 
 	if (params.impactOnly) {
 		if (params.hitObject.HasStored<CUnit>()) {
@@ -375,12 +395,17 @@ void CGameHelper::Explosion(const CExplosionParams& params) {
  * should be implemented in the Query object if desired.
  * (It isn't necessary for e.g. GetClosest** methods.)
  */
-template<typename TFilter, typename TQuery>
+// Synced selects the object-dedup scratch space: sim-context callers pass true
+// (synced counter + CWorldObject::syncedTempNum, whose increment sequence is a
+// synced-determinism invariant); draw-context callers -- currently only MiniMap
+// unit picking -- pass false (CGlobalUnsynced counter + unsyncedTempNum) so they
+// never touch the synced scratch. See PR 9 (sim/draw decoupling).
+template<bool Synced, typename TFilter, typename TQuery>
 static inline void QueryUnits(TFilter filter, TQuery& query)
 {
 	QuadFieldQuery qfQuery;
 	quadField.GetQuads(qfQuery, query.pos, query.radius);
-	const int tempNum = gs->GetTempNum();
+	const int tempNum = Synced ? gs->GetTempNum() : gu->GetTempNum();
 
 	for (int t = 0; t < teamHandler.ActiveAllyTeams(); ++t) { //FIXME
 		if (!filter.Team(t))
@@ -390,10 +415,12 @@ static inline void QueryUnits(TFilter filter, TQuery& query)
 			const auto& allyTeamUnits = quadField.GetQuad(qi).teamUnits[t];
 
 			for (CUnit* u: allyTeamUnits) {
-				if (u->tempNum == tempNum)
+				int& objTempNum = Synced ? u->syncedTempNum : u->unsyncedTempNum;
+
+				if (objTempNum == tempNum)
 					continue;
 
-				u->tempNum = tempNum;
+				objTempNum = tempNum;
 
 				if (!filter.Unit(u))
 					continue;
@@ -703,10 +730,10 @@ size_t CGameHelper::GenerateWeaponTargets(const CWeapon* weapon, const CUnit* av
 			const std::vector<CUnit*>& allyTeamUnits = quadField.GetQuad(qi).teamUnits[t];
 
 			for (CUnit* targetUnit: allyTeamUnits) {
-				if (targetUnit->tempNum == tempNum)
+				if (targetUnit->syncedTempNum == tempNum)
 					continue;
 
-				targetUnit->tempNum = tempNum;
+				targetUnit->syncedTempNum = tempNum;
 
 				if (!weapon->TestTarget(testPos, SWeaponTarget(targetUnit)))
 					continue;
@@ -770,8 +797,8 @@ size_t CGameHelper::GenerateWeaponTargets(const CWeapon* weapon, const CUnit* av
 
 				const bool allowTarget = eventHandler.AllowWeaponTarget(weaponOwner->id, targetUnit->id, weapon->weaponNum, weaponDef->id, &targetPriority);
 
-				// Lua call may have changed tempNum, so needs to be set again
-				targetUnit->tempNum = tempNum;
+				// Lua call may have changed syncedTempNum, so needs to be set again
+				targetUnit->syncedTempNum = tempNum;
 
 				if (!allowTarget)
 					continue;
@@ -790,16 +817,53 @@ size_t CGameHelper::GenerateWeaponTargets(const CWeapon* weapon, const CUnit* av
 CUnit* CGameHelper::GetClosestUnit(const float3& pos, float searchRadius)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	Query::ClosestUnit_ErrorPos_NOT_SYNCED q(pos, searchRadius);
-	QueryUnits(Filter::Friendly_All_Plus_Enemy_InLos_NOT_SYNCED(), q);
-	return q.GetClosestUnit();
+	// PR 25 (sim/draw decoupling section D): this is the draw/UI picker (MiniMap
+	// GetSelectUnit / SelectUnits) -- served from the SimSnapshot + the draw-side
+	// grid instead of the sim quadfield walk. Reproduces the exact predicate of
+	// Filter::Friendly_All_Plus_Enemy_InLos_NOT_SYNCED + the distance test of
+	// Query::ClosestUnit_ErrorPos_NOT_SYNCED against snapshot rows. Reads the
+	// last published boundary (<=1 draw frame stale for input handlers). The
+	// terminal id -> pointer lookup is the seam left for the split.
+	const SimSnapshot::UnitRows& urows = simSnapshot.Read();
+	const int myAllyTeam = gu->myAllyTeam;
+	const bool fullView = gu->spectatingFullView;
+
+	static std::vector<int> cand;
+	snapshotPickGrid.QueryUnitsInRadius(pos, searchRadius, cand);
+
+	float closeSqDist = searchRadius * searchRadius;
+	int closeID = -1;
+
+	for (const int id: cand) {
+		const bool visible = (urows.AllyTeam(id) == myAllyTeam) ||
+			(urows.LosStatus(id, myAllyTeam) & (LOS_INLOS | LOS_INRADAR)) || fullView;
+		if (!visible)
+			continue;
+
+		const float3 unitPos = fullView ? urows.MidPos(id) : (urows.MidPos(id) + urows.ErrorVector(id, myAllyTeam));
+		const float sqDist = (pos - unitPos).SqLength2D();
+		if (sqDist <= closeSqDist) {
+			closeSqDist = sqDist;
+			closeID = id;
+		}
+	}
+
+	// terminal id -> pointer lookup (the split seam). Under the running split
+	// gate it behind the snapshot Valid check so a boundary-stale winner id
+	// never resolves to a freed sim slot; flag-off keeps the legacy lookup.
+	if (closeID < 0)
+		return nullptr;
+	if ((SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) && !urows.Valid(closeID))
+		return nullptr;
+
+	return unitHandler.GetUnit(closeID);
 }
 
 CUnit* CGameHelper::GetClosestEnemyUnit(const CUnit* excludeUnit, const float3& pos, float searchRadius, int searchAllyteam)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	Query::ClosestUnit q(pos, searchRadius);
-	QueryUnits(Filter::Enemy_InLos(excludeUnit, searchAllyteam), q);
+	QueryUnits<true>(Filter::Enemy_InLos(excludeUnit, searchAllyteam), q);
 	return q.GetClosestUnit();
 }
 
@@ -807,7 +871,7 @@ CUnit* CGameHelper::GetClosestValidTarget(const float3& pos, float searchRadius,
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	Query::ClosestUnit q(pos, searchRadius);
-	QueryUnits(Filter::Enemy_InLos_ValidTarget(searchAllyteam, cai), q);
+	QueryUnits<true>(Filter::Enemy_InLos_ValidTarget(searchAllyteam, cai), q);
 	return q.GetClosestUnit();
 }
 
@@ -825,31 +889,64 @@ CUnit* CGameHelper::GetClosestEnemyUnitNoLosTest(
 	if (sphereDistTest) {
 		// includes target radius
 		Query::ClosestUnit_InLos q(searchPos, searchRadius, checkSightDist);
-		QueryUnits(Filter::Enemy(excludeUnit, searchAllyteam), q);
+		QueryUnits<true>(Filter::Enemy(excludeUnit, searchAllyteam), q);
 		closestUnit = q.GetClosestUnit();
 	} else {
 		// excludes target radius
 		Query::ClosestUnit_InLos_Cylinder q(searchPos, searchRadius, checkSightDist);
-		QueryUnits(Filter::Enemy(excludeUnit, searchAllyteam), q);
+		QueryUnits<true>(Filter::Enemy(excludeUnit, searchAllyteam), q);
 		closestUnit = q.GetClosestUnit();
 	}
 
 	return closestUnit;
 }
 
-CUnit* CGameHelper::GetClosestFriendlyUnit(const CUnit* excludeUnit, const float3& pos, float searchRadius, int searchAllyteam)
+// Mixed-context helper: reached from sim (Builder), synced Lua (LuaSyncedRead)
+// AND draw/UI picking (MiniMap). Callers pass synced=false only from the
+// draw/UI thread so it uses the unsynced dedup scratch there; every sim/synced
+// caller passes true and keeps the synced scratch's exact increment sequence.
+CUnit* CGameHelper::GetClosestFriendlyUnit(const CUnit* excludeUnit, const float3& pos, float searchRadius, int searchAllyteam, bool synced)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	Query::ClosestUnit q(pos, searchRadius);
-	QueryUnits(Filter::Friendly(excludeUnit, searchAllyteam), q);
-	return q.GetClosestUnit();
+	if (synced) {
+		Query::ClosestUnit q(pos, searchRadius);
+		QueryUnits<true>(Filter::Friendly(excludeUnit, searchAllyteam), q);
+		return q.GetClosestUnit();
+	}
+
+	// PR 25: unsynced (MiniMap SelectUnits) path -> SimSnapshot + draw-side grid,
+	// reproducing Filter::Friendly (allied-to-searchAllyteam, excludeUnit) +
+	// Query::ClosestUnit (raw midPos distance). Section D previous-boundary read.
+	const SimSnapshot::UnitRows& urows = simSnapshot.Read();
+	const int excludeID = (excludeUnit != nullptr) ? excludeUnit->id : -1;
+
+	static std::vector<int> cand;
+	snapshotPickGrid.QueryUnitsInRadius(pos, searchRadius, cand);
+
+	float closeSqDist = searchRadius * searchRadius;
+	int closeID = -1;
+
+	for (const int id: cand) {
+		if (id == excludeID)
+			continue;
+		if (!urows.Allied(searchAllyteam, urows.AllyTeam(id)))
+			continue;
+
+		const float sqDist = (pos - urows.MidPos(id)).SqLength2D();
+		if (sqDist <= closeSqDist) {
+			closeSqDist = sqDist;
+			closeID = id;
+		}
+	}
+
+	return (closeID >= 0) ? unitHandler.GetUnit(closeID) : nullptr;
 }
 
 CUnit* CGameHelper::GetClosestEnemyAircraft(const CUnit* excludeUnit, const float3& pos, float searchRadius, int searchAllyteam)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	Query::ClosestUnit q(pos, searchRadius);
-	QueryUnits(Filter::EnemyAircraft(excludeUnit, searchAllyteam), q);
+	QueryUnits<true>(Filter::EnemyAircraft(excludeUnit, searchAllyteam), q);
 	return q.GetClosestUnit();
 }
 
@@ -860,7 +957,7 @@ size_t CGameHelper::GetEnemyUnits(const float3& pos, float searchRadius, int sea
 	found.reserve(128);
 
 	Query::AllUnitsById q(pos, searchRadius, found);
-	QueryUnits(Filter::Enemy_InLos(nullptr, searchAllyteam), q);
+	QueryUnits<true>(Filter::Enemy_InLos(nullptr, searchAllyteam), q);
 
 	return (found.size());
 }
@@ -872,7 +969,7 @@ size_t CGameHelper::GetEnemyUnitsNoLosTest(const float3& pos, float searchRadius
 	found.reserve(128);
 
 	Query::AllUnitsById q(pos, searchRadius, found);
-	QueryUnits(Filter::Enemy(nullptr, searchAllyteam), q);
+	QueryUnits<true>(Filter::Enemy(nullptr, searchAllyteam), q);
 
 	return (found.size());
 }
@@ -980,7 +1077,7 @@ void CGameHelper::BuggerOff(const float3& pos, float radius, bool spherical, boo
 }
 
 
-float3 CGameHelper::Pos2BuildPos(const BuildInfo& buildInfo, bool synced)
+float3 CGameHelper::Pos2BuildPos(const BuildInfo& buildInfo, bool synced, const float2* currHeightBoundsOverride)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	float3 pos;
@@ -998,7 +1095,7 @@ float3 CGameHelper::Pos2BuildPos(const BuildInfo& buildInfo, bool synced)
 	else
 		pos.z = math::floor((buildInfo.pos.z + SQUARE_SIZE) / BUILD_SQUARE_SIZE) * BUILD_SQUARE_SIZE;
 
-	pos.y = CGameHelper::GetBuildHeight(pos, buildInfo.def, synced);
+	pos.y = CGameHelper::GetBuildHeight(pos, buildInfo.def, synced, currHeightBoundsOverride);
 	return pos;
 }
 
@@ -1088,21 +1185,19 @@ static const std::vector<SearchOffset>& GetSearchOffsetTable(int radius)
 	return searchOffsets;
 }
 
-// used by AICallback, ResourceMapAnalyzer (unsynced), LuaSyncedRead
-float3 CGameHelper::ClosestBuildPos(
-	int team,
-	const UnitDef* unitDef,
-	const float3& worldPos,
-	float searchRadius,
-	int minDistance,
-	int buildFacing,
-	bool synced
-) {
-	RECOIL_DETAILED_TRACY_ZONE;
+// used by AICallback, ResourceMapAnalyzer (unsynced), LuaSyncedRead.
+// PLACEMENT REHOST (stage 3b): templated over a state view; DEFINED here (not the
+// header) because it uses the file-local GetSearchOffsetTable + teamHandler.
+// Explicitly instantiated for LiveView + EpochView below.
+namespace placement {
+template<class V>
+float3 ClosestBuildPosT(const V& view, int team, const UnitDef* unitDef, const float3& worldPos,
+                        float searchRadius, int minDistance, int buildFacing, bool synced)
+{
 	if (unitDef == nullptr)
 		return -RgtVector;
 
-	CFeature* feature = nullptr;
+	int featureId = -1; // reset by each TestUnitBuildSquareT call (matches the live feature=nullptr)
 
 	const int allyTeam = teamHandler.AllyTeam(team);
 	const int rawRadius = static_cast<int>(searchRadius / BUILD_SQUARE_SIZE);
@@ -1116,9 +1211,9 @@ float3 CGameHelper::ClosestBuildPos(
 		const float wzpos = worldPos.z + offsets[i].dy * BUILD_SQUARE_SIZE;
 
 		BuildInfo bi(unitDef, {wxpos, 0.0f, wzpos}, buildFacing);
-		bi.pos = Pos2BuildPos(bi, false);
+		bi.pos = view.SnapBuildPos(bi);
 
-		if (!TestUnitBuildSquare(bi, feature, allyTeam, synced) && (feature == nullptr || feature->allyteam != allyTeam))
+		if (!TestUnitBuildSquareT(view, bi, featureId, allyTeam, synced) && (featureId < 0 || view.FeatureAllyteam(featureId) != allyTeam))
 			continue;
 
 		const int xsqr  = static_cast<int>(wxpos / SQUARE_SIZE);
@@ -1141,12 +1236,12 @@ float3 CGameHelper::ClosestBuildPos(
 		// check for nearby blocking objects
 		for (int z = zmin; z < zmax; ++z) {
 			for (int x = xmin; x < xmax; ++x) {
-				const CSolidObject* solObj = groundBlockingObjectMap.GroundBlockedUnsafe(z * mapDims.mapx + x);
+				typename V::Occupant so = view.GroundBlocked(x, z);
 
-				if (solObj == nullptr)
+				if (view.OccNull(so))
 					continue;
 				// immobile=true implies Feature or Building
-				if (!solObj->immobile)
+				if (!view.OccImmobile(so))
 					continue;
 
 				free = false;
@@ -1163,13 +1258,13 @@ float3 CGameHelper::ClosestBuildPos(
 			// none found, check for nearby factories with open yards
 			for (int z = zmin; z < zmax; ++z) {
 				for (int x = xmin; x < xmax; ++x) {
-					const CSolidObject* solObj = groundBlockingObjectMap.GroundBlockedUnsafe(z * mapDims.mapx + x);
+					typename V::Occupant so = view.GroundBlocked(x, z);
 
-					if (solObj == nullptr)
+					if (view.OccNull(so))
 						continue;
-					if (!solObj->immobile)
+					if (!view.OccImmobile(so))
 						continue;
-					if (!solObj->yardOpen)
+					if (!view.OccYardOpen(so))
 						continue;
 
 					free = false;
@@ -1185,9 +1280,26 @@ float3 CGameHelper::ClosestBuildPos(
 	return -RgtVector;
 }
 
+template float3 ClosestBuildPosT<LiveView>(const LiveView&, int, const UnitDef*, const float3&, float, int, int, bool);
+template float3 ClosestBuildPosT<EpochView>(const EpochView&, int, const UnitDef*, const float3&, float, int, int, bool);
+} // namespace placement
+
+float3 CGameHelper::ClosestBuildPos(
+	int team,
+	const UnitDef* unitDef,
+	const float3& worldPos,
+	float searchRadius,
+	int minDistance,
+	int buildFacing,
+	bool synced
+) {
+	RECOIL_DETAILED_TRACY_ZONE;
+	return placement::ClosestBuildPosT(placement::LiveView{}, team, unitDef, worldPos, searchRadius, minDistance, buildFacing, synced);
+}
+
 // find the reference height for a build-position
 // against which to compare all footprint squares
-float CGameHelper::GetBuildHeight(const float3& pos, const UnitDef* unitdef, bool synced)
+float CGameHelper::GetBuildHeight(const float3& pos, const UnitDef* unitdef, bool synced, const float2* currHeightBoundsOverride)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	// we are not going to terraform the ground for mobile units
@@ -1210,8 +1322,12 @@ float CGameHelper::GetBuildHeight(const float3& pos, const UnitDef* unitdef, boo
 
 	const float maxDifHgt = unitdef->maxHeightDif;
 
-	float minHgt = readMap->GetCurrMinHeight();
-	float maxHgt = readMap->GetCurrMaxHeight();
+	// sim|draw PR 29: the served draw-thread twin routes these sim-mutable
+	// currHeightBounds scalars through its SimSnapshot mirror (boundary-consistent)
+	// rather than reading readMap live cross-thread. nullptr => live read, which is
+	// bit-identical to the pre-split single-threaded sim path for all sim callers.
+	float minHgt = currHeightBoundsOverride ? currHeightBoundsOverride->x : readMap->GetCurrMinHeight();
+	float maxHgt = currHeightBoundsOverride ? currHeightBoundsOverride->y : readMap->GetCurrMaxHeight();
 
 	unsigned int numBorderSquares = 0;
 	float sumBorderSquareHeight = 0.0f;
@@ -1276,78 +1392,53 @@ CGameHelper::BuildSquareStatus CGameHelper::TestUnitBuildSquare(
 	RECOIL_DETAILED_TRACY_ZONE;
 	feature = nullptr;
 
-	const int xsize = buildInfo.GetXSize();
-	const int zsize = buildInfo.GetZSize();
+	// PLACEMENT REHOST (stage 2): the build-preview UI path (commands != nullptr,
+	// unsynced ShowUnitBuildSquare) is kept as live code -- it still routes each
+	// square through the templated TestBuildSquare wrapper. It is templatized in
+	// stage 3 when the C++ preview park sites are converted.
+	if (commands != nullptr) {
+		assert(!synced);
 
-	const float3 testPos = buildInfo.pos;
-	      float3 sqrPos;
+		const int xsize = buildInfo.GetXSize();
+		const int zsize = buildInfo.GetZSize();
 
-	const int x1 = int(testPos.x / SQUARE_SIZE) - (xsize >> 1), x2 = x1 + xsize;
-	const int z1 = int(testPos.z / SQUARE_SIZE) - (zsize >> 1), z2 = z1 + zsize;
-	const int2 xrange = int2(x1, x2);
-	const int2 zrange = int2(z1, z2);
+		const float3 testPos = buildInfo.pos;
+		      float3 sqrPos;
 
-	const MoveDef* moveDef = (buildInfo.def->pathType != -1U) ? moveDefHandler.GetMoveDefByPathType(buildInfo.def->pathType) : nullptr;
+		const int x1 = int(testPos.x / SQUARE_SIZE) - (xsize >> 1), x2 = x1 + xsize;
+		const int z1 = int(testPos.z / SQUARE_SIZE) - (zsize >> 1), z2 = z1 + zsize;
+		const int2 xrange = int2(x1, x2);
+		const int2 zrange = int2(z1, z2);
 
-	// const float buildHeight = GetBuildHeight(testPos, buildInfo.def, synced);
-	// const float modelHeight = (model != nullptr) ? math::fabs(model->height) : 10.0f;
+		const MoveDef* moveDef = (buildInfo.def->pathType != -1U) ? moveDefHandler.GetMoveDefByPathType(buildInfo.def->pathType) : nullptr;
 
-	sqrPos.y = GetBuildHeight(testPos, buildInfo.def, synced);
+		sqrPos.y = GetBuildHeight(testPos, buildInfo.def, synced);
 
-	BuildSquareStatus testStatus = BUILDSQUARE_OPEN;
+		BuildSquareStatus testStatus = BUILDSQUARE_OPEN;
 
-	if (buildInfo.def->needGeo) {
-		testStatus = BUILDSQUARE_BLOCKED;
+		if (buildInfo.def->needGeo) {
+			testStatus = BUILDSQUARE_BLOCKED;
 
-		QuadFieldQuery qfQuery;
-		qfQuery.threadOwner = threadOwner;
-		quadField.GetFeaturesExact(qfQuery, testPos, std::max(xsize, zsize) * 6);
+			QuadFieldQuery qfQuery;
+			qfQuery.threadOwner = threadOwner;
+			quadField.GetFeaturesExact(qfQuery, testPos, std::max(xsize, zsize) * 6);
 
-		const int mindx = xsize * (SQUARE_SIZE >> 1) - (SQUARE_SIZE >> 1);
-		const int mindz = zsize * (SQUARE_SIZE >> 1) - (SQUARE_SIZE >> 1);
+			const int mindx = xsize * (SQUARE_SIZE >> 1) - (SQUARE_SIZE >> 1);
+			const int mindz = zsize * (SQUARE_SIZE >> 1) - (SQUARE_SIZE >> 1);
 
-		// look for a nearby geothermal feature if we need one
-		for (const CFeature* f: *qfQuery.features) {
-			if (!f->def->geoThermal)
-				continue;
+			for (const CFeature* f: *qfQuery.features) {
+				if (!f->def->geoThermal)
+					continue;
 
-			const float dx = math::fabs(f->pos.x - testPos.x);
-			const float dz = math::fabs(f->pos.z - testPos.z);
+				const float dx = math::fabs(f->pos.x - testPos.x);
+				const float dz = math::fabs(f->pos.z - testPos.z);
 
-			if (dx < mindx && dz < mindz) {
-				testStatus = BUILDSQUARE_OPEN;
-				break;
+				if (dx < mindx && dz < mindz) {
+					testStatus = BUILDSQUARE_OPEN;
+					break;
+				}
 			}
 		}
-	}
-
-	// Units update their positions on slow update. Synced code must avoid building and trapping
-	// units - so check that all nearby mobile units have correctly accurate positions up to date.
-	if (synced)
-	{
-		assert(!ThreadPool::IsInMultiThreadedSection());
-
-		// buffer should be the maximum distance given by the movetype using the formula:
-		// maxspeed * modInfo.unitQuadPositionUpdateRate + half footStep + 1
-		// +1 on end is a safety buffer against rounding issues with square placement.
-		// placeholder values are given here for the moment.
-		const int largestMoveTypSizeH = moveDefHandler.GetLargestFootPrintSizeH() + 1;
-		const int bufferSize = SQUARE_SIZE * modInfo.unitQuadPositionUpdateRate * 2 + largestMoveTypSizeH + 1;
-		const float3 min((x1 - bufferSize) * SQUARE_SIZE, 0.f, (z1 - bufferSize) * SQUARE_SIZE);
-		const float3 max((x2 + bufferSize) * SQUARE_SIZE, 0.f, (z2 + bufferSize) * SQUARE_SIZE);
-
-		QuadFieldQuery qfQuery;
-		qfQuery.threadOwner = threadOwner;
-		quadField.GetUnitsExact(qfQuery, min, max);
-		for (const CUnit* unit: *qfQuery.units) {
-			if (unit->moveDef != nullptr) 
-				unit->moveType->UpdateGroundBlockMap();
-		}
-	}
-
-	if (commands != nullptr) {
-		// this is only called in unsynced context (ShowUnitBuildSquare)
-		assert(!synced);
 
 		for (int z = z1; z < z2; z++) {
 			for (int x = x1; x < x2; x++) {
@@ -1393,29 +1484,43 @@ CGameHelper::BuildSquareStatus CGameHelper::TestUnitBuildSquare(
 				testStatus = std::min(testStatus, sqrStatus);
 			}
 		}
-	} else {
-		// out of map?
-		if (static_cast<unsigned>(x1) > mapDims.mapx || static_cast<unsigned>(x2) > mapDims.mapx ||
-			static_cast<unsigned>(z1) > mapDims.mapy || static_cast<unsigned>(z2) > mapDims.mapy) {
-			return BUILDSQUARE_BLOCKED;
-		}
 
-		// this can be called in either context
-		for (int z = z1; z < z2; z++) {
-			for (int x = x1; x < x2; x++) {
-				sqrPos.x = x * SQUARE_SIZE;
-				sqrPos.z = z * SQUARE_SIZE;
+		return testStatus;
+	}
 
-				const BuildSquareStatus sqrStatus = TestBuildSquare(sqrPos, xrange, zrange, buildInfo, moveDef, feature, allyteam, synced);
+	// Served/synced test path (commands == nullptr). The synced slow-update (the
+	// only synced mutation in this function -- it refreshes nearby mobile units'
+	// blocking-map positions) stays here, before the read-only templated test.
+	if (synced) {
+		assert(!ThreadPool::IsInMultiThreadedSection());
 
-				if ((testStatus = std::min(testStatus, sqrStatus)) == BUILDSQUARE_BLOCKED) {
-					return BUILDSQUARE_BLOCKED;
-				}
-			}
+		const int xsize = buildInfo.GetXSize();
+		const int zsize = buildInfo.GetZSize();
+		const int x1 = int(buildInfo.pos.x / SQUARE_SIZE) - (xsize >> 1), x2 = x1 + xsize;
+		const int z1 = int(buildInfo.pos.z / SQUARE_SIZE) - (zsize >> 1), z2 = z1 + zsize;
+
+		// buffer should be the maximum distance given by the movetype using the formula:
+		// maxspeed * modInfo.unitQuadPositionUpdateRate + half footStep + 1
+		const int largestMoveTypSizeH = moveDefHandler.GetLargestFootPrintSizeH() + 1;
+		const int bufferSize = SQUARE_SIZE * modInfo.unitQuadPositionUpdateRate * 2 + largestMoveTypSizeH + 1;
+		const float3 min((x1 - bufferSize) * SQUARE_SIZE, 0.f, (z1 - bufferSize) * SQUARE_SIZE);
+		const float3 max((x2 + bufferSize) * SQUARE_SIZE, 0.f, (z2 + bufferSize) * SQUARE_SIZE);
+
+		QuadFieldQuery qfQuery;
+		qfQuery.threadOwner = threadOwner;
+		quadField.GetUnitsExact(qfQuery, min, max);
+		for (const CUnit* unit: *qfQuery.units) {
+			if (unit->moveDef != nullptr)
+				unit->moveType->UpdateGroundBlockMap();
 		}
 	}
 
-	return testStatus;
+	int featureId = -1;
+	placement::LiveView view;
+	view.threadOwner = threadOwner;
+	const BuildSquareStatus ret = placement::TestUnitBuildSquareT(view, buildInfo, featureId, allyteam, synced);
+	feature = (featureId >= 0) ? featureHandler.GetFeature(featureId) : nullptr;
+	return ret;
 }
 
 CGameHelper::BuildSquareStatus CGameHelper::TestBuildSquare(
@@ -1429,97 +1534,12 @@ CGameHelper::BuildSquareStatus CGameHelper::TestBuildSquare(
 	bool synced
 ) {
 	RECOIL_DETAILED_TRACY_ZONE;
-	assert(pos.IsInBounds());
-
-	const int sqx = unsigned(pos.x) / SQUARE_SIZE;
-	const int sqz = unsigned(pos.z) / SQUARE_SIZE;
-
-	const float groundHeight = CGround::GetApproximateHeightUnsafe(sqx, sqz, synced);
-	const UnitDef* unitDef = buildInfo.def;
-
-	if (!CheckTerrainConstraints(unitDef, moveDef, pos.y, groundHeight, CGround::GetSlope(pos.x, pos.z, synced)))
-		return BUILDSQUARE_BLOCKED;
-
-	if (!buildingMaskMap.TestTileMaskUnsafe(sqx >> 1, sqz >> 1, unitDef->buildingMask))
-		return BUILDSQUARE_BLOCKED;
-
-	BuildSquareStatus ret = BUILDSQUARE_OPEN;
-	const int yardxpos = unsigned(pos.x) / SQUARE_SIZE;
-	const int yardypos = unsigned(pos.z) / SQUARE_SIZE;
-	const int2 yardpos = { yardxpos, yardypos };
-	const int ymIdx = GetYardMapIndex(buildInfo.buildFacing, yardpos, xrange, zrange);
-
-	if (yardmapStatusEffectsMap.AreAnyFlagsSet(sqx, sqz, YardmapStatusEffectsMap::BLOCK_BUILDING)) {
-		bool isStackable = (!unitDef->yardmap.empty() && unitDef->yardmap[ymIdx] <= YardmapStates::YARDMAP_STACKABLE);
-		if ( !isStackable && (synced || ((allyteam < 0) || losHandler->InLos(pos, allyteam))) ) {
-			return BUILDSQUARE_BLOCKED;
-		}
-	}
-
-	CSolidObject* so = groundBlockingObjectMap.GroundBlocked(yardxpos, yardypos);
-
-	if (so != nullptr) {
-		CFeature* f = dynamic_cast<CFeature*>(so);
-		CUnit* u = dynamic_cast<CUnit*>(so);
-
-		// blocking-map can lag behind because it is not updated every frame
-		assert(true || (so->pos.x >= xrange.x && so->pos.x <= xrange.y)); // NOLINT{misc-static-assert}
-		assert(true || (so->pos.z >= zrange.x && so->pos.z <= zrange.y)); // NOLINT{misc-static-assert}
-
-		if (f != nullptr) {
-			if ((allyteam < 0) || f->IsInLosForAllyTeam(allyteam)) {
-				if (!f->def->reclaimable) {
-					ret = BUILDSQUARE_BLOCKED;
-				} else {
-					ret = BUILDSQUARE_RECLAIMABLE;
-					feature = f;
-				}
-			}
-		} else {
-			assert(u);
-			if ((allyteam < 0) || (u->losStatus[allyteam] & LOS_INLOS)) {
-				if (so->immobile) {
-					bool isStackable = (!unitDef->yardmap.empty() && unitDef->yardmap[ymIdx] <= YardmapStates::YARDMAP_GEOSTACKABLE);
-					ret = isStackable ? BUILDSQUARE_OPEN :
-							(TestBlockSquareForBuildOnly(so, yardpos) ? BUILDSQUARE_OPEN : BUILDSQUARE_BLOCKED);
-				} else {
-					ret = BUILDSQUARE_OCCUPIED;
-				}
-			}
-		}
-
-		if (ret == BUILDSQUARE_BLOCKED || ret == BUILDSQUARE_OCCUPIED) {
-			// if the to-be-buildee has a MoveDef, test if <so> would block it
-			// note:
-			//   <so> might be another new buildee and if that happens to be located
-			//   on sloped ground, then so->pos.y will equal Builder::StartBuild -->
-			//   ::Pos2BuildPos --> ::GetBuildHeight which can differ from the actual
-			//   ground height at so->pos (s.t. !so->IsOnGround() and the object will
-			//   be non-blocking)
-			//   fixed: no longer true for mobile units
-			#if 0
-			if (synced) {
-				so->PushPhysicalStateBit(CSolidObject::PSTATE_BIT_ONGROUND);
-				so->UpdatePhysicalStateBit(CSolidObject::PSTATE_BIT_ONGROUND, (math::fabs(so->pos.y - groundHeight) <= 0.5f));
-			}
-			#endif
-
-			if (moveDef != nullptr) {
-				MoveTypes::CheckCollisionQuery collisionQuery(moveDef, pos);
-				if (CMoveMath::IsNonBlocking(so, &collisionQuery))
-					ret = BUILDSQUARE_OPEN;
-			}
-
-			#if 0
-			if (synced)
-				so->PopPhysicalStateBit(CSolidObject::PSTATE_BIT_ONGROUND);
-			#endif
-		}
-
-		if (ret == BUILDSQUARE_BLOCKED)
-			return ret;
-	}
-
+	// PLACEMENT REHOST (stage 2): LiveView instantiation of the templated predicate.
+	// The feature out-param is threaded as an id (init from the incoming feature so
+	// the "unchanged unless a reclaimable blocker is found" semantics are preserved).
+	int featureId = (feature != nullptr) ? feature->id : -1;
+	const BuildSquareStatus ret = placement::TestBuildSquareT(placement::LiveView{}, pos, xrange, zrange, buildInfo, moveDef, featureId, allyteam, synced);
+	feature = (featureId >= 0) ? featureHandler.GetFeature(featureId) : nullptr;
 	return ret;
 }
 
@@ -1529,24 +1549,10 @@ bool CGameHelper::TestBlockSquareForBuildOnly(
 )
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	bool ret = false;
-	auto so = blockingObject;
-	
-	// check whether the current building allows for building in the given square.
-	auto soYardMap = so->GetBlockMap();
-	if (soYardMap != nullptr) {
-		const int sox1 = int(so->pos.x / SQUARE_SIZE) - (so->xsize >> 1), sox2 = sox1 + so->xsize;
-		const int soz1 = int(so->pos.z / SQUARE_SIZE) - (so->zsize >> 1), soz2 = soz1 + so->zsize;
-		const int2 soxrange = int2(sox1, sox2);
-		const int2 sozrange = int2(soz1, soz2);
-
-		auto soYmIdx = GetYardMapIndex(so->buildFacing, yardpos, soxrange, sozrange);
-		if (soYardMap[soYmIdx] == YardmapStates::YARDMAP_BUILDONLY)
-			// While the square is blocked for walking, it is open for building.
-			ret = true;
-	}
-
-	return ret;
+	// PLACEMENT REHOST (stage 2): the body is now a templated pure function over a
+	// state view (placement::TestBlockSquareForBuildOnlyT); this is the LiveView
+	// instantiation, byte-identical to the previous inline body.
+	return placement::TestBlockSquareForBuildOnlyT(placement::LiveView{}, blockingObject, yardpos);
 }
 
 /**

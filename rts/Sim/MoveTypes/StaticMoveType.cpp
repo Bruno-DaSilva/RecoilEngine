@@ -19,6 +19,7 @@ CR_REG_METADATA(CStaticMoveType, (
 
 CStaticMoveType::CStaticMoveType(CUnit* unit) : AMoveType(unit) {
 	RECOIL_DETAILED_TRACY_ZONE;
+	moveTypeClass = MT_STATIC;
 	useWantedSpeed[false] = false;
 	useWantedSpeed[ true] = false;
 

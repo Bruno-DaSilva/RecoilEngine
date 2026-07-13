@@ -19,6 +19,7 @@
 #include "Rendering/GlobalRendering.h"
 #include "Rendering/ShadowHandler.h"
 #include "Rendering/Units/UnitDrawer.h"
+#include "Rendering/Features/FeatureDrawer.h"
 #include "Rendering/Env/ISky.h"
 #include "Rendering/Env/SunLighting.h"
 #include "Rendering/Env/WaterRendering.h"
@@ -37,6 +38,7 @@
 #include "Sim/Features/Feature.h"
 #include "Sim/Features/FeatureDef.h"
 #include "Sim/Features/FeatureDefHandler.h"
+#include "Sim/Features/FeatureHandler.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Units/UnitDefHandler.h"
@@ -859,6 +861,34 @@ uint32_t CGroundDecalHandler::GetTexTarget() const
 	return atlasTex ? atlasTex->GetTexTarget() : 0;
 }
 
+// decalOwners solid-object keys (PR 26, see the DecalOwner comment in the
+// header): pack via GetBlockingMapID() -- units [0, MaxUnits), features
+// [MaxUnits, ...) -- and resolve back through the handlers. Resolution sites
+// carry the PR-14 post-drain invariant: a keyed id names a live object.
+static inline int MakeSolidObjectKey(const CSolidObject* object)
+{
+	return object->GetBlockingMapID();
+}
+
+static inline bool SolidObjectKeyIsUnit(int somID)
+{
+	return (somID < static_cast<int>(unitHandler.MaxUnits()));
+}
+
+static inline const CUnit* ResolveUnitKey(int somID)
+{
+	assert(SolidObjectKeyIsUnit(somID));
+	return unitHandler.GetUnit(somID);
+}
+
+static inline const CSolidObject* ResolveSolidObjectKey(int somID)
+{
+	if (SolidObjectKeyIsUnit(somID))
+		return unitHandler.GetUnit(somID);
+
+	return featureHandler.GetFeature(somID - unitHandler.MaxUnits());
+}
+
 void CGroundDecalHandler::AddSolidObject(const CSolidObject* object) { MoveSolidObject(object, object->pos); }
 void CGroundDecalHandler::MoveSolidObject(const CSolidObject* object, const float3& pos)
 {
@@ -891,7 +921,7 @@ void CGroundDecalHandler::MoveSolidObject(const CSolidObject* object, const floa
 
 	const auto createFrame = static_cast<float>(std::max(gs->frameNum, 0));
 
-	if (const auto doIt = decalOwners.find(object); doIt != decalOwners.end()) {
+	if (const auto doIt = decalOwners.find(MakeSolidObjectKey(object)); doIt != decalOwners.end()) {
 		assert(doIt->second < decals.size());
 		auto& decal = decals[doIt->second];
 		decal.posTL = posTL;
@@ -935,7 +965,7 @@ void CGroundDecalHandler::MoveSolidObject(const CSolidObject* object, const floa
 
 	decalsUpdateList.EmplaceBackUpdate();
 	idToPos[decal.info.id] = decals.size() - 1;
-	decalOwners[object] = decals.size() - 1;
+	decalOwners[MakeSolidObjectKey(object)] = decals.size() - 1;
 }
 
 void CGroundDecalHandler::RemoveSolidObject(const CSolidObject* object, const GhostSolidObject* gb)
@@ -943,7 +973,7 @@ void CGroundDecalHandler::RemoveSolidObject(const CSolidObject* object, const Gh
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(object);
 
-	const auto doIt = decalOwners.find(object);
+	const auto doIt = decalOwners.find(MakeSolidObjectKey(object));
 	if (doIt == decalOwners.end()) {
 		// it's ok for an object to not have any decals
 		return;
@@ -1198,7 +1228,7 @@ const CSolidObject* CGroundDecalHandler::GetDecalSolidObjectOwner(uint32_t id) c
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	for (const auto& [owner, pos] : decalOwners) {
-		if (!std::holds_alternative<const CSolidObject*>(owner))
+		if (!std::holds_alternative<int>(owner))
 			continue;
 
 		assert(pos < decals.size());
@@ -1210,10 +1240,36 @@ const CSolidObject* CGroundDecalHandler::GetDecalSolidObjectOwner(uint32_t id) c
 		if (id != decals[pos].info.id)
 			continue;
 
-		return std::get<const CSolidObject*>(owner);
+		return ResolveSolidObjectKey(std::get<int>(owner));
 	}
 
 	return nullptr;
+}
+
+int CGroundDecalHandler::GetDecalSolidObjectOwnerID(uint32_t id) const
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	// mirror of GetDecalSolidObjectOwner but returns the packed owner key
+	// (draw-owned) WITHOUT resolving it to a sim-owned pointer -- the caller
+	// gates the id through the snapshot Valid check instead of dereferencing a
+	// possibly-freed CUnit/CFeature under the split.
+	for (const auto& [owner, pos] : decalOwners) {
+		if (!std::holds_alternative<int>(owner))
+			continue;
+
+		assert(pos < decals.size());
+		const auto& decal = decals[pos];
+
+		if (!decal.IsValid())
+			continue;
+
+		if (id != decals[pos].info.id)
+			continue;
+
+		return std::get<int>(owner);
+	}
+
+	return -1;
 }
 
 void CGroundDecalHandler::SetUnitLeaveTracks(CUnit* unit, bool leaveTracks)
@@ -1221,7 +1277,7 @@ void CGroundDecalHandler::SetUnitLeaveTracks(CUnit* unit, bool leaveTracks)
 	//ZoneScoped;
 	unit->leaveTracks = leaveTracks;
 	if (!leaveTracks) {
-		if (auto it = decalOwners.find(unit); it != decalOwners.end()) {
+		if (auto it = decalOwners.find(MakeSolidObjectKey(unit)); it != decalOwners.end()) {
 			auto& mm = unitMinMaxHeights[unit->id];
 
 			decalOwners.erase(it); // restart with new decal next time
@@ -1275,7 +1331,7 @@ void CGroundDecalHandler::AddTrack(const CUnit* unit, const float3& newPos, bool
 	auto& mm = unitMinMaxHeights[unit->id];
 
 	if (!CanReceiveTracks(decalPos) || (unit->IsInWater() && !unit->IsOnGround())) {
-		decalOwners.erase(unit); // restart with new decal next time
+		decalOwners.erase(MakeSolidObjectKey(unit)); // restart with new decal next time
 		mm = {};
 		return;
 	}
@@ -1288,7 +1344,7 @@ void CGroundDecalHandler::AddTrack(const CUnit* unit, const float3& newPos, bool
 
 	const auto createFrameInt = static_cast<uint32_t>(std::max(gs->frameNum, 0));
 	const auto createFrame = static_cast<float>(createFrameInt);
-	const auto doIt = decalOwners.find(unit);
+	const auto doIt = decalOwners.find(MakeSolidObjectKey(unit));
 	if (doIt == decalOwners.end()) {
 		// new decal
 
@@ -1330,7 +1386,7 @@ void CGroundDecalHandler::AddTrack(const CUnit* unit, const float3& newPos, bool
 
 		mm = {};
 
-		decalOwners[unit] = decals.size() - 1;
+		decalOwners[MakeSolidObjectKey(unit)] = decals.size() - 1;
 		idToPos[decal.info.id] = decals.size() - 1;
 		decalsUpdateList.EmplaceBackUpdate();
 
@@ -1353,7 +1409,7 @@ void CGroundDecalHandler::AddTrack(const CUnit* unit, const float3& newPos, bool
 
 	// check if the unit is standing still
 	if (oldDecal.createFrameMax + TRACKS_UPDATE_RATE < createFrame) {
-		decalOwners.erase(unit);
+		decalOwners.erase(MakeSolidObjectKey(unit));
 		mm = {};
 		return;
 	}
@@ -1419,7 +1475,7 @@ void CGroundDecalHandler::AddTrack(const CUnit* unit, const float3& newPos, bool
 	mm = {};
 
 	// replace the old entry
-	decalOwners[unit] = decals.size() - 1;
+	decalOwners[MakeSolidObjectKey(unit)] = decals.size() - 1;
 
 	idToPos[newDecal.info.id] = decals.size() - 1;
 	decalsUpdateList.EmplaceBackUpdate();
@@ -1462,8 +1518,8 @@ void CGroundDecalHandler::CompactDecalsVector(int frameNum)
 #if 0
 	LOG("DH:CompactDecalsVector[1](fn=%d) Decals.size()=%u", frameNum, static_cast<uint32_t>(decals.size()));
 	for (int cnt = 0; const auto & [owner, offset] : decalOwners) {
-		const void* ptr = std::holds_alternative<const CSolidObject*>(owner) ? static_cast<const void*>(std::get<const CSolidObject*>(owner)) : nullptr;
-		int id = (ptr != nullptr) ? std::get<const CSolidObject*>(owner)->id : -1;
+		int id = std::holds_alternative<int>(owner) ? std::get<int>(owner) : -1;
+		const void* ptr = std::holds_alternative<const GhostSolidObject*>(owner) ? static_cast<const void*>(std::get<const GhostSolidObject*>(owner)) : nullptr;
 
 		LOG("DH:CompactDecalsVector[1] [cnt=%d][ptr=%p][id=%d]=[pos=%u]",
 			cnt++,
@@ -1530,8 +1586,8 @@ void CGroundDecalHandler::CompactDecalsVector(int frameNum)
 #if 0
 	LOG("DH:CompactDecalsVector[2](fn=%d) Decals.size()=%u", frameNum, static_cast<uint32_t>(decals.size()));
 	for (int cnt = 0; const auto & [owner, offset] : decalOwners) {
-		const void* ptr = std::holds_alternative<const CSolidObject*>(owner) ? static_cast<const void*>(std::get<const CSolidObject*>(owner)) : nullptr;
-		int id = (ptr != nullptr) ? std::get<const CSolidObject*>(owner)->id : -1;
+		int id = std::holds_alternative<int>(owner) ? std::get<int>(owner) : -1;
+		const void* ptr = std::holds_alternative<const GhostSolidObject*>(owner) ? static_cast<const void*>(std::get<const GhostSolidObject*>(owner)) : nullptr;
 
 		LOG("DH:CompactDecalsVector[2] [cnt=%d][ptr=%p][id=%d]=[pos=%u]",
 			cnt++,
@@ -1553,15 +1609,22 @@ void CGroundDecalHandler::UpdateDecalsVisibility()
 		if (decal.info.type != static_cast<uint8_t>(GroundDecal::Type::DECAL_PLATE))
 			continue;
 
-		if (std::holds_alternative<const CSolidObject*>(owner)) {
-			const auto* so = std::get<const CSolidObject*>(owner);
+		if (std::holds_alternative<int>(owner)) {
+			const int somID = std::get<int>(owner);
 			float wantedMult = 1.0f;
 
-			if (const CUnit* unit = dynamic_cast<const CUnit*>(so); unit != nullptr) {
+			// the key kind replaces the old dynamic_cast; runs post-drain, so
+			// the id must resolve (PR-14 post-drain invariant)
+			if (SolidObjectKeyIsUnit(somID)) {
+				const CUnit* unit = ResolveUnitKey(somID);
+				assert(unit != nullptr);
+				if (unit == nullptr)
+					continue;
+
 				const bool decalOwnerInCurLOS = ((unit->losStatus[gu->myAllyTeam] &   LOS_INLOS) != 0);
 				const bool decalOwnerInPrvLOS = ((unit->losStatus[gu->myAllyTeam] & LOS_PREVLOS) != 0);
 				const bool isGhostNow = gameSetup->ghostedBuildings && decalOwnerInPrvLOS && !decalOwnerInCurLOS;
-				const bool iconOnly = (unit->GetDrawFlag() == DrawFlags::SO_DRICON_FLAG);
+				const bool iconOnly = (CUnitDrawer::GetDrawFlag(unit) == DrawFlags::SO_DRICON_FLAG);
 
 				if (!gu->spectatingFullView && isGhostNow) {
 					// don't show ground decals for ghosts, this not for long used to be ghostDimming
@@ -1580,12 +1643,15 @@ void CGroundDecalHandler::UpdateDecalsVisibility()
 				wantedMult *= std::clamp(unit->buildProgress, 0.0f, 1.0f);
 			}
 			else {
-				const CFeature* feature = static_cast<const CFeature*>(so);
-				assert(feature);
+				const CFeature* feature = featureHandler.GetFeature(somID - unitHandler.MaxUnits());
+				assert(feature != nullptr);
+				if (feature == nullptr)
+					continue;
+
 				if (!feature->IsInLosForAllyTeam(gu->myAllyTeam))
 					wantedMult = 0.0f;
 
-				wantedMult = std::min(wantedMult, std::max(0.0f, feature->drawAlpha));
+				wantedMult = std::min(wantedMult, std::max(0.0f, CFeatureDrawer::GetDrawAlpha(feature)));
 			}
 
 			if (math::fabs(wantedMult - decal.visMult) > 0.05f) {
@@ -1638,8 +1704,8 @@ void CGroundDecalHandler::GameFramePost(int frameNum)
 #if 0
 	LOG("DH:GD(fn=%d) Decals.size()=%u", frameNum, static_cast<uint32_t>(decals.size()));
 	for (int cnt = 0; const auto & [owner, offset] : decalOwners) {
-		const void* ptr = std::holds_alternative<const CSolidObject*>(owner) ? static_cast<const void*>(std::get<const CSolidObject*>(owner)) : nullptr;
-		int id = (ptr != nullptr) ? std::get<const CSolidObject*>(owner)->id : -1;
+		int id = std::holds_alternative<int>(owner) ? std::get<int>(owner) : -1;
+		const void* ptr = std::holds_alternative<const GhostSolidObject*>(owner) ? static_cast<const void*>(std::get<const GhostSolidObject*>(owner)) : nullptr;
 
 		LOG("DH:GD [cnt=%d][ptr=%p][id=%d]=[pos=%u]",
 			cnt++,
@@ -1653,10 +1719,18 @@ void CGroundDecalHandler::GameFramePost(int frameNum)
 	std::vector<const CUnit*> deferredTrackUpdate;
 
 	for (const auto& [owner, _] : decalOwners) {
-		if (!std::holds_alternative<const CSolidObject*>(owner))
+		if (!std::holds_alternative<int>(owner))
 			continue;
 
-		const CUnit* unit = dynamic_cast<const CUnit*>(std::get<const CSolidObject*>(owner));
+		const int somID = std::get<int>(owner);
+		if (!SolidObjectKeyIsUnit(somID))
+			continue;
+
+		// sim-phase resolution: a unit that died earlier in this sim batch is
+		// already out of the handler (its destroy record drains later), so it
+		// reads null here -- same skip its nulled shell moveType produced when
+		// the map was pointer-keyed
+		const CUnit* unit = ResolveUnitKey(somID);
 		if (unit == nullptr)
 			continue;
 

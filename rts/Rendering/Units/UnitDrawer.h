@@ -51,12 +51,64 @@ public:
 
 	static void AddTempDrawUnit(const CUnitDrawerData::TempDrawUnit& tempDrawUnit) { modelDrawerData->AddTempDrawUnit(tempDrawUnit); }
 
-	static const std::vector<CUnit*>& GetUnsortedUnits() { return modelDrawerData->GetUnsortedObjects(); }
+	static const std::vector<int>& GetUnsortedUnits() { return modelDrawerData->GetUnsortedObjects(); } // unit ids (PR 14)
+
+	// drawer-owned draw-time positions/transforms (sim/draw §A drawPos eviction)
+	static const float3& GetDrawPos(const CUnit* unit) { return modelDrawerData->GetDrawPos(unit); }
+	static const float3& GetDrawPos(int unitID) { return modelDrawerData->GetDrawPos(unitID); }
+	static const float3& GetDrawMidPos(const CUnit* unit) { return modelDrawerData->GetDrawMidPos(unit); }
+	// id-keyed forms for the sim|draw PR 40 frustum twins (same stored values)
+	static const float3& GetDrawMidPos(int unitID) { return modelDrawerData->GetDrawMidPos(unitID); }
+	static float GetDrawRadius(int unitID) { return modelDrawerData->GetDrawRadius(unitID); }
+	static float3 GetObjectSpaceDrawPos(const CUnit* unit, const float3& p) { return modelDrawerData->GetObjectSpaceDrawPos(unit, p); }
+	static float3 GetObjDrawMidPos(const CUnit* unit) { return modelDrawerData->GetObjDrawMidPos(unit); }
+	static float3 GetObjDrawErrorPos(const CUnit* unit, int allyteam) { return modelDrawerData->GetObjDrawErrorPos(unit, allyteam); }
+	static CMatrix44f GetUnsyncedTransformMatrix(const CUnit* unit, bool fullread = false) { return modelDrawerData->GetUnsyncedTransformMatrix(unit, fullread); }
+
+	// drawer-owned draw-visibility flags + icon state (sim/draw §A drawFlag eviction, PR 4)
+	static uint8_t GetDrawFlag(const CUnit* unit) { return modelDrawerData->GetDrawFlag(unit); }
+	static uint8_t GetPreviousDrawFlag(const CUnit* unit) { return modelDrawerData->GetPreviousDrawFlag(unit); }
+	static bool HasDrawFlag(const CUnit* unit, DrawFlags f) { return modelDrawerData->HasDrawFlag(unit, f); }
+	static bool GetIsIcon(const CUnit* unit) { return modelDrawerData->GetUnitIsIcon(unit); }
+	static bool GetIsIcon(int unitID) { return modelDrawerData->GetUnitIsIcon(unitID); }
+
+	// SCOPE-1: drawer-owned per-unit render record (immutable header + sim-owned
+	// mutable fields the draw-window passes read); never dereference live CUnit
+	static const CUnitDrawerData::UnitRenderRecord& GetRenderRecord(const CUnit* unit) { return modelDrawerData->GetRenderRecord(unit); }
+	static const CUnitDrawerData::UnitRenderRecord& GetRenderRecord(int unitID) { return modelDrawerData->GetRenderRecord(unitID); }
+	// PR 43 (3b): barrier step 8 / valve hook (see CUnitDrawerData)
+	static void ClearDeadRetainedRecords() { if (modelDrawerData != nullptr) modelDrawerData->ClearDeadRetainedRecords(); }
+	// PR 44a: producer-side transform extraction (sim thread, frame edge,
+	// forced-serial -- see CModelDrawerDataBase::ExtractTransforms)
+	static void ExtractTransformsAtSimEdge() { if (modelDrawerData != nullptr) modelDrawerData->ExtractTransformsAtSimEdge(); }
+
+	// drawer-owned Lua material state + per-piece LOD display lists evicted from
+	// LocalModel/LocalModelPiece (sim/draw PR 10)
+	static LuaObjectMaterialData& GetLuaMaterialData(int unitID) { return modelDrawerData->GetLuaMaterialDataRef(unitID); }
+	static std::vector<std::vector<uint32_t>>& GetLodDispLists(int unitID) { return modelDrawerData->GetLodDispListsRef(unitID); }
 
 	static void ClearPreviousDrawFlags() { modelDrawerData->ClearPreviousDrawFlags(); }
 	static void UnitLeavesGhostChanged(const CUnit* unit, const bool leaveDeadGhost) { modelDrawerData->UnitLeavesGhostChanged(unit, leaveDeadGhost); }
 
+	// renderEventQueue dispatch targets for queued LOS-transition records
+	static void ApplyUnitRadarChanged(const CUnit* unit, int allyTeam) { modelDrawerData->ApplyUnitRadarChanged(unit, allyTeam); }
+	static void ApplyUnitEnteredLos(const CUnit* unit, int allyTeam, bool leavesGhostAtEvent) { modelDrawerData->ApplyUnitEnteredLos(unit, allyTeam, leavesGhostAtEvent); }
+	static void ApplyUnitLeftLos(const CUnit* unit, int allyTeam, bool leavesGhostAtEvent) { modelDrawerData->ApplyUnitLeftLos(unit, allyTeam, leavesGhostAtEvent); }
+	static void ApplyUnitLeavesGhostChanged(const CUnit* unit, const GhostAllyMask& deadGhostAllyMask) { modelDrawerData->ApplyUnitLeavesGhostChanged(unit, deadGhostAllyMask); }
+
 	static void UpdateCurrentUnitIcon(const CUnit* unit) { modelDrawerData->UpdateCurrentUnitIcon(unit); }
+
+	// drawer-owned per-unit icon state (sim/draw §A icon-state eviction, PR 5);
+	// GetUnitIconRadius also serves draw-side picking (TraceRay)
+	static size_t GetUnitIconIndex(const CUnit* unit) { return modelDrawerData->GetUnitIconIndex(unit); }
+	static float GetUnitIconRadius(const CUnit* unit) { return modelDrawerData->GetUnitIconRadius(unit); }
+	static float GetUnitIconRadius(int unitID) { return modelDrawerData->GetUnitIconRadius(unitID); }
+	static bool GetUnitDrawIcon(const CUnit* unit) { return modelDrawerData->GetUnitDrawIcon(unit); }
+	static void SetUnitDrawIcon(const CUnit* unit, bool b) { modelDrawerData->SetUnitDrawIcon(unit, b); }
+	static void SetUnitCustomIcon(const CUnit* unit, size_t iconIdx) { modelDrawerData->SetUnitCustomIcon(unit, iconIdx); }
+	// id-keyed variants (§4.6): draw-context Lua ctrl pokes hold a snapshot id
+	static void SetUnitDrawIcon(int unitID, bool b) { modelDrawerData->SetUnitDrawIcon(unitID, b); }
+	static void SetUnitCustomIcon(int unitID, size_t iconIdx) { modelDrawerData->SetUnitCustomIcon(unitID, iconIdx); }
 public:
 	// DrawUnit*
 	virtual void DrawUnitNoTrans(const CUnit* unit, uint32_t preList, uint32_t postList, bool lodCall, bool noLuaCall) const = 0;
@@ -82,9 +134,9 @@ public:
 
 	virtual void DrawBuildIcons(const std::vector<CCursorIcons::BuildIcon>& buildIcons) const = 0;
 protected:
-	static bool ShouldDrawOpaqueUnit(CUnit* u, uint8_t thisPassMask);
-	static bool ShouldDrawAlphaUnit(CUnit* u, uint8_t thisPassMask);
-	static bool ShouldDrawUnitShadow(CUnit* u);
+	static bool ShouldDrawOpaqueUnit(const CUnit* u, uint8_t thisPassMask);
+	static bool ShouldDrawAlphaUnit(const CUnit* u, uint8_t thisPassMask);
+	static bool ShouldDrawUnitShadow(const CUnit* u);
 
 	virtual void DrawGhostedBuildings(int modelType) const = 0;
 protected:
@@ -161,9 +213,9 @@ protected:
 
 	void DrawGhostedBuildings(int modelType) const override;
 
-	void DrawOpaqueUnit(CUnit* unit, uint8_t thisPassMask) const;
-	void DrawUnitShadow(CUnit* unit) const;
-	void DrawAlphaUnit(CUnit* unit, int modelType, uint8_t thisPassMask, bool drawGhostBuildingsPass) const;
+	void DrawOpaqueUnit(const CUnit* unit, uint8_t thisPassMask) const;
+	void DrawUnitShadow(const CUnit* unit) const;
+	void DrawAlphaUnit(const CUnit* unit, int modelType, uint8_t thisPassMask, bool drawGhostBuildingsPass) const;
 
 	void DrawOpaqueAIUnit(const CUnitDrawerData::TempDrawUnit& unit) const;
 	void DrawAlphaAIUnit(const CUnitDrawerData::TempDrawUnit& unit) const;
@@ -188,7 +240,7 @@ protected:
 	void PopIndividualAlphaState(const S3DModel* model, int teamID, bool deferredPass) const;
 
 	void DrawUnitMiniMapIcon(TypedRenderBuffer<VA_TYPE_2DTC3>& rb, size_t iconIdx, const float iconScale, const float3& pos, const SColor& color) const;
-	float DrawUnitIcon(TypedRenderBuffer<VA_TYPE_TC3>& rb, size_t iconIdx, const float iconRadius, const float unitRadius, float3 pos, const SColor& color) const;
+	float DrawUnitIcon(TypedRenderBuffer<VA_TYPE_TC3>& rb, size_t iconIdx, const float unitRadius, float3 pos, const SColor& color) const;
 	void DrawUnitIconScreen(TypedRenderBuffer<VA_TYPE_2DTC3>& rb, size_t iconIdx, const float3& pos, SColor& color, float unitRadius, bool isIcon) const;
 };
 

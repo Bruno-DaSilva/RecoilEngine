@@ -96,7 +96,9 @@ CMobileCAI::CMobileCAI():
 	tempOrder(false),
 	slowGuard(false),
 	moveDir(gsRNG.NextFloat() > 0.5f)
-{}
+{
+	mobileCAI = true;
+}
 
 
 CMobileCAI::CMobileCAI(CUnit* owner):
@@ -112,6 +114,8 @@ CMobileCAI::CMobileCAI(CUnit* owner):
 	slowGuard(false),
 	moveDir(gsRNG.NextFloat() > 0.5f)
 {
+	mobileCAI = true;
+
 	CalculateCancelDistance();
 
 	{
@@ -499,6 +503,7 @@ void CMobileCAI::ExecuteFight(Command& c)
 
 			if ((newTarget != nullptr) && w->Attack(SWeaponTarget(newTarget, false))) {
 				c.SetParam(0, newTarget->id);
+				commandQue.BumpVersion(); // c aliases the queued front command
 
 				inCommand = CMD_STOP;
 			}
@@ -1027,6 +1032,7 @@ bool CMobileCAI::SetFrontMoveCommandPos(const float3& pos)
 		return false;
 
 	(commandQue.front()).SetPos(0, pos);
+	commandQue.BumpVersion(); // in-place edit of the queued front command
 	return true;
 }
 
@@ -1997,6 +2003,7 @@ void CMobileCAI::UnloadLand(Command& c)
 
 			if (FindEmptySpot(transportee, wantedPos, std::max(16.0f * SQUARE_SIZE, transportee->radius * 4.0f), transportee->radius, newWantedPos)) {
 				c.SetPos(0, newWantedPos);
+				commandQue.BumpVersion(); // c aliases the queued front command
 				SetGoal(newWantedPos + UpVector * transportee->model->height, owner->pos);
 				return;
 			}

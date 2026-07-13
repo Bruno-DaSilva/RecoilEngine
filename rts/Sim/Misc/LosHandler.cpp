@@ -97,8 +97,12 @@ void ILosType::Init(const int mipLevel_, LosType type_)
 	const float* ctrHeightMap = readMap->GetCenterHeightMapSynced();
 	const float* mipHeightMap = readMap->GetMIPHeightMapSynced(mipLevel_);
 
-	for (CLosMap& losMap: losMaps) {
+	for (size_t at = 0; at < losMaps.size(); ++at) {
+		CLosMap& losMap = losMaps[at];
 		losMap.Init(size, int2(mapDims.mapx, mapDims.mapy), ctrHeightMap, mipHeightMap, type == LOS_TYPE_LOS);
+		// PR 28: identify this map to the DrawMapMirrors LOS store; mirrorType
+		// == the LosType enum (matches DrawMapMirrors::LOS_MIRROR_TYPE_*)
+		losMap.SetMirrorId(static_cast<int>(type), static_cast<int>(at));
 	}
 }
 
@@ -951,11 +955,18 @@ bool CLosHandler::InRadar(const float3 pos, int allyTeam) const
 bool CLosHandler::InRadar(const CUnit* unit, int allyTeam) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	return InRadar(unit, allyTeam, InJammer(unit, allyTeam));
+}
+
+
+bool CLosHandler::InRadar(const CUnit* unit, int allyTeam, bool inJammer) const
+{
+	RECOIL_DETAILED_TRACY_ZONE;
 	// unit is discoverable by sonar
 	if (unit->IsInWater()) {
 		if ((!unit->sonarStealth || unit->beingBuilt) &&
 		    sonar.InSight(unit->pos, allyTeam) &&
-		    !InJammer(unit, allyTeam))
+		    !inJammer)
 			return true;
 	}
 
@@ -967,7 +978,7 @@ bool CLosHandler::InRadar(const CUnit* unit, int allyTeam) const
 	if (unit->stealth && !unit->beingBuilt)
 		return false;
 
-	return (radar.InSight(unit->pos, allyTeam) && !InJammer(unit, allyTeam));
+	return (radar.InSight(unit->pos, allyTeam) && !inJammer);
 }
 
 

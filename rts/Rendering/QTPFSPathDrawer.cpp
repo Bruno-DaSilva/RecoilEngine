@@ -31,6 +31,8 @@
 #include "Rendering/GL/RenderBuffers.h"
 #include "Rendering/Map/InfoTexture/IInfoTextureHandler.h"
 #include "System/StringUtil.h"
+#include "System/Log/ILog.h"
+#include "System/SimDrawSplit.h"
 
 static std::vector<const QTPFS::QTNode*> visibleNodes;
 
@@ -51,6 +53,16 @@ QTPFSPathDrawer::QTPFSPathDrawer() {
 }
 
 void QTPFSPathDrawer::DrawAll() const {
+	// PR 27b: walks live sim state; dark under the running split (dev tool)
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
+		static bool warned = false;
+		if (!warned) {
+			LOG_L(L_WARNING, "[%s] debug overlay unavailable with SimDrawSplit=1", __func__);
+			warned = true;
+		}
+		return;
+	}
+
 	const MoveDef* md = GetSelectedMoveDef();
 
 	if (md == nullptr)

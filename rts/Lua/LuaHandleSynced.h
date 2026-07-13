@@ -3,11 +3,15 @@
 #ifndef LUA_HANDLE_SYNCED
 #define LUA_HANDLE_SYNCED
 
+#include <mutex>
 #include <string>
 
 #include "LuaHandle.h"
+#include "System/SimDrawSplit.h"
+#include "System/UnsyncedBoundaryQueue.h"
 #include "LuaRulesParams.h"
 #include "System/UnorderedMap.hpp"
+#include "System/UnorderedSet.hpp"
 
 struct lua_State;
 class LuaSyncedCtrl;
@@ -183,7 +187,24 @@ class CSplitLuaHandle
 {
 	public: // Non-eventhandler call-ins
 		bool GotChatMsg(const std::string& msg, int playerID) {
-			return syncedLuaHandle.GotChatMsg(msg, playerID) || unsyncedLuaHandle.GotChatMsg(msg, playerID);
+			const bool syncedHandled = syncedLuaHandle.GotChatMsg(msg, playerID);
+
+			// PR 27b: the unsynced half belongs to the draw thread; this
+			// arrives via synced-action net processing (the sim thread under
+			// the split). Defer that leg; the "handled" answer then reflects
+			// the synced half only -- master's return was only consumed for
+			// duplicate-dispatch suppression, and a deferred unsynced leg
+			// cannot be double-dispatched anyway.
+			if (SimDrawSplit::DeferUnsyncedNow()) {
+				if (!syncedHandled) {
+					CUnsyncedLuaHandle* ulh = &unsyncedLuaHandle;
+					UnsyncedBoundaryQueue::DeferFor(ulh, [ulh, msg, playerID]() { ulh->GotChatMsg(msg, playerID); });
+				}
+
+				return syncedHandled;
+			}
+
+			return syncedHandled || unsyncedLuaHandle.GotChatMsg(msg, playerID);
 		}
 
 		bool RecvLuaMsg(const std::string& msg, int playerID) {
@@ -216,9 +237,72 @@ class CSplitLuaHandle
 			return &ulh->base.syncedLuaHandle;
 		}
 
+		static CSplitLuaHandle* GetSplitHandle(lua_State* L) {
+			if (CLuaHandle::GetHandleSynced(L))
+				return &CSyncedLuaHandle::GetSyncedHandle(L)->base;
+
+			return &CUnsyncedLuaHandle::GetUnsyncedHandle(L)->base;
+		}
+
+		// ---- PR 44b remainder (§9 BINDING ruling): SYNCED-globals epoch mirror ----
+		// Read-set-driven: the SYNCED proxy registers every dispatch-window key
+		// on first touch; the SIM thread mirrors the registered keys' SCALAR
+		// _G values at its produce edge; the consumer commits them with the
+		// acquired epoch; the proxy serves subsequent window reads from the
+		// held epoch's mirror. FIDELITY: the mirrored value is the epoch
+		// edge's -- it matches the deferred events' frame window, which is
+		// MORE master-faithful than the live read the parked dispatch used to
+		// make (master's handlers ran mid-frame-N; the mirror is frame-N
+		// state). Non-scalar values (tables etc.) and first-touch misses are
+		// NOT servable: the proxy takes the dispatch-scoped lazy park instead
+		// (measured rare -- pregame system_info, game-end gui_awards).
+
+		/// SYNCED proxy serve attempt (key at the top of dstL's stack):
+		/// 1 = value pushed (mirror hit, scalar); 0 = not servable (the key
+		/// is registered either way; the caller lazy-parks + reads live)
+		int ServeSyncedGlobalFromMirror(lua_State* dstL);
+
+		/// producer (sim thread, produce edge): mirror the registered keys'
+		/// current _G values into the staged map. onlyIfDirty: only when the
+		/// read-set grew since the last mirror (the paused-idle servicing)
+		void MirrorSyncedGlobalsAtSimEdge(bool onlyIfDirty);
+		/// consumer (barrier): commit staged -> served with the epoch
+		void CommitSyncedGlobalsMirror();
+
+		/// the produce-edge / barrier hooks over the live handle pairs
+		/// (luaRules + luaGaia, null-checked)
+		static void MirrorAllSyncedGlobalsAtSimEdge(bool onlyIfDirty);
+		static void CommitAllSyncedGlobalsMirrors();
+
+		// PR 44b: the SendToUnsynced mailbox rotates per epoch batch (the
+		// fire and drain sides run concurrently under the no-park split; see
+		// the mailbox block in the .cpp). Rotate at the producer's seal,
+		// recycle after the consumer drained the held slot's closures.
+		static void RotateSendToUnsyncedMailbox(int slot);
+		static void RecycleSendToUnsyncedMailbox(int slot);
+
 		bool ReloadUnsynced() { return (FreeUnsynced(), LoadUnsynced()); }
 		bool SwapSyncedHandle(lua_State* L, lua_State* L_GC);
 		bool InitUnsynced();
+
+	private:
+		// PR 44b remainder: the SYNCED-globals mirror state (see the method
+		// comments above). One mutex guards all of it -- draw registers/serves
+		// (dispatch window), the sim thread stages at its produce edge, the
+		// consumer swaps at the barrier; a handful of keys in practice.
+		struct SyncedGlobalMirrorValue {
+			enum Type : uint8_t { NIL, BOOL, NUM, STR, UNSERVABLE };
+			Type type = UNSERVABLE;
+			bool b = false;
+			double n = 0.0;
+			std::string s;
+		};
+		std::mutex syncedMirrorMtx;
+		spring::unordered_set<std::string> syncedMirrorReadSet;
+		spring::unordered_map<std::string, SyncedGlobalMirrorValue> syncedMirrorStaged;
+		spring::unordered_map<std::string, SyncedGlobalMirrorValue> syncedMirrorServed;
+		bool syncedMirrorStagedValid = false;
+		bool syncedMirrorReadSetDirty = false;
 
 	protected:
 		CSplitLuaHandle(const std::string& name, int order);

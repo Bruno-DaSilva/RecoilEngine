@@ -127,10 +127,13 @@ public:
 
 	float GetPointSurfaceDistance(const CUnit* u, const LocalModelPiece* lmp, const float3& pos) const;
 	float GetPointSurfaceDistance(const CFeature* u, const LocalModelPiece* lmp, const float3& pos) const;
+	// object-free matrix-space overload (public for the sim/draw split trace
+	// re-host: the epoch TestCone helper reconstructs the inverse-volume matrix
+	// from the snapshot rows and queries surface distance without a live object)
+	float GetPointSurfaceDistance(const CMatrix44f& mv, const float3& p) const;
 
 private:
 	float GetPointSurfaceDistance(const CSolidObject* obj, const LocalModelPiece* lmp, const CMatrix44f& mat, const float3& pos) const;
-	float GetPointSurfaceDistance(const CMatrix44f& mv, const float3& p) const;
 
 	float GetCylinderDistance(const float3& pv, size_t axisA = 0, size_t axisB = 1, size_t axisC = 2) const;
 	float GetEllipsoidDistance(const float3& pv) const;

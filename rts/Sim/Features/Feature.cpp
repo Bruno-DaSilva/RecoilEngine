@@ -25,6 +25,7 @@
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Units/UnitDefHandler.h"
 #include "Sim/Units/UnitHandler.h"
+#include "Rendering/Common/RenderEventQueue.h"
 #include "System/EventHandler.h"
 #include "System/SpringMath.h"
 #include "System/creg/DefTypes.h"
@@ -41,7 +42,6 @@ CR_REG_METADATA(CFeature, (
 	CR_MEMBER(deleteMe),
 	CR_MEMBER(alphaFade),
 
-	CR_MEMBER(drawAlpha),
 	CR_MEMBER(resurrectProgress),
 	CR_MEMBER(reclaimTime),
 	CR_MEMBER(reclaimLeft),
@@ -91,21 +91,31 @@ CFeature::~CFeature()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(featureMemPool.mapped(this));
+
+	// deferred-deleted features (CFeatureHandler::UpdateFeature) already ran
+	// PreDestruct() at the old free site; direct frees (teardown) run it here
+	if (!detached)
+		CFeature::PreDestruct();
+}
+
+void CFeature::PreDestruct()
+{
+	RECOIL_DETAILED_TRACY_ZONE;
 	UnBlock();
 	quadField.RemoveFeature(this);
 
-	if (!def->geoThermal)
-		return;
+	if (def->geoThermal)
+		CGeoThermSmokeProjectile::GeoThermDestroyed(this);
 
-	CGeoThermSmokeProjectile::GeoThermDestroyed(this);
+	CSolidObject::PreDestruct();
 }
 
 
 void CFeature::PostLoad()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	eventHandler.RenderFeaturePreCreated(this);
-	eventHandler.RenderFeatureCreated(this);
+	renderEventQueue.RenderFeaturePreCreated(this);
+	renderEventQueue.RenderFeatureCreated(this);
 }
 
 
@@ -249,11 +259,11 @@ void CFeature::Initialize(const FeatureLoadParams& params)
 
 	MoveTypes::RegisterFeatureForUnitTrapCheck(this);
 
-	eventHandler.RenderFeaturePreCreated(this);
+	renderEventQueue.RenderFeaturePreCreated(this);
 	// allow Spring.SetFeatureBlocking to be called from gadget:FeatureCreated
 	// (callin sees the complete default state, but can change any part of it)
 	eventHandler.FeatureCreated(this);
-	eventHandler.RenderFeatureCreated(this);
+	renderEventQueue.RenderFeatureCreated(this);
 }
 
 
@@ -505,7 +515,7 @@ void CFeature::ForcedSpin(const float3& newDir)
 	RECOIL_DETAILED_TRACY_ZONE;
 	// update local direction-vectors
 	CSolidObject::ForcedSpin(newDir);
-	UpdateTransform(pos, true);
+	UpdateTransform(pos);
 }
 
 void CFeature::ForcedSpin(const float3& newFrontDir, const float3& newRightDir)
@@ -513,22 +523,21 @@ void CFeature::ForcedSpin(const float3& newFrontDir, const float3& newRightDir)
 	RECOIL_DETAILED_TRACY_ZONE;
 	// update local direction-vectors
 	CSolidObject::ForcedSpin(newFrontDir, newRightDir);
-	UpdateTransform(pos, true);
+	UpdateTransform(pos);
 }
 
-void CFeature::UpdateTransform(const float3& p, bool synced)
+void CFeature::UpdateTransform(const float3& p)
 {
-	transMatrix[synced] = std::move(ComposeMatrix(p));
+	transMatrix = std::move(ComposeMatrix(p));
 
-	if (synced)
-		CondUpdatePrevTransform();
+	CondUpdatePrevTransform();
 }
 
 void CFeature::UpdateTransformAndPhysState()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	UpdateDirVectors(!def->upright && IsOnGround(), true, 0.0f);
-	UpdateTransform(pos, true);
+	UpdateTransform(pos);
 
 	UpdatePhysicalStateBit(CSolidObject::PSTATE_BIT_MOVING, (SetSpeed(speed) != 0.0f));
 	UpdatePhysicalState(0.1f);

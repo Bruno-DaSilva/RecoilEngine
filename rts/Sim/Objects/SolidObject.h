@@ -190,12 +190,14 @@ public:
 	void UpdatePrevFrameTransform();
 
 	CMatrix44f ComposeMatrix(const float3& p) const { return (CMatrix44f(p, -rightdir, updir, frontdir)); }
-	virtual CMatrix44f GetTransformMatrix(bool synced = false, bool fullread = false) const = 0;
+	// the synced transform; draw-time (interpolated / error-offset) transforms
+	// live with the drawers (CUnitDrawer/CFeatureDrawer::GetUnsyncedTransformMatrix)
+	virtual CMatrix44f GetTransformMatrix() const = 0;
 
 	const CollisionVolume* GetCollisionVolume(const LocalModelPiece* lmp) const;
 
-	const LuaObjectMaterialData* GetLuaMaterialData() const;
-	      LuaObjectMaterialData* GetLuaMaterialData();
+	// GetLuaMaterialData() evicted to the drawer render record (sim/draw PR 10):
+	// reach it via LuaObjectDrawer::GetLuaMaterialData(objType, id)
 
 	const LocalModelPiece* GetLastHitPiece(int frame, int synced = true) const {
 		if (frame == pieceHitFrames[synced])
@@ -231,13 +233,6 @@ public:
 	// these transform a point or vector to object-space
 	float3 GetObjectSpaceVec(const float3& v) const { return (      (frontdir * v.z) + (rightdir * v.x) + (updir * v.y)); }
 	float3 GetObjectSpacePos(const float3& p) const { return (pos + (frontdir * p.z) + (rightdir * p.x) + (updir * p.y)); }
-
-	// note: requires drawPos to have been set first
-	float3 GetObjectSpaceDrawPos(const float3& p) const { return (drawPos + GetObjectSpaceVec(p)); }
-
-	// unsynced mid-{position,vector}s
-	float3 GetMdlDrawMidPos() const;
-	float3 GetObjDrawMidPos() const;
 
 
 	int2 GetMapPos() const { return (GetMapPos(pos)); }
@@ -424,11 +419,6 @@ public:
 
 	float3 dragScales = OnesVector;
 
-	///< pos + speed * timeOffset (unsynced)
-	float3 drawPos;
-	///< drawPos + relMidPos (unsynced)
-	float3 drawMidPos;
-
 	bool objectUsable = true;
 
 	/**
@@ -440,6 +430,21 @@ public:
 	 * Parameters may or may not have a name.
 	 */
 	LuaRulesParams::Params  modParams;
+
+	// PR 46: version-skip key for the SimSnapshot rules-params row copy (the
+	// per-object full map copy dominated the Units extraction cost). Set to a
+	// fresh globally-unique serial by BumpModParamsVersion() at every
+	// modParams mutation (choke: LuaSyncedCtrl::SetRulesParam call sites --
+	// the only runtime writers). 0 (creation / creg-load default; deliberately
+	// NOT serialized) means "no version": extraction always copies. Global
+	// uniqueness ensures an id reused by a new object can never alias a
+	// stale slot copy.
+	uint64_t modParamsVersion = 0;
+
+	void BumpModParamsVersion() { modParamsVersion = ++modParamsVersionSource; }
+
+private:
+	static uint64_t modParamsVersionSource;
 
 public:
 	static constexpr float DEFAULT_MASS = 1e5f;

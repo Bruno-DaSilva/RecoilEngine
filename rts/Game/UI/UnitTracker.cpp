@@ -9,6 +9,8 @@
 #include "Game/GlobalUnsynced.h"
 #include "Map/Ground.h"
 #include "Rendering/GlobalRendering.h"
+#include "Rendering/Common/SimSnapshot.h"
+#include "Rendering/Units/UnitDrawer.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/LosHandler.h"
 #include "Sim/Misc/TeamHandler.h"
@@ -210,7 +212,7 @@ float3 CUnitTracker::CalcAveragePos() const
 	float3 p;
 
 	for (const int unitID: trackedUnitIDs) {
-		p += unitHandler.GetUnitUnsafe(unitID)->drawPos;
+		p += CUnitDrawer::GetDrawPos(unitHandler.GetUnitUnsafe(unitID));
 	}
 
 	return (p / trackedUnitIDs.size());
@@ -224,7 +226,7 @@ float3 CUnitTracker::CalcExtentsPos() const
 	float3 maxPos(-1e9f, -1e9f, -1e9f);
 
 	for (const int unitID: trackedUnitIDs) {
-		const float3& p = unitHandler.GetUnitUnsafe(unitID)->drawPos;
+		const float3& p = CUnitDrawer::GetDrawPos(unitHandler.GetUnitUnsafe(unitID));
 
 		minPos = float3::min(minPos, p);
 		maxPos = float3::max(maxPos, p);
@@ -245,6 +247,15 @@ void CUnitTracker::SetCam()
 		Disable();
 		return;
 	}
+
+	// snapshot-served orientation/extent (SimSnapshot / §C torn-read policy, PR 24):
+	// the tracked unit's radius and object-space basis as of the boundary frame.
+	// Position stays on the drawer-owned interpolated draw-mid-pos; u is used only
+	// for its id here (GetTrackUnit already validated it against the live handler).
+	const auto& snapshot = simSnapshot.Read();
+	const float    trackRadius   = snapshot.Radius(u->id);
+	const float3   trackFrontdir = snapshot.Frontdir(u->id);
+	const float3   trackRightdir = snapshot.Rightdir(u->id);
 
 	if (lastFollowUnit != 0 && unitHandler.GetUnitUnsafe(lastFollowUnit) == nullptr) {
 		timeOut = 1;
@@ -279,11 +290,11 @@ void CUnitTracker::SetCam()
 				pos = CalcExtentsPos();
 			} break;
 			default: {
-				pos = u->drawMidPos;
+				pos = CUnitDrawer::GetDrawMidPos(u);
 			} break;
 		}
 
-		camHandler->GetCurrentController().SetTrackingInfo(pos, u->radius * 2.7182818f);
+		camHandler->GetCurrentController().SetTrackingInfo(pos, trackRadius * 2.7182818f);
 		camHandler->UpdateTransition();
 	} else {
 		// FPS Camera
@@ -291,17 +302,17 @@ void CUnitTracker::SetCam()
 		const float deltaTime = offsetTime - lastUpdateTime;
 		lastUpdateTime = offsetTime;
 
-		const float3 modFrontVec = u->frontdir * u->radius * 3.0f;
-		const float3 mixRightDir = mix<float3>(u->rightdir, RgtVector, 0.75f); // NB: will be 0 if u->r == -R
-		      float3 modPlanePos = u->drawMidPos - modFrontVec;
+		const float3 modFrontVec = trackFrontdir * trackRadius * 3.0f;
+		const float3 mixRightDir = mix<float3>(trackRightdir, RgtVector, 0.75f); // NB: will be 0 if u->r == -R
+		      float3 modPlanePos = CUnitDrawer::GetDrawMidPos(u) - modFrontVec;
 
-		modPlanePos.y = std::max(modPlanePos.y, CGround::GetHeightReal(modPlanePos.x, modPlanePos.z, false) + (u->radius * 2.0f));
+		modPlanePos.y = std::max(modPlanePos.y, CGround::GetHeightReal(modPlanePos.x, modPlanePos.z, false) + (trackRadius * 2.0f));
 
 		trackPos += (modPlanePos - trackPos) * (1 - math::pow(0.95f, deltaTime));
-		trackDir += (u->frontdir - trackDir) * (1 - math::pow(0.90f, deltaTime));
+		trackDir += (trackFrontdir - trackDir) * (1 - math::pow(0.90f, deltaTime));
 		smoothedRight = mix<float3>(smoothedRight, mixRightDir, deltaTime * 0.05f).SafeANormalize();
 
-		const float3 wantedDir = (u->drawMidPos - camera->GetPos()).SafeANormalize();
+		const float3 wantedDir = (CUnitDrawer::GetDrawMidPos(u) - camera->GetPos()).SafeANormalize();
 		const float3 cameraDir = (wantedDir + trackDir.SafeANormalize()).SafeANormalize();
 
 		camera->SetPos(trackPos);

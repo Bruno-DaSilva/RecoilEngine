@@ -56,6 +56,7 @@ add_library(engineSim STATIC
 		"${CMAKE_CURRENT_SOURCE_DIR}/MoveTypes/Systems/GroundMoveSystem.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/MoveTypes/Systems/UnitTrapCheckSystem.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/MoveTypes/Utils/UnitTrapCheckUtils.cpp"
+		"${CMAKE_CURRENT_SOURCE_DIR}/Objects/DeferredObjectDeleter.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Objects/SolidObject.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Objects/SolidObjectDef.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Objects/WorldObject.cpp"
@@ -155,6 +156,7 @@ add_library(engineSim STATIC
 		"${CMAKE_CURRENT_SOURCE_DIR}/Weapons/WeaponDefHandler.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Weapons/WeaponLoader.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Weapons/WeaponTarget.cpp"
+		"${CMAKE_CURRENT_SOURCE_DIR}/Weapons/WeaponTraceClass.cpp"
 	)
 
 target_link_libraries(engineSim SDL2::SDL2 Tracy::TracyClient nowide::nowide fmt::fmt)

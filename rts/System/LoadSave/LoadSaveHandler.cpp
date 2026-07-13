@@ -6,6 +6,7 @@
 #include "Game/GameSetup.h"
 #include "System/FileSystem/FileSystem.h"
 #include "System/Log/ILog.h"
+#include "Game/Game.h"
 
 SaveFileData globalSaveFileData;
 
@@ -38,8 +39,14 @@ bool ILoadSaveHandler::CreateSave(
 
 	ILoadSaveHandler* ls = CreateHandler(saveFile);
 
-	ls->SaveInfo(gameSetup->mapName, gameSetup->mapName);
-	ls->SaveGame(saveFile);
+	{
+		// PR 27b: serialization walks the whole sim state -- keep the sim
+		// thread parked for the duration (no-op when the split is off)
+		CGame::ScopedExternalSimPause simPause;
+
+		ls->SaveInfo(gameSetup->mapName, gameSetup->mapName);
+		ls->SaveGame(saveFile);
+	}
 	LOG("[ILoadSaveHandler::%s] saved game to file \"%s\"", __func__, saveFile.c_str());
 	delete ls;
 	return true;

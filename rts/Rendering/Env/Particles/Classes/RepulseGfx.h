@@ -19,7 +19,7 @@ public:
 		const float4& gfxColor
 	);
 
-	void Draw() override;
+	void Draw() const override;
 	void Update() override;
 
 	int GetProjectilesCount() const override { return 20; }

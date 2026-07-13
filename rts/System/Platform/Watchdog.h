@@ -12,7 +12,8 @@ enum WatchdogThreadnum {
 	WDT_LOAD  = 1,
 	WDT_AUDIO = 2,
 	WDT_VFSI  = 3,
-	WDT_COUNT = 4,
+	WDT_SIM   = 4, // the sim|draw split's sim thread (PR 27b)
+	WDT_COUNT = 5,
 };
 
 namespace Watchdog

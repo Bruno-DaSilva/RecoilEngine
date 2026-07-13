@@ -9,6 +9,7 @@
 #include "MapDamage.h"
 #include "MapInfo.h"
 #include "MetalMap.h"
+#include "Rendering/Common/DrawMapMirrors.h" // PR 28: orig-heightmap mirror dirty marking
 #include "Rendering/Env/MapRendering.h"
 #include "SMF/SMFReadMap.h"
 #include "Game/LoadScreen.h"
@@ -457,6 +458,22 @@ void CReadMap::LoadOriginalHeightMapAndChecksum()
 }
 
 
+// PR 28 choke-point funnel: every runtime write of the SYNCED original
+// heightmap goes through SetOriginalHeight (AddOriginalHeight delegates to it),
+// and the four Spring.*OriginalHeightMap Lua callouts
+// (Level/Adjust/Revert/{Set,Add}OriginalHeightMapFunc) are the only callers, so
+// marking here covers all of them uniformly. The load-time full fill in
+// LoadOriginalHeightMapAndChecksum writes originalHeightMap[] directly and is
+// captured by the mirror's first-drain full copy, so it needs no mark. Defined
+// out-of-line (was a header inline) to keep DrawMapMirrors out of ReadMap.h;
+// not a per-frame hot path.
+float CReadMap::AddOriginalHeight(const int idx, const float a) { return SetOriginalHeight(idx, a, 1); }
+float CReadMap::SetOriginalHeight(const int idx, const float h, const int add) {
+	drawMapMirrors.MarkOrigHeightDirty();
+	return SetHeightValue((*originalHeightMapPtr)[idx], idx, h, add);
+}
+
+
 
 
 
@@ -493,25 +510,35 @@ void CReadMap::UpdateDraw(bool firstCall)
 {
 	SCOPED_TIMER("Update::ReadMap::UHM");
 
-	if (unsyncedHeightMapUpdates.empty())
+	// PR 44b: steal the sim-appended queue under the lock into the draw-local
+	// drain handler, then process lock-free (see the member comment); the
+	// per-frame budget's leftovers stay in the drain for the next call
+	{
+		std::lock_guard<std::mutex> lock(unsyncedHeightMapUpdatesMtx);
+
+		if (!unsyncedHeightMapUpdates.empty())
+			unsyncedHeightMapUpdatesDrain.append(unsyncedHeightMapUpdates);
+	}
+
+	if (unsyncedHeightMapUpdatesDrain.empty())
 		return;
 
 	//optimize layout
-	unsyncedHeightMapUpdates.Process(firstCall);
+	unsyncedHeightMapUpdatesDrain.Process(firstCall);
 
-	const int N = static_cast<int>(std::min(MAX_UHM_RECTS_PER_FRAME, unsyncedHeightMapUpdates.size()));
+	const int N = static_cast<int>(std::min(MAX_UHM_RECTS_PER_FRAME, unsyncedHeightMapUpdatesDrain.size()));
 
 	for (int i = 0; i < N; i++) {
-		UpdateHeightMapUnsynced(*(unsyncedHeightMapUpdates.begin() + i));
+		UpdateHeightMapUnsynced(*(unsyncedHeightMapUpdatesDrain.begin() + i));
 	};
 	UpdateHeightMapUnsyncedPost();
 
 	for (int i = 0; i < N; i++) {
-		eventHandler.UnsyncedHeightMapUpdate(*(unsyncedHeightMapUpdates.begin() + i));
+		eventHandler.UnsyncedHeightMapUpdate(*(unsyncedHeightMapUpdatesDrain.begin() + i));
 	}
 
 	for (int i = 0; i < N; i++) {
-		unsyncedHeightMapUpdates.pop_front();
+		unsyncedHeightMapUpdatesDrain.pop_front();
 	}
 }
 
@@ -537,8 +564,15 @@ void CReadMap::UpdateHeightMapSynced(const SRectangle& hgtMapRect)
 	UpdateFaceNormals(centerRect, initialize);
 	UpdateSlopemap(centerRect, initialize); // must happen after UpdateFaceNormals()!
 
+	// PLACEMENT REHOST: the single terraform choke -- centerHeightMap, maxHeightMap,
+	// centerNormals2D and slopeMap were all just recomputed above, so log the
+	// recomputed centerRect (INCLUSIVE bounds; the mirror drain re-applies the
+	// UpdateFaceNormals/UpdateSlopemap margins). Runs on the sim (producer) thread.
+	drawMapMirrors.MarkHeightDirty(centerRect.x1, centerRect.z1, centerRect.x2, centerRect.z2);
+
 	// push the unsynced update; initial one without LOS check
 	if (initialize) {
+		std::lock_guard<std::mutex> lock(unsyncedHeightMapUpdatesMtx);
 		unsyncedHeightMapUpdates.push_back(cornerRect);
 	} else {
 		#ifdef USE_HEIGHTMAP_DIGESTS
@@ -565,7 +599,7 @@ void CReadMap::UpdateHeightMapSynced(const SRectangle& hgtMapRect)
 
 void CReadMap::UpdateHeightBounds(int syncFrame)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
+	SCOPED_TIMER("Sim::ReadMap");
 	constexpr int PACING_PERIOD = GAME_SPEED; //tune if needed
 	int dataChunk = syncFrame % PACING_PERIOD;
 
@@ -790,6 +824,10 @@ void CReadMap::HeightMapUpdateLOSCheck(const SRectangle& hgtMapRect)
 	const SRectangle losMapRect = hgtMapRect * (SQUARE_SIZE * losHandler->los.invDiv); // LOS space
 
 	const float* ctrHgtMap = readMap->GetCenterHeightMapSynced();
+
+	// PR 44b: the queue is cross-thread (sim appends, draw drains); one lock
+	// for the whole per-rect push loop
+	std::lock_guard<std::mutex> lock(unsyncedHeightMapUpdatesMtx);
 
 	const auto PushRect = [&](SRectangle& subRect, int hmx, int hmz) {
 		if (subRect.GetArea() > 0) {

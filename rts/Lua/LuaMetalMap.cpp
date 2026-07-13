@@ -7,6 +7,7 @@
 #include "LuaUtils.h"
 #include "Map/MetalMap.h"
 #include "Map/ReadMap.h"
+#include "Rendering/Common/DrawMapMirrors.h" // PR 38d: metal distribution mirror dirty marking
 
 #include "System/Misc/TracyDefs.h"
 
@@ -77,6 +78,12 @@ int LuaMetalMap::SetMetalAmount(lua_State* L)
 	const float m = luaL_checkfloat(L, 3);
 	// SetMetalAmount automatically clamps the value
 	metalMap.SetMetalAmount(x, z, m);
+
+	// PR 38d choke point: the sole runtime writer of metalMap's distribution
+	// map -> mark the DrawMapMirrors metal copy for the barrier drain (served
+	// by Spring.GetGroundInfo)
+	drawMapMirrors.MarkMetalMapDirty();
+
 	return 0;
 }
 

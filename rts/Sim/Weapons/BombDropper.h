@@ -13,6 +13,11 @@ public:
 
 	float GetPredictedImpactTime(const float3& p) const override final;
 
+	// TRACE REHOST: the torpedo members the draw-side epoch predicate stack
+	// captures (CBombDropper overrides TestTarget / TestRange).
+	bool GetDropTorpedoes() const { return dropTorpedoes; }
+	float GetTorpMoveRange() const { return torpMoveRange; }
+
 private:
 	bool CanFire(bool ignoreAngleGood, bool ignoreTargetType, bool ignoreRequestedDir) const override final;
 

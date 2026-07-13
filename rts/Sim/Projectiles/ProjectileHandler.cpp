@@ -5,6 +5,7 @@
 #include "Projectile.h"
 #include "ProjectileHandler.h"
 #include "ProjectileMemPool.h"
+#include "Game/BoundaryStats.h"
 #include "Game/GlobalUnsynced.h"
 #include "Game/TraceRay.h"
 #include "Map/Ground.h"
@@ -17,6 +18,7 @@
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Misc/QuadField.h"
 #include "Sim/Misc/TeamHandler.h"
+#include "Sim/Objects/DeferredObjectDeleter.h"
 #include "Rendering/Env/Particles/Classes/NanoProjectile.h"
 #include "Sim/Projectiles/WeaponProjectiles/WeaponProjectile.h"
 #include "Sim/Units/Unit.h"
@@ -25,8 +27,13 @@
 #include "Sim/Weapons/WeaponDef.h"
 #include "Sim/Weapons/PlasmaRepulser.h"
 #include "System/Config/ConfigHandler.h"
+#include "Rendering/Common/RenderEventQueue.h"
 #include "System/EventHandler.h"
 #include "System/Log/ILog.h"
+#include "System/Platform/Threading.h"
+#include "System/SimDrawSplit.h"
+#include "System/Sync/SyncChecker.h"
+#include "System/Threading/ThreadPool.h"
 #include "System/Cpp11Compat.hpp"
 #include "System/SpringMath.h"
 #include "System/TimeProfiler.h"
@@ -234,7 +241,15 @@ static void UPDATE_PTR_CONTAINER(T& cont) {
 		CGroundFlash*& gf = cont[i];
 
 		if (!gf->Update()) {
-			projMemPool.free(gf);
+			// PR 27b: under the split the draw side renders from a barrier-
+			// copied flash list -- the shell must stay readable until the
+			// next barrier ack (same epoch as every other sim object)
+			if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
+				deferredObjectDeleter.Defer(gf);
+			} else {
+				projMemPool.free(gf);
+			}
+
 			gf = cont[size -= 1];
 			continue;
 		}
@@ -279,15 +294,58 @@ static void UPDATE_REF_CONTAINER(T& cont) {
 
 
 
+// boundary-size measurement: spawn rates by re-derivability class — ballistic
+// weapon projectiles can be re-derived from spawn params by a stream consumer,
+// guided (tracking) ones need per-frame updates, hitscan ones live 1-2 frames
+static void CountProjectileChurn(const CProjectile* p, const bool spawn)
+{
+	using namespace BoundaryStats;
+
+	if (!spawn) {
+		Add(p->synced ? ctr.projDespawnSynced : ctr.projDespawnUnsynced);
+		return;
+	}
+
+	if (!p->synced) {
+		Add(ctr.projSpawnUnsynced);
+		return;
+	}
+
+	if (p->piece) {
+		Add(ctr.projSpawnPiece);
+		return;
+	}
+
+	if (p->weapon) {
+		const auto* wp = static_cast<const CWeaponProjectile*>(p);
+		const WeaponDef* wd = wp->GetWeaponDef();
+
+		if (wd == nullptr)
+			Add(ctr.projSpawnSyncedOther);
+		else if (wd->IsHitScanWeapon())
+			Add(ctr.projSpawnHitscan);
+		else if (wd->tracks)
+			Add(ctr.projSpawnGuided);
+		else
+			Add(ctr.projSpawnBallistic);
+
+		return;
+	}
+
+	Add(ctr.projSpawnSyncedOther);
+}
+
 void CProjectileHandler::CreateProjectile(CProjectile* p)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	p->createMe = false;
 
+	CountProjectileChurn(p, true);
+
 	if (p->synced || PH_UNSYNCED_PROJECTILE_EVENTS == 1)
 		eventHandler.ProjectileCreated(p, p->GetAllyteamID());
 
-	eventHandler.RenderProjectileCreated(p);
+	renderEventQueue.RenderProjectileCreated(p);
 }
 
 void CProjectileHandler::DestroyProjectile(CProjectile* p)
@@ -295,7 +353,9 @@ void CProjectileHandler::DestroyProjectile(CProjectile* p)
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(!p->createMe);
 
-	eventHandler.RenderProjectileDestroyed(p);
+	CountProjectileChurn(p, false);
+
+	renderEventQueue.RenderProjectileDestroyed(p);
 
 	if (p->synced) {
 		//modelUniformsStorage.DelObject(p);
@@ -313,7 +373,9 @@ void CProjectileHandler::DestroyProjectile(CProjectile* p)
 		projectiles[false].Del(p->id);
 	}
 
-	projMemPool.free(p);
+	// PR 13: sync-observable teardown (PreDestruct) runs here, at the old
+	// free site; the slot is released after the draw boundary drain
+	deferredObjectDeleter.Defer(p);
 }
 
 uint32_t CProjectileHandler::UnsyncedRandInt(uint32_t N) { return guRNG.NextInt(N); }
@@ -365,6 +427,14 @@ void CProjectileHandler::AddProjectile(CProjectile* p)
 	// already initialized?
 	assert(p->id < 0);
 	assert(p->createMe);
+	// PR 27b: both containers are sim-thread-owned under the split -- the
+	// hazard is a MAIN-thread spawn while the sim runs unparked (racing the
+	// SimFrame update loops). Sim-side workers (ExpGenSpawner spawning from
+	// the MT unsynced-projectile pass, serialized by CProjectile::mut) are
+	// legal, and no per-thread flag identifies them reliably
+	// (~MultithreadedSection clears unconditionally), so assert the inverse.
+	assert(!SimDrawSplit::Enabled() || !SimDrawSplit::SimThreadRunning() ||
+	       !Threading::IsMainThread() || SimDrawSplit::IsSimParked());
 
 	if (p->synced)
 		p->id = static_cast<int>(projectiles[true ].Add(p, rngFuncs[true]));
@@ -449,7 +519,7 @@ void CProjectileHandler::CheckUnitCollisions(
 		if (!CheckProjectileCollisionFlags(p, unit))
 			continue;
 
-		if (CCollisionHandler::DetectHit(unit, unit->GetTransformMatrix(true), ppos0, ppos1, &cq)) {
+		if (CCollisionHandler::DetectHit(unit, unit->GetTransformMatrix(), ppos0, ppos1, &cq)) {
 			if (cq.GetHitPiece() != nullptr)
 				unit->SetLastHitPiece(cq.GetHitPiece(), gs->frameNum, p->synced);
 
@@ -488,7 +558,7 @@ void CProjectileHandler::CheckFeatureCollisions(
 		if (!feature->HasCollidableStateBit(CSolidObject::CSTATE_BIT_PROJECTILES))
 			continue;
 
-		if (CCollisionHandler::DetectHit(feature, feature->GetTransformMatrix(true), ppos0, ppos1, &cq)) {
+		if (CCollisionHandler::DetectHit(feature, feature->GetTransformMatrix(), ppos0, ppos1, &cq)) {
 			if (cq.GetHitPiece() != nullptr)
 				feature->SetLastHitPiece(cq.GetHitPiece(), gs->frameNum, p->synced);
 
@@ -763,6 +833,16 @@ float CProjectileHandler::GetParticleSaturation(bool randomized) const
 int CProjectileHandler::GetCurrentParticles() const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+
+	// PR 27b: the walks below iterate (and the precache counters mutate)
+	// sim-owned containers; a draw-thread caller under the running split
+	// (/debug info text, Lua) gets the last sim-frame precache instead --
+	// found by a windowed-dogfood SIGABRT mid-walk. Torn int read tolerated
+	// (a display statistic).
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() &&
+	    !Threading::IsSimThread() && !SimDrawSplit::IsSimParked())
+		return frameCurrentParticles;
+
 	// use precached part of particles count calculation that else becomes very heavy
 	// example where it matters: (in ZK) /cheat /give 20 armraven -> shoot ground
 	for (size_t i = frameProjectileCounts[true], e = projectiles[true].size(); i < e; ++i) {

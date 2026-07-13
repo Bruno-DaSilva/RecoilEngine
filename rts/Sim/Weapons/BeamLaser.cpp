@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "BeamLaser.h"
+#include "WeaponPredicates.h" // TRACE REHOST (stage 3): templated predicate stack
 #include "PlasmaRepulser.h"
 #include "WeaponDef.h"
 #include "Game/GameHelper.h"
@@ -89,6 +90,7 @@ CBeamLaser::CBeamLaser(CUnit* owner, const WeaponDef* def)
 	, salvoDamageMult(1.0f)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	weaponClass = trace::WeaponClass::BeamLaser;
 	// null happens when loading
 	if (def != nullptr)
 		color = def->visuals.color;
@@ -273,14 +275,7 @@ void CBeamLaser::FireImpl(const bool scriptCall)
 
 bool CBeamLaser::TestRange(const float3& tgtPos, const SWeaponTarget& trg) const
 {
-	float3 aimDir = (tgtPos - aimFromPos);
-	const float targetDist = aimDir.LengthNormalize();
-
-	if (const auto shapedRange = GetShapedWeaponRange(aimDir, range); targetDist > shapedRange)
-		return false;
-
-	// NOTE: mainDir is in unit-space
-	return (CheckTargetAngleConstraint(aimDir, owner->GetObjectSpaceVec(mainDir)));
+	return trace::TestRangeShapedT(trace::LiveView(this), tgtPos, trg);
 }
 
 void CBeamLaser::FireInternal(float3 curDir)

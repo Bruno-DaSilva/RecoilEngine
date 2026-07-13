@@ -8,6 +8,7 @@
 
 #include "Map/Ground.h"
 #include "Map/ReadMap.h"
+#include "Rendering/Common/DrawMapMirrors.h" // PR 28: smooth-mesh mirror dirty marking
 #include "Sim/Misc/ModInfo.h"
 #include "System/float3.h"
 #include "System/Log/ILog.h"
@@ -139,6 +140,12 @@ float SmoothHeightMesh::SetHeight(int index, float h)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(index < maxx*maxy);
+	// PR 28 choke-point funnel: every mesh-height write goes through these three
+	// setters (the six Spring.*SmoothMesh Lua callouts call them directly), so
+	// marking here covers all of them. The updater (UpdateSmoothMesh /
+	// MakeSmoothMesh) writes the mesh via the Blur/CopyMeshPart helpers, NOT
+	// through these setters, so it keeps its own marks.
+	drawMapMirrors.MarkSmoothMeshDirty();
 	return (mesh[index] = h);
 }
 
@@ -146,6 +153,7 @@ float SmoothHeightMesh::AddHeight(int index, float h)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(index < maxx*maxy);
+	drawMapMirrors.MarkSmoothMeshDirty();
 	return (mesh[index] += h);
 }
 
@@ -153,6 +161,7 @@ float SmoothHeightMesh::SetMaxHeight(int index, float h)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(index < maxx*maxy);
+	drawMapMirrors.MarkSmoothMeshDirty();
 	return (mesh[index] = std::max(h, mesh[index]));
 }
 
@@ -560,6 +569,11 @@ void SmoothHeightMesh::UpdateSmoothMesh() {
 
 	if (!UpdateSmoothMeshRequired(mapChangeTrack)) return;
 
+	// PR 28 choke point: this call recomputes a window of the mesh (the mesh's
+	// Set/Add helpers are only ever called from here and MakeSmoothMesh) ->
+	// mark the DrawMapMirrors smooth-mesh copy dirty for the barrier drain
+	drawMapMirrors.MarkSmoothMeshDirty();
+
 	const bool flushBuffer = !mapChangeTrack.activeBuffer;
 	const bool updateMaxima = !mapChangeTrack.damageQueue[flushBuffer].empty();
 	const bool doHorizontalBlur = !mapChangeTrack.horizontalBlurQueue.empty();
@@ -650,6 +664,10 @@ void SmoothHeightMesh::MakeSmoothMesh() {
 
 	// tempMesh should be kept inline with mesh to avoid bluring artefacts in dynamic updates
 	std::copy(mesh.begin(), mesh.end(), tempMesh.begin());
+
+	// PR 28 choke point: the whole mesh was (re)built -> mark the DrawMapMirrors
+	// smooth-mesh copy dirty for the barrier drain
+	drawMapMirrors.MarkSmoothMeshDirty();
 }
 
 

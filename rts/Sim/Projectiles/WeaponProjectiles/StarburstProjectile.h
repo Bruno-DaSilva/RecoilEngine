@@ -23,7 +23,7 @@ public:
 	void Collision(CFeature* feature) override;
 	void Collision() override;
 	void Update() override;
-	void Draw() override;
+	void Draw() const override;
 
 	int GetProjectilesCount() const override;
 

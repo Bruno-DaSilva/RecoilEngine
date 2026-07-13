@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "MissileLauncher.h"
+#include "WeaponPredicates.h" // TRACE REHOST (stage 3): templated predicate stack
 
 #include "WeaponDef.h"
 #include "Game/TraceRay.h"
@@ -69,6 +70,14 @@ void CMissileLauncher::FireImpl(const bool scriptCall)
 }
 
 bool CMissileLauncher::HaveFreeLineOfFire(const float3& srcPos, const float3& tgtPos, const SWeaponTarget& trg) const
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	return trace::HaveFreeLineOfFireMissileT(trace::LiveView(this), srcPos, tgtPos, trg);
+}
+
+// TRACE REHOST (stage 3): verbatim trajectoryHeight LOF scan, called by the
+// LiveView missile-trajectory primitive (only reached when trajectoryHeight>0).
+bool CMissileLauncher::TrajectoryLOF(const float3& srcPos, const float3& tgtPos, const SWeaponTarget& trg) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	// high-trajectory missiles use curved path rather than linear ground intersection
@@ -229,7 +238,7 @@ bool CMissileLauncher::HaveFreeLineOfFire(const float3& srcPos, const float3& tg
 				const CollisionVolume* cv = &u->collisionVolume;
 				const float3 cvRelVec = cv->GetWorldSpacePos(u) - srcPos;
 				const float  cvRelDst = std::clamp(cvRelVec.dot(targetVec), 0.0f, xzTargetDist);
-				const CMatrix44f objTransform = u->GetTransformMatrix(true);
+				const CMatrix44f objTransform = u->GetTransformMatrix();
 				for (int i = 1; i < 9; i++) {
 					if (cvRelDst < mdist[i]) {
 						// find the relevant linear segment
@@ -272,7 +281,7 @@ bool CMissileLauncher::HaveFreeLineOfFire(const float3& srcPos, const float3& tg
 				const CollisionVolume* cv = &u->collisionVolume;
 				const float3 cvRelVec = cv->GetWorldSpacePos(u) - srcPos;
 				const float  cvRelDst = std::clamp(cvRelVec.dot(targetVec), 0.0f, xzTargetDist);
-				const CMatrix44f objTransform = u->GetTransformMatrix(true);
+				const CMatrix44f objTransform = u->GetTransformMatrix();
 				for (int i = 1; i < 9; i++) {
 					if (cvRelDst < mdist[i]) {
 						// find the relevant linear segment
@@ -311,7 +320,7 @@ bool CMissileLauncher::HaveFreeLineOfFire(const float3& srcPos, const float3& tg
 				const CollisionVolume* cv = &f->collisionVolume;
 				const float3 cvRelVec = cv->GetWorldSpacePos(f) - srcPos;
 				const float  cvRelDst = std::clamp(cvRelVec.dot(targetVec), 0.0f, xzTargetDist);
-				const CMatrix44f objTransform = f->GetTransformMatrix(true);
+				const CMatrix44f objTransform = f->GetTransformMatrix();
 				for (int i = 1; i < 9; i++) {
 					if (cvRelDst < mdist[i]) {
 						// find the relevant linear segment

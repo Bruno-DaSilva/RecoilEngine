@@ -17,6 +17,8 @@
 #include "Rendering/Models/3DModel.hpp"
 #include "Rendering/Models/ModelsMemStorage.h"
 #include "Rendering/Env/Particles/ProjectileDrawer.h"
+#include "Rendering/Units/UnitDrawer.h"
+#include "Rendering/Features/FeatureDrawer.h"
 #include "Sim/Objects/SolidObjectDef.h"
 #include "Sim/Features/Feature.h"
 #include "Sim/Features/FeatureHandler.h"
@@ -991,7 +993,7 @@ size_t LuaVBOImpl::MatrixDataFromProjectileIDsImpl(const Iterable& ids, int attr
 		const bool doOffset = wp && wp->GetProjectileType() == WEAPON_MISSILE_PROJECTILE;
 
 		const CMatrix44f trMat = projectileDrawer->CanDrawProjectile(p, -1) ?
-			p->GetTransformMatrix(doOffset) :
+			projectileDrawer->GetTransformMatrix(p, doOffset) :
 			CMatrix44f::Zero();
 
 		memcpy(&matDataVec[16 * idx], &trMat, sizeof(CMatrix44f));
@@ -1019,9 +1021,13 @@ SInstanceData LuaVBOImpl::InstanceDataFromGetData(int id, int attrID, uint8_t de
 	}
 
 	uint8_t drawFlags = 0u;
-	if constexpr (std::is_same_v<TObj, CUnit> || std::is_same_v<TObj, CFeature>) {
+	if constexpr (std::is_same_v<TObj, CUnit>) {
 		teamID = obj->team;
-		drawFlags = obj->drawFlag;
+		drawFlags = CUnitDrawer::GetDrawFlag(obj); // drawer-owned since sim/draw §A eviction (PR 4)
+	}
+	else if constexpr (std::is_same_v<TObj, CFeature>) {
+		teamID = obj->team;
+		drawFlags = CFeatureDrawer::GetDrawFlag(obj);
 	}
 
 	uint16_t numPieces = 0;

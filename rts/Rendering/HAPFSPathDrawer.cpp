@@ -33,6 +33,8 @@
 #include "Rendering/Map/InfoTexture/IInfoTextureHandler.h"
 #include "System/SpringMath.h"
 #include "System/StringUtil.h"
+#include "System/Log/ILog.h"
+#include "System/SimDrawSplit.h"
 
 #define PE_EXTRA_DEBUG_OVERLAYS 1
 
@@ -56,6 +58,16 @@ HAPFSPathDrawer::HAPFSPathDrawer(): IPathDrawer()
 }
 
 void HAPFSPathDrawer::DrawAll() const {
+	// PR 27b: walks live sim state; dark under the running split (dev tool)
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
+		static bool warned = false;
+		if (!warned) {
+			LOG_L(L_WARNING, "[%s] debug overlay unavailable with SimDrawSplit=1", __func__);
+			warned = true;
+		}
+		return;
+	}
+
 	// CPathManager is not thread-safe
 	if (enabled && (gs->cheatEnabled || gu->spectating)) {
 		glPushAttrib(GL_ENABLE_BIT);

@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "LightningCannon.h"
+#include "WeaponPredicates.h" // TRACE REHOST (stage 3): templated predicate stack
 #include "PlasmaRepulser.h"
 #include "WeaponDef.h"
 #include "Game/GameHelper.h"
@@ -22,6 +23,7 @@ CR_REG_METADATA(CLightningCannon, (
 CLightningCannon::CLightningCannon(CUnit* owner, const WeaponDef* def): CWeapon(owner, def)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	weaponClass = trace::WeaponClass::LightningCannon;
 	// null happens when loading
 	if (def != nullptr)
 		color = def->visuals.color;
@@ -30,14 +32,7 @@ CLightningCannon::CLightningCannon(CUnit* owner, const WeaponDef* def): CWeapon(
 
 bool CLightningCannon::TestRange(const float3& tgtPos, const SWeaponTarget& trg) const
 {
-	float3 aimDir = (tgtPos - aimFromPos);
-	const float targetDist = aimDir.LengthNormalize();
-
-	if (const auto shapedRange = GetShapedWeaponRange(aimDir, range); targetDist > shapedRange)
-		return false;
-
-	// NOTE: mainDir is in unit-space
-	return (CheckTargetAngleConstraint(aimDir, owner->GetObjectSpaceVec(mainDir)));
+	return trace::TestRangeShapedT(trace::LiveView(this), tgtPos, trg);
 }
 
 void CLightningCannon::FireImpl(const bool scriptCall)

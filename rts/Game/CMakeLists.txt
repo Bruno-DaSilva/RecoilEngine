@@ -4,6 +4,7 @@
 make_global_var(sources_engine_Game
 		"${CMAKE_CURRENT_SOURCE_DIR}/Action.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/AviVideoCapturing.cpp"
+		"${CMAKE_CURRENT_SOURCE_DIR}/BoundaryStats.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Camera.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Camera/CameraController.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/Camera/FPSController.cpp"

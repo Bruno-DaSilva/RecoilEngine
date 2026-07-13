@@ -78,7 +78,7 @@ void CSpherePartProjectile::Update()
 	pos = centerPos + vectors[12] * sphereSize;
 }
 
-void CSpherePartProjectile::Draw()
+void CSpherePartProjectile::Draw() const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	unsigned char col0[4];

@@ -15,6 +15,7 @@
 #include "LuaMathExtra.h"
 #include "LuaTableExtra.h"
 #include "LuaTracyExtra.h"
+#include "LuaUnsyncedRead.h"
 #include "LuaUtils.h"
 #include "LuaZip.h"
 #include "Game/Game.h"
@@ -44,6 +45,8 @@
 #include "System/creg/SerializeLuaState.h"
 #include "System/Config/ConfigHandler.h"
 #include "System/EventHandler.h"
+#include "System/SimDrawSplit.h"
+#include "System/UnsyncedBoundaryQueue.h"
 #include "System/Exceptions.h"
 #include "System/GlobalConfig.h"
 #include "System/Rectangle.h"
@@ -138,6 +141,27 @@ static int handlepanic(lua_State* L)
 }
 
 
+// Wrappers that drive the CPU-attribution profiler (/profiledump) from the
+// per-addon tracy zones the widget/gadget handlers already emit, while still
+// calling the original tracy.ZoneBeginN/ZoneEnd (captured as upvalue 1) so Tracy
+// itself keeps working when compiled in. Installed onto the global tracy table at
+// state init below; gated on the profiling config there.
+static int profilerZoneBeginWrap(lua_State* L)
+{
+	lua_pushvalue(L, lua_upvalueindex(1)); // original tracy.ZoneBeginN
+	lua_pushvalue(L, 1);                   // zone name
+	lua_call(L, 1, 0);
+	return LuaUnsyncedRead::ProfilerPushZone(L); // reads the name at index 1
+}
+
+static int profilerZoneEndWrap(lua_State* L)
+{
+	lua_pushvalue(L, lua_upvalueindex(1)); // original tracy.ZoneEnd
+	lua_call(L, 0, 0);
+	return LuaUnsyncedRead::ProfilerPopZone(L);
+}
+
+
 
 CLuaHandle::CLuaHandle(const string& _name, int _order, bool _userMode, bool _synced)
 	: CEventClient(_name, _order, _synced)
@@ -147,7 +171,9 @@ CLuaHandle::CLuaHandle(const string& _name, int _order, bool _userMode, bool _sy
 	// do not use it for LuaMenu either; too many blocks allocated
 	// by *other* states end up not being recycled which presently
 	// forces clearing the shared pool on reload
-	, D(_name != "LuaIntro" && name != "LuaMenu", true)
+	// (unsynced handles use the draw-side shared pool under the
+	// sim|draw split, PR 27b -- see LuaMemPool.cpp)
+	, D(_name != "LuaIntro" && name != "LuaMenu", true, !_synced)
 {
 	D.owner = this;
 	D.synced = _synced;
@@ -177,6 +203,28 @@ CLuaHandle::CLuaHandle(const string& _name, int _order, bool _userMode, bool _sy
 		LuaTracyExtra::PushEntries(L);
 		lua_pop(L, 1);
 	#endif
+
+	// Drive the CPU-attribution profiler (/profiledump) from the per-addon tracy zones
+	// the widget/gadget handlers already emit (W:DrawScreen:<widget>, G:GameFrame:<gadget>,
+	// ...), so time attributes per addon with no game-side changes. Wrap (not replace)
+	// tracy.ZoneBeginN/ZoneEnd on the state's global table so each zone also drives
+	// ProfilerPushZone/PopZone while Tracy still works when compiled in. Gated on the
+	// profiling config => zero overhead in normal play; ProfilerPushZone itself no-ops
+	// until a dump force-enables the profiler. NOTE: this only works because
+	// LuaUtils::TracyRemoveAlsoExtras keeps the zone calls in the script source under
+	// the same config (otherwise Tracy strips the calls and there is nothing to drive).
+	if (configHandler != nullptr && configHandler->GetInt("LuaTrackCalloutCounts") > 0) {
+		lua_getglobal(L, "tracy");
+		if (lua_istable(L, -1)) {
+			lua_getfield(L, -1, "ZoneBeginN");
+			lua_pushcclosure(L, profilerZoneBeginWrap, 1);
+			lua_setfield(L, -2, "ZoneBeginN");
+			lua_getfield(L, -1, "ZoneEnd");
+			lua_pushcclosure(L, profilerZoneEndWrap, 1);
+			lua_setfield(L, -2, "ZoneEnd");
+		}
+		lua_pop(L, 1);
+	}
 }
 
 
@@ -834,6 +882,18 @@ void CLuaHandle::GameFrame(int frameNum)
 		const std::string msg = GetName() + ((!killMsg.empty())? ": " + killMsg: "");
 
 		LOG("[%s] disabled %s", __func__, msg.c_str());
+
+		// PR 27b: a handle dying on the sim thread would rewire the shared
+		// eventHandler lists under the draw thread's dispatch loops -- hand
+		// the delete to the boundary (sim parked there); queued events that
+		// still target it are dropped by the drain's registry check
+		if (SimDrawSplit::DeferUnsyncedNow()) {
+			killMe = false; // do not re-queue next frame
+			CLuaHandle* dying = this;
+			UnsyncedBoundaryQueue::Defer([dying]() { delete dying; });
+			return;
+		}
+
 		delete this;
 		return;
 	}
@@ -2376,6 +2436,15 @@ void CLuaHandle::SetDevMode(bool value)
 			if (!lc || !lc->owner)
 				continue;
 
+			// PR 27b: /cheat arrives as a net message (sim phase); the
+			// unsynced handles' lua_States belong to the draw thread under
+			// the split, so their half of the fan-out defers to the boundary
+			if (!lc->synced && SimDrawSplit::DeferUnsyncedNow()) {
+				CLuaHandle* owner = lc->owner;
+				UnsyncedBoundaryQueue::DeferFor(owner, [owner]() { owner->EnactDevMode(); });
+				continue;
+			}
+
 			lc->owner->EnactDevMode();
 		}
 	}
@@ -2451,8 +2520,20 @@ void CLuaHandle::HandleLuaMsg(int playerID, int script, int mode, const std::vec
 					} break;
 				}
 
-				if (sendMsg)
-					luaUI->RecvLuaMsg(msg, playerID);
+				if (sendMsg) {
+					// PR 27b: LuaUI belongs to the draw thread; this dispatch
+					// arrives via net-message processing (the sim thread
+					// under the split). The gating decision above is captured
+					// at fire time, matching master's evaluation point.
+					if (SimDrawSplit::DeferUnsyncedNow()) {
+						UnsyncedBoundaryQueue::DeferFor(luaUI, [msg, playerID]() {
+							if (luaUI != nullptr)
+								luaUI->RecvLuaMsg(msg, playerID);
+						});
+					} else {
+						luaUI->RecvLuaMsg(msg, playerID);
+					}
+				}
 			}
 		} break;
 
@@ -2682,6 +2763,13 @@ void CLuaHandle::RunDrawCallIn(const LuaHashString& hs)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	LUA_CALL_IN_CHECK(L);
+	// the shared dispatcher's __func__ ("RunDrawCallIn") defeats the timer
+	// macro's name-based Draw* detection, so open the draw-callin context
+	// bracket explicitly -- every callin routed through here is a Draw* one.
+	// Without this, callouts fired from the argless draw callins (DrawWorld,
+	// DrawGenesis, ...) count as non-draw context (PR-2 census skew) and the
+	// PR-18 snapshot redirect never engages for them.
+	ScopedDrawCallinContext drawCallinCtx(true);
 	luaL_checkstack(L, 2, __func__);
 	if (!hs.GetGlobalFunc(L))
 		return;
@@ -4137,7 +4225,14 @@ void CLuaHandle::CollectGarbage(bool forced)
 	// and OOM exceptions become a concern when catching up
 	// OTOH if gc is tied to sim-speed the increased number of calls can
 	// mean too much time is spent on it, must weigh the per-call period
-	const float gcSpeedFactor = std::clamp(gs->speedFactor * (1 - gs->PreSimFrame()) * (1 - gs->paused), 1.0f, 50.0f);
+	//
+	// PR 27b: that weighing assumes a per-sim-frame caller (more calls at
+	// higher speed, smaller slices). Under the split the unsynced states
+	// are collected by a FIXED 30Hz main-thread job -- dividing its budget
+	// by sim speed starves the collector exactly when catch-up generates
+	// the most garbage (BAR's 1.2GB emergency-collect valve was firing)
+	const bool fixedRateCaller = (SimDrawSplit::Enabled() && !GetLuaContextData(L)->synced);
+	const float gcSpeedFactor = fixedRateCaller ? 1.0f : std::clamp(gs->speedFactor * (1 - gs->PreSimFrame()) * (1 - gs->paused), 1.0f, 50.0f);
 	const float gcBaseRunTime = smoothstep(10.0f, 100.0f, gcMemFootPrint / 1024);
 	const float gcLoopRunTime = std::clamp((gcBaseRunTime * gcRunTimeMult) / gcSpeedFactor, D.gcCtrl.minLoopRunTime, D.gcCtrl.maxLoopRunTime);
 

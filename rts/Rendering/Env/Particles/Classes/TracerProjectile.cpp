@@ -1,5 +1,6 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
+#include "Rendering/Env/Particles/ProjectileDrawer.h"
 #include "TracerProjectile.h"
 
 #include "Rendering/GL/myGL.h"
@@ -63,10 +64,13 @@ void CTracerProjectile::Update()
 	deleteMe |= (length < 0.0f);
 }
 
-void CTracerProjectile::Draw()
+void CTracerProjectile::Draw() const
 {
+	const float3 drawPos = projectileDrawer->GetDrawPos(this);
 	RECOIL_DETAILED_TRACY_ZONE;
-	drawLength = std::min(drawLength, 3.0f);
+	// clamp locally instead of writing back (sim/draw PR 10): the member is
+	// only ever read through this clamp, so the drawn output is identical
+	const float tracerLength = std::min(drawLength, 3.0f);
 
 	auto& rb = RenderBuffer::GetTypedRenderBuffer<VA_TYPE_TC>();
 	auto& sh = rb.GetShader();
@@ -75,7 +79,7 @@ void CTracerProjectile::Draw()
 	const float t = 1.0f / 16.0f;
 
 	rb.AddVertex({ drawPos                   , t, t, col });
-	rb.AddVertex({ drawPos - dir * drawLength, t, t, col });
+	rb.AddVertex({ drawPos - dir * tracerLength, t, t, col });
 
 	sh.Enable();
 	rb.DrawArrays(GL_LINES);

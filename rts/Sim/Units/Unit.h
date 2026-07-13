@@ -3,6 +3,7 @@
 #ifndef UNIT_H
 #define UNIT_H
 
+#include <atomic>
 #include <vector>
 
 #include "Sim/Objects/SolidObject.h"
@@ -69,6 +70,8 @@ public:
 	CUnit();
 	virtual ~CUnit();
 
+	void PreDestruct() override;
+
 	static void InitStatic();
 
 	void SanityCheck() const;
@@ -110,7 +113,7 @@ public:
 	void EnableScriptMoveType();
 	void DisableScriptMoveType();
 
-	CMatrix44f GetTransformMatrix(bool synced = false, bool fullread = false) const override final;
+	CMatrix44f GetTransformMatrix() const override final;
 
 	void DependentDied(CObject* o);
 
@@ -147,7 +150,6 @@ public:
 
 	float3 GetErrorVector(int allyteam) const;
 	float3 GetErrorPos(int allyteam, bool aiming = false) const { return (aiming? aimPos: midPos) + GetErrorVector(allyteam); }
-	float3 GetObjDrawErrorPos(int allyteam) const { return (GetObjDrawMidPos() + GetErrorVector(allyteam)); }
 
 	float3 GetLuaErrorVector(int allyteam, bool fullRead) const { return (fullRead? ZeroVector: GetErrorVector(allyteam)); }
 	float3 GetLuaErrorPos(int allyteam, bool fullRead) const { return (midPos + GetLuaErrorVector(allyteam, fullRead)); }
@@ -256,21 +258,16 @@ public: // unsynced methods
 	const CGroup* GetGroup() const;
 	      CGroup* GetGroup();
 
-	bool GetIsIcon() const { return HasDrawFlag(DrawFlags::SO_DRICON_FLAG); }
-	void SetIsIcon(bool b) {
-		if (b)
-			AddDrawFlag(DrawFlags::SO_DRICON_FLAG);
-		else
-			DelDrawFlag(DrawFlags::SO_DRICON_FLAG);
-	}
+	// GetIsIcon()/SetIsIcon() evicted to the drawer (CUnitDrawer::GetIsIcon,
+	// CUnitDrawerData::SetUnitIsIcon) with the drawFlag storage (sim/draw §A, PR 4);
+	// the remaining icon state (icon indices/name, iconRadius, drawIcon) followed
+	// in PR 5 (CUnitDrawerData::UnitIconState, CUnitDrawer::GetUnitIcon* statics)
 public:
 	static float ExperienceScale(float limExperience, float experienceWeight) {
 		// limExperience ranges from 0.0 to 0.9999...
 		return std::max(0.0f, 1.0f - (limExperience * experienceWeight));
 	}
-private:
-	void UpdateRenderParams();
-public:
+
 	const UnitDef* unitDef = nullptr;
 
 	// Our shield weapon, NULL if we have none
@@ -280,6 +277,23 @@ public:
 
 	const DynDamageArray* selfdExpDamages = nullptr;
 	const DynDamageArray* deathExpDamages = nullptr;
+
+	// version-skip key for the SimSnapshot damage-array row copies (the
+	// modParamsVersion pattern, but ctor-seeded): the ctor draws a fresh
+	// globally-unique serial, so a never-mutated unit still differs from any
+	// stale slot copy (one initial copy per (re)spawned id, then skipped) and
+	// an id reused by a new unit can never alias the previous owner's copy.
+	// Bumped at the single runtime mutation choke, LuaSyncedCtrl::
+	// SetUnitWeaponDamages. CR_IGNORED (runtime-only serving state): a
+	// creg-loaded unit draws a fresh serial in the ctor, forcing a re-copy.
+	uint64_t damagesVersion = 0;
+
+	void BumpDamagesVersion() { damagesVersion = ++damagesVersionSource; }
+
+private:
+	static uint64_t damagesVersionSource;
+
+public:
 
 	CUnit* soloBuilder = nullptr;
 	CUnit* lastAttacker = nullptr;
@@ -537,14 +551,14 @@ public:
 	bool isSelected = false;
 	// if true, unit can not be added to groups by a player (UNSYNCED)
 	bool noGroup = false;
-
-	float iconRadius = 0.0f;
-
-	mutable std::string definedIconName;
-	mutable size_t currentIconIndex = size_t(-1); // icon::INVALID_ICON_INDEX;
-	mutable size_t customIconIndex = size_t(-1); // icon::INVALID_ICON_INDEX;
-
-	bool drawIcon = true;
+	// UNSYNCED draw-owned mirror of "this unit is in a UI control-group"
+	// (uiGroupHandlers[team] membership). Maintained by CGroup::AddUnit /
+	// RemoveUnit / CGroupHandler::SetUnitGroup / RemoveUnitFromGroups so the
+	// sim-thread CommandAI idle-gate can test group membership WITHOUT a
+	// concurrent unitGroups map read (rehash UB under the sim|draw split);
+	// see doc/sim-draw-pr44-prerequisites.md "Gap A". Relaxed: one-frame-stale
+	// AI-idle notification is cosmetic (already non-deterministic).
+	std::atomic<bool> inUiGroup = {false};
 private:
 	// if we are stunned by a weapon or for other reason, access via IsStunned/SetStunned(bool)
 	bool stunned = false;

@@ -30,6 +30,8 @@
 #include "LuaOpenGL.h"
 #include "LuaVFS.h"
 #include "LuaZip.h"
+#include "LuaRules.h" // PR 44b: MirrorAll/CommitAll iterate luaRules + luaGaia
+#include "LuaGaia.h"
 
 #include "Game/Game.h"
 #include "Game/WordCompletion.h"
@@ -48,13 +50,102 @@
 #include "System/creg/SerializeLuaState.h"
 #include "System/FileSystem/FileHandler.h"
 #include "System/Log/ILog.h"
+#include "System/SimDrawSplit.h"
 #include "System/SpringMath.h"
 #include "System/LoadLock.h"
+#include "System/UnsyncedBoundaryQueue.h"
 
 #include "System/Misc/TracyDefs.h"
 
 
 LuaRulesParams::Params  CSplitLuaHandle::gameParams;
+
+
+/**
+ * PR 27b -> PR 44b: the SendToUnsynced boundary mailbox(es) -- bare
+ * lua_States used only as value buffers between the sim phase (which parks
+ * each message's args in a registry-ref'd table) and the barrier drain
+ * (which unpacks and dispatches them). Each owns a private non-shared
+ * LuaMemPool so its allocations cannot race either thread's handle pools.
+ *
+ * PR 44b (no-park): the fire side (sim thread) and the drain side (the
+ * barrier, main thread) RUN CONCURRENTLY now -- one shared state raced
+ * (GATE-FOUND: a registry resize under a concurrent luaL_ref / lua_rawgeti
+ * pair SIGSEGV'd the first no-park strict run at load end). The mailbox
+ * therefore ROTATES PER EPOCH BATCH: fires go into the CURRENT mailbox
+ * (sim-side exclusive; closures capture THEIR mailbox at fire time); the
+ * seal hands the current mailbox to the sealed batch and installs a
+ * recycled/fresh one (RotateSendToUnsyncedMailbox); the consumer drains the
+ * batch's mailbox exclusively -- fenced by the epoch publish/acquire -- and
+ * recycles it once the batch fully drained (RecycleSendToUnsyncedMailbox).
+ * Lockstep never rotates (single-threaded, one mailbox). The tiny recycle
+ * pool is the only lock (uncontended). A dropped closure (client died
+ * between defer and drain) leaks its ref slot inside the recycled state --
+ * bounded by the handle-death rate, accepted.
+ *
+ * States are deliberately leaked at exit: an atexit destructor would run
+ * after LuaMemPool::KillStatic and release into a freed pool (TSan-found
+ * exit-order use-after-free); they live for the process lifetime by design.
+ */
+namespace {
+	std::mutex mailboxPoolMtx;
+	std::vector<lua_State*> mailboxPool;
+	lua_State* currentMailbox = nullptr;
+	lua_State* slotMailboxes[UnsyncedBoundaryQueue::MAX_EPOCH_BATCH_SLOTS] = {nullptr, nullptr, nullptr};
+}
+
+static lua_State* NewSendToUnsyncedMailbox()
+{
+	luaContextData* mailboxLcd = new luaContextData(false, true); // leaked by design (see above)
+	return LUA_OPEN(mailboxLcd);
+}
+
+static lua_State* GetSendToUnsyncedMailbox()
+{
+	// fire-side / lockstep use only: the current mailbox belongs to the
+	// firing side (the sim thread under the flip) until the next rotation
+	if (currentMailbox == nullptr)
+		currentMailbox = NewSendToUnsyncedMailbox();
+
+	return currentMailbox;
+}
+
+void CSplitLuaHandle::RotateSendToUnsyncedMailbox(int slot)
+{
+	// producer, at the epoch seal (sim thread -- PR 44c: the valve's forced
+	// tail produce runs on the sim thread too): the sealed batch's closures
+	// own the current mailbox from here on
+	assert(slot >= 0 && slot < UnsyncedBoundaryQueue::MAX_EPOCH_BATCH_SLOTS);
+
+	std::lock_guard<std::mutex> lock(mailboxPoolMtx);
+
+	// a stale slot mailbox (teardown dropped its batch unconsumed) recycles
+	if (slotMailboxes[slot] != nullptr)
+		mailboxPool.push_back(slotMailboxes[slot]);
+
+	slotMailboxes[slot] = currentMailbox; // may be nullptr (no fires yet)
+
+	if (!mailboxPool.empty()) {
+		currentMailbox = mailboxPool.back();
+		mailboxPool.pop_back();
+	} else {
+		currentMailbox = nullptr; // lazily created on the next fire
+	}
+}
+
+void CSplitLuaHandle::RecycleSendToUnsyncedMailbox(int slot)
+{
+	// consumer, after the held slot's closure batch fully drained (every
+	// dispatched closure unref'd its message table)
+	assert(slot >= 0 && slot < UnsyncedBoundaryQueue::MAX_EPOCH_BATCH_SLOTS);
+
+	if (slotMailboxes[slot] == nullptr)
+		return;
+
+	std::lock_guard<std::mutex> lock(mailboxPoolMtx);
+	mailboxPool.push_back(slotMailboxes[slot]);
+	slotMailboxes[slot] = nullptr;
+}
 
 
 
@@ -2031,6 +2122,51 @@ int CSyncedLuaHandle::SendToUnsynced(lua_State* L)
 	}
 
 	CUnsyncedLuaHandle* ulh = CSplitLuaHandle::GetUnsyncedHandle(L);
+
+	// PR 27b: RecvFromSynced runs unsynced Lua synchronously in this call
+	// stack; under the split the args park in a neutral mailbox lua_State
+	// and the dispatch replays at the boundary. PR 44b: the closure captures
+	// ITS mailbox at fire time -- the seal rotates the current mailbox into
+	// the epoch batch, so the drain side owns it exclusively (see the
+	// mailbox block above). The entry is tagged with the receiving handle so
+	// a handle disabled before the boundary drops its pending messages
+	// instead of dangling.
+	if (SimDrawSplit::DeferUnsyncedNow()) {
+		lua_State* mb = GetSendToUnsyncedMailbox();
+
+		luaL_checkstack(mb, args + 3, __func__);
+		lua_createtable(mb, args, 0);
+
+		const int tblIdx = lua_gettop(mb);
+
+		LuaUtils::CopyData(mb, L, args);
+
+		for (int i = args; i >= 1; --i) {
+			lua_rawseti(mb, tblIdx, i);
+		}
+
+		const int msgRef = luaL_ref(mb, LUA_REGISTRYINDEX);
+
+		UnsyncedBoundaryQueue::DeferFor(ulh, [ulh, mb, msgRef, args]() {
+			lua_rawgeti(mb, LUA_REGISTRYINDEX, msgRef);
+
+			const int tblIdx = lua_gettop(mb);
+
+			luaL_checkstack(mb, args + 2, "SendToUnsynced::drain");
+
+			for (int i = 1; i <= args; ++i) {
+				lua_rawgeti(mb, tblIdx, i);
+			}
+
+			ulh->RecvFromSynced(mb, args);
+
+			lua_settop(mb, tblIdx - 1);
+			luaL_unref(mb, LUA_REGISTRYINDEX, msgRef);
+		});
+
+		return 0;
+	}
+
 	ulh->RecvFromSynced(L, args);
 	return 0;
 }
@@ -2054,7 +2190,15 @@ int CSyncedLuaHandle::AddSyncedActionFallback(lua_State* L)
 
 	auto lhs = GetSyncedHandle(L);
 	lhs->textCommands[cmd] = luaL_checkstring(L, 2);
-	wordCompletion.AddWord(cmdRaw, true, false, false);
+
+	// PR 27b: wordCompletion is the draw/UI-owned text-input dictionary --
+	// a synced callout may not poke it from the sim phase under the split
+	if (SimDrawSplit::DeferUnsyncedNow()) {
+		UnsyncedBoundaryQueue::Defer([cmdRaw = std::move(cmdRaw)]() { wordCompletion.AddWord(cmdRaw, true, false, false); });
+	} else {
+		wordCompletion.AddWord(cmdRaw, true, false, false);
+	}
+
 	lua_pushboolean(L, true);
 	return 1;
 }
@@ -2084,7 +2228,14 @@ int CSyncedLuaHandle::RemoveSyncedActionFallback(lua_State* L)
 
 	if (it != cmds.end()) {
 		cmds.erase(it);
-		wordCompletion.RemoveWord(cmdRaw);
+
+		// see AddSyncedActionFallback
+		if (SimDrawSplit::DeferUnsyncedNow()) {
+			UnsyncedBoundaryQueue::Defer([cmdRaw]() { wordCompletion.RemoveWord(cmdRaw); });
+		} else {
+			wordCompletion.RemoveWord(cmdRaw);
+		}
+
 		lua_pushboolean(L, true);
 	} else {
 		lua_pushboolean(L, false);
@@ -2365,6 +2516,123 @@ CSplitLuaHandle::CSplitLuaHandle(const std::string& _name, int _order)
 	: syncedLuaHandle(this, _name, _order)
 	, unsyncedLuaHandle(this, _name, _order + 1)
 {
+}
+
+
+// ---- PR 44b remainder (§9 ruling): SYNCED-globals epoch mirror ----
+// (see the header comment block; the SYNCED proxy in LuaSyncedTable.cpp is
+// the sole consumer of ServeSyncedGlobalFromMirror)
+
+int CSplitLuaHandle::ServeSyncedGlobalFromMirror(lua_State* dstL)
+{
+	// string keys are the whole observed demand; anything else always takes
+	// the lazy-park path (and is not registered)
+	if (lua_type(dstL, -1) != LUA_TSTRING)
+		return 0;
+
+	size_t keyLen = 0;
+	const char* keyPtr = lua_tolstring(dstL, -1, &keyLen);
+	const std::string key(keyPtr, keyLen);
+
+	std::lock_guard<std::mutex> lock(syncedMirrorMtx);
+
+	// read-set registration (first touch schedules the key for the
+	// producer's next edge; idempotent afterwards)
+	if (syncedMirrorReadSet.insert(key).second)
+		syncedMirrorReadSetDirty = true;
+
+	const auto it = syncedMirrorServed.find(key);
+
+	if (it == syncedMirrorServed.end())
+		return 0;
+
+	switch (it->second.type) {
+		case SyncedGlobalMirrorValue::NIL : { lua_pushnil(dstL);                              } return 1;
+		case SyncedGlobalMirrorValue::BOOL: { lua_pushboolean(dstL, it->second.b);            } return 1;
+		case SyncedGlobalMirrorValue::NUM : { lua_pushnumber(dstL, it->second.n);             } return 1;
+		case SyncedGlobalMirrorValue::STR : { lua_pushlstring(dstL, it->second.s.data(), it->second.s.size()); } return 1;
+		default: {
+			// UNSERVABLE (table/function/userdata): the caller lazy-parks and
+			// the live read below it copies the real value
+		} return 0;
+	}
+}
+
+
+void CSplitLuaHandle::MirrorSyncedGlobalsAtSimEdge(bool onlyIfDirty)
+{
+	if (!syncedLuaHandle.IsValid())
+		return;
+
+	std::lock_guard<std::mutex> lock(syncedMirrorMtx);
+
+	if (syncedMirrorReadSet.empty())
+		return;
+	if (onlyIfDirty && !syncedMirrorReadSetDirty)
+		return;
+
+	syncedMirrorReadSetDirty = false;
+
+	lua_State* srcL = syncedLuaHandle.GetLuaState();
+	const int srcTop = lua_gettop(srcL);
+
+	syncedMirrorStaged.clear();
+
+	for (const std::string& key: syncedMirrorReadSet) {
+		SyncedGlobalMirrorValue v;
+
+		lua_pushvalue(srcL, LUA_GLOBALSINDEX);
+		lua_pushlstring(srcL, key.data(), key.size());
+		lua_rawget(srcL, -2);
+
+		switch (lua_type(srcL, -1)) {
+			case LUA_TNIL    : { v.type = SyncedGlobalMirrorValue::NIL;                                  } break;
+			case LUA_TBOOLEAN: { v.type = SyncedGlobalMirrorValue::BOOL; v.b = lua_toboolean(srcL, -1);  } break;
+			case LUA_TNUMBER : { v.type = SyncedGlobalMirrorValue::NUM;  v.n = lua_tonumber(srcL, -1);   } break;
+			case LUA_TSTRING : {
+				size_t len = 0;
+				const char* p = lua_tolstring(srcL, -1, &len);
+				v.type = SyncedGlobalMirrorValue::STR;
+				v.s.assign(p, len);
+			} break;
+			default: { v.type = SyncedGlobalMirrorValue::UNSERVABLE; } break;
+		}
+
+		lua_settop(srcL, srcTop);
+		syncedMirrorStaged[key] = std::move(v);
+	}
+
+	syncedMirrorStagedValid = true;
+}
+
+
+void CSplitLuaHandle::CommitSyncedGlobalsMirror()
+{
+	std::lock_guard<std::mutex> lock(syncedMirrorMtx);
+
+	if (!syncedMirrorStagedValid)
+		return;
+
+	syncedMirrorStagedValid = false;
+	syncedMirrorServed.swap(syncedMirrorStaged);
+}
+
+
+void CSplitLuaHandle::MirrorAllSyncedGlobalsAtSimEdge(bool onlyIfDirty)
+{
+	if (luaRules != nullptr)
+		luaRules->MirrorSyncedGlobalsAtSimEdge(onlyIfDirty);
+	if (luaGaia != nullptr)
+		luaGaia->MirrorSyncedGlobalsAtSimEdge(onlyIfDirty);
+}
+
+
+void CSplitLuaHandle::CommitAllSyncedGlobalsMirrors()
+{
+	if (luaRules != nullptr)
+		luaRules->CommitSyncedGlobalsMirror();
+	if (luaGaia != nullptr)
+		luaGaia->CommitSyncedGlobalsMirror();
 }
 
 

@@ -132,16 +132,18 @@ int CGeometricObjects::AddLine(float3 start, float3 end, float width, int arrow,
 void CGeometricObjects::Update()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	const auto iter = timedGroups.find(gs->frameNum);
-
-	if (iter == timedGroups.end())
-		return;
-
-	for (const int groupID: iter->second) {
-		DeleteGroup(groupID);
+	// runs once per sim-frame batch at the unsynced boundary (PR 11b), so sweep
+	// every expired bucket (key <= frameNum), not just the exact-frame bucket;
+	// an exact-key find would skip buckets under fast-forward and leak groups
+	for (auto it = timedGroups.begin(); it != timedGroups.end(); ) {
+		if (it->first <= gs->frameNum) {
+			for (const int groupID: it->second)
+				DeleteGroup(groupID);
+			it = timedGroups.erase(it);
+		} else {
+			++it;
+		}
 	}
-
-	timedGroups.erase(iter->first);
 }
 
 

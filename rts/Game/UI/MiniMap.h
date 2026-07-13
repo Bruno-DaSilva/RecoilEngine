@@ -42,6 +42,10 @@ public:
 
 	float3 GetMapPosition(int x, int y) const;
 	CUnit* GetSelectUnit(const float3& pos) const;
+	// §4.6: id-only pick for draw-context callers (Lua TraceScreenRay) so the
+	// picked object's id is consumed without a live CUnit* deref crossing the
+	// draw/sim seam; returns -1 for no selectable unit
+	int GetSelectUnitID(const float3& pos) const;
 
 	void UpdateGeometry();
 	void SetGeometry(int px, int py, int sx, int sy);

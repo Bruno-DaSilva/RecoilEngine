@@ -15,7 +15,7 @@ public:
 	CEmgProjectile(const ProjectileParams& params);
 
 	void Update() override;
-	void Draw() override;
+	void Draw() const override;
 
 	int GetProjectilesCount() const override;
 

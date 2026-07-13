@@ -288,7 +288,7 @@ void CPieceProjectile::DrawOnMinimap() const
 }
 
 
-void CPieceProjectile::Draw()
+void CPieceProjectile::Draw() const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if ((explFlags & PF_Fire) == 0)

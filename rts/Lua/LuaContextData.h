@@ -27,10 +27,10 @@ class LuaParser;
 
 struct luaContextData {
 public:
-	luaContextData(bool sharedPool, bool stateOwned)
+	luaContextData(bool sharedPool, bool stateOwned, bool unsyncedSharedPool = false)
 	: owner(nullptr)
 	, luamutex(nullptr)
-	, memPool(LuaMemPool::AcquirePtr(sharedPool, stateOwned))
+	, memPool(LuaMemPool::AcquirePtr(sharedPool, stateOwned, unsyncedSharedPool))
 	, parser(nullptr)
 
 	, synced(false)

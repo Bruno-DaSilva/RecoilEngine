@@ -47,7 +47,11 @@ enum DbgTimingInfoType {
 	TIMING_SIM,
 	TIMING_GC,
 	TIMING_SWAP,
-	TIMING_UNSYNCED
+	TIMING_UNSYNCED,
+	TIMING_GC_SIM,    // TIMING_GC emitted from the sim phase (synced-handle GC)
+	TIMING_BARRIER,   // sim|draw gate: pause-wait + valve service + barrier (main thread)
+	TIMING_SIM_PARKED, // sim|draw gate: window the sim thread is held parked
+	TIMING_EPOCH_PRODUCE // sim|draw split: epoch extraction+publish on the sim thread (PR 46)
 };
 
 
@@ -74,6 +78,16 @@ class CEventClient
 		// used by the eventHandler to route certain event types
 		virtual int  GetReadAllyTeam() const { return NoAccessTeam; }
 		virtual bool GetFullRead()     const { return GetReadAllyTeam() == AllAccessTeam; }
+
+		/**
+		 * PR 27b: fire-time capture clients (the RenderEventQueue enqueue
+		 * layer, i.e. CUnitDrawerData's LOS-transition handlers) must receive
+		 * sim-fired events at fire time even under the sim|draw split -- they
+		 * record event-time facts into boundary-drained records and their
+		 * sim-fired handlers are sim-thread-safe by design. Everyone else
+		 * unsynced gets boundary-deferred (UnsyncedBoundaryQueue.h).
+		 */
+		virtual bool IsSimPhaseCaptureClient() const { return false; }
 		inline bool CanReadAllyTeam(int allyTeam) {
 			return (GetFullRead() || (GetReadAllyTeam() == allyTeam));
 		}

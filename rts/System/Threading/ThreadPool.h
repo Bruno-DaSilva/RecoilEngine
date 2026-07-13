@@ -32,6 +32,11 @@ namespace ThreadPool {
 	static inline bool HasThreads() { return false; }
 
 	static constexpr int MAX_THREADS = 1;
+
+	// PR 27b: extra scratch slot for main-thread queries under the sim|draw
+	// split (see the THREADPOOL branch)
+	static constexpr int MAX_SCRATCH_SLOTS = MAX_THREADS + 1;
+	static constexpr int MAIN_SPLIT_SCRATCH_SLOT = MAX_THREADS;
 }
 
 template <typename F>
@@ -137,17 +142,34 @@ namespace ThreadPool {
 	void NotifyWorkerThreads(bool force, bool async);
 
 	static constexpr int MAX_THREADS = 32;
+
+	// PR 27b: extra scratch slot for main-thread queries under the sim|draw
+	// split -- both orchestrator threads report GetThreadNum()==0, and the
+	// still-live draw-side quadfield walks must not share the sim thread's
+	// tempNum/query-cache slot (found by the flag-ON shakeout: corrupted
+	// GetQuads scratch crashed CQuadField::MovedUnit on the sim thread)
+	static constexpr int MAX_SCRATCH_SLOTS = MAX_THREADS + 1;
+	static constexpr int MAIN_SPLIT_SCRATCH_SLOT = MAX_THREADS;
 }
 
 
 struct MultithreadedSection {
-	MultithreadedSection() {
+	// save/restore, NOT set/clear: WorkerLoop sets the thread-local flag ONCE
+	// at worker startup (a pool worker is "in a multithreaded section" for its
+	// whole lifetime), so a nested wrapper invoked from a task body -- whose
+	// destructor runs on the worker -- must not CLEAR the worker's flag on
+	// exit. With plain set/clear one nested for_mt/parallel call permanently
+	// disarmed every IsInMultiThreadedSection() guard on that worker (e.g.
+	// the HAPFS heat-map update branch in IPathFinder.cpp).
+	MultithreadedSection() : prevValue(ThreadPool::IsInMultiThreadedSection() != 0) {
 		ThreadPool::SetInMultiThreadedSection(true);
 	}
 
 	~MultithreadedSection() {
-		ThreadPool::SetInMultiThreadedSection(false);
+		ThreadPool::SetInMultiThreadedSection(prevValue);
 	}
+
+	const bool prevValue;
 };
 
 

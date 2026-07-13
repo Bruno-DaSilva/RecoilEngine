@@ -26,6 +26,18 @@ namespace GL {
 
 		GL::Light* GetLight(unsigned int lgtHandle);
 
+		// PR 27b: under the sim|draw split the Lua track callouts skip the
+		// DEPENDENCE_LIGHT registration (cross-thread listener mutation +
+		// sim-thread delivery into draw-owned lights); the boundary calls
+		// this instead for every drained destroy. The tracked pointer stays
+		// readable until then (deferred-deletion shell).
+		void DeliverBoundaryDeath(const CWorldObject* obj) {
+			for (GL::Light& light: lights) {
+				if (light.GetTrackObject() == obj)
+					light.DependentDied(nullptr);
+			}
+		}
+
 		unsigned int GetBaseLight() const { return baseLight; }
 		unsigned int GetMaxLights() const { return maxLights; }
 

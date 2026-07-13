@@ -2,6 +2,7 @@
 
 #include "HUDDrawer.h"
 
+#include "Rendering/Units/UnitDrawer.h"
 #include "Rendering/Fonts/glFont.h"
 #include "Rendering/GlobalRendering.h"
 #include "Rendering/GL/myGL.h"
@@ -71,7 +72,7 @@ void HUDDrawer::DrawModel(const CUnit* unit)
 		}
 
 		glColor4f(1.0f, 1.0f, 1.0f, 0.25f);
-		unit->localModel.Draw();
+		unit->localModel.Draw(&CUnitDrawer::GetLuaMaterialData(unit->id), &CUnitDrawer::GetLodDispLists(unit->id));
 	glPopMatrix();
 }
 

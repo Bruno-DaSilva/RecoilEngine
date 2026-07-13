@@ -63,7 +63,7 @@ void CRepulseGfx::DependentDied(CObject* o)
 	deleteMe = true;
 }
 
-void CRepulseGfx::Draw()
+void CRepulseGfx::Draw() const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	const CUnit* owner = CProjectile::owner();
@@ -78,7 +78,9 @@ void CRepulseGfx::Draw()
 	float3 xdirDS;
 	float3 ydirDS;
 
-	pos = (repulsed->pos - zdir * 10.0f) + (repulsed->speed * globalRendering->timeOffset);
+	// interpolated anchor, computed locally instead of written back into pos
+	// (sim/draw PR 10); Update() keeps the persistent pos tracking at sim rate
+	const float3 anchorPos = (repulsed->pos - zdir * 10.0f) + (repulsed->speed * globalRendering->timeOffset);
 
 	float drawsize = 10.0f;
 	float alpha = std::min(255.0f, age * 10.0f);
@@ -112,10 +114,10 @@ void CRepulseGfx::Draw()
 			const float rx = x * 0.25f;
 			AddEffectsQuad<0>(
 				et->pageNum,
-				{ pos + xdirDS * (dx + 0) + ydirDS * (dy + 0) + zdir * vertexDists[(y    ) * 5 + x    ],  txo + (ry        ) * txs, tyo + (rx        ) * tys,  col },
-				{ pos + xdirDS * (dx + 0) + ydirDS * (dy + 1) + zdir * vertexDists[(y + 1) * 5 + x    ],  txo + (ry + 0.25f) * txs, tyo + (rx        ) * tys,  col },
-				{ pos + xdirDS * (dx + 1) + ydirDS * (dy + 1) + zdir * vertexDists[(y + 1) * 5 + x + 1],  txo + (ry + 0.25f) * txs, tyo + (rx + 0.25f) * tys,  col },
-				{ pos + xdirDS * (dx + 1) + ydirDS * (dy + 0) + zdir * vertexDists[(y    ) * 5 + x + 1],  txo + (ry        ) * txs, tyo + (rx + 0.25f) * tys,  col }
+				{ anchorPos + xdirDS * (dx + 0) + ydirDS * (dy + 0) + zdir * vertexDists[(y    ) * 5 + x    ],  txo + (ry        ) * txs, tyo + (rx        ) * tys,  col },
+				{ anchorPos + xdirDS * (dx + 0) + ydirDS * (dy + 1) + zdir * vertexDists[(y + 1) * 5 + x    ],  txo + (ry + 0.25f) * txs, tyo + (rx        ) * tys,  col },
+				{ anchorPos + xdirDS * (dx + 1) + ydirDS * (dy + 1) + zdir * vertexDists[(y + 1) * 5 + x + 1],  txo + (ry + 0.25f) * txs, tyo + (rx + 0.25f) * tys,  col },
+				{ anchorPos + xdirDS * (dx + 1) + ydirDS * (dy + 0) + zdir * vertexDists[(y    ) * 5 + x + 1],  txo + (ry        ) * txs, tyo + (rx + 0.25f) * tys,  col }
 			);
 		}
 	}
@@ -139,32 +141,32 @@ void CRepulseGfx::Draw()
 		ct->pageNum,
 		{ owner->pos + (-xdir + ydir) * drawsize * 0.2f,  tx, ty, col2 },
 		{ owner->pos + ( xdir + ydir) * drawsize * 0.2f,  tx, ty, col2 },
-		{ pos + xdirDS + ydirDS + zdir * vertexDists[6],  tx, ty, col },
-		{ pos - xdirDS + ydirDS + zdir * vertexDists[6],  tx, ty, col }
+		{ anchorPos + xdirDS + ydirDS + zdir * vertexDists[6],  tx, ty, col },
+		{ anchorPos - xdirDS + ydirDS + zdir * vertexDists[6],  tx, ty, col }
 	);
 
 	AddEffectsQuad<0>(
 		ct->pageNum,
 		{ owner->pos + (-xdir - ydir) * drawsize * 0.2f,  tx, ty, col2 },
 		{ owner->pos + ( xdir - ydir) * drawsize * 0.2f,  tx, ty, col2 },
-		{ pos + xdirDS - ydirDS + zdir * vertexDists[6],  tx, ty, col },
-		{ pos - xdirDS - ydirDS + zdir * vertexDists[6],  tx, ty, col }
+		{ anchorPos + xdirDS - ydirDS + zdir * vertexDists[6],  tx, ty, col },
+		{ anchorPos - xdirDS - ydirDS + zdir * vertexDists[6],  tx, ty, col }
 	);
 
 	AddEffectsQuad<0>(
 		ct->pageNum,
 		{ owner->pos + ( xdir - ydir) * drawsize * 0.2f,   tx, ty, col2 },
 		{ owner->pos + ( xdir + ydir) * drawsize * 0.2f,   tx, ty, col2 },
-		{ pos + xdirDS + ydirDS + zdir * vertexDists[6],  tx, ty, col },
-		{ pos + xdirDS - ydirDS + zdir * vertexDists[6],  tx, ty, col }
+		{ anchorPos + xdirDS + ydirDS + zdir * vertexDists[6],  tx, ty, col },
+		{ anchorPos + xdirDS - ydirDS + zdir * vertexDists[6],  tx, ty, col }
 	);
 
 	AddEffectsQuad<0>(
 		ct->pageNum,
 		{ owner->pos + (-xdir - ydir) * drawsize * 0.2f,  tx, ty, col2 },
 		{ owner->pos + (-xdir + ydir) * drawsize * 0.2f,  tx, ty, col2 },
-		{ pos - xdirDS + ydirDS + zdir * vertexDists[6],  tx, ty, col },
-		{ pos - xdirDS - ydirDS + zdir * vertexDists[6],  tx, ty, col }
+		{ anchorPos - xdirDS + ydirDS + zdir * vertexDists[6],  tx, ty, col },
+		{ anchorPos - xdirDS - ydirDS + zdir * vertexDists[6],  tx, ty, col }
 	);
 }
 
@@ -173,4 +175,14 @@ void CRepulseGfx::Update()
 	RECOIL_DETAILED_TRACY_ZONE;
 	age += 1;
 	deleteMe |= (repulsed != nullptr && owner() != nullptr && (repulsed->pos - owner()->pos).SqLength() > sqMaxOwnerDist);
+
+	// moved here from Draw() (sim/draw PR 10): draw code no longer writes
+	// object state, so track the repulsed projectile at sim rate instead
+	// (Draw() adds the sub-frame speed offset locally; master only updated
+	// pos when the projectile was actually drawn, so this also un-stales
+	// the culling position)
+	if (repulsed != nullptr && owner() != nullptr) {
+		const float3 zdir = (repulsed->pos - owner()->pos).SafeANormalize();
+		pos = repulsed->pos - zdir * 10.0f;
+	}
 }

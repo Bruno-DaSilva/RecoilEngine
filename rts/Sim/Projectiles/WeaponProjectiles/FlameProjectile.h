@@ -15,7 +15,7 @@ public:
 	CFlameProjectile(const ProjectileParams& params);
 
 	void Update() override;
-	void Draw() override;
+	void Draw() const override;
 	void Collision() override;
 
 	int GetProjectilesCount() const override;

@@ -1,6 +1,8 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "SelectedUnitsHandler.h"
+
+#include "System/SimDrawSplit.h"
 #include "SelectedUnitsAI.h"
 #include "Camera.h"
 #include "GlobalUnsynced.h"
@@ -14,12 +16,15 @@
 #include "ExternalAI/SkirmishAIHandler.h"
 #include "Rendering/CommandDrawer.h"
 #include "Rendering/LineDrawer.h"
+#include "Rendering/Units/UnitDrawer.h"
 #include "Rendering/GL/myGL.h"
 #include "Rendering/GL/RenderBuffers.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/MoveTypes/MoveDefHandler.h"
 #include "Sim/Features/Feature.h"
+#include "Rendering/Common/SimSnapshot.h"
+#include "Lua/LuaSnapshotServe.h" // sim|draw PR 44: served GetAvailableCommands
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Units/UnitHandler.h"
@@ -91,6 +96,77 @@ void CSelectedUnitsHandler::ToggleBuildIconsFirst()
 CSelectedUnitsHandler::AvailableCommandsStruct CSelectedUnitsHandler::GetAvailableCommands()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+
+	// sim|draw PR 44 (Gap B): under the RUNNING split (sim thread live, not
+	// parked) this can be reached sim-live (input-driven LayoutIcons; and, once
+	// guihandler->Update folds sim-live, every frame), where walking live
+	// commandAI->GetPossibleCommands() / lastSelectedCommandPage races the sim.
+	// Serve from the boundary cmd-desc cache instead. Flag-off / sim-parked /
+	// pregame falls through to the live body below -> byte-identical. The served
+	// twin mirrors the live 3-pass structure exactly; a selected unit with no
+	// served slot (died mid-frame / never copied) is skipped, matching the live
+	// path's null-CUnit skip.
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() && !SimDrawSplit::IsSimParked()) {
+		possibleCommandsChanged = false;
+
+		int commandPage = 1000;
+		spring::unordered_map<int, int> states;
+		std::vector<SCommandDescription> commands;
+
+		// fetch each selected unit's served descs + page once (in selectedUnits
+		// order, so the load-pass push order matches the live path)
+		std::vector<std::vector<SCommandDescription>> perUnitDescs;
+		perUnitDescs.reserve(selectedUnits.size());
+
+		for (const int unitID: selectedUnits) {
+			std::vector<SCommandDescription> descs;
+			int page = 0;
+			if (!LuaSnapshotServe::GetServedAvailableCommands(unitID, descs, page))
+				continue;
+
+			for (const SCommandDescription& cmdDesc: descs) {
+				if (cmdDesc.showUnique && selectedUnits.size() > 1)
+					states[cmdDesc.id] = 0;
+				else
+					states[cmdDesc.id] = cmdDesc.disabled ? 2 : 1;
+			}
+
+			if (page < commandPage)
+				commandPage = page;
+
+			perUnitDescs.push_back(std::move(descs));
+		}
+
+		// load the first set (separating build and non-build commands)
+		for (const std::vector<SCommandDescription>& descs: perUnitDescs) {
+			for (const SCommandDescription& cmdDesc: descs) {
+				if (buildIconsFirst != (cmdDesc.id < 0))
+					continue;
+				if (states[cmdDesc.id] > 0) {
+					commands.push_back(cmdDesc);
+					states[cmdDesc.id] = 0;
+				}
+			}
+		}
+
+		// load the second set (all those that have not already been included)
+		for (const std::vector<SCommandDescription>& descs: perUnitDescs) {
+			for (const SCommandDescription& cmdDesc: descs) {
+				if (buildIconsFirst != (cmdDesc.id >= 0))
+					continue;
+				if (states[cmdDesc.id] > 0) {
+					commands.push_back(cmdDesc);
+					states[cmdDesc.id] = 0;
+				}
+			}
+		}
+
+		AvailableCommandsStruct ac;
+		ac.commandPage = commandPage;
+		ac.commands = commands;
+		return ac;
+	}
+
 	possibleCommandsChanged = false;
 
 	int commandPage = 1000;
@@ -100,6 +176,10 @@ CSelectedUnitsHandler::AvailableCommandsStruct CSelectedUnitsHandler::GetAvailab
 
 	for (const int unitID: selectedUnits) {
 		const CUnit* u = unitHandler.GetUnit(unitID);
+		// PR 27b: skip a selected unit killed mid-frame under the split (null
+		// slot; its commandAI is destructed by CUnit::PreDestruct on death)
+		if (u == nullptr)
+			continue;
 		const CCommandAI* cai = u->commandAI;
 
 		for (const SCommandDescription* cmdDesc: cai->GetPossibleCommands()) {
@@ -117,6 +197,10 @@ CSelectedUnitsHandler::AvailableCommandsStruct CSelectedUnitsHandler::GetAvailab
 	// load the first set (separating build and non-build commands)
 	for (const int unitID: selectedUnits) {
 		const CUnit* u = unitHandler.GetUnit(unitID);
+		// PR 27b: skip a selected unit killed mid-frame under the split (null
+		// slot; its commandAI is destructed by CUnit::PreDestruct on death)
+		if (u == nullptr)
+			continue;
 		const CCommandAI* cai = u->commandAI;
 
 		for (const SCommandDescription* cmdDesc: cai->GetPossibleCommands()) {
@@ -135,6 +219,10 @@ CSelectedUnitsHandler::AvailableCommandsStruct CSelectedUnitsHandler::GetAvailab
 	// load the second set (all those that have not already been included)
 	for (const int unitID: selectedUnits) {
 		const CUnit* u = unitHandler.GetUnit(unitID);
+		// PR 27b: skip a selected unit killed mid-frame under the split (null
+		// slot; its commandAI is destructed by CUnit::PreDestruct on death)
+		if (u == nullptr)
+			continue;
 		const CCommandAI* cai = u->commandAI;
 
 		for (const SCommandDescription* cmdDesc: cai->GetPossibleCommands()) {
@@ -307,7 +395,15 @@ void CSelectedUnitsHandler::HandleUnitBoxSelection(const float4& planeRight, con
 			continue;
 
 		for (CUnit* u: unitHandler.GetUnitsByTeam(team)) {
-			const float4 vec(u->midPos, 1.0f);
+			// PR 25 (sim/draw decoupling section D): the box predicate reads the
+			// boundary snapshot midPos, not the live sim object. Box-select only
+			// iterates own/selectable teams (always in LOS) so the raw snapshot
+			// value equals master's raw u->midPos; a unit created since the last
+			// boundary reads (0,0,0) and is simply not box-selectable for <=1
+			// frame (the decided pick-latency contract). The iteration and the
+			// AddUnit/RemoveUnit below still hold live pointers -- the id -> owner
+			// seam left for the split.
+			const float4 vec(simSnapshot.Read().MidPos(u->id), 1.0f);
 
 			if (vec.dot4(planeRight) >= 0.0f)
 				continue;
@@ -377,7 +473,8 @@ void CSelectedUnitsHandler::HandleSingleUnitClickSelection(CUnit* unit, bool doI
 				if (u->unitDef->id != unit->unitDef->id)
 					continue;
 
-				if (!doInViewTest || KeyInput::GetKeyModState(KMOD_CTRL) || camera->InView((u)->midPos))
+				// PR 25: snapshot midPos (own/selectable units, always in LOS)
+				if (!doInViewTest || KeyInput::GetKeyModState(KMOD_CTRL) || camera->InView(simSnapshot.Read().MidPos(u->id)))
 					AddUnit(u);
 			}
 		}
@@ -401,7 +498,11 @@ void CSelectedUnitsHandler::AddUnit(CUnit* unit)
 		return;
 
 	if (selectedUnits.insert(unit->id).second) {
-		AddDeathDependence(unit, DEPENDENCE_SELECTED);
+		// PR 27b: no death-dependences on sim objects from the draw side
+		// under the split; the boundary delivers deaths (DependentDied is
+		// called from CGame::DeliverBoundaryDeaths instead)
+		if (!SimDrawSplit::Enabled())
+			AddDeathDependence(unit, DEPENDENCE_SELECTED);
 
 		selectionChanged = true;
 		possibleCommandsChanged = true;
@@ -420,7 +521,8 @@ void CSelectedUnitsHandler::RemoveUnit(CUnit* unit)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (selectedUnits.erase(unit->id)) {
-		DeleteDeathDependence(unit, DEPENDENCE_SELECTED);
+		if (!SimDrawSplit::Enabled())
+			DeleteDeathDependence(unit, DEPENDENCE_SELECTED);
 
 		selectionChanged = true;
 		possibleCommandsChanged = true;
@@ -449,7 +551,9 @@ void CSelectedUnitsHandler::ClearSelected()
 		}
 
 		u->isSelected = false;
-		DeleteDeathDependence(u, DEPENDENCE_SELECTED);
+
+		if (!SimDrawSplit::Enabled())
+			DeleteDeathDependence(u, DEPENDENCE_SELECTED);
 	}
 
 	selectedUnits.clear();
@@ -486,7 +590,8 @@ void CSelectedUnitsHandler::SelectGroup(int num)
 		if (!u->noSelect) {
 			u->isSelected = true;
 			selectedUnits.insert(u->id);
-			AddDeathDependence(u, DEPENDENCE_SELECTED);
+			if (!SimDrawSplit::Enabled())
+				AddDeathDependence(u, DEPENDENCE_SELECTED);
 		}
 	}
 
@@ -636,9 +741,13 @@ void CSelectedUnitsHandler::Draw()
 
 		for (const int unitID : *unitSet) {
 			const CUnit* unit = unitHandler.GetUnit(unitID);
+			// PR 27b: draw pass with the sim thread live -- skip a selected unit
+			// the sim killed mid-frame (null handler slot)
+			if (unit == nullptr)
+				continue;
 			const MoveDef* moveDef = unit->moveDef;
 
-			if (unit->GetIsIcon())
+			if (CUnitDrawer::GetIsIcon(unit))
 				continue;
 			if (!IsUnitSelected(unit))
 				continue;
@@ -649,21 +758,23 @@ void CSelectedUnitsHandler::Draw()
 				mhxsize = (moveDef == nullptr) ? uhxsize : ((moveDef->xsize * SQUARE_SIZE) >> 1),
 				mhzsize = (moveDef == nullptr) ? uhzsize : ((moveDef->zsize * SQUARE_SIZE) >> 1);
 
+			const float3& drawPos = CUnitDrawer::GetDrawPos(unit);
+
 			// UnitDef footprint corners
 			rb.AddQuadLines(
-				{ float3(unit->drawPos.x + uhxsize, unit->drawPos.y, unit->drawPos.z + uhzsize), color1 },
-				{ float3(unit->drawPos.x - uhxsize, unit->drawPos.y, unit->drawPos.z + uhzsize), color1 },
-				{ float3(unit->drawPos.x - uhxsize, unit->drawPos.y, unit->drawPos.z - uhzsize), color1 },
-				{ float3(unit->drawPos.x + uhxsize, unit->drawPos.y, unit->drawPos.z - uhzsize), color1 }
+				{ float3(drawPos.x + uhxsize, drawPos.y, drawPos.z + uhzsize), color1 },
+				{ float3(drawPos.x - uhxsize, drawPos.y, drawPos.z + uhzsize), color1 },
+				{ float3(drawPos.x - uhxsize, drawPos.y, drawPos.z - uhzsize), color1 },
+				{ float3(drawPos.x + uhxsize, drawPos.y, drawPos.z - uhzsize), color1 }
 			);
 
 			if (globalRendering->drawDebug && (mhxsize != uhxsize || mhzsize != uhzsize)) {
 				// MoveDef footprint corners
 				rb.AddQuadLines(
-					{ float3(unit->drawPos.x + mhxsize, unit->drawPos.y, unit->drawPos.z + mhzsize), color2 },
-					{ float3(unit->drawPos.x - mhxsize, unit->drawPos.y, unit->drawPos.z + mhzsize), color2 },
-					{ float3(unit->drawPos.x - mhxsize, unit->drawPos.y, unit->drawPos.z - mhzsize), color2 },
-					{ float3(unit->drawPos.x + mhxsize, unit->drawPos.y, unit->drawPos.z - mhzsize), color2 }
+					{ float3(drawPos.x + mhxsize, drawPos.y, drawPos.z + mhzsize), color2 },
+					{ float3(drawPos.x - mhxsize, drawPos.y, drawPos.z + mhzsize), color2 },
+					{ float3(drawPos.x - mhxsize, drawPos.y, drawPos.z - mhzsize), color2 },
+					{ float3(drawPos.x + mhxsize, drawPos.y, drawPos.z - mhzsize), color2 }
 				);
 			}
 		}
@@ -865,7 +976,7 @@ static inline bool IsBetterLeader(const UnitDef* newDef, const UnitDef* oldDef)
 // DrawMapStuff --> CGuiHandler::GetDefaultCommand --> GetDefaultCmd
 // CMouseHandler::DrawCursor --> DrawCentroidCursor --> CGuiHandler::GetDefaultCommand --> GetDefaultCmd
 // LuaUnsyncedRead::GetDefaultCommand --> CGuiHandler::GetDefaultCommand --> GetDefaultCmd
-int CSelectedUnitsHandler::GetDefaultCmd(const CUnit* unit, const CFeature* feature)
+int CSelectedUnitsHandler::GetDefaultCmd(const CUnit* unit, const CFeature* feature, bool fireEvent)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	// return the default if there are no units selected
@@ -879,13 +990,25 @@ int CSelectedUnitsHandler::GetDefaultCmd(const CUnit* unit, const CFeature* feat
 	if (targetUnit != nullptr)
 		targetIsEnemy = !teamHandler.Ally(gu->myAllyTeam, targetUnit->allyteam);
 
-	// find the best leader to pick the command
-	const CUnit* leaderUnit = unitHandler.GetUnit(*selectedUnits.begin());
-	const UnitDef* leaderDef = leaderUnit->unitDef;
+	// find the best leader to pick the command.
+	// PR 27b: this runs from the draw pass too (GuiHandler::DrawMapStuff) with
+	// the sim thread live, so a selected unit may have died mid-frame and
+	// unitHandler.GetUnit() returns null -- skip such ids (and their commandAI,
+	// which CUnit::PreDestruct() already destructed) instead of dereferencing.
+	const CUnit* leaderUnit = nullptr;
+	const UnitDef* leaderDef = nullptr;
 
 	for (const int unitID: selectedUnits) {
 		const CUnit* testUnit = unitHandler.GetUnit(unitID);
+		if (testUnit == nullptr)
+			continue;
 		const UnitDef* testDef = testUnit->unitDef;
+
+		if (leaderUnit == nullptr) {
+			leaderUnit = testUnit;
+			leaderDef = testDef;
+			continue;
+		}
 
 		if (testDef == leaderDef)
 			continue;
@@ -897,9 +1020,77 @@ int CSelectedUnitsHandler::GetDefaultCmd(const CUnit* unit, const CFeature* feat
 		leaderUnit = testUnit;
 	}
 
+	// every selected unit died out from under the draw pass
+	if (leaderUnit == nullptr)
+		return CMD_STOP;
+
 	int cmd = leaderUnit->commandAI->GetDefaultCmd(unit, feature);
-	eventHandler.DefaultCommand(unit, feature, cmd);
+	// sim|draw PR 44 (Gap B): the armed diff-gate raw path skips the widget callin
+	if (fireEvent)
+		eventHandler.DefaultCommand(unit, feature, cmd);
 	return cmd;
+}
+
+
+// PR 44b: the SIM-THREAD evaluation half of GetDefaultCmd -- the identical
+// leader walk over a REQUEST-TIME selection snapshot (ids captured by the
+// draw side), with NO widget callin: the DefaultCommand event is the
+// presentation half, fired by the consumer's commit on the main thread
+// (CGuiHandler::CommitDefaultCmdReply) with this walk's results as its args.
+// leaderFound=false reproduces the no-selection / all-dead CMD_STOP shape,
+// where the live path fires no event either. Uses the same file-static
+// IsBetterLeader target context as the live body: safe because every
+// main-thread GetDefaultCmd caller holds a ScopedExternalSimPause (the sim is
+// at its yield point, never inside this eval) -- the two walks are mutually
+// exclusive by construction.
+int CSelectedUnitsHandler::GetDefaultCmdEval(const std::vector<int>& unitIDs, const CUnit* unit, const CFeature* feature, bool& leaderFound)
+{
+	leaderFound = false;
+
+	// return the default if there are no units selected
+	if (unitIDs.empty())
+		return CMD_STOP;
+
+	// setup the locals for IsBetterLeader()
+	targetUnit = unit;
+	targetFeature = feature;
+
+	if (targetUnit != nullptr)
+		targetIsEnemy = !teamHandler.Ally(gu->myAllyTeam, targetUnit->allyteam);
+
+	// find the best leader to pick the command (the GetDefaultCmd walk over
+	// the captured ids; this runs on the sim thread, so unitHandler reads are
+	// legal and a stale id simply resolves to null and is skipped)
+	const CUnit* leaderUnit = nullptr;
+	const UnitDef* leaderDef = nullptr;
+
+	for (const int unitID: unitIDs) {
+		const CUnit* testUnit = unitHandler.GetUnit(unitID);
+		if (testUnit == nullptr)
+			continue;
+		const UnitDef* testDef = testUnit->unitDef;
+
+		if (leaderUnit == nullptr) {
+			leaderUnit = testUnit;
+			leaderDef = testDef;
+			continue;
+		}
+
+		if (testDef == leaderDef)
+			continue;
+
+		if (!IsBetterLeader(testDef, leaderDef))
+			continue;
+
+		leaderDef = testDef;
+		leaderUnit = testUnit;
+	}
+
+	if (leaderUnit == nullptr)
+		return CMD_STOP;
+
+	leaderFound = true;
+	return leaderUnit->commandAI->GetDefaultCmd(unit, feature);
 }
 
 
@@ -916,6 +1107,19 @@ void CSelectedUnitsHandler::PossibleCommandChange(CUnit* sender)
 // CMiniMap::DrawForReal --> DrawCommands
 void CSelectedUnitsHandler::DrawCommands()
 {
+	// PR 27b: command-line drawing walks live sim command state -- CommandAI
+	// (whose commandAI object CUnit::PreDestruct() destructs at unit-death on
+	// the sim thread) and the commandQue deque the sim mutates mid-frame. From
+	// the draw pass with the sim thread live and unparked that is a
+	// use-after-free / torn-read race: a selected unit dying mid-burst still
+	// resolves (a deferred-deletion shell), but its commandAI is already gone,
+	// and the boundary snapshot cannot flag the intra-burst death. Suppress the
+	// draw until the engine command drawer is converted to read the boundary-
+	// copied command queues (LuaSnapshotServe's per-unit copies; the Lua callout
+	// family is already served). Flag-off / sim-parked is byte-identical.
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() && !SimDrawSplit::IsSimParked())
+		return;
+
 	glDisable(GL_TEXTURE_2D);
 	glDisable(GL_DEPTH_TEST);
 
@@ -969,12 +1173,17 @@ std::string CSelectedUnitsHandler::GetTooltip()
 		const CUnit* unit = unitHandler.GetUnit(*selectedUnits.begin());
 		const CTeam* team = nullptr;
 
-		// show the player name instead of unit name if it has FBI tag showPlayerName
-		if (unit->unitDef->showPlayerName) {
-			team = teamHandler.Team(unit->team);
-			s = team->GetControllerName();
-		} else {
-			s = unitToolTipMap.Get(unit->id);
+		// PR 27b: draw-pass tooltip (CTooltipConsole::Draw) with the sim thread
+		// live -- the lead selected unit may have died mid-frame; leave the name
+		// blank rather than dereferencing a null slot
+		if (unit != nullptr) {
+			// show the player name instead of unit name if it has FBI tag showPlayerName
+			if (unit->unitDef->showPlayerName) {
+				team = teamHandler.Team(unit->team);
+				s = team->GetControllerName();
+			} else {
+				s = unitToolTipMap.Get(unit->id);
+			}
 		}
 	}
 
@@ -991,6 +1200,10 @@ std::string CSelectedUnitsHandler::GetTooltip()
 
 		for (const int unitID: selectedUnits) {
 			const CUnit* unit = unitHandler.GetUnit(unitID);
+			// PR 27b: skip a selected unit killed mid-draw-frame (null slot);
+			// SUnitStats::AddUnit dereferences it
+			if (unit == nullptr)
+				continue;
 			stats.AddUnit(unit, false);
 
 			if (ctrlTeam == NO_TEAM) {
@@ -1021,7 +1234,19 @@ void CSelectedUnitsHandler::SetCommandPage(int page)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	for (const int unitID: selectedUnits) {
+		// the served twin reads the page from here (main thread, race-free)
+		LuaSnapshotServe::NoteSelectedCommandPage(unitID, page);
+
+		// while the sim runs unparked, unit->commandAI is sim-owned and gets
+		// nulled on death with the shell still allocated -- do not touch it
+		if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning() && !SimDrawSplit::IsSimParked())
+			continue;
+
 		CUnit* u = unitHandler.GetUnit(unitID);
+
+		if (u == nullptr)
+			continue;
+
 		CCommandAI* c = u->commandAI;
 		c->lastSelectedCommandPage = page;
 	}

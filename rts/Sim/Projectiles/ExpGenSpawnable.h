@@ -38,9 +38,10 @@ public:
 protected:
 	CExpGenSpawnable();
 
-	//update in Draw() of CGroundFlash or CProjectile
-	void UpdateRotation();
-	virtual bool UpdateAnimParams() = 0;
+	//update in Draw() of CGroundFlash or CProjectile; const because Draw()
+	//only sees const objects — the state they advance is mutable (below)
+	void UpdateRotation() const;
+	virtual bool UpdateAnimParams() const = 0;
 
 	void UpdateAnimParamsImpl(const float3& ap, float& p) const;
 
@@ -52,20 +53,25 @@ protected:
 
 	static bool GetMemberInfo(SExpGenSpawnableMemberInfo& memberInfo);
 
-	// anim params for 4 textures (max) in an effect
+	// anim params for 4 textures (max) in an effect.
+	// animProgress*/rotVal/rotVel are mutable: draw-time animation state
+	// (advanced by UpdateRotation/UpdateAnimParams from Draw() at draw rate,
+	// pure functions of frame time), physically resident on the sim object;
+	// discovered-and-deferred eviction candidate (sim/draw PR 10, same class
+	// as LocalModel::luaMaterialData)
 	float3 animParams1 = { 1.0f, 1.0f, 30.0f }; // numX, numY, animLength, 
-	float animProgress1 = 0.0f; // animProgress = (gf_dt % animLength) / animLength
+	mutable float animProgress1 = 0.0f; // animProgress = (gf_dt % animLength) / animLength
 	float3 animParams2 = { 1.0f, 1.0f, 30.0f }; // numX, numY, animLength, 
-	float animProgress2 = 0.0f; // animProgress = (gf_dt % animLength) / animLength
+	mutable float animProgress2 = 0.0f; // animProgress = (gf_dt % animLength) / animLength
 	float3 animParams3 = { 1.0f, 1.0f, 30.0f }; // numX, numY, animLength, 
-	float animProgress3 = 0.0f; // animProgress = (gf_dt % animLength) / animLength
+	mutable float animProgress3 = 0.0f; // animProgress = (gf_dt % animLength) / animLength
 	float3 animParams4 = { 1.0f, 1.0f, 30.0f }; // numX, numY, animLength, 
-	float animProgress4 = 0.0f; // animProgress = (gf_dt % animLength) / animLength
+	mutable float animProgress4 = 0.0f; // animProgress = (gf_dt % animLength) / animLength
 
 	float3 rotParams = { 0.0f, 0.0f, 0.0f }; // speed, accel, startRot |deg/s, deg/s2, deg|
 
-	float rotVal;
-	float rotVel;
+	mutable float rotVal;
+	mutable float rotVel;
 
 	int createFrame;
 

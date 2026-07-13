@@ -3,9 +3,11 @@
 #include "Weapon.h"
 #include "WeaponDefHandler.h"
 #include "WeaponMemPool.h"
+#include "WeaponPredicates.h" // TRACE REHOST (stage 3): templated predicate stack (LiveView)
 #include "Game/GameHelper.h"
 #include "Game/TraceRay.h"
 #include "Game/Players/Player.h"
+#include "Rendering/Common/SimSnapshotWriteThrough.h"
 #include "Lua/LuaConfig.h"
 #include "Map/Ground.h"
 #include "Map/MapInfo.h"
@@ -33,6 +35,7 @@
 #include "System/Log/ILog.h"
 
 #include "System/Misc/TracyDefs.h"
+
 
 //constexpr float SAFE_INTERCEPT_EPS = (1.0 / 65536);
 
@@ -281,7 +284,7 @@ void CWeapon::UpdateWeaponErrorVector()
 
 void CWeapon::UpdateWeaponVectors()
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 
 	relAimFromPos = owner->script->GetPiecePos(aimFromPiece);
 	owner->script->GetEmitDirPos(muzzlePiece, relWeaponMuzzlePos, weaponDir);
@@ -317,7 +320,7 @@ float CWeapon::GetPredictedImpactTime(const float3& p) const
 
 void CWeapon::Update()
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 
 	// Fast auto targeting needs to trigger an immediate retarget once the target is dead.
 	bool fastAutoRetargetRequired = fastAutoRetargeting && HaveTarget()
@@ -351,7 +354,7 @@ void CWeapon::Update()
 
 void CWeapon::UpdateAim()
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	if (!HaveTarget())
 		return;
 
@@ -463,7 +466,7 @@ bool CWeapon::CanFire(bool ignoreAngleGood, bool ignoreTargetType, bool ignoreRe
 
 void CWeapon::UpdateFire()
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	if (!CanFire(false, false, false))
 		return;
 
@@ -498,6 +501,7 @@ void CWeapon::UpdateFire()
 		numStockpiled--;
 		owner->commandAI->StockpileChanged(this);
 		eventHandler.StockpileChanged(owner, this, oldCount);
+		SimSnapshotWT::NoteStockpile(owner);
 	}
 
 	reloadStatus = gs->frameNum + int(reloadTime / owner->reloadSpeed);
@@ -514,7 +518,7 @@ void CWeapon::UpdateFire()
 
 bool CWeapon::UpdateStockpile()
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	if (!weaponDef->stockpile)
 		return true;
 
@@ -532,6 +536,9 @@ bool CWeapon::UpdateStockpile()
 			owner->commandAI->StockpileChanged(this);
 			eventHandler.StockpileChanged(owner, this, oldCount);
 		}
+
+		// per-frame-hot while actively stockpiling (buildPercent creep)
+		SimSnapshotWT::NoteStockpile(owner);
 	}
 
 	return (numStockpiled > 0) || (salvoLeft > 0);
@@ -540,7 +547,7 @@ bool CWeapon::UpdateStockpile()
 
 void CWeapon::UpdateSalvo()
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	if (!salvoLeft || nextSalvo > gs->frameNum)
 		return;
 
@@ -610,7 +617,7 @@ void CWeapon::UpdateSalvo()
 
 bool CWeapon::Attack(const SWeaponTarget& newTarget)
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	if (newTarget == currentTarget)
 		return true;
 
@@ -921,7 +928,7 @@ float3 CWeapon::GetTargetBorderPos(
 	tmpColVol.SetIgnoreHits(false);
 
 	// our weapon muzzle is inside the target unit's volume (FIXME: use aimFromPos?)
-	if (CCollisionHandler::DetectHit(targetUnit, &tmpColVol, targetUnit->GetTransformMatrix(true), weaponMuzzlePos, ZeroVector, nullptr))
+	if (CCollisionHandler::DetectHit(targetUnit, &tmpColVol, targetUnit->GetTransformMatrix(), weaponMuzzlePos, ZeroVector, nullptr))
 		return (targetBorderPos = weaponMuzzlePos);
 
 	// otherwise, perform a raytrace to find the proper length correction
@@ -944,7 +951,7 @@ float3 CWeapon::GetTargetBorderPos(
 
 	// adjust the length of <targetVec> based on the targetBorder factor
 	// the muzzle position must not be inside tmpColVol for this to work
-	if (CCollisionHandler::DetectHit(targetUnit, &tmpColVol, targetUnit->GetTransformMatrix(true), weaponMuzzlePos, targetRayPos, &tmpColQry) && tmpColQry.AllHit())
+	if (CCollisionHandler::DetectHit(targetUnit, &tmpColVol, targetUnit->GetTransformMatrix(), weaponMuzzlePos, targetRayPos, &tmpColQry) && tmpColQry.AllHit())
 		targetBorderPos = mix(tmpColQry.GetIngressPos(), tmpColQry.GetEgressPos(), weaponDef->targetBorder <= 0.0f);
 
 	return targetBorderPos;
@@ -955,21 +962,9 @@ bool CWeapon::TryTarget(const float3& tgtPos, const SWeaponTarget& trg, bool pre
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(GetLeadTargetPos(trg).SqDistance(tgtPos) < Square(250.0f));
-
-	if (!TestTarget(tgtPos, trg))
-		return false;
-
-	// auto-targeted units are allowed to be out of range
-	// (UpdateFire will still block firing at such units)
-	if (!trg.isAutoTarget && !TestRange(tgtPos, trg))
-		return false;
-
-	// no LOF if aim-position is below ground (not in HFLOF, is overridden)
-	if (preFire && (weaponMuzzlePos.y < CGround::GetHeightReal(weaponMuzzlePos.x, weaponMuzzlePos.z)))
-		return false;
-
-	// TODO: add a forcedUserTarget (forced-fire mode enabled with CTRL e.g.) and skip the tests below
-	return (HaveFreeLineOfFire(GetAimFromPos(preFire), tgtPos, trg));
+	// TRACE REHOST (stage 3): one implementation over a state View; the LiveView
+	// instantiation inlines to the original body (byte-identical).
+	return trace::TryTargetT(trace::LiveView(this), tgtPos, trg, preFire);
 }
 
 float CWeapon::GetShapedWeaponRange(const float3& dir, float maxLength) const
@@ -1020,140 +1015,26 @@ void CWeapon::LoadWeaponVectors(const WeaponVectorsState& wvs)
 bool CWeapon::TestTarget(const float3& tgtPos, const SWeaponTarget& trg) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	if ((trg.isManualFire != weaponDef->manualfire) && owner->unitDef->canManualFire)
-		return false;
-
-	switch (trg.type) {
-		case Target_None: {
-			return true;
-		} break;
-		case Target_Unit: {
-			if (trg.unit == owner || trg.unit == nullptr)
-				return false;
-			if ((trg.unit->category & onlyTargetCategory) == 0)
-				return false;
-			if (trg.unit->isDead && !modInfo.fireAtKilled)
-				return false;
-			if (trg.unit->IsCrashing() && !modInfo.fireAtCrashing)
-				return false;
-			if ((trg.unit->losStatus[owner->allyteam] & (LOS_INLOS | LOS_INRADAR)) == 0)
-				return false;
-			if (!trg.isUserTarget && trg.unit->IsNeutral() && owner->fireState < FIRESTATE_FIREATNEUTRAL)
-				return false;
-			// don't fire at allied targets
-			if (!trg.isUserTarget && teamHandler.Ally(owner->allyteam, trg.unit->allyteam))
-				return false;
-
-			if (trg.unit->GetTransporter() != nullptr) {
-				if (!modInfo.targetableTransportedUnits)
-					return false;
-				// the transportee might be "hidden" below terrain, in which case we can't target it
-				if (trg.unit->pos.y < CGround::GetHeightReal(trg.unit->pos.x, trg.unit->pos.z))
-					return false;
-			}
-		} break;
-		case Target_Pos: {
-			if (!weaponDef->canAttackGround)
-				return false;
-		} break;
-		case Target_Intercept: {
-			if (weaponDef->interceptSolo && trg.intercept->IsBeingIntercepted())
-				return false;
-			if (!weaponDef->interceptor)
-				return false;
-			if (!trg.intercept->CanBeInterceptedBy(weaponDef))
-				return false;
-		} break;
-		default: break;
-	}
-
-	// interceptor can only target projectiles!
-	if (trg.type != Target_Intercept && weaponDef->interceptor)
-		return false;
-
-	// water weapon checks
-	if (!weaponDef->waterweapon) {
-		// we cannot pick targets underwater, check where target is in relation to us
-		if (!owner->IsUnderWater() && TargetUnderWater(tgtPos, trg))
-			return false;
-		// if we are underwater but target is *not* in water, fireSubmersed gets checked
-		if (owner->IsUnderWater() && TargetInWater(tgtPos, trg))
-			return false;
-	}
-
-	return true;
+	return trace::TestTargetBaseT(trace::LiveView(this), tgtPos, trg);
 }
 
 bool CWeapon::TestRange(const float3& tgtPos, const SWeaponTarget& trg) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	const float heightDiff = tgtPos.y - aimFromPos.y;
-	const float targetDist = aimFromPos.SqDistance2D(tgtPos);
-
-	float weaponRange = 0.0f; // range modified by heightDiff and cylinderTargeting
-
-	if (trg.type == Target_Pos || weaponDef->cylinderTargeting < 0.01f) {
-		// check range in a sphere (with extra radius <heightDiff * heightMod>)
-		weaponRange = GetRange2D(0.0f, heightDiff * weaponDef->heightmod);
-	} else {
-		// check range in a cylinder (with height <cylinderTargeting * range>)
-		if ((weaponDef->cylinderTargeting * range) > (math::fabsf(heightDiff) * weaponDef->heightmod))
-			weaponRange = GetRange2D(0.0f, 0.0f);
-	}
-
-	if (targetDist > (weaponRange * weaponRange))
-		return false;
-
-	// NOTE: mainDir is in unit-space
-	return (CheckTargetAngleConstraint((tgtPos - aimFromPos).SafeNormalize(), owner->GetObjectSpaceVec(mainDir)));
+	return trace::TestRangeBaseT(trace::LiveView(this), tgtPos, trg);
 }
 
 
 bool CWeapon::HaveFreeLineOfFire(const float3& srcPos, const float3& tgtPos, const SWeaponTarget& trg) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	float3 tgtDir = tgtPos - srcPos;
-
-	const float length = tgtDir.LengthNormalize();
-	const float spread = AccuracyExperience() + SprayAngleExperience();
-
-	if (length == 0.0f)
-		return true;
-
-	CUnit* unit = nullptr;
-	CFeature* feature = nullptr;
-
-	// ground check
-	// NOTE:
-	//   ballistic weapons (Cannon / Missile icw. trajectoryHeight) override this part,
-	//   they rely on TrajectoryGroundCol with an external check for the NOGROUND flag
-	if ((avoidFlags & Collision::NOGROUND) == 0) {
-		const float gndDst = TraceRay::TraceRay(srcPos, tgtDir, length, ~Collision::NOGROUND, owner, unit, feature);
-		const float tgtDst = tgtPos.SqDistance(srcPos + tgtDir * gndDst);
-
-		// true iff ground does not block the ray of length <length> from <srcPos> along <tgtDir>
-		if ((gndDst > 0.0f) && (tgtDst > Square(damages->damageAreaOfEffect)))
-			return false;
-
-		unit = nullptr;
-		feature = nullptr;
-	}
-
-	// friendly, neutral & feature check
-	// for projectiles that do not or barely spread out with distance
-	// this reduces to a ray intersection, which is also more accurate
-	// must nerf TraceRay since it scans for enemies and ground if the
-	// flags are omitted, unlike TestCone which is restricted to A/N/F
-	if (spread < 0.001f)
-		return (TraceRay::TraceRay(srcPos, tgtDir, length, avoidFlags | Collision::NOENEMIES | Collision::NOGROUND, owner, unit, feature) >= length);
-
-	return (!TraceRay::TestCone(srcPos, tgtDir, length, spread, owner->allyteam, avoidFlags, owner));
+	return trace::HaveFreeLineOfFireBaseT(trace::LiveView(this), srcPos, tgtPos, trg);
 }
 
 
 bool CWeapon::TryTarget(const SWeaponTarget& trg) const {
 	RECOIL_DETAILED_TRACY_ZONE;
-	return TryTarget(GetLeadTargetPos(trg), trg);
+	return trace::TryTargetT(trace::LiveView(this), trg);
 }
 
 
@@ -1363,10 +1244,7 @@ float CWeapon::GetStaticRange2D(const CWeapon* w, const WeaponDef* wd, float mod
 float CWeapon::GetRange2D(float boost, float ydiff) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	const float rangeSq = Square(range + boost); // c^2 (hyp)
-	const float ydiffSq = Square(ydiff); // b^2 (opp)
-	const float    root = rangeSq - ydiffSq; // a^2 (adj)
-	return (math::sqrt(std::max(root, 0.0f)));
+	return trace::GetRange2DBaseT(trace::LiveView(this), boost, ydiff);
 }
 
 
@@ -1405,40 +1283,21 @@ void CWeapon::AdjustTargetPosToWater(float3& tgtPos, bool attackGround) const
 	if (!attackGround)
 		return;
 
-	tgtPos.y = std::max(tgtPos.y, CGround::GetHeightReal(tgtPos.x, tgtPos.z));
-	tgtPos.y = std::max(tgtPos.y, tgtPos.y * weaponDef->waterweapon);
-
-	// prevent range hax in FPS mode
-	if (owner->UnderFirstPersonControl() && dynamic_cast<const CCannon*>(this) != nullptr) {
-		tgtPos.y = CGround::GetHeightAboveWater(tgtPos.x, tgtPos.z);
-	}
+	trace::AdjustTargetPosToWaterT(trace::LiveView(this), tgtPos);
 }
 
 
 float3 CWeapon::GetUnitPositionWithError(const CUnit* unit) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	float3 errorPos = unit->GetErrorPos(owner->allyteam, true);
-	if (doTargetGroundPos) errorPos -= unit->aimPos - unit->pos;
-	const float errorScale = (MoveErrorExperience() * GAME_SPEED * unit->speed.w);
-	return errorPos + errorVector * errorScale;
+	return trace::GetUnitPositionWithErrorT(trace::LiveView(this), unit);
 }
 
 
 float3 CWeapon::GetUnitLeadTargetPos(const CUnit* unit) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	const float3 tmpTargetPos = GetUnitPositionWithError(unit) + GetLeadVec(unit);
-	const float3 tmpTargetDir = (tmpTargetPos - aimFromPos).SafeNormalize();
-
-	float3 aimPos = GetTargetBorderPos(unit, tmpTargetPos, tmpTargetDir);
-
-	// never target below terrain
-	// never target below water if not a water-weapon
-	aimPos.y = std::max(aimPos.y, CGround::GetApproximateHeight(aimPos.x, aimPos.z) + 2.0f);
-	aimPos.y = std::max(aimPos.y, aimPos.y * weaponDef->waterweapon);
-
-	return aimPos;
+	return trace::GetUnitLeadTargetPosT(trace::LiveView(this), unit);
 }
 
 float CWeapon::GetSafeInterceptTime(const CUnit* unit, float predictMult) const
@@ -1642,23 +1501,7 @@ float CWeapon::GetAccuratePredictedImpactTime(const CUnit* unit) const
 
 float3 CWeapon::GetLeadVec(const CUnit* unit) const
 {
-	const float predictMult = mix(predictSpeedMod, 1.0f, weaponDef->predictBoost);
-	const float predictTime = (accurateLeading > 0)
-		? GetAccuratePredictedImpactTime(unit)
-		: GetPredictedImpactTime(unit->pos)
-	;
-	float3 lead = unit->speed * predictTime * predictMult;
-
-	if (weaponDef->leadLimit < 0.0f)
-		return lead;
-
-	const float leadLenSq = lead.SqLength();
-	const float leadBonus = weaponDef->leadLimit + weaponDef->leadBonus * owner->experience;
-
-	if (leadLenSq > Square(leadBonus))
-		lead *= (leadBonus / (math::sqrt(leadLenSq) + 0.01f));
-
-	return lead;
+	return trace::GetLeadVecT(trace::LiveView(this), unit);
 }
 
 
@@ -1688,16 +1531,5 @@ float CWeapon::MoveErrorExperience() const
 float3 CWeapon::GetLeadTargetPos(const SWeaponTarget& target) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	switch (target.type) {
-		case Target_None:      return currentTargetPos;
-		case Target_Unit:      return GetUnitLeadTargetPos(target.unit);
-		case Target_Pos: {
-			float3 p = target.groundPos;
-			AdjustTargetPosToWater(p, true);
-			return p;
-		} break;
-		case Target_Intercept: return target.intercept->pos + target.intercept->speed;
-	}
-
-	return currentTargetPos;
+	return trace::GetLeadTargetPosT(trace::LiveView(this), target);
 }

@@ -9,7 +9,7 @@ public:
 	enum { HIGHLIGHT_FIRST = 0, HIGHLIGHT_NONE = 0, HIGHLIGHT_PLAYERS, HIGHLIGHT_ALL, HIGHLIGHT_SIZE, HIGHLIGHT_LAST = HIGHLIGHT_SIZE - 1 };
 	static void Enable(unsigned currentTime);
 	static void Disable();
-	static void Update(int frameNum);
+	static void Update(int prevFrame);
 	static bool highlight;
 };
 

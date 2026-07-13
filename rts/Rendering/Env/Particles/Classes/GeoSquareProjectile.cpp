@@ -46,7 +46,7 @@ CGeoSquareProjectile::CGeoSquareProjectile(const float3& p1, const float3& p2, c
 }
 
 
-void CGeoSquareProjectile::Draw()
+void CGeoSquareProjectile::Draw() const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	unsigned char col[4];

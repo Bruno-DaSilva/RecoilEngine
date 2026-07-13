@@ -239,12 +239,12 @@ float3 CollisionVolume::GetWorldSpacePos(const CSolidObject* o, const float3& ex
 
 float CollisionVolume::GetPointSurfaceDistance(const CUnit* u, const LocalModelPiece* lmp, const float3& pos) const {
 	RECOIL_DETAILED_TRACY_ZONE;
-	return (GetPointSurfaceDistance(u, lmp, u->GetTransformMatrix(true), pos));
+	return (GetPointSurfaceDistance(u, lmp, u->GetTransformMatrix(), pos));
 }
 
 float CollisionVolume::GetPointSurfaceDistance(const CFeature* f, const LocalModelPiece* lmp, const float3& pos) const {
 	RECOIL_DETAILED_TRACY_ZONE;
-	return (GetPointSurfaceDistance(f, lmp, f->GetTransformMatrixRef(true), pos));
+	return (GetPointSurfaceDistance(f, lmp, f->GetTransformMatrixRef(), pos));
 }
 
 float CollisionVolume::GetPointSurfaceDistance(

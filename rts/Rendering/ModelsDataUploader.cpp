@@ -420,10 +420,8 @@ size_t ModelUniformsUploader::GetElemOffset(const CProjectile* p) const
 		return ModelUniformsStorage::INVALID_INDEX;
 	}
 
-	if (size_t offset = modelUniformsStorage.GetObjOffset(p); offset != size_t(-1)) {
-		return offset;
-	}
-
+	// projectiles are never registered in modelUniformsStorage (the old
+	// pointer-keyed lookup here could silently auto-add one)
 	LOG_L(L_ERROR, "[%s::%s] Supplied invalid CProjectile (id:%d)", className, __func__, p->id);
 	return ModelUniformsStorage::INVALID_INDEX;
 }

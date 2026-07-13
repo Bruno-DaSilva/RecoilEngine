@@ -24,7 +24,13 @@ public:
 	void SelectGroup(int num);
 	void SetGroup(CGroup* group, bool fromFactory= false, bool autoSelect = false);
 	void AINetOrder(int unitID, int aiTeamID, int playerID, const Command& c);
-	int GetDefaultCmd(const CUnit* unit, const CFeature* feature);
+	// sim|draw PR 44 (Gap B): fireEvent gates the eventHandler.DefaultCommand
+	// widget callin -- true reproduces the live behaviour (widget cursor
+	// overrides), false is the raw engine answer used by the armed diff-gate.
+	int GetDefaultCmd(const CUnit* unit, const CFeature* feature, bool fireEvent = true);
+	// PR 44b: sim-thread evaluation half of GetDefaultCmd over a captured
+	// selection-id snapshot, no widget callin (see the .cpp comment)
+	int GetDefaultCmdEval(const std::vector<int>& unitIDs, const CUnit* unit, const CFeature* feature, bool& leaderFound);
 
 	void NetOrder(Command& c, int playerId);
 	void NetSelect(std::vector<int>& s, int playerId);

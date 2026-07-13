@@ -4,6 +4,8 @@
 #define LUA_UTILS_H
 
 #include <string>
+#include <utility>
+#include <vector>
 
 #include <fmt/printf.h>
 
@@ -13,6 +15,12 @@
 #include "LuaDefs.h"
 // FIXME: use fwd-decls
 #include "System/EventClient.h"
+#include "System/SimDrawSplit.h" // drain-window shell resolution (IdToObject)
+
+// Rendering/Common/ModelDrawerData.h; boundary-consistent id resolution for
+// IdToObject under the running split (specialized for CUnit / CFeature)
+template<typename T>
+const T* DrawerGetObjectByID(int id);
 #include "Sim/Units/CommandAI/Command.h"
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Misc/CollisionVolume.h"
@@ -294,10 +302,35 @@ static inline void LuaPushNamedCFunc(lua_State* L, const string& key, lua_CFunct
 	lua_rawset(L, -3);
 }
 
+// Per-callout call-count profiling (opt-in via the LuaTrackCalloutCounts
+// config var). When disabled (default) PushMaybeCounted just does
+// lua_pushcfunction, so the callout invocation path is byte-for-byte unchanged;
+// when enabled it pushes a counting closure that bumps a per-name counter.
+// Out-of-line so the registry state lives in one TU and counting can be
+// compiled out on unitsync/dedicated/AI builds (no TimeProfiler there).
+namespace LuaCalloutCounters {
+	void PushMaybeCounted(lua_State* L, const char* name, lua_CFunction func);
+	// cumulative per-callout-name counts since process start, for queries/dumps
+	void GetCounts(std::vector<std::pair<std::string, std::uint64_t>>& out);
+
+	// cumulative per-callout counts split by execution context — the draw-time
+	// callout census (/calloutcensus): countDraw = fired inside a Draw* callin
+	// (must be snapshot-served on the draw side of a sim|draw split), countSim =
+	// fired during SimFrame (sim-side), remainder = other unsynced contexts
+	// (Update/input/net; also draw-thread-side under a split)
+	struct CensusRow {
+		std::string name;
+		std::uint64_t count;
+		std::uint64_t countDraw;
+		std::uint64_t countSim;
+	};
+	void GetCensus(std::vector<CensusRow>& out);
+}
+
 static inline void LuaPushRawNamedCFunc(lua_State* L, const char* key, lua_CFunction func)
 {
 	lua_pushstring(L, key);
-	lua_pushcfunction(L, func);
+	LuaCalloutCounters::PushMaybeCounted(L, key, func);
 	lua_rawset(L, -3);
 }
 
@@ -457,12 +490,39 @@ static inline LocalModelPiece* ParseObjectLocalModelPiece(lua_State* L, CSolidOb
 template<>
 const inline CUnit* LuaUtils::IdToObject(int id, const char* func)
 {
+	// PR 27b: with the sim thread running, the live handler walk both races
+	// the sim's own container mutation AND disagrees with the snapshot view
+	// callers guard with (spValidUnitID says boundary-N, the walk says
+	// mid-burst) -- resolve through the drawer's render record instead
+	// (DrawerGetObjectByID, SCOPE-1).
+	//
+	// PR 43 (3b): the explicit ShellFallback is RETIRED. The record now
+	// RETAINS a died-in-batch id's row (obj = the deferred-deletion shell,
+	// readable until the step-8 ack) through the whole deferred-dispatch
+	// window (CUnitDrawerData::RenderUnitDestroyed / ClearDeadRetainedRecords)
+	// -- exactly the retention SCOPE-1 lacked when dropping the fallback
+	// nil-stormed gl.SetFeatureBufferUniforms from deferred RecvFromSynced
+	// handlers (unit_healthbars_widget_forwarding). Outside the window a dead
+	// id resolves to nullptr = the "no such unit" nil shape, as before.
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning())
+		return DrawerGetObjectByID<CUnit>(id);
+
+	// flag-off / no sim thread: master's plain handler walk (the PR-27b shell
+	// fallback that used to follow it was inert here -- the shell window only
+	// opens under the running split)
 	return unitHandler.GetUnit(id);
 }
 
 template<>
 const inline CFeature* LuaUtils::IdToObject(int id, const char* func)
 {
+	// see the CUnit specialization (PR 43 3b: shell fallback retired; the
+	// record retains died-in-batch ids through the dispatch window, including
+	// same-batch non-model features, which register their at-death record at
+	// destroy dispatch -- CFeatureDrawerData::RenderFeatureDestroyed)
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning())
+		return DrawerGetObjectByID<CFeature>(id);
+
 	return featureHandler.GetFeature(id);
 }
 

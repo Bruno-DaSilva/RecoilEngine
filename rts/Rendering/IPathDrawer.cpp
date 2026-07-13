@@ -49,8 +49,11 @@ const MoveDef* IPathDrawer::GetSelectedMoveDef() {
 	const auto& unitSet = selectedUnitsHandler.selectedUnits;
 
 	if (!unitSet.empty()) {
+		// PR 27b: draw pass with the sim thread live -- the lead selected unit
+		// may have died mid-frame (null handler slot)
 		const CUnit* unit = unitHandler.GetUnit(*unitSet.begin());
-		md = unit->moveDef;
+		if (unit != nullptr)
+			md = unit->moveDef;
 	}
 
 	return md;

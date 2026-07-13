@@ -4,6 +4,7 @@
 #include "LuaPathFinder.h"
 #include "LuaInclude.h"
 #include "LuaHandle.h"
+#include "LuaSplitContract.h"
 #include "LuaUtils.h"
 #include "Sim/Path/IPathManager.h"
 #include "Sim/MoveTypes/MoveDefHandler.h"
@@ -134,6 +135,10 @@ static int path_next(lua_State* L)
 
 	const float minDist = luaL_optfloat(L, 5, 0.0f);
 
+	// split-contract gate (PR 27a): NextWayPoint reads (and advances) sim-owned pathManager state
+	if (LuaSplitContract::DenyLiveRead(L, "PathFinder::Next"))
+		return 0;
+
 	const bool synced = CLuaHandle::GetHandleSynced(L);
 	const float3 point = pathManager->NextWayPoint(nullptr, pathID, 0, callerPos, minDist, synced);
 
@@ -155,6 +160,10 @@ static int path_nodes(lua_State* L)
 {
 	const int* idPtr = (int*)luaL_checkudata(L, 1, "Path");
 	const int pathID = *idPtr;
+
+	// split-contract gate (PR 27a): GetPathWayPoints reads sim-owned pathManager path storage
+	if (LuaSplitContract::DenyLiveRead(L, "PathFinder::GetPathWayPoints"))
+		return 0;
 
 	return (LuaPathFinder::PushPathNodes(L, pathID));
 }
@@ -192,6 +201,12 @@ static int path_gc(lua_State* L)
 	if (pathID == 0)
 		return 0;
 
+	// split-contract gate (PR 27a): DeletePath mutates sim-owned pathManager path storage.
+	// NB: __gc runs once per userdata, so a strict-mode denial leaks the sim-side path
+	// (inventoried; the 27b answer is the boundary-apply queue)
+	if (LuaSplitContract::DenyLiveRead(L, "PathFinder::DeletePath"))
+		return 0;
+
 	pathManager->DeletePath(*idPtr);
 	*idPtr = 0;
 	return 0;
@@ -213,6 +228,16 @@ static void CreatePathMetatable(lua_State* L)
 
 int LuaPathFinder::RequestPath(lua_State* L)
 {
+	// split-contract gate (PR 27a; the whole PathFinder object API DENIES under the
+	// split, Batch-4 P1 ruling): sim-owned pathManager; RequestPath/Next/DeletePath/
+	// Set* mutate it and the reads (GetPathWayPoints / GetPathNodeCost(s)) are
+	// coupled to a Lua-requested path handle or cost overlay YOU installed via those
+	// denied writes, so a draw-context caller cannot drive a stateful sim path search
+	// -- the family denies rather than boundary-defers (a read-only draw caller has
+	// no safe use for it). RequestPath mutates the sim-owned pathManager, gate at top
+	if (LuaSplitContract::DenyLiveRead(L, __func__))
+		return 0;
+
 	const MoveDef* moveDef = nullptr;
 
 	if (lua_israwstring(L, 1)) {
@@ -252,6 +277,11 @@ int LuaPathFinder::RequestPath(lua_State* L)
 
 int LuaPathFinder::InitPathNodeCostsArray(lua_State* L)
 {
+	// split-contract gate (PR 27a): allocates a cost overlay whose buffer the sim-owned
+	// pathManager reads once installed (SetPathNodeCosts); gated with the rest of the family
+	if (LuaSplitContract::DenyLiveRead(L, __func__))
+		return 0;
+
 	const unsigned int overlayIndex = luaL_checkint(L, 1);
 	const unsigned int overlaySizeX = luaL_checkint(L, 2);
 	const unsigned int overlaySizeZ = luaL_checkint(L, 3);
@@ -284,6 +314,10 @@ int LuaPathFinder::InitPathNodeCostsArray(lua_State* L)
 
 int LuaPathFinder::FreePathNodeCostsArray(lua_State* L)
 {
+	// split-contract gate (PR 27a): reads/nulls the sim-owned pathManager's active cost overlay
+	if (LuaSplitContract::DenyLiveRead(L, __func__))
+		return 0;
+
 	const unsigned int overlayIndex = luaL_checkint(L, 1);
 	const unsigned int syncedOverlay = CLuaHandle::GetHandleSynced(L);
 
@@ -317,6 +351,10 @@ int LuaPathFinder::FreePathNodeCostsArray(lua_State* L)
 
 int LuaPathFinder::SetPathNodeCosts(lua_State* L)
 {
+	// split-contract gate (PR 27a): installs a cost overlay into the sim-owned pathManager
+	if (LuaSplitContract::DenyLiveRead(L, __func__))
+		return 0;
+
 	const unsigned int overlayIndex = luaL_checkint(L, 1);
 	const unsigned int syncedOverlay = CLuaHandle::GetHandleSynced(L);
 
@@ -341,6 +379,10 @@ int LuaPathFinder::SetPathNodeCosts(lua_State* L)
 
 int LuaPathFinder::GetPathNodeCosts(lua_State* L)
 {
+	// split-contract gate (PR 27a): reads a cost overlay the sim-owned pathManager may have active
+	if (LuaSplitContract::DenyLiveRead(L, __func__))
+		return 0;
+
 	const unsigned int overlayIndex = luaL_checkint(L, 1);
 	const unsigned int syncedOverlay = CLuaHandle::GetHandleSynced(L);
 
@@ -372,6 +414,10 @@ int LuaPathFinder::GetPathNodeCosts(lua_State* L)
 
 int LuaPathFinder::SetPathNodeCost(lua_State* L)
 {
+	// split-contract gate (PR 27a): writes into a cost overlay the sim-owned pathManager may read live
+	if (LuaSplitContract::DenyLiveRead(L, __func__))
+		return 0;
+
 	const unsigned int overlayIndex = luaL_checkint(L, 1);
 	const unsigned int costValIndex = luaL_checkint(L, 2);
 	const unsigned int syncedOverlay = CLuaHandle::GetHandleSynced(L);
@@ -404,6 +450,10 @@ int LuaPathFinder::GetPathNodeCost(lua_State* L)
 {
 	const unsigned int hmx = luaL_checkint(L, 1);
 	const unsigned int hmz = luaL_checkint(L, 2);
+
+	// split-contract gate (PR 27a): reads node costs through the sim-owned pathManager
+	if (LuaSplitContract::DenyLiveRead(L, __func__))
+		return 0;
 
 	// reads from the active overlay if PathNodeStateBuffer::extraCosts != NULL
 	lua_pushnumber(L, pathManager->GetNodeExtraCost(hmx, hmz, CLuaHandle::GetHandleSynced(L)));

@@ -16,6 +16,7 @@
 #include "System/Threading/SpringThreading.h"
 
 #include <cassert>
+#include "Game/Game.h" // ScopedExternalSimPause (PR 27b)
 
 CLuaRules* luaRules = nullptr;
 

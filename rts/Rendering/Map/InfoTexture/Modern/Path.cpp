@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "Path.h"
+#include "Game/Game.h"          // PR 42: CGame::ScopedExternalSimPause
 #include "Game/GameHelper.h"
 #include "Game/GlobalUnsynced.h"
 #include "Game/SelectedUnitsHandler.h"
@@ -101,8 +102,10 @@ const MoveDef* CPathTexture::GetSelectedMoveDef()
 		return nullptr;
 
 	const auto iter = unitSet.begin();
+	// PR 27b: draw pass with the sim thread live -- the lead selected unit may
+	// have died mid-frame (null handler slot)
 	const CUnit* unit = unitHandler.GetUnit(*iter);
-	return unit->moveDef;
+	return (unit != nullptr) ? unit->moveDef : nullptr;
 }
 
 
@@ -193,6 +196,17 @@ bool CPathTexture::IsUpdateNeeded()
 void CPathTexture::Update()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// PR 42: the path/build-cost overlay recomputes movement cost on the draw
+	// thread by reading live sim (GetSelectedMoveDef -> unitHandler; the for_mt
+	// TestUnitBuildSquare / Pos2BuildPos / CMoveMath / losHandler->InLos). Its
+	// live surface is far too large to mirror faithfully (building-mask map,
+	// live center heightmap, slopemap, full blocking-cell chain), so re-park the
+	// sim for the duration -- like the analogous cold UI reads in GuiHandler /
+	// MiniMap / MouseHandler. This only fires when the overlay is actively
+	// displayed (IsUpdateNeeded self-expires ~2s after the last GetTexture), and
+	// nests to a no-op when the sim is already parked (pre-window-shrink).
+	CGame::ScopedExternalSimPause simPause;
+
 	const MoveDef* md = GetSelectedMoveDef();
 	const UnitDef* ud = GetCurrentBuildCmdUnitDef();
 

@@ -16,9 +16,12 @@
 #include "Sim/Misc/TeamHandler.h"
 #include "Sim/Misc/GlobalSynced.h"
 #include "Sim/Units/Unit.h"
+#include "Rendering/Common/SimSnapshotWriteThrough.h"
 #include "Sim/Units/UnitHandler.h"
+#include "System/SimDrawSplit.h"
 #include "System/SpringMath.h"
 #include "System/EventHandler.h"
+#include "System/UnsyncedBoundaryQueue.h"
 #include "System/Log/ILog.h"
 #include "System/creg/STL_Set.h"
 
@@ -104,16 +107,27 @@ void CPlayer::StartSpectating()
 
 	if (gu->myPlayerNum == this->playerNum) {
 		// HACK: unsynced code should just listen for the PlayerChanged event
-		gu->spectating           = true;
-		gu->spectatingFullView   = true;
-		gu->spectatingFullSelect = true;
+		// PR 27b: this whole block is draw/UI-owned state (gu view flags,
+		// LuaUI, local selection, unsynced map view, tracker); resign/spec
+		// arrives via net-message handling -- boundary-defer under the split
+		const auto applySpectatorView = []() {
+			gu->spectating           = true;
+			gu->spectatingFullView   = true;
+			gu->spectatingFullSelect = true;
 
-		//FIXME use eventHandler?
-		CLuaUI::UpdateTeams();
-		selectedUnitsHandler.ClearSelected();
-		if (readMap != nullptr)
-			readMap->BecomeSpectator();
-		unitTracker.Disable();
+			//FIXME use eventHandler?
+			CLuaUI::UpdateTeams();
+			selectedUnitsHandler.ClearSelected();
+			if (readMap != nullptr)
+				readMap->BecomeSpectator();
+			unitTracker.Disable();
+		};
+
+		if (SimDrawSplit::DeferUnsyncedNow()) {
+			UnsyncedBoundaryQueue::Defer(applySpectatorView);
+		} else {
+			applySpectatorView();
+		}
 	}
 
 	StopControllingUnit();
@@ -128,17 +142,27 @@ void CPlayer::JoinTeam(int newTeam)
 	team = newTeam;
 
 	if (gu->myPlayerNum == this->playerNum) {
-		// HACK: see StartSpectating
-		gu->myPlayingTeam = gu->myTeam = newTeam;
-		gu->myPlayingAllyTeam = gu->myAllyTeam = teamHandler.AllyTeam(gu->myTeam);
+		// HACK: see StartSpectating (PR 27b: same deferral rationale; the
+		// ally-team lookup is a sim read, capture it at fire time)
+		const int newAllyTeam = teamHandler.AllyTeam(newTeam);
+		const auto applyPlayerView = [newTeam, newAllyTeam]() {
+			gu->myPlayingTeam = gu->myTeam = newTeam;
+			gu->myPlayingAllyTeam = gu->myAllyTeam = newAllyTeam;
 
-		gu->spectating           = false;
-		gu->spectatingFullView   = false;
-		gu->spectatingFullSelect = false;
+			gu->spectating           = false;
+			gu->spectatingFullView   = false;
+			gu->spectatingFullSelect = false;
 
-		CLuaUI::UpdateTeams();
-		selectedUnitsHandler.ClearSelected();
-		unitTracker.Disable();
+			CLuaUI::UpdateTeams();
+			selectedUnitsHandler.ClearSelected();
+			unitTracker.Disable();
+		};
+
+		if (SimDrawSplit::DeferUnsyncedNow()) {
+			UnsyncedBoundaryQueue::Defer(applyPlayerView);
+		} else {
+			applyPlayerView();
+		}
 	}
 
 	eventHandler.PlayerChanged(playerNum);
@@ -192,21 +216,31 @@ void CPlayer::StartControllingUnit()
 		if (eventHandler.AllowDirectUnitControl(this->playerNum, newControlleeUnit)) {
 			newControlleeUnit->fpsControlPlayer = this;
 			fpsController.SetControlleeUnit(newControlleeUnit);
+			SimSnapshotWT::NoteFpsControl(newControlleeUnit);
 			selectedUnitsHandler.ClearNetSelect(this->playerNum);
 
 			if (this->playerNum == gu->myPlayerNum) {
-				// update the unsynced state
-				selectedUnitsHandler.ClearSelected();
+				// update the unsynced state (PR 27b: mouse/camera/selection
+				// are draw-owned; direct control arrives via net messages)
+				const auto applyFpsView = []() {
+					selectedUnitsHandler.ClearSelected();
 
-				gu->fpsMode = true;
-				mouse->wasLocked = mouse->locked;
+					gu->fpsMode = true;
+					mouse->wasLocked = mouse->locked;
 
-				if (!mouse->locked) {
-					mouse->locked = true;
-					mouse->HideMouse();
+					if (!mouse->locked) {
+						mouse->locked = true;
+						mouse->HideMouse();
+					}
+					camHandler->PushMode();
+					camHandler->SetCameraMode(0);
+				};
+
+				if (SimDrawSplit::DeferUnsyncedNow()) {
+					UnsyncedBoundaryQueue::Defer(applyFpsView);
+				} else {
+					applyFpsView();
 				}
-				camHandler->PushMode();
-				camHandler->SetCameraMode(0);
 			}
 		}
 	}
@@ -226,21 +260,31 @@ void CPlayer::StopControllingUnit()
 	thisUnit->AttackUnit(nullptr, true, false, true);
 	thisUnit->fpsControlPlayer = nullptr;
 	fpsController.SetControlleeUnit(nullptr);
+	SimSnapshotWT::NoteFpsControl(thisUnit);
 	selectedUnitsHandler.ClearNetSelect(this->playerNum);
 
 	if (thatUnit == thisUnit) {
-		// update the unsynced state
-		selectedUnitsHandler.ClearSelected();
-
-		gu->fpsMode = false;
+		// update the unsynced state (PR 27b: see StartControllingUnit)
 		assert(gu->myPlayerNum == this->playerNum);
 
-		// switch back to the camera we were using before
-		camHandler->PopMode();
+		const auto dropFpsView = []() {
+			selectedUnitsHandler.ClearSelected();
 
-		if (mouse->locked && !mouse->wasLocked) {
-			mouse->locked = false;
-			mouse->ShowMouse();
+			gu->fpsMode = false;
+
+			// switch back to the camera we were using before
+			camHandler->PopMode();
+
+			if (mouse->locked && !mouse->wasLocked) {
+				mouse->locked = false;
+				mouse->ShowMouse();
+			}
+		};
+
+		if (SimDrawSplit::DeferUnsyncedNow()) {
+			UnsyncedBoundaryQueue::Defer(dropFpsView);
+		} else {
+			dropFpsView();
 		}
 	}
 }

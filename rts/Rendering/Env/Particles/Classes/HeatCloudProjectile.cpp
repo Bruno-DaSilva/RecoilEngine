@@ -99,8 +99,9 @@ void CHeatCloudProjectile::Init(const CUnit* owner, const float3& offset)
 	CProjectile::Init(owner, offset);
 }
 
-void CHeatCloudProjectile::Draw()
+void CHeatCloudProjectile::Draw() const
 {
+	const float3 drawPos = projectileDrawer->GetDrawPos(this);
 	RECOIL_DETAILED_TRACY_ZONE;
 	UpdateRotation();
 

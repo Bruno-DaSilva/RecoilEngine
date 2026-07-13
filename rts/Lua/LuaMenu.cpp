@@ -28,6 +28,7 @@
 #include "LuaUI.h"
 
 #include "System/Misc/TracyDefs.h"
+#include "Game/Game.h" // ScopedExternalSimPause (PR 27b)
 
 CLuaMenu* luaMenu = nullptr;
 

@@ -51,6 +51,9 @@ public:
 
 	int GetSizeX() const { return sizeX; }
 	int GetSizeZ() const { return sizeZ; }
+	// PR 38d (sim|draw): the Init-time metal scale, needed by the DrawMapMirrors
+	// metal-distribution mirror to reproduce GetMetalAmount's `raw * metalScale`.
+	float GetMetalScale() const { return metalScale; }
 
 	const unsigned char* GetTexturePalette () const { return  texturePalette.data(); }
 	const unsigned char* GetDistributionMap() const { return distributionMap.data(); }

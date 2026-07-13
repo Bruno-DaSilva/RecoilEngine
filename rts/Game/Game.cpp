@@ -4,7 +4,12 @@
 
 #include <Rml/Backends/RmlUi_Backend.h>
 #include <RmlUi/Core.h>
+
+#include <array>    // §4.5 pause-surface telemetry counters
+#include <atomic>
+#include <cstdint>
 #include "Game.h"
+#include "BoundaryStats.h"
 #include "Camera.h"
 #include "CameraHandler.h"
 #include "ChatMessage.h"
@@ -33,6 +38,12 @@
 #include "ExternalAI/EngineOutHandler.h"
 #include "ExternalAI/SkirmishAIHandler.h"
 #include "Rendering/WorldDrawer.h"
+#include "Rendering/Common/RenderEventQueue.h"
+#include "Rendering/Common/DrawMapMirrors.h"
+#include "Rendering/Common/SimSnapshot.h"
+#include "Rendering/Common/SnapshotPickGrid.h"
+#include "Rendering/Common/SnapshotHash.h"
+#include "Rendering/Common/SnapshotDiffGate.h"
 #include "Rendering/Env/IWater.h"
 #include "Rendering/Env/WaterRendering.h"
 #include "Rendering/Env/MapRendering.h"
@@ -47,6 +58,12 @@
 #include "Rendering/ModelsDataUploader.h"
 #include "Rendering/ShadowHandler.h"
 #include "Rendering/TeamHighlight.h"
+#include "Map/BaseGroundDrawer.h"
+#include "Rendering/Common/ModelDrawer.h"
+#include "Rendering/Models/IModelParser.h"
+#include "Rendering/GL/LightHandler.h"
+#include "Rendering/Env/Particles/ProjectileDrawer.h"
+#include "Rendering/Features/FeatureDrawer.h"
 #include "Rendering/Units/UnitDrawer.h"
 #include "Rendering/UniformConstants.h"
 #include "Rendering/Map/InfoTexture/IInfoTextureHandler.h"
@@ -57,6 +74,10 @@
 #include "Lua/LuaMenu.h"
 #include "Lua/LuaRules.h"
 #include "Lua/LuaOpenGL.h"
+#include "Lua/LuaSnapshotServe.h"
+#include "Lua/LuaSplitContract.h"
+#include "System/SimDrawSplit.h"
+#include "System/UnsyncedBoundaryQueue.h"
 #include "Lua/LuaParser.h"
 #include "Lua/LuaSyncedRead.h"
 #include "Lua/LuaUI.h"
@@ -71,6 +92,7 @@
 #include "Sim/Features/FeatureDefHandler.h"
 #include "Sim/Features/FeatureHandler.h"
 #include "Sim/Misc/CategoryHandler.h"
+#include "Sim/Objects/DeferredObjectDeleter.h"
 #include "Sim/Misc/DamageArrayHandler.h"
 #include "Sim/Misc/YardmapStatusEffectsMap.h"
 #include "Sim/Misc/GeometricObjects.h"
@@ -124,7 +146,9 @@
 #include "System/LoadSave/DemoRecorder.h"
 #include "System/Log/ILog.h"
 #include "System/Platform/Misc.h"
+#include "lib/streflop/streflop_cond.h"
 #include "System/Platform/Watchdog.h"
+#include "System/Threading/SpringThreading.h"
 #include "System/Platform/errorhandler.h"
 #include "System/Sound/ISound.h"
 #include "System/Sound/ISoundChannels.h"
@@ -150,6 +174,7 @@ CONFIG(float, GuiOpacity).defaultValue(0.8f).minimumValue(0.0f).maximumValue(1.0
 CONFIG(std::string, InputTextGeo).defaultValue("");
 
 CONFIG(int, SmoothTimeOffset).defaultValue(0).headlessValue(0).description("Enables frametimeoffset smoothing, 0 = off (old version), -1 = forced 0.5,  1-20 smooth, recommended = 2-3");
+CONFIG(int, SplitWindowShrink).defaultValue(1).description("PR 42 (SimDrawSplit only): 1 = defer the mirror-fed info textures + widget Update callins past the sim-pause release so they run with the sim live (shrinks the parked window); 0 = keep the whole UI phase parked (pre-42 behavior). For A/B measurement.");
 
 CGame* game = nullptr;
 
@@ -243,6 +268,9 @@ CGame::CGame(const std::string& mapFileName, const std::string& modFileName, ILo
 	// set "Headless" in config overlay (not persisted)
 	configHandler->Set("Headless", (SpringVersion::IsHeadless()) ? 1 : 0, true);
 
+	// cache the sim|draw split flag for this game session (PR 27b)
+	SimDrawSplit::UpdateConfig();
+
 	showFPS   = configHandler->GetBool("ShowFPS");
 	showClock = configHandler->GetBool("ShowClock");
 	showSpeed = configHandler->GetBool("ShowSpeed");
@@ -286,8 +314,24 @@ CGame::CGame(const std::string& mapFileName, const std::string& modFileName, ILo
 
 CGame::~CGame()
 {
+	// PR 27b: the sim thread must be gone before any teardown below touches
+	// state it consumes (handlers, net, Lua); no-op when the split is off
+	JoinSimThread();
+
 	ENTER_SYNCED_CODE();
 	LOG("[Game::%s][1]", __func__);
+
+	// write out a partial /boundarydump if the game ends before its end frame
+	BoundaryStats::FlushPartial();
+	// flush the /snaphashdump file; runs on every rewind reload too, and the
+	// dump deliberately survives the reload so forward + resim passes accumulate
+	SnapshotHash::FlushPartial();
+
+	// report the snapshot differential gate totals if it was left armed
+	snapshotDiffGate.FlushPartial();
+
+	// §4.5: dump the mid-gameplay sim-park survey (which pause sites engaged)
+	DumpSimPauseSurvey();
 
 	RmlGui::Shutdown();
 	helper->Kill();
@@ -320,8 +364,17 @@ void CGame::AddTimedJobs()
 
 			// SimFrame handles gc when not paused, this all other cases
 			// do not check the global synced state, never true in demos
-			if (luaGCControl == 1 || simFrameDeltaTime > gcForcedDeltaTime)
-				eventHandler.CollectGarbage(false);
+			// PR 27b: under the split this job runs on the main/draw thread,
+			// so it may not lua_gc the sim-thread-owned synced states -- and
+			// it is the ONLY collector the unsynced states have: SimFrame's
+			// call is filtered to the synced mirror on the sim thread, so
+			// the paused-only gate master used would let LuaUI grow without
+			// bound during active play (windowed-dogfood LUA_ERRMEM at ~3min)
+			if (SimDrawSplit::Enabled()) {
+				eventHandler.CollectGarbage(false, CEventHandler::GC_UNSYNCED_ONLY);
+			} else if (luaGCControl == 1 || simFrameDeltaTime > gcForcedDeltaTime) {
+				eventHandler.CollectGarbage(false, CEventHandler::GC_ALL);
+			}
 
 			CInputReceiver::CollectGarbage();
 			return true;
@@ -463,6 +516,12 @@ void CGame::Load(const std::string& mapFileName)
 				auto lock = CLoadLock::GetUniqueLock();
 				saveFileHandler->LoadGame();
 				Watchdog::ClearTimer(WDT_LOAD);
+
+				// sim|draw WS-1 §5.4: a checkpoint/savegame load in-place
+				// (the replay-rewind flow) never passes through teardown's
+				// ClearCaches -- unit/feature ids, model pointers and piece
+				// read-set registrations alias across the load
+				LuaSnapshotServe::InvalidatePieceCaches();
 			}
 			LoadLua(false, true);
 			Watchdog::ClearTimer(WDT_LOAD);
@@ -938,6 +997,11 @@ void CGame::PostLoad()
 
 	Sim::systemUtils.NotifyPostLoad();
 
+	// sim|draw WS-5: creg rebuilds every command queue with a fresh version but
+	// fires no per-unit dirty push, so seed the epoch producer's dirty-list with
+	// all active units (design §9). No-op flag-off.
+	LuaSnapshotServe::MarkAllCmdQueuesDirty();
+
 	if (gameServer != nullptr) {
 		gameServer->PostLoad(gs->frameNum);
 	}
@@ -999,6 +1063,20 @@ void CGame::KillRendering()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	LOG("[Game::%s][1]", __func__);
+	// pending records reference sim objects that die without further drains
+	// (CUnitHandler::Kill frees units without Render*Destroyed notifications)
+	renderEventQueue.Clear();
+	// same for boundary-deferred unsynced dispatches (their targets die here)
+	UnsyncedBoundaryQueue::Clear();
+	SimDrawSplit::Clear();
+	simSnapshot.Clear();
+	drawMapMirrors.Clear(); // PR 28: forget the map-layer mirrors for the next game
+	snapshotPickGrid.Clear();
+	// per-generation serving caches (the generation counter resets with the snapshot)
+	LuaSnapshotServe::ClearCaches();
+	// dumps the draw-contract trip inventory into the infolog before reset
+	// (the PR-27a gate artifact; no-op when the contract never tripped)
+	LuaSplitContract::Clear();
 	icon::iconHandler.Kill();
 	spring::SafeDelete(geometricObjects);
 	worldDrawer.Kill();
@@ -1045,6 +1123,10 @@ void CGame::KillSimulation()
 
 	LOG("[Game::%s][2]", __func__);
 	unitHandler.DeleteScripts();
+
+	// KillRendering dropped any queued destroy records; destruct and free
+	// the deferred shells before the handlers clear the pools under them
+	deferredObjectDeleter.Clear();
 
 	featureHandler.Kill(); // depends on unitHandler (via ~CFeature)
 	unitHandler.Kill();
@@ -1161,6 +1243,12 @@ bool CGame::Update()
 	RECOIL_DETAILED_TRACY_ZONE;
 	good_fpu_control_registers("CGame::Update");
 
+	// sim->render events fired below (ClientReadNet -> SimFrame) queue up as
+	// records; CGame::Draw drains them at the draw boundary. Under the split
+	// the sim thread opens the phase itself, each loop iteration.
+	if (!SimDrawSplit::Enabled())
+		renderEventQueue.BeginSimPhase();
+
 	jobDispatcher.Update();
 	clientNet->Update();
 
@@ -1169,19 +1257,42 @@ bool CGame::Update()
 	if (playing && gameServer != nullptr && videoCapturing->AllowRecord())
 		gameServer->CreateNewFrame(false, true);
 
-	ENTER_SYNCED_CODE();
-	SendClientProcUsage();
-	ClientReadNet(); // issues new SimFrame()s
+	if (SimDrawSplit::Enabled()) {
+		// PR 27b: the sim thread owns ClientReadNet -> SimFrames (spawned
+		// here so the whole CGame is constructed first). The main thread
+		// keeps connection upkeep -- every clientNet entry point used below
+		// locks -- and the CPU-usage report, which reads main-side data.
+		SpawnSimThread();
+		SendClientProcUsage();
 
-	if (!gameOver) {
-		if (clientNet->NeedsReconnect())
-			clientNet->AttemptReconnect(SpringVersion::GetSync(), Platform::GetPlatformStr());
+		if (!gameOver) {
+			if (clientNet->NeedsReconnect())
+				clientNet->AttemptReconnect(SpringVersion::GetSync(), Platform::GetPlatformStr());
 
-		if (clientNet->CheckTimeout(0, gs->PreSimFrame()))
-			GameEnd({}, true);
+			if (clientNet->CheckTimeout(0, gs->PreSimFrame()))
+				GameEnd({}, true);
+		}
+	} else {
+		ENTER_SYNCED_CODE();
+		SendClientProcUsage();
+		{
+			// the sim phase (PR 27b): sim-fired unsynced work inside this
+			// bracket boundary-defers when the split flag is on; under the
+			// split the sim thread's loop opens the same bracket instead
+			SimDrawSplit::ScopedSimPhase simPhase;
+			ClientReadNet(); // issues new SimFrame()s
+		}
+
+		if (!gameOver) {
+			if (clientNet->NeedsReconnect())
+				clientNet->AttemptReconnect(SpringVersion::GetSync(), Platform::GetPlatformStr());
+
+			if (clientNet->CheckTimeout(0, gs->PreSimFrame()))
+				GameEnd({}, true);
+		}
+
+		LEAVE_SYNCED_CODE();
 	}
-
-	LEAVE_SYNCED_CODE();
 
 	{
 		SLuaAllocError error = {};
@@ -1353,6 +1464,31 @@ bool CGame::UpdateUnsynced(const spring_time currentTime)
 
 	lastSimFrame = gs->frameNum;
 
+	// PR 42 window shrink: when the split is actually running, the sim is parked
+	// from the barrier through the drawer extraction below. Everything served /
+	// mirror-fed / draw-owned can run AFTER the sim resumes -- so the two heavy
+	// consumers that are safe sim-live (the mirror-fed info textures [PR 42's
+	// InfoTexture->DrawMapMirrors conversion] and the widget Update callins
+	// [snapshot-served]) are deferred to just after ReleaseSimPause below,
+	// shrinking the parked window by their cost. Flag-off (or split not running)
+	// keeps the exact current in-place order -- byte-identical. Enumerated
+	// deviation (flag-on only): a widget that moves the camera / sets unit
+	// tracking in its Update is reflected one draw frame late, because camera +
+	// culling extraction now finalize before the widget callins run.
+	// config toggle (default on) so the shrink can be A/B'd on one binary for
+	// measurement / bisection: SplitWindowShrink = 0 keeps the whole UI phase
+	// parked (pre-42 behavior), 1 defers the sim-live consumers past release.
+	const bool shrinkWindow = SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()
+		&& (configHandler->GetInt("SplitWindowShrink") != 0);
+
+	// the PR-11b boundary movers that used to run here moved into
+	// SimDrawBarrier() (PR 26) -- same per-sim-frame-batch gating, same order
+	// relative to the render-event drain, now inside the one barrier function
+
+	// §8.1: apply the FPS direct-control camera-rotY nudge the sim thread deferred
+	// this batch (draw owns the camera); no-op flag-off / when nothing pending
+	camHandler->ApplyPendingFPSDirectControlRotY();
+
 	// set camera
 	camHandler->UpdateController(playerHandler.Player(gu->myPlayerNum), gu->fpsMode);
 
@@ -1362,13 +1498,21 @@ bool CGame::UpdateUnsynced(const spring_time currentTime)
 	CNamedTextures::Update();
 
 	// always update InfoTexture and SoundListener at <= 30Hz (even when paused)
-	if (newSimFrame || forceUpdate) {
+	const bool doInfoTexSoundUpdate = (newSimFrame || forceUpdate);
+	if (doInfoTexSoundUpdate) {
 		lastUnsyncedUpdateTime = currentTime;
 
-		// TODO: should be moved to WorldDrawer::Update
-		infoTextureHandler->Update();
-		// TODO call only when camera changed
-		sound->UpdateListener(camera->GetPos(), camera->GetDir(), camera->GetUp());
+		// PR 42: infoTextureHandler->Update reads the boundary-drained mirrors
+		// (DrawMapMirrors), so under the running split it defers to after
+		// ReleaseSimPause (sim-live); in-place otherwise. sound->UpdateListener
+		// just copies the camera vectors + flags the sound thread -- safe either
+		// side, deferred with infotex to keep the pair together.
+		if (!shrinkWindow) {
+			// TODO: should be moved to WorldDrawer::Update
+			infoTextureHandler->Update();
+			// TODO call only when camera changed
+			sound->UpdateListener(camera->GetPos(), camera->GetDir(), camera->GetUp());
+		}
 	}
 	SetDrawMode(gameNormalDraw); //TODO move to ::Draw()?
 
@@ -1376,10 +1520,14 @@ bool CGame::UpdateUnsynced(const spring_time currentTime)
 		luaUI->CheckStack();
 		luaUI->CheckAction();
 	}
-	if (luaGaia != nullptr)
-		luaGaia->CheckStack();
-	if (luaRules != nullptr)
-		luaRules->CheckStack();
+	// PR 27b: the split-handle CheckStack pokes the synced lua_State too --
+	// skip the diagnostic while the sim thread owns those states
+	if (!(SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning())) {
+		if (luaGaia != nullptr)
+			luaGaia->CheckStack();
+		if (luaRules != nullptr)
+			luaRules->CheckStack();
+	}
 
 	if (gameTextInput.SendPromptInput()) {
 		gameConsoleHistory.AddLine(gameTextInput.userInput);
@@ -1397,10 +1545,25 @@ bool CGame::UpdateUnsynced(const spring_time currentTime)
 
 	mouse->Update();
 	mouse->UpdateCursors();
-	guihandler->Update();
+	// PR 42 window shrink + sim|draw PR 44 (Gap B): guihandler->Update's cursor
+	// path now reads the snapshot-served command surface + the barrier-published
+	// default-command reply instead of walking live commandAI, so under the
+	// running split it defers to after ReleaseSimPause (sim-live) with the other
+	// deferred UI consumers -- removing the PR-42b "keep guihandler parked"
+	// carve-out. In-place (byte-identical) flag-off / when not shrinking.
+	if (!shrinkWindow)
+		guihandler->Update();
 	commandDrawer->Update();
 
-	{
+	// UI unit-group housekeeping: draw-owned containers, no frame-keyed logic,
+	// safe at draw rate (moved from CGame::SimFrame, PR 11b)
+	for (auto& grouphandler: uiGroupHandlers)
+		grouphandler.Update();
+
+	// PR 42: the widget Update callins read snapshot-served / draw-owned state,
+	// so under the running split they defer to after ReleaseSimPause (sim-live);
+	// in-place otherwise. (Deferred with infotex below.)
+	if (!shrinkWindow) {
 		SCOPED_TIMER("Update::EventHandler");
 		eventHandler.Update();
 	}
@@ -1412,7 +1575,52 @@ bool CGame::UpdateUnsynced(const spring_time currentTime)
 	shadowHandler.Update();
 	{
 		worldDrawer.Update(newSimFrame);
-		transformsUploader.Update();
+		// PR 44a/44b: consume the producer-written transform staging INSIDE
+		// the consume window (after worldDrawer.Update so the new-object
+		// catch-up extraction is included, BEFORE the consume-complete
+		// signal -- the producer's next extraction writes the storage)
+		if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
+			transformsUploader.Update();
+			// PR 46: the SSBO now holds the HELD epoch's transform pair
+			// (the producer cannot extract again until the consume-complete
+			// signal below) -- stamp its frame so UniformConstants can build
+			// the epoch-consistent shader lerp factor (see SimDrawSplit.h).
+			SimDrawSplit::SetUploadedTransformFrame(
+				simSnapshot.SlotMeta(simSnapshot.HeldSlot()).lastSimFrame);
+		}
+		// PR 44b (no-park): the drawer consumption for the held epoch is
+		// complete -- everything below reads extracted or draw-owned storage
+		// only. Stamp consume-complete (the producer may extract again);
+		// there is no per-frame park to release anymore (PR 44c: backpressure
+		// is ring-keyed, nothing to publish here either).
+		SignalEpochConsumeComplete();
+
+		// PR 42 window shrink: run the deferred sim-live consumers now that the
+		// sim has resumed (see the shrinkWindow note above). infotex reads the
+		// boundary-drained DrawMapMirrors; the widget Update callins read
+		// snapshot-served / draw-owned state. Same relative order as the in-place
+		// flag-off path (infotex+sound, then widget Update).
+		if (shrinkWindow) {
+			if (doInfoTexSoundUpdate) {
+				infoTextureHandler->Update();
+				sound->UpdateListener(camera->GetPos(), camera->GetDir(), camera->GetUp());
+			}
+			// sim|draw PR 44 (Gap B): deferred from the parked window above. Reads
+			// the served command surface + the barrier default-command reply; kept
+			// before eventHandler.Update to preserve the in-place relative order.
+			guihandler->Update();
+			{
+				SCOPED_TIMER("Update::EventHandler");
+				eventHandler.Update();
+			}
+		}
+
+		// PR 44a: transformsMemStorage is PRODUCER-written under the flip (the
+		// sim thread extracts at its frame edges), so the SSBO upload happened
+		// inside the parked window above; post-release it would race the
+		// producer. modelUniformsStorage stays draw-written -> uploads here.
+		if (!(SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()))
+			transformsUploader.Update();
 		modelUniformsUploader.Update();
 	}
 
@@ -1426,11 +1634,1010 @@ bool CGame::UpdateUnsynced(const spring_time currentTime)
 }
 
 
+/**
+ * @brief SimDrawBarrier -- the sim|draw extract barrier (PR 26)
+ *
+ * THE place where mutable sim state crosses to the draw side, once per draw
+ * frame. Under the Phase-2 thread split this function body becomes the
+ * sim-pause window verbatim: sim pauses at a frame edge (never mid-SimFrame),
+ * this runs, sim resumes -- so everything that must happen "at the boundary"
+ * has to live inside it, and nothing else may read mutable synced state
+ * per-boundary from outside it.
+ *
+ * Contract:
+ *  - SINGLE CALL SITE: the top of CGame::Draw, before any other draw-side
+ *    code runs (input handlers calling in from elsewhere read the previous
+ *    boundary's published data). Do not add call sites.
+ *  - ORDER (fixed; each step's comment states its dependency):
+ *      1. renderEventQueue.Drain()            -- drawer containers reach the
+ *         completed sim frame's end state before anything draw-side reads them
+ *         (PR 12; catch-up batches apply N frames of records here, in order).
+ *      2. deferredObjectDeleter.AckDrainedDestroys() -- the drain dispatched
+ *         every queued destroy record, so destruct the deferred shells and
+ *         poison the slots (PR 13). ReleaseAcked() at the end of the same
+ *         Draw returns the slots to the pools -- the ack/release pair brackets
+ *         the draw frame; at split time the release folds into the next
+ *         barrier (pools are sim-owned).
+ *      3. simSnapshot.Update()                -- publish the observable-state
+ *         snapshot (unit/projectile/feature rows due-checked per SimSnapshot.h;
+ *         the PR-26 team/player boundary copy re-extracts unconditionally).
+ *         After the drain, so snapshot and drawer containers agree on the same
+ *         completed frame.
+ *      4. snapshotDiffGate.CheckBoundary()    -- TEST-ONLY (PR 17) gate hook,
+ *         right after publish; a single branch when unarmed.
+ *      5. the PR-11b boundary movers          -- once per batch of completed
+ *         sim frames, skip-gated exactly as before (see the block comment).
+ *      6. readMap->UpdateDraw()               -- the heightmap dirty-rect
+ *         drain (synced heightmap -> unsynced copy + UnsyncedHeightMapUpdate
+ *         events), moved here from CWorldDrawer::Update: it is boundary work
+ *         (sim writes the rect queue). Runs after the movers, preserving
+ *         their old relative order.
+ *      7. UnsyncedBoundaryQueue::Drain()      -- replay the sim phase's
+ *         boundary-deferred unsynced dispatches (PR 27b: LuaUI events,
+ *         Cob2Lua, SendToUnsynced, net-message draw pokes) in fire order.
+ *         Empty unless the split flag is on.
+ *  - MAY NOT run inside: rendering, GL work, or Lua callins -- with the
+ *    sanctioned exceptions of the drain's Render* event dispatches, the
+ *    UnsyncedHeightMapUpdate events of step 6, and the deferred unsynced
+ *    dispatches of step 7, which exist precisely to fire at the boundary.
+ *  - Deferred second half (documented decision, PR 26): the drawer extraction
+ *    layer (CModelDrawerDataBase::Update/ExtractTransforms/
+ *    UpdateObjectUniforms, projectileDrawer->UpdateDrawFlags -- the section-C
+ *    UPD class) still runs inside worldDrawer.Update(), later in the frame,
+ *    because it consumes the camera state updated between here and there;
+ *    moving it into this function today would change culling inputs (a
+ *    behavior change this PR forbids). At split time (27b) the pause window
+ *    must span it: either the camera update moves ahead of the barrier and
+ *    the extraction half moves in here, or the window extends -- decided
+ *    there.
+ */
+void CGame::SimDrawBarrier()
+{
+	// boundary-cost telemetry (the PR-27b gate's fine-print number)
+	SCOPED_TIMER("Misc::SimDrawBarrier");
+
+	// PR 44a (the producer flip): with the sim thread running, epoch
+	// PRODUCTION happens on the SIM thread at its frame edges
+	// (CGame::ProduceEpochAtSimEdge) -- this barrier is the CONSUMER half
+	// only: acquire the newest epoch, then dispatch its SEALED record/closure
+	// batches. PR 44b (§3.6): the deferred dispatches read PUBLISHED epoch
+	// state (no barrierLive live exception exists) -- their Lua callouts
+	// route to the snapshot twins against the just-acquired epoch, whose
+	// DEAD_THIS_BATCH rows + dead-retained render records cover every
+	// died-in-batch id (the armed id-coverage gate enforces this). The
+	// lockstep produce-at-barrier path below remains for flag-off and the
+	// pre-spawn window.
+	const bool producerFlip = SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning();
+
+	// PR 44b: the flip consumer ACQUIRES FIRST -- the deferred dispatches
+	// below no longer read the parked live sim (no barrierLive exception
+	// exists); their callouts route to the LuaSnapshotServe twins, which must
+	// read the epoch whose sealed batch is about to dispatch (§3.6a: every
+	// record/closure id resolves in ITS epoch -- ACTIVE or DEAD_THIS_BATCH).
+	// The dispatch window is per-epoch (§3.6c): it opens tagged with the held
+	// epoch id, DEAD_THIS_BATCH validity and the event-time overrides scope
+	// to the bracket, and the epoch cannot retire until the close (retirement
+	// only happens in AcquireNewestEpoch, which runs after the previous
+	// bracket closed -- asserted here).
+	if (producerFlip) {
+		assert(!SimDrawSplit::BoundaryShellWindowActive());
+
+		// the epoch CONSUMER half -- acquire the newest complete epoch
+		// (ref++), release the previously held one (ref--). A release that
+		// drops a slot's refcount to zero RETIRES that epoch: the
+		// DeferredObjectDeleter release is keyed to epoch retirement (§2.2).
+		const uint64_t retiredEpoch = simSnapshot.AcquireNewestEpoch();
+
+		if (retiredEpoch != 0)
+			deferredObjectDeleter.ReleaseRetired(retiredEpoch);
+
+		// point the map-mirror serving side at the acquired epoch's slot
+		drawMapMirrors.SetServingSlot(simSnapshot.HeldSlot());
+
+		SimDrawSplit::OpenEpochDispatchWindow(simSnapshot.HeldEpochId());
+	}
+
+	// (0) lockstep split only: open the boundary drain window -- the destroy
+	// records about to dispatch populate the id->shell maps that let step 7's
+	// deferred handlers resolve objects that died later in the same burst
+	// (closed again at step 8, before the ack poisons the shells)
+	if (SimDrawSplit::Enabled() && !producerFlip)
+		SimDrawSplit::SetBoundaryShellWindow(true);
+
+	// (0b) split only: run the GL upload half of any sim-thread model loads
+	// BEFORE the drain -- the creation records about to dispatch may
+	// register objects with these models (PR 27b commit c)
+	modelLoader.ServiceQueuedUploads();
+
+	// (1) apply the queued render-event records (object creation,
+	// destruction, LOS transitions) before any draw-side code reads the
+	// drawer containers. Flip: exactly the acquired epoch's SEALED slot
+	// batch -- records fired after the epoch's edge stay pending (sim-owned
+	// live container) and ride the next epoch (§1.3); lockstep: everything.
+	if (producerFlip) {
+		renderEventQueue.DispatchSealedBatch(simSnapshot.HeldSlot());
+	} else {
+		// PR 44b: a flip->lockstep transition (the sim thread joined at
+		// quit/teardown) can leave a published-but-unacquired epoch whose
+		// sealed batches sit in a ring slot -- the live-container Drain
+		// below never touches them, so the tail's closures would dispatch
+		// against objects whose destroy records never ran (gate-found: the
+		// healthbars invalid-feature-id teardown storm). Acquire + dispatch
+		// the leftover sealed batch FIRST (fire order: it precedes the
+		// tail); every call here no-ops in the ordinary pre-spawn lockstep
+		// (no seals ever happened).
+		if (SimDrawSplit::Enabled()) {
+			const uint64_t retiredEpoch = simSnapshot.AcquireNewestEpoch();
+
+			if (retiredEpoch != 0) {
+				deferredObjectDeleter.ReleaseRetired(retiredEpoch);
+				deferredObjectDeleter.ServiceRetiredReleases();
+			}
+
+			drawMapMirrors.SetServingSlot(simSnapshot.HeldSlot());
+			simSnapshot.MarkNewestEpochConsumed();
+			renderEventQueue.DispatchSealedBatch(simSnapshot.HeldSlot());
+		}
+
+		renderEventQueue.Drain();
+	}
+
+	// (1b) split only: deliver the drained destroys to the draw-owned death
+	// dependents (selection, wait-AI, tracked lights) -- they skip
+	// registering real death-dependences on sim objects under the split
+	// (SimDrawSplit.h), and this is their replacement notification
+	DeliverBoundaryDeaths();
+
+	// (1c) split only: the sim-owned effect containers the draw passes
+	// iterate (the draw passes may not touch the sim-owned tables post-
+	// release; see ModelDrawerData.h). Flip (PR 44b): the PRODUCER staged the
+	// copies at its edge (it owns the containers there); swap them into the
+	// serving members. Lockstep: barrier copy as before, after the drain so
+	// fresh registrations are covered.
+	if (SimDrawSplit::Enabled()) {
+		if (producerFlip)
+			projectileDrawer->CommitStagedEffectContainers();
+		else
+			projectileDrawer->SnapshotEffectContainers();
+	}
+
+	// (2) the drain dispatched every queued destroy record: the draw side has
+	// acked those objects, so destruct their deferred shells and poison the
+	// slots; ReleaseAcked() at the end of this Draw returns them to the pools.
+	// Split only: the ack moves to the END of the barrier -- the deferred
+	// unsynced dispatches of step 7 hold shell pointers that must stay
+	// readable until they ran (and the release folds into the next ack).
+	if (!SimDrawSplit::Enabled())
+		deferredObjectDeleter.AckDrainedDestroys();
+
+	// (2b) lockstep only: apply the draw-side Lua contract's boundary-deferred
+	// sim pokes (LuaUnsyncedCtrl direct-sim-poke class under SplitDrawContract,
+	// PR 27a). PR 44a: under the flip the SIM thread drains this queue at its
+	// frame edge immediately before extraction (freshness by construction,
+	// §1.8) -- see ProduceEpochAtSimEdge.
+	if (!producerFlip) {
+		if (LuaSplitContract::DrainBoundaryApplies() > 0) {
+			// the applied pokes mutated sim state outside any sim frame -- the
+			// snapshot's frameNum-based due-check cannot see that (the same
+			// class as net-driven team transfers, see CUnit::ChangedTeam)
+			simSnapshot.MarkMutatedOutsideFrame();
+		}
+	}
+
+	// (3) lockstep only: produce + publish the epoch AT the barrier (contract
+	// in SimSnapshot.h). Under the flip the producer already published at its
+	// frame edge; the consumer only acquires below.
+	if (!producerFlip)
+		simSnapshot.Update();
+
+	// (3a) PR 43: the epoch CONSUMER half, lockstep form (the flip acquired
+	// at the top of this function, BEFORE the dispatches -- PR 44b). Under
+	// the lockstep this immediately follows every publish (a pointer rotation
+	// with the double buffer's values). A release that drops a slot's
+	// refcount to zero RETIRES that epoch: run the retirement hooks -- the
+	// DeferredObjectDeleter release is rekeyed from "end of Draw" to "epoch
+	// retirement" (§2.2), returning the pool slots of every shell acked under
+	// the retired (or an earlier) epoch.
+	if (!producerFlip) {
+		const uint64_t retiredEpoch = simSnapshot.AcquireNewestEpoch();
+
+		if (SimDrawSplit::Enabled() && retiredEpoch != 0) {
+			deferredObjectDeleter.ReleaseRetired(retiredEpoch);
+			// PR 44b: ReleaseRetired only marks releasable (pools are
+			// sim-owned under the flip); the lockstep runs single-threaded /
+			// sim-quiescent, so return the pages in place
+			deferredObjectDeleter.ServiceRetiredReleases();
+		}
+
+		// point the map-mirror serving side at the acquired epoch's slot
+		// (the mirrors became true per-slot copies; the producer fills the
+		// slot of the epoch being produced, the draw side reads the held one)
+		drawMapMirrors.SetServingSlot(simSnapshot.HeldSlot());
+
+		// PR 44b: the pacing stamp moved out of AcquireNewestEpoch; the
+		// lockstep consume is complete at the acquire (produce-at-barrier)
+		simSnapshot.MarkNewestEpochConsumed();
+	}
+
+	// (3a') PR 43 §2.6 -- THE ARMED ID-COVERAGE GATE: every id the batch's
+	// records referenced (collected during the step-1 drain) must resolve in
+	// the epoch just published/acquired, as ACTIVE or DEAD_THIS_BATCH. This
+	// is 44b's make-or-break invariant, proven under the park now; a
+	// violation is a deterministic "[EpochIdCoverage]" error line. The refs
+	// are cleared with the dead-shell maps at step 8.
+	if (SimDrawSplit::Enabled())
+		simSnapshot.CheckEpochIdCoverage();
+
+	if (!producerFlip) {
+		// LOCKSTEP channel production into the just-acquired slot (PR 44a made
+		// every channel physically per-slot; under the flip the PRODUCER fills
+		// them at its frame edge instead -- see ProduceEpochAtSimEdge):
+		// (2c->3b-) the map-layer mirrors (PR 28 + later layers). Value-
+		// identical to the pre-44a step-2c placement: the sim is parked for
+		// the whole bracket, so draining after the publish reads the same
+		// quiescent layers (the diff-gate memcmp at (4) still follows it).
+		drawMapMirrors.DrainAtBarrier(simSnapshot.HeldSlot());
+
+		// (3b) refresh the draw-side command-queue copies (PR 27b serving
+		// batch 2). AFTER the publish: epoch-gated so queue copies and rows
+		// always describe the same boundary. Also after (2b): drained boundary
+		// pokes may have mutated queues, and their version bumps must be
+		// visible to this refresh.
+		LuaSnapshotServe::RefreshCommandQueues(simSnapshot.HeldSlot(), simSnapshot.HeldEpochId());
+
+		// (3b') refresh the draw-side piece caches (PR 33 pieces/scripts
+		// serving); same epoch gating, live accessors under the park.
+		LuaSnapshotServe::RefreshPieces(simSnapshot.HeldSlot(), simSnapshot.HeldEpochId());
+
+		// (3b'') PR 43 §2.1: record the epoch's channel-version scalars into
+		// the held ring slot. (The flip producer seals them at publish.)
+		simSnapshot.SealEpochChannelVersions(
+			LuaSnapshotServe::CmdQueueCacheEpoch(),
+			LuaSnapshotServe::PieceCacheEpoch(),
+			drawMapMirrors.DrainSerial());
+
+		// (3c/3d) TRACE REHOST (stage 4b) + PLACEMENT REHOST (stage 4): both
+		// query/reply channels are retired -- the four trace callouts and three
+		// placement callouts are served draw-side against the published epoch
+		// (EpochView), so there is no barrier query evaluation left to run.
+	} else {
+		// (3d' flip) PR 44b §9: commit the SYNCED-globals mirrors staged at
+		// the same edge (the dispatch window above/below serves from them).
+		// TRACE/PLACEMENT REHOST: the query/reply staging is retired (served
+		// draw-side), so there are no staged trace/placement replies to commit.
+		CSplitLuaHandle::CommitAllSyncedGlobalsMirrors();
+	}
+
+	// (3e) the context-cursor default-command query (sim|draw PR 44, Gap B).
+	// Lockstep: evaluate at the barrier (sim quiescent) -- the deep-CAI
+	// GetDefaultCmd + GuiTraceRay run against valid boundary-N sim state.
+	// Flip (PR 44b re-host): the SIM thread evaluated the staged query at its
+	// frame edge; COMMIT the staged result here -- fire the main-thread-bound
+	// DefaultCommand widget callin and publish the index reply. Runs before
+	// the step-8 ack so staged pointers of died-since-eval objects are still
+	// readable shells.
+	if (guihandler != nullptr) {
+		if (producerFlip)
+			guihandler->CommitDefaultCmdReply();
+		else
+			guihandler->EvaluateDefaultCmdQuery();
+	}
+
+	// (4) TEST-ONLY (PR 17): when armed via /snapshotdiffgate, verify every
+	// value the snapshot would serve bit-matches the live sim read at this
+	// boundary. A single branch when unarmed.
+	snapshotDiffGate.CheckBoundary();
+
+	// (5) sim-frame boundary: unsynced work relocated out of CGame::SimFrame's
+	// misplaced-work block (PR 11b). Runs once per batch of sim frames (>1
+	// under fast-forward) at the sim-quiescent boundary, after ClientReadNet
+	// drained its frame budget and after the render-event queue drain above.
+	// None of these write synced state or consume gsRNG; their only sim-facing
+	// effect is net messages, timing-equivalent to user input. The !skipping
+	// gate preserves the former UpdateUnsynced early-return (movers never ran
+	// during /skip fast-forward); lastSimFrame itself is only advanced by
+	// UpdateUnsynced, exactly as before.
+	if (!skipping && (lastSimFrame != gs->frameNum) && !gs->PreSimFrame()) {
+		// last processed sim frame, for the movers' crossing checks
+		const int prevSimFrame = lastSimFrame;
+
+		// keep waitCommandsAI before sound->NewFrame: a wait release plays a
+		// unit-reply sample that must land in the same emit budget as on master
+		waitCommandsAI.Update(prevSimFrame);
+		// sweep all expired buckets, not just frameNum's (see GeometricObjects.cpp)
+		geometricObjects->Update();
+		// reset the audio emit counter once per batch (never at raw draw rate)
+		sound->NewFrame();
+
+		playerHandler.Player(gu->myPlayerNum)->fpsController.SendStateUpdate();
+
+		CTeamHighlight::Update(prevSimFrame);
+
+		// dead-ghost pruning is draw-owned; run it after the batch's render-event
+		// drain so ghosts created by the batch's destroy events exist first
+		CUnitDrawer::UpdateGhostedBuildings();
+	}
+
+	// (6) heightmap dirty-rect drain: copy sim heightmap updates into the
+	// unsynced heightmap + fire UnsyncedHeightMapUpdate (moved here from
+	// CWorldDrawer::Update, which never ran while skipping -- keep that gate
+	// so rects keep accumulating across /skip)
+	if (!skipping) {
+		readMap->UpdateDraw(firstUnsyncedHeightMapDrain);
+		firstUnsyncedHeightMapDrain = false;
+	}
+
+	// (7) replay the sim phase's boundary-deferred unsynced dispatches (PR
+	// 27b, UnsyncedBoundaryQueue.h): LuaUI/unsynced-handle events, Cob2Lua,
+	// SendToUnsynced, ... -- in exact fire order, after the snapshot publish
+	// so their callin bodies read this boundary's frame. Empty (and free)
+	// unless the split flag deferred something since the last barrier. These
+	// are sanctioned boundary callins, the same class as the Render* event
+	// dispatches of step 1. A non-empty drain may have poked sim state
+	// directly (live exception, post-snapshot) -- mark, or a no-new-frame
+	// boundary serves stale rows.
+	if (producerFlip) {
+		// the held epoch's SEALED closure batch only (the post-seal tail
+		// rides the next epoch). PR 44b: the handlers read PUBLISHED epoch
+		// state through the serving twins (§3.6); their ctrl pokes queue to
+		// the producer instead of applying live, so the mark below covers
+		// only the engine-side closures that still poke sim state directly.
+		if (UnsyncedBoundaryQueue::DrainSealedBatch(simSnapshot.HeldSlot()) > 0)
+			simSnapshot.MarkMutatedOutsideFrame();
+
+		// the batch fully drained -- its SendToUnsynced mailbox is empty and
+		// reusable (see the rotation note at the producer's seal)
+		CSplitLuaHandle::RecycleSendToUnsyncedMailbox(simSnapshot.HeldSlot());
+	} else {
+		// PR 44b: flip->lockstep leftovers first (see step 1) -- the sealed
+		// closures precede the live tail in fire order; no-ops pre-spawn
+		if (SimDrawSplit::Enabled()) {
+			if (UnsyncedBoundaryQueue::DrainSealedBatch(simSnapshot.HeldSlot()) > 0)
+				simSnapshot.MarkMutatedOutsideFrame();
+
+			CSplitLuaHandle::RecycleSendToUnsyncedMailbox(simSnapshot.HeldSlot());
+		}
+
+		if (UnsyncedBoundaryQueue::Drain() > 0)
+			simSnapshot.MarkMutatedOutsideFrame();
+	}
+
+	// (8) split only: the relocated shell ack (see step 2). The drain window
+	// closes first -- the ack poisons the shells the window's id->shell
+	// fallback serves from (died-in-burst resolution for step 7's dispatches)
+	if (SimDrawSplit::Enabled()) {
+		if (producerFlip)
+			SimDrawSplit::CloseEpochDispatchWindow();
+		else
+			SimDrawSplit::SetBoundaryShellWindow(false);
+		// PR 43: the dispatch window has closed -- revert the published slot's
+		// DEAD_THIS_BATCH marks (they only read as valid inside the window)
+		// and clear the drawers' dead-retained render records (their shell
+		// handles are about to be poisoned by the ack below; item 3b keeps
+		// them resolvable exactly through the deferred-dispatch window)
+		simSnapshot.ClearDeadThisBatch();
+		CUnitDrawer::ClearDeadRetainedRecords();
+		CFeatureDrawer::ClearDeadRetainedRecords();
+		renderEventQueue.ClearBoundaryDeadShells();
+		renderEventQueue.ClearBatchCoverageRefs();
+		// PR 43: the split ack tags the shells with the epoch whose record
+		// dispatch just completed; their pool RELEASE is keyed to that epoch's
+		// retirement (barrier step 3a), replacing the end-of-Draw ReleaseAcked.
+		// PR 44a: under the flip only the SEALED prefix is acked -- shells of
+		// deaths after the epoch's edge have undispatched destroy records (the
+		// next epoch's batch) and must stay readable. The key is the HELD
+		// epoch id (EpochId() can already be the next epoch mid-frame).
+		if (producerFlip) {
+			deferredObjectDeleter.AckSealedDestroysEpoch(simSnapshot.HeldSlot(), simSnapshot.HeldEpochId());
+		} else {
+			// PR 44b: flip->lockstep leftovers (see step 1) -- the sealed
+			// shell batch's destroy records dispatched above; ack it first
+			// (no-op pre-spawn / when empty)
+			deferredObjectDeleter.AckSealedDestroysEpoch(simSnapshot.HeldSlot(), simSnapshot.HeldEpochId());
+			deferredObjectDeleter.AckDrainedDestroysEpoch(simSnapshot.HeldEpochId());
+		}
+	}
+
+	// PR 44b §9: release the dispatch-scoped lazy park, if a window read
+	// engaged one (SYNCED cross-hop first-touch / non-scalar value). The
+	// window is closed and the ack is done -- no more quiescence is needed.
+	if (lazyDispatchParkHeld) {
+		lazyDispatchParkHeld = false;
+		ReleaseSimPause();
+	}
+}
+
+// PR 27b: see barrier step (1b). PR 44c: barrier-only again -- the valve's
+// tail epochs are consumed through the normal barrier (no in-place service).
+void CGame::DeliverBoundaryDeaths()
+{
+	if (!SimDrawSplit::Enabled())
+		return;
+
+	const auto& deadUnits = renderEventQueue.BoundaryDestroyedUnits();
+	const auto& deadProjs = renderEventQueue.BoundaryDestroyedProjectiles();
+
+	GL::LightHandler* groundLights = (readMap != nullptr && readMap->GetGroundDrawer() != nullptr) ? readMap->GetGroundDrawer()->GetLightHandler() : nullptr;
+	GL::LightHandler* modelLights = CModelDrawerConcept::GetLightHandler();
+
+	for (const CUnit* u: deadUnits) {
+		CUnit* unit = const_cast<CUnit*>(u);
+
+		// Gap A: the death-path group prune deferred out of CUnit::PreDestruct
+		// (draw-owned UI control-groups; team is unchanged on death).
+		unit->SetGroup(nullptr);
+
+		selectedUnitsHandler.DependentDied(unit);
+		waitCommandsAI.DeliverBoundaryDeath(unit);
+
+		if (groundLights != nullptr)
+			groundLights->DeliverBoundaryDeath(unit);
+		if (modelLights != nullptr)
+			modelLights->DeliverBoundaryDeath(unit);
+	}
+
+	for (const CProjectile* p: deadProjs) {
+		if (groundLights != nullptr)
+			groundLights->DeliverBoundaryDeath(p);
+		if (modelLights != nullptr)
+			modelLights->DeliverBoundaryDeath(p);
+	}
+
+	renderEventQueue.ClearBoundaryDestroys();
+}
+
+// ---------------------------------------------------------------------------
+// PR 27b: the sim thread (active only with SimDrawSplit=1)
+// ---------------------------------------------------------------------------
+
+// joined by JoinSimThread; file-static so Game.h stays include-light
+static spring::thread simNetThread;
+
+// when the current pause window parked the sim thread (RequestPause return);
+// ReleaseSimPause emits it as the /debug frame grapher's "Parked" slice
+static spring_time simPauseBeginTime;
+
+// PR 44a: last successful epoch publish (the low-rate fallback-republish
+// timer for between-frames mutation classes without an explicit mark, e.g.
+// main-thread clientPaused flips); file-static, reset at SpawnSimThread
+static spring_time lastEpochPublishTime;
+// PR 44a: last producer pass that observed new sim frames -- the
+// frame-idle gate for non-frame-driven republishes (see below)
+static spring_time lastFrameAdvanceTime;
+
+// PR 44a -- THE EPOCH PRODUCER (§3.1/§3.2), sim thread, frame edges only.
+// Order: ctrl-poke drain (freshness by construction) -> pacing gate
+// (skip-if-unconsumed) -> due-check -> row + channel extraction into a free
+// ring slot -> query evaluation (§7.3: same edge as extraction) -> seal the
+// record/closure/shell batches -> publish. When production is skipped, the
+// pending queries are still serviced so cursor-tracking widget predicates
+// stay live while the game is paused (the §8 Gap-B note's pattern).
+void CGame::ProduceEpochAtSimEdge(bool forceProduce)
+{
+	assert(SimDrawSplit::Enabled());
+
+	// PR 46: own /debug timer -- producer time on the sim thread is NOT part
+	// of the "Sim" special timer (SimFrame only), so without this the whole
+	// extraction/publish cost reads as sim-thread idle in the profiler
+	SCOPED_TIMER("Sim::EpochProduce");
+	// frame-grapher slice, emitted at the publish below (skipped passes are
+	// microseconds and would only flood the deque)
+	const spring_time produceStartTime = spring_now();
+
+	// (p0) PR 44b: return retired-epoch pool pages (the consumer's
+	// ReleaseRetired only marks them releasable -- pools are sim-owned)
+	{
+		SCOPED_TIMER("Sim::EpochProduce::PoolService");
+		deferredObjectDeleter.ServiceRetiredReleases();
+	}
+
+	// (p1) drain the draw side's queued ctrl pokes BEFORE the due-check +
+	// extraction (barrier step 2b's successor, §1.8): applied pokes mutate
+	// sim state outside any frame, so they force a republish via the mark
+	if (LuaSplitContract::DrainBoundaryApplies() > 0)
+		simSnapshot.MarkMutatedOutsideFrame();
+
+	// (p2) §3.2 pacing: at most one unconsumed published epoch. Extraction
+	// cost is thereby paid at min(sim rate, draw rate); a catch-up burst pays
+	// ~one extraction per draw frame (today's batching, producer-side).
+	if (!simSnapshot.NewestEpochConsumed())
+		return;
+
+	// (p3) due-check. Frame-driven publishes (new frames / alive-count
+	// change) happen unconditionally. The NON-frame-driven classes --
+	// between-frames mutation marks, pending closures, the low-rate fallback
+	// -- publish only while the sim is FRAME-IDLE (paused / pregame / no
+	// frames for >100ms): while frames flow they fold into the next frame
+	// edge's natural publish (<=1 sim frame staleness, the same class as the
+	// pre-flip in-place refresh). This avoids SAME-FRAME REPUBLISHES during
+	// active play, which dispatch widget events without a perceived
+	// GetGameFrame advance -- a pattern the lockstep barrier never produced
+	// (a nonempty event batch always implied a frame advance) and one that
+	// trips BAR's instancevbotable zombie recovery (headful gate finding:
+	// unitlights/healthbar ZOMBIE echoes on Rosetta).
+	const bool framesDue = simSnapshot.FramesDue();
+	const spring_time now = spring_now();
+
+	if (framesDue)
+		lastFrameAdvanceTime = now;
+
+	const bool frameIdle = (now - lastFrameAdvanceTime).toMilliSecsf() >= 100.0f;
+	const bool mutationDue = simSnapshot.MutatedOutsideFrameMark();
+	// PR 44b: sealed batches live in the ring slots now; the live containers
+	// hold exactly the unsealed pending records/closures
+	const bool recsDue = !renderEventQueue.Empty() || !UnsyncedBoundaryQueue::Empty();
+	const bool timeDue = (now - lastEpochPublishTime).toMilliSecsf() >= 250.0f;
+
+	if (!forceProduce && !framesDue && !(frameIdle && (mutationDue || recsDue || timeDue))) {
+		// idle/paused query servicing: no state changed since the newest
+		// epoch, so evaluating against it is trivially §7.3-consistent.
+		// TRACE/PLACEMENT REHOST: the trace + placement query channels are
+		// retired (served draw-side against the epoch), so there are no pending
+		// queries to evaluate at the sim edge here.
+
+		// PR 44b: service the standing default-cmd query too, so the context
+		// cursor stays live while the game is paused (no frame edges fire)
+		if (guihandler != nullptr)
+			guihandler->EvaluateDefaultCmdQueryAtSimEdge();
+
+		// PR 44b §9: a first-touch SYNCED-mirror key registered while the
+		// game is paused still gets mirrored (nothing changed since the
+		// newest epoch -> trivially consistent); dirty-gated, so this is a
+		// flag check per idle tick
+		CSplitLuaHandle::MirrorAllSyncedGlobalsAtSimEdge(true);
+		return;
+	}
+
+	// (p4) rows + §7.7 dead rows into a free slot (meta staged, not visible)
+	const int slot = simSnapshot.BeginEpochProduction();
+	const uint64_t epochId = simSnapshot.NextEpochId();
+
+	// (p5) the per-slot channels (PR 44a: physically per-slot copies)
+	LuaSnapshotServe::RefreshCommandQueues(slot, epochId);
+	LuaSnapshotServe::RefreshPieces(slot, epochId);
+	drawMapMirrors.DrainAtBarrier(slot);
+
+	// (p6) §7.6 ruling A: transformsMemStorage production moves here (the
+	// PR-8 extraction is camera-independent); the SSBO upload consumes it at
+	// the consumer's park (see UpdateUnsynced). Forced-serial on this thread.
+	{
+		SCOPED_TIMER("Sim::EpochProduce::Transforms");
+		{
+			SCOPED_TIMER("Sim::EpochProduce::TransformsUnits");
+			CUnitDrawer::ExtractTransformsAtSimEdge();
+		}
+		{
+			SCOPED_TIMER("Sim::EpochProduce::TransformsFeatures");
+			CFeatureDrawer::ExtractTransformsAtSimEdge();
+		}
+	}
+
+	// (p7) evaluate the pending default-cmd query at the SAME edge the rows
+	// were extracted (§7.3: reply consistent with the epoch's rows).
+	// TRACE/PLACEMENT REHOST: the trace + placement query channels are retired
+	// (served draw-side against the epoch), so only the default-cmd query edge
+	// evaluation remains.
+	{
+		SCOPED_TIMER("Sim::EpochProduce::Queries");
+
+		// PR 44b: the re-hosted default-cmd query evaluates at the same edge
+		// (its reply commits at the consumer's barrier -- CommitDefaultCmdReply)
+		if (guihandler != nullptr)
+			guihandler->EvaluateDefaultCmdQueryAtSimEdge();
+	}
+
+	// (p7c) PR 44b §9: mirror the registered SYNCED-globals read-set at the
+	// same edge (scalar _G values; the SYNCED proxy serves them inside the
+	// dispatch window -- the epoch-window value, MORE master-faithful than
+	// the live read the parked dispatch used to make)
+	{
+		SCOPED_TIMER("Sim::EpochProduce::SyncedMirror");
+		CSplitLuaHandle::MirrorAllSyncedGlobalsAtSimEdge(false);
+	}
+
+	// (p7b) PR 44b: stage the effect-container copies (ground flashes /
+	// flying pieces) -- the sim owns the source containers at this edge; the
+	// consumer swaps them into the serving members at the barrier
+	{
+		SCOPED_TIMER("Sim::EpochProduce::EffectStage");
+		projectileDrawer->StageEffectContainersAtSimEdge();
+	}
+
+	// (p8) seal the epoch's record/closure/shell batches INTO THE RING SLOT
+	// (PR 44b: physically per-slot): the consumer dispatches exactly these;
+	// anything fired later rides the next epoch (§1.3). No sim frame can run
+	// between the extraction above and this seal (same thread), so the seal
+	// scope == the extraction scope.
+	static_assert(RenderEventQueue::MAX_EPOCH_BATCH_SLOTS == SimSnapshot::EPOCH_RING_SLOTS);
+	static_assert(DeferredObjectDeleter::MAX_EPOCH_BATCH_SLOTS == SimSnapshot::EPOCH_RING_SLOTS);
+	static_assert(UnsyncedBoundaryQueue::MAX_EPOCH_BATCH_SLOTS == SimSnapshot::EPOCH_RING_SLOTS);
+	{
+		SCOPED_TIMER("Sim::EpochProduce::SealPublish");
+		renderEventQueue.SealEpochBatch(slot);
+		UnsyncedBoundaryQueue::SealEpochBatch(slot);
+		deferredObjectDeleter.SealPendingBatch(slot);
+		// PR 44b: the sealed closures own their fire-time mailbox from here on
+		// (the fire/drain sides run concurrently under the no-park split)
+		CSplitLuaHandle::RotateSendToUnsyncedMailbox(slot);
+
+		// (p9) publish (channel versions sealed into the slot's meta first)
+		simSnapshot.PublishEpoch(slot,
+			LuaSnapshotServe::CmdQueueCacheEpoch(slot),
+			LuaSnapshotServe::PieceCacheEpoch(slot),
+			drawMapMirrors.DrainSerial());
+	}
+
+	lastEpochPublishTime = spring_now();
+
+	// PR 46: /debug frame-grapher attribution (the cyan "Epoch" slice on the
+	// sim-thread row); same emit pattern as TIMING_SIM at SimFrame's end
+	eventHandler.DbgTimingInfo(TIMING_EPOCH_PRODUCE, produceStartTime, lastEpochPublishTime);
+}
+
+__FORCE_ALIGN_STACK__
+void CGame::SimThreadProc()
+{
+	Threading::SetThreadName("sim");
+	// registers thread controls so watchdog/crash dumps can suspend us
+	Threading::SetSimThread();
+
+	// PR 46: pin to the core SetDefaultThreadCount reserved (0 = none
+	// reserved: non-pinning policies, or flag off). Without an explicit pin
+	// this thread floats over the pinned workers' cores (Linux: inherits the
+	// spawning main thread's mask) and creates for_mt stragglers.
+	if (const uint32_t simAffinity = Threading::GetReservedSimAffinityMask(); simAffinity != 0)
+		Threading::SetAffinityHelper("Sim", simAffinity);
+
+	// not needed to maintain sync (precision flags are per-process) but fpu
+	// exceptions are per-thread (the GameLoadThread pattern; sync risk #1)
+	streflop::streflop_init<streflop::Simple>();
+
+	Watchdog::RegisterThread(WDT_SIM);
+	// simRunning was already set by SpawnSimThread BEFORE the thread
+	// existed: the pause handshake must see the thread from the very first
+	// Draw, or the barrier drains unparked against a consuming sim thread
+	// (the TSan-found spawn race)
+	assert(SimDrawSplit::SimThreadRunning());
+
+	try {
+		while (!SimDrawSplit::SimThreadExitRequested() && !gu->globalQuit) {
+			Watchdog::ClearTimer(WDT_SIM);
+
+			// the frame-edge park point (the barrier handshake); the second
+			// one sits between packets inside ClientReadNet
+			SimDrawSplit::YieldIfPauseRequested();
+
+			if (SimDrawSplit::SimThreadExitRequested() || gu->globalQuit)
+				break;
+
+			// PR 44a: THE PRODUCER (§3.1) -- at this frame edge, with the
+			// previous epoch consumed, extract + publish the next epoch
+			// concurrently with the draw thread's rendering. This is the
+			// flip's whole point: the extraction cost leaves the parked
+			// window (it ran under the park at the barrier before).
+			ProduceEpochAtSimEdge();
+
+			good_fpu_control_registers("CGame::SimThreadProc");
+
+			// PR 46: frame progress across the ClientReadNet call decides
+			// whether a full-throttle pass may hot-continue (see below)
+			const int preNetFrameNum = gs->frameNum;
+
+			{
+				// exactly the bracket the single-threaded path wraps around
+				// ClientReadNet in CGame::Update
+				renderEventQueue.BeginSimPhase();
+				SimDrawSplit::ScopedSimPhase simPhase;
+
+				ENTER_SYNCED_CODE();
+				ClientReadNet(); // issues new SimFrame()s
+				LEAVE_SYNCED_CODE();
+			}
+
+			// keep consuming without a nap while budget and packets remain
+			// (ClientReadNet returns on its per-call wall-time cap during
+			// catch-up; napping there throttles fast-forward to ~half speed).
+			// PR 46 full throttle: no budget -- hot-continue only when the
+			// pass made frame progress; a ring-blocked or dry pass naps (a
+			// bare packets-remain check would busy-spin a core against the
+			// backpressure gate at 1x while draw catches up)
+			if (SplitFullThrottleConsume()) {
+				if (gs->frameNum != preNetFrameNum && clientNet->Peek(0) != nullptr)
+					continue;
+			} else if (msgProcTimeLeft > 0.0f && clientNet->Peek(0) != nullptr) {
+				continue;
+			}
+
+			// bounded nap; woken early by a pause request or exit
+			SimDrawSplit::SimIdleWait();
+		}
+	} CATCH_SPRING_ERRORS
+
+	SimDrawSplit::SetSimThreadRunning(false);
+	Watchdog::DeregisterThread(WDT_SIM);
+}
+
+void CGame::SpawnSimThread()
+{
+	if (simNetThread.joinable())
+		return;
+
+	// the sim thread interleaves Peek/GetData with main-thread Sends; the
+	// two unlocked queue ops take the connection lock from here on
+	clientNet->SetThreadSafeQueueOps(true);
+
+	// PR 44a: the flip producer runs the SimSnapshot extraction on the sim
+	// thread; pre-fill the MapParser-backed start-position cache on the MAIN
+	// thread first (the MapParser must stay off the sim thread). Idempotent.
+	simSnapshot.EnsureMapStartPositionsCached();
+
+	SimDrawSplit::ResetSimThreadExit();
+	// set BEFORE the thread exists (see the assert in SimThreadProc)
+	SimDrawSplit::SetSimThreadRunning(true);
+	lastEpochPublishTime = spring_now();
+	lastFrameAdvanceTime = spring_now();
+	simNetThread = spring::thread(std::bind(&CGame::SimThreadProc, this));
+
+	LOG("[Game::%s] sim thread spawned (SimDrawSplit=1)", __func__);
+}
+
+void CGame::JoinSimThread()
+{
+	if (!simNetThread.joinable())
+		return;
+
+	SimDrawSplit::RequestSimThreadExit();
+	simNetThread.join();
+	Threading::ClearSimThread();
+
+	LOG("[Game::%s] sim thread joined", __func__);
+}
+
+void CGame::AcquireSimPause()
+{
+	if (!SimDrawSplit::Enabled() || !SimDrawSplit::SimThreadRunning())
+		return;
+
+	{
+		// how long the draw side waits for the sim to reach a frame edge
+		// (the other half of the boundary cost; worst case one sim frame)
+		SCOPED_TIMER("Misc::SimPauseWait");
+		SimDrawSplit::RequestPause();
+	}
+
+	// the sim thread is parked from here to ReleasePause: at a frame edge,
+	// or MID-frame at the pool valve (PR 44c §3.4: the valve wait presents
+	// as a park and holds fully quiescent while a pause is pending; there is
+	// no main-thread valve service to run -- the sim resumes itself once the
+	// draw side's ordinary consume+retire returns pool pages). Enumerated
+	// deviation: a lifecycle park that catches a valve-parked sim gets
+	// MID-frame quiescence (pre-44c the acquire serviced the valve in place
+	// and waited for the frame edge) -- rare^2 (a near-pool-cap game AND a
+	// concurrent lifecycle event), flagged in the 44c design record.
+	simPauseBeginTime = spring_now();
+	simPauseHeld = true;
+}
+
+// PR 44c (§3.4): the pool valve's forced mid-frame tail publish -- runs on
+// the SIM thread from DeferredObjectDeleter::WaitForEpochRetirementAtValve.
+// A normal producer pass: the §3.2 pacing gate inside still applies (at most
+// one unconsumed published epoch), so repeated valve rounds publish at the
+// draw side's consume rate. The mid-frame rows/records are the same value-
+// consistent momentary state the PR-44b main-thread valve produced; §7.7
+// dead rows come from the pending ledger, so §3.6a id coverage holds for the
+// tail batch by construction.
+void CGame::ProduceEpochForPoolValve()
+{
+	assert(Threading::IsSimThread());
+	ProduceEpochAtSimEdge(true);
+}
+
+// PR 44b §9 (option-1 fallback): on-demand quiescence for a dispatch-window
+// read the epoch cannot serve (SYNCED cross-hop first-touch / non-scalar
+// value). Held to the barrier's window close. A valve-parked sim satisfies
+// this park too (quiescence is all the read needs; PR 44c: no caller
+// services the valve -- the sim resumes itself after the release).
+void CGame::AcquireLazyDispatchPark()
+{
+	if (simPauseHeld)
+		return;
+	if (!SimDrawSplit::Enabled() || !SimDrawSplit::SimThreadRunning())
+		return;
+
+	{
+		SCOPED_TIMER("Misc::SimPauseWait");
+		SimDrawSplit::RequestPause();
+	}
+
+	simPauseBeginTime = spring_now();
+	simPauseHeld = true;
+	lazyDispatchParkHeld = true;
+}
+
+// PR 44b §9: the consume-complete signal -- see the Game.h comment. Stamped
+// when ALL consumer-side drawer consumption for the held epoch finished; the
+// §3.2 pacing gate then reproduces the removed park's producer/consumer
+// exclusion without blocking the sim (production is skipped, simulation
+// continues). PR 44c: no boundary-frame publish anymore -- backpressure is
+// keyed to the epoch ring (SimSnapshot::UnretiredEpochCount, §3.4).
+void CGame::SignalEpochConsumeComplete()
+{
+	if (!SimDrawSplit::Enabled() || !SimDrawSplit::SimThreadRunning())
+		return;
+
+	simSnapshot.MarkNewestEpochConsumed();
+}
+
+// PR 44a telemetry: cumulative parked-window stats (the program's headline
+// number -- under the flip the parked window should shrink from ~the full
+// barrier to ~acquire+dispatch). Reported by DumpSimPauseSurvey at teardown.
+static std::atomic<uint64_t> simParkCount = {0};
+static std::atomic<uint64_t> simParkTotalUs = {0};
+static std::atomic<uint64_t> simParkMaxUs = {0};
+
+void CGame::ReleaseSimPause()
+{
+	if (!simPauseHeld)
+		return;
+
+	// PR 44b §9: the consume-complete stamp moved to
+	// SignalEpochConsumeComplete (the explicit per-frame signal); parks are
+	// lifecycle/lazy/input-gated events now and must NOT stamp -- a
+	// mid-window release would let the producer extract while the consumer
+	// is still mid-consumption.
+
+	simPauseHeld = false;
+	SimDrawSplit::ReleasePause();
+
+	const spring_time parkEnd = spring_now();
+
+	// PR 44a telemetry (relaxed counters; single writer, the draw thread)
+	const uint64_t us = uint64_t((parkEnd - simPauseBeginTime).toMilliSecsf() * 1000.0f);
+	simParkCount.fetch_add(1, std::memory_order_relaxed);
+	simParkTotalUs.fetch_add(us, std::memory_order_relaxed);
+	if (us > simParkMaxUs.load(std::memory_order_relaxed))
+		simParkMaxUs.store(us, std::memory_order_relaxed);
+
+	// gate telemetry for the /debug frame grapher (sim-row "Parked" slice)
+	eventHandler.DbgTimingInfo(TIMING_SIM_PARKED, simPauseBeginTime, parkEnd);
+}
+
+// §4.5 pause-surface telemetry: per-site count of parks that actually engaged
+// (re-parked the running sim). Relaxed atomics -- read/written from the draw
+// thread today, but kept atomic so the eventual 44b consumers stay clean.
+static std::array<std::atomic<uint64_t>, size_t(CGame::SimPauseSite::COUNT)> simPauseSiteCounts = {};
+
+void CGame::DumpSimPauseSurvey()
+{
+	// PR 44a telemetry: the parked-window aggregate (headline number)
+	if (const uint64_t n = simParkCount.load(std::memory_order_relaxed); n > 0) {
+		LOG("[SimParkStats] parks=%llu totalMs=%.1f avgMs=%.3f maxMs=%.1f",
+			(unsigned long long)n,
+			simParkTotalUs.load(std::memory_order_relaxed) / 1000.0f,
+			simParkTotalUs.load(std::memory_order_relaxed) / 1000.0f / n,
+			simParkMaxUs.load(std::memory_order_relaxed) / 1000.0f);
+	}
+
+	// PR 44c: valve engage/wait aggregates (zero-line suppressed)
+	deferredObjectDeleter.DumpValveStats();
+
+	// PR 44c telemetry: epoch-ring backpressure denials (zero-suppressed)
+	if (const uint64_t n = SimDrawSplit::g_ringBlockCount.load(std::memory_order_relaxed); n > 0)
+		LOG("[BackpressureStats] ringBlocked=%llu", (unsigned long long)n);
+
+	// PR 46 telemetry: full-throttle passes ended by the hygiene backstop
+	// instead of the epoch-consumed exit (zero-suppressed; small counts under
+	// FF are normal, huge counts mean draw stopped acquiring epochs)
+	if (const uint64_t n = SimDrawSplit::g_ffBackstopExitCount.load(std::memory_order_relaxed); n > 0)
+		LOG("[BackpressureStats] ffBackstopExits=%llu", (unsigned long long)n);
+
+	static const char* siteNames[size_t(SimPauseSite::COUNT)] = {
+		"LIFECYCLE", "GUI_TRY_TARGET", "GUI_TEST_BUILDSQUARE", "GUI_GET_COMMAND",
+		"GUI_GET_BUILDPOS", "GUI_DRAW_MAPSTUFF", "GUI_GET_DEFAULT_CMD",
+		"MOUSE_RELEASE", "MINIMAP_FRUSTUM", "LUA_SEND_COMMANDS", "LUA_GIVE_ORDER",
+		"PIECE_FIRST_TOUCH", "EST_PATH_FIRST_TOUCH",
+	};
+
+	uint64_t total = 0;
+	for (auto& c: simPauseSiteCounts)
+		total += c.load(std::memory_order_relaxed);
+
+	if (total == 0)
+		return; // split off / never parked mid-gameplay
+
+	LOG("[SimPauseSurvey] mid-gameplay ScopedExternalSimPause parks that engaged "
+	    "(re-parked the running sim), by site:");
+	for (size_t i = 0; i < size_t(SimPauseSite::COUNT); ++i) {
+		const uint64_t n = simPauseSiteCounts[i].load(std::memory_order_relaxed);
+		if (n > 0)
+			LOG("[SimPauseSurvey]   %-22s %llu", siteNames[i], (unsigned long long)n);
+	}
+}
+
+CGame::ScopedExternalSimPause::ScopedExternalSimPause(SimPauseSite site)
+{
+	if (game == nullptr || game->simPauseHeld)
+		return;
+
+	game->AcquireSimPause();
+	acquired = game->simPauseHeld;
+
+	// telemetry (§4.5): only count parks that actually engaged (a nested
+	// bracket returns above with acquired=false and is not a real re-park)
+	if (acquired)
+		simPauseSiteCounts[size_t(site)].fetch_add(1, std::memory_order_relaxed);
+}
+
+CGame::ScopedExternalSimPause::~ScopedExternalSimPause()
+{
+	if (acquired && game != nullptr)
+		game->ReleaseSimPause();
+}
+
+
 bool CGame::Draw() {
+	const spring_time currentTimePreBarrier = spring_now();
+
+	// PR 47: under the split the draw thread free-runs, so the unsynced
+	// lua_States produce garbage per DRAW frame at an uncapped rate (measured
+	// ~40x master's draw-frame rate under headless FF), while their ONLY
+	// collector was the fixed 30Hz timed job with master's per-call budget.
+	// The imbalance let BAR's LuaUI heap balloon to its 1.2GB emergency-
+	// collect valve (42 emergency collects over one Rosetta replay; zero
+	// flag-off). Master ties collection to the loop that produces the
+	// garbage (SimFrame, whose call rate scales with sim speed); restore
+	// that coupling for the DRAW-owned states by stepping their skip-gated,
+	// budget-bounded incremental GC once per draw frame, on the thread that
+	// owns them and OUTSIDE the draw window (before the barrier, so no
+	// dispatch or draw callin is running). spring_lua_alloc_skip_gc() keeps
+	// the per-call cost self-balancing: the run probability scales with the
+	// global heap-load ratio, so a low heap skips almost every call. The
+	// 30Hz timed job remains as the backstop for non-drawing periods
+	// (menus, parked saves, minimized). Flag-off pacing is untouched.
+	if (SimDrawSplit::Enabled())
+		eventHandler.CollectGarbage(false, CEventHandler::GC_UNSYNCED_ONLY);
+
+	// PR 44b remainder (§9 ruling): THE PER-FRAME CONSUME-PARK IS GONE --
+	// the barrier below consumes the published epoch CONCURRENT with the
+	// running sim (the producer/consumer exclusion is the §3.2 pacing gate,
+	// stamped at SignalEpochConsumeComplete). PR 44c (§3.4): the Draw-top
+	// pool-valve service is gone too -- a pool-pressured sim publishes its
+	// mid-frame tail itself and waits for epoch retirement (this loop's
+	// ordinary consume+retire is what releases it). Parks remain only for
+	// lifecycle events, the input-gated narrow parks and the dispatch-scoped
+	// lazy park.
+
+	// PR 44b: the barrierLive ScopedLiveException is GONE -- the barrier's
+	// deferred dispatches (the a0 closures' Lua handlers) read PUBLISHED
+	// epoch state through the LuaSnapshotServe twins (§3.6), exactly like
+	// every other draw-context callout. The Render* record dispatches are
+	// engine-drawer-only (no Lua) and read pinned shells / plain fields.
+	// Lockstep (flag-off / pre-spawn) dispatches run outside the draw window
+	// and stay live-legal without an exception bracket.
+	SimDrawBarrier();
+
+	// gate telemetry for the /debug frame grapher (draw-row "Gate" slice):
+	// the pause-wait + valve service + barrier span no other category covers
+	if (SimDrawSplit::Enabled())
+		eventHandler.DbgTimingInfo(TIMING_BARRIER, currentTimePreBarrier, spring_now());
+
+	// everything from here to the end of Draw is draw-thread context under
+	// the split contract (PR 27a): unsynced Lua ran below this line executes
+	// on the draw thread at 27b while sim advances. The barrier above is
+	// deliberately OUTSIDE the window -- it is the sim-pause bracket, where
+	// live reads (the Render* event dispatches) stay legal.
+	LuaSplitContract::ScopedDrawWindow splitContractWindow;
+
 	const spring_time currentTimePreUpdate = spring_gettime();
 
-	if (UpdateUnsynced(currentTimePreUpdate))
+	if (UpdateUnsynced(currentTimePreUpdate)) {
+		// early-out paths (skipping 2Hz redraw etc.) exit before the normal
+		// consume-complete point inside UpdateUnsynced: no drawer mutation
+		// happens this frame past here, so the producer may extract
+		SignalEpochConsumeComplete();
+		ReleaseSimPause(); // leaked lazy/lifecycle park safety (no-op else)
 		return false;
+	}
 
 	RmlGui::Update();
 	const spring_time currentTimePreDraw = spring_gettime();
@@ -1549,6 +2756,18 @@ bool CGame::Draw() {
 
 	lastDrawFrameTime = currentTimePostDraw;
 
+	// return the poisoned slots of this Draw's acked destroys to the pools.
+	// PR 27b/43: under the split the pools are sim-owned and the sim thread is
+	// running again here -- the release is keyed to EPOCH RETIREMENT instead
+	// (barrier step 3a: DeferredObjectDeleter::ReleaseRetired when the ring
+	// retires the epoch the shells were acked under)
+	if (!SimDrawSplit::Enabled())
+		deferredObjectDeleter.ReleaseAcked();
+
+	// safety net for any Draw exit path that skipped the normal release
+	// point (no-op when already released)
+	ReleaseSimPause();
+
 	return true;
 }
 
@@ -1664,8 +2883,17 @@ void CGame::StartPlaying()
 		gu->myAllyTeam = teamHandler.AllyTeam(gu->myTeam);
 	}
 
-	GameSetupDrawer::Disable();
-	CLuaUI::UpdateTeams();
+	// PR 27b: both are draw/UI-owned (the setup-drawer singleton and the
+	// unsynced LuaUI state); StartPlaying fires from net-message handling
+	if (SimDrawSplit::DeferUnsyncedNow()) {
+		UnsyncedBoundaryQueue::Defer([]() {
+			GameSetupDrawer::Disable();
+			CLuaUI::UpdateTeams();
+		});
+	} else {
+		GameSetupDrawer::Disable();
+		CLuaUI::UpdateTeams();
+	}
 
 	teamHandler.SetDefaultStartPositions(gameSetup);
 
@@ -1676,6 +2904,10 @@ void CGame::StartPlaying()
 static const char* const tracingSimFrameName = "SimFrame";
 
 void CGame::SimFrame() {
+	// tag every zone (incl. unsynced widget callins run from here) as sim-budget,
+	// so the profiler can split sim vs draw/update time
+	ScopedSimFramePhase simPhase;
+
 	ENTER_SYNCED_CODE();
 	ASSERT_SYNCED(gsRNG.GetGenState());
 
@@ -1722,21 +2954,11 @@ void CGame::SimFrame() {
 	spring_lua_alloc_update_stats((gs->frameNum % GAME_SPEED) == 0);
 
 	if (!skipping) {
-		// everything here is unsynced and should ideally moved to Game::Update()
-		waitCommandsAI.Update();
-		geometricObjects->Update();
-		sound->NewFrame();
+		// eoh->Update stays on the sim path: its single-player cheat callbacks
+		// mutate synced state, and AIs assume once-per-sim-frame Update(frame)
+		// cadence. The rest of this block was unsynced and moved to
+		// CGame::UpdateUnsynced / Draw per PR 11b (11a classification table).
 		eoh->Update();
-
-		for (auto& grouphandler: uiGroupHandlers)
-			grouphandler.Update();
-
-		CPlayer* p = playerHandler.Player(gu->myPlayerNum);
-		FPSUnitController& c = p->fpsController;
-
-		c.SendStateUpdate(/*camera->GetMovState(), mouse->buttons*/);
-
-		CTeamHighlight::Update(gs->frameNum);
 	}
 
 	// everything from here is simulation
@@ -1753,10 +2975,17 @@ void CGame::SimFrame() {
 
 			// keep garbage-collection rate tied to sim-speed
 			// (fixed 30Hz gc is not enough while catching up)
-			if (luaGCControl == 0)
-				eventHandler.CollectGarbage(false);
+			// PR 27b: under the split the sim phase GCs only the synced
+			// lua_States it owns; the main-thread timed job covers the rest
+			if (luaGCControl == 0) {
+				SCOPED_TIMER("Sim::GameFrame::CollectGarbage");
+				eventHandler.CollectGarbage(false, SimDrawSplit::Enabled() ? CEventHandler::GC_SYNCED_ONLY : CEventHandler::GC_ALL);
+			}
 
-			eventHandler.GameFrame(gs->frameNum);
+			{
+				SCOPED_TIMER("Sim::GameFrame::Callins");
+				eventHandler.GameFrame(gs->frameNum);
+			}
 		}
 
 		helper->Update();
@@ -1783,10 +3012,9 @@ void CGame::SimFrame() {
 		}
 		envResHandler.Update();
 		losHandler->Update();
-		// dead ghosts have to be updated in sim, after los,
-		// to make sure they represent the current knowledge correctly.
-		// should probably be split from drawer
-		CUnitDrawer::UpdateGhostedBuildings();
+		// UpdateGhostedBuildings() (dead-ghost pruning) moved to the unsynced
+		// boundary in CGame::UpdateUnsynced (PR 11b): it is draw-owned state and
+		// must run after the batch's render-event drain, not on the sim path.
 		interceptHandler.Update(false);
 
 		teamHandler.GameFrame(gs->frameNum);
@@ -1801,6 +3029,14 @@ void CGame::SimFrame() {
 	eventHandler.DbgTimingInfo(TIMING_SIM, lastFrameTime, lastSimFrameTime);
 
 	FrameMarkEnd(tracingSimFrameName);
+
+	// sample per-sim-frame profiler self/inclusive/count for an active /profiledump
+	CTimeProfiler::GetInstance().DumpFrame(gs->frameNum);
+	// sample per-sim-frame boundary-size stats for an active /boundarydump
+	BoundaryStats::SampleFrame(gs->frameNum);
+	// hash this completed sim frame's SimSnapshot for an active /snaphashdump
+	// (per sim frame, not per draw frame, so fast-forward doesn't skip frames)
+	simSnapshot.HashCompletedFrame(gs->frameNum);
 
 	#ifdef HEADLESS
 	{
@@ -1854,7 +3090,13 @@ void CGame::GameEnd(const std::vector<unsigned char>& winningAllyTeams, bool tim
 	gameOver = true;
 	eventHandler.GameOver(winningAllyTeams);
 
-	CEndGameBox::Create(winningAllyTeams);
+	// PR 27b: the end-game box is an agui/UI object; GameEnd can fire from
+	// net-message handling (sim thread under the split) -- boundary-defer
+	if (SimDrawSplit::DeferUnsyncedNow()) {
+		UnsyncedBoundaryQueue::Defer([winningAllyTeams]() { CEndGameBox::Create(winningAllyTeams); });
+	} else {
+		CEndGameBox::Create(winningAllyTeams);
+	}
 #ifdef    HEADLESS
 	CTimeProfiler::GetInstance().PrintProfilingInfo();
 #endif // HEADLESS
@@ -1920,6 +3162,18 @@ void CGame::SendNetChat(std::string message, int destination)
 }
 
 
+// PR 27b: the chat-notification sample plays through the UI sound channel
+// (main-thread/audio-owned); chat arrives via net-message handling, which
+// runs on the sim thread under the split
+static void PlayDeferrableChatSound(int soundID)
+{
+	if (SimDrawSplit::DeferUnsyncedNow()) {
+		UnsyncedBoundaryQueue::Defer([soundID]() { Channels::UserInterface->PlaySample(soundID, 5); });
+	} else {
+		Channels::UserInterface->PlaySample(soundID, 5);
+	}
+}
+
 void CGame::HandleChatMsg(const ChatMessage& msg)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
@@ -1965,13 +3219,13 @@ void CGame::HandleChatMsg(const ChatMessage& msg)
 			const bool allied = teamHandler.Ally(msgAllyTeam, gu->myAllyTeam);
 			if (gu->spectating || (allied && !player->spectator)) {
 				LOG("%sAllies: %s", label.c_str(), s.c_str());
-				Channels::UserInterface->PlaySample(chatSound, 5);
+				PlayDeferrableChatSound(chatSound);
 			}
 		}
 		else if (msg.destination == ChatMessage::TO_SPECTATORS) {
 			if (gu->spectating || myMsg) {
 				LOG("%sSpectators: %s", label.c_str(), s.c_str());
-				Channels::UserInterface->PlaySample(chatSound, 5);
+				PlayDeferrableChatSound(chatSound);
 			}
 		}
 		else if (msg.destination == ChatMessage::TO_EVERYONE) {
@@ -1982,7 +3236,7 @@ void CGame::HandleChatMsg(const ChatMessage& msg)
 				} else {
 					LOG("%s%s", label.c_str(), s.c_str());
 				}
-				Channels::UserInterface->PlaySample(chatSound, 5);
+				PlayDeferrableChatSound(chatSound);
 			}
 		}
 		else if ((msg.destination < playerHandler.ActivePlayers()) && player)
@@ -1993,7 +3247,7 @@ void CGame::HandleChatMsg(const ChatMessage& msg)
 				LOG("%s whispered %s: %s", label.c_str(), playerHandler.Player(msg.destination)->name.c_str(), s.c_str());
 			} else if (msg.destination == gu->myPlayerNum && player->spectator == gu->spectating) {
 				LOG("%sPrivate: %s", label.c_str(), s.c_str());
-				Channels::UserInterface->PlaySample(chatSound, 5);
+				PlayDeferrableChatSound(chatSound);
 			}
 			else if (player->playerNum == gu->myPlayerNum)
 			{

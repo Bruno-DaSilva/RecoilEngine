@@ -39,6 +39,8 @@ bool CGroup::AddUnit(CUnit* unit)
 		return false;
 
 	units.insert(unit->id);
+	// draw-owned mirror read lock-free by the sim-thread CommandAI idle-gate
+	unit->inUiGroup.store(true, std::memory_order_relaxed);
 	uiGroupHandlers[ghIndex].PushGroupChange(id);
 	return true;
 }
@@ -50,6 +52,7 @@ void CGroup::RemoveUnit(CUnit* unit)
 		return;
 
 	units.erase(unit->id);
+	unit->inUiGroup.store(false, std::memory_order_relaxed);
 	uiGroupHandlers[ghIndex].PushGroupChange(id);
 }
 

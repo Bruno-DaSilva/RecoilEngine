@@ -9,7 +9,7 @@ class CFlameThrower: public CWeapon
 {
 	CR_DECLARE_DERIVED(CFlameThrower)
 public:
-	CFlameThrower(CUnit* owner = nullptr, const WeaponDef* def = nullptr): CWeapon(owner, def) {}
+	CFlameThrower(CUnit* owner = nullptr, const WeaponDef* def = nullptr): CWeapon(owner, def) { weaponClass = trace::WeaponClass::FlameThrower; }
 
 	float3 color;
 	float3 color2;

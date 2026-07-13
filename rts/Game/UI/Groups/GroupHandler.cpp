@@ -6,6 +6,7 @@
 #include "Group.h"
 #include "Game/SelectedUnitsHandler.h"
 #include "Game/CameraHandler.h"
+#include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitHandler.h"
 #include "System/Input/KeyInput.h"
 #include "System/Log/ILog.h"
@@ -279,6 +280,40 @@ void CGroupHandler::RemoveGroup(CGroup* group)
 
 	group->ClearUnits();
 	freeGroups.push_back(group->id);
+}
+
+bool CGroupHandler::SetUnitGroup(int unitID, const CGroup* g)
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	unitGroups.erase(unitID);
+
+	if (g == nullptr) {
+		// keep the draw-owned membership mirror consistent
+		if (CUnit* u = unitHandler.GetUnit(unitID); u != nullptr)
+			u->inUiGroup.store(false, std::memory_order_relaxed);
+		return false;
+	}
+
+	unitGroups.emplace(unitID, g->id);
+	return true;
+}
+
+void CGroupHandler::RemoveUnitFromGroups(int unitID)
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	const int groupNum = GetUnitGroupNum(unitID);
+
+	if (groupNum < 0)
+		return;
+
+	CGroup& group = groups[groupNum];
+
+	group.units.erase(unitID);
+	unitGroups.erase(unitID);
+	PushGroupChange(group.id);
+
+	if (CUnit* u = unitHandler.GetUnit(unitID); u != nullptr)
+		u->inUiGroup.store(false, std::memory_order_relaxed);
 }
 
 void CGroupHandler::PushGroupChange(int id)

@@ -41,6 +41,8 @@ public:
 	);
 	virtual ~CProjectile();
 
+	void PreDestruct() override;
+
 	virtual void Collision() { Delete(); }
 	virtual void Collision(CUnit* unit) { Collision(); }
 	virtual void Collision(CFeature* feature) { Collision(); }
@@ -51,10 +53,10 @@ public:
 	virtual void Update();
 	virtual void Init(const CUnit* owner, const float3& offset) override;
 
-	virtual void Draw() {}
+	virtual void Draw() const {}
 	virtual void DrawOnMinimap() const;
 
-	bool UpdateAnimParams() override;
+	bool UpdateAnimParams() const override;
 
 	virtual int GetProjectilesCount() const = 0;
 
@@ -90,16 +92,8 @@ public:
 
 	uint32_t GetProjectileType() const { return projectileType; }
 	uint32_t GetCollisionFlags() const { return collisionFlags; }
-	uint32_t GetRenderIndex() const { return renderIndex; }
 
 	void SetCustomExpGenID(uint32_t id) { cegID = id; }
-	void SetRenderIndex(uint32_t idx) { renderIndex = idx; }
-
-	// UNSYNCED ONLY
-	CMatrix44f GetTransformMatrix(bool offsetPos) const;
-
-	float GetSortDist(uint32_t camType) const { return sortDist[camType]; }
-	void SetSortDist(uint32_t camType, float d) { sortDist[camType] = d + sortDistOffset; }
 public:
 	bool synced = false;           // is this projectile part of the simulation?
 	bool weapon = false;           // is this a weapon projectile? (true implies synced true)
@@ -120,13 +114,13 @@ public:
 	bool blockPreciseCol = false;
 
 	float3 dir = FwdVector;        // set via Init()
-	float3 drawPos;
 
 	float myrange = 0.0f;          // used by WeaponProjectile::TraveledRange
 	float mygravity = 0.0f;
 
-	std::array<float, 3> sortDist = {}; // distance used for z-sorting when rendering
-	float sortDistOffset = 0.0f;        // an offset used for z-sorting
+	// offset added by CProjectileDrawer when it computes this projectile's
+	// z-sort key (the key array itself is drawer-owned, sim/draw §A eviction)
+	float sortDistOffset = 0.0f;
 
 	int drawOrder = 0;
 
@@ -140,7 +134,6 @@ protected:
 
 	uint32_t projectileType = -1u;
 	uint32_t collisionFlags = 0;
-	uint32_t renderIndex = -1u;
 
 	static bool GetMemberInfo(SExpGenSpawnableMemberInfo& memberInfo);
 	static bool IsValidTexture(const AtlasedTexture* tex);

@@ -352,8 +352,9 @@ inline int CStarburstProjectile::GetSmokePeriod() const
 	return weaponDef->visuals.smokePeriod;
 }
 
-void CStarburstProjectile::Draw()
+void CStarburstProjectile::Draw() const
 {
+	const float3 drawPos = projectileDrawer->GetDrawPos(this);
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (!validTextures[0])
 		return;

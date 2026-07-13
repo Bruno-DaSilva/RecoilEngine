@@ -13,7 +13,7 @@ public:
 	CWreckProjectile(CUnit* owner, float3 pos, float3 speed, float temperature);
 
 	void Update() override;
-	void Draw() override;
+	void Draw() const override;
 	void DrawOnMinimap() const override;
 
 	int GetProjectilesCount() const override;

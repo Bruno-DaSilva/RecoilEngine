@@ -224,6 +224,110 @@ bool CCollisionHandler::MouseHit(
 	return (CCollisionHandler::Intersect(o, v, m, p0, p1, cq));
 }
 
+bool CCollisionHandler::MouseHit(
+	const float3& relMidPos,
+	bool isInVoid,
+	const CMatrix44f& m,
+	const float3& p0,
+	const float3& p1,
+	const CollisionVolume* v,
+	CollisionQuery* cq
+) {
+	RECOIL_DETAILED_TRACY_ZONE;
+	if (cq != nullptr)
+		cq->Reset();
+
+	if (isInVoid)
+		return false;
+
+	// piece-tree selection volumes are deferred draw-side (PR 25); the caller
+	// detects this and falls back to a live read
+	if (v->DefaultToPieceTree())
+		return false;
+	if (v->IgnoreHits())
+		return false;
+
+	// replicate Intersect(o, v, m) with s = 1: translate into the midpos-relative
+	// space the CV is positioned in, then by the CV's own offsets
+	CMatrix44f mr = m;
+	mr.Translate(relMidPos);
+	mr.Translate(v->GetOffsets());
+
+	return (CCollisionHandler::Intersect(v, mr, p0, p1, cq));
+}
+
+bool CCollisionHandler::DetectHit(
+	const float3& midPos,
+	const float3& relMidPos,
+	bool isInVoid,
+	const CollisionVolume* v,
+	const CMatrix44f& m,
+	const float3 p0,
+	const float3 p1,
+	CollisionQuery* cq,
+	bool forceTrace
+) {
+	RECOIL_DETAILED_TRACY_ZONE;
+	// object-free mirror of DetectHit(o, v, m, p0, p1, cq, forceTrace). The two
+	// volume classes that need a live object/map read are deferred (return
+	// false); the caller pre-checks the volume and falls back (see the header).
+	bool hit = false;
+
+	if (cq != nullptr)
+		cq->Reset();
+
+	if (isInVoid)
+		return hit;
+
+	// per-piece hit volumes: served via the demand piece cache, not here
+	if (v->DefaultToPieceTree())
+		return hit;
+	if (v->IgnoreHits())
+		return hit;
+
+	if (forceTrace || v->UseContHitTest()) {
+		// continuous (ray) branch -- byte-identical to the object-free MouseHit:
+		// Intersect(o, v, m, p0, p1, cq) with s = 1
+		CMatrix44f mr = m;
+		mr.Translate(relMidPos);
+		mr.Translate(v->GetOffsets());
+		hit = CCollisionHandler::Intersect(v, mr, p0, p1, cq);
+		return hit;
+	}
+
+	// discrete (point-in-volume) branch -- object-free Collision(o, v, m, p0, cq).
+	// GetWorldSpacePos(o) == o->midPos + o->GetObjectSpaceVec(axisOffsets); the
+	// object-space basis is recovered from the transform columns (m == ComposeMatrix:
+	// col0 = -rightdir, col1 = updir, col2 = frontdir).
+	const float3& off = v->GetOffsets();
+	const float3 worldSpacePos = midPos + (m.GetZ() * off.z) - (m.GetX() * off.x) + (m.GetY() * off.y);
+
+	// sphere early-out (identical to the object overload's bounding-radius reject)
+	if ((worldSpacePos - p0).SqLength() > v->GetBoundingRadiusSq())
+		return hit;
+
+	// footprint volumes hit-test against the live blocking map + object identity
+	// (CollisionFootPrint); deferred draw-side -- the caller pre-checks
+	if (v->DefaultToFootPrint())
+		return hit;
+
+	hit = (v->GetVolumeType() == CollisionVolume::COLVOL_TYPE_SPHERE);
+
+	if (!hit) {
+		// transform into midpos-relative space, then by the CV's own offsets
+		CMatrix44f mr = m;
+		mr.Translate(relMidPos);
+		mr.Translate(v->GetOffsets());
+		hit = CCollisionHandler::Collision(v, mr, p0);
+	}
+
+	if (cq != nullptr && hit) {
+		cq->b0 = CQ_POINT_IN_VOL; cq->t0 = 0.0f; cq->p0 = p0;
+	}
+
+	return hit;
+}
+
 
 /*
 bool CCollisionHandler::IntersectPieceTreeHelper(

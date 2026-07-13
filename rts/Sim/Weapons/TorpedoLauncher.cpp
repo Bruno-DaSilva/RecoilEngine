@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "TorpedoLauncher.h"
+#include "WeaponPredicates.h" // TRACE REHOST (stage 3): templated predicate stack
 
 #include "WeaponDef.h"
 #include "Map/Ground.h"
@@ -19,6 +20,7 @@ CR_REG_METADATA(CTorpedoLauncher,(
 CTorpedoLauncher::CTorpedoLauncher(CUnit* owner, const WeaponDef* def): CWeapon(owner, def)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	weaponClass = trace::WeaponClass::TorpedoLauncher;
 	// null happens when loading
 	if (def != nullptr)
 		tracking = weaponDef->turnrate * def->tracks;
@@ -42,14 +44,7 @@ bool CTorpedoLauncher::TestTarget(const float3& pos, const SWeaponTarget& trg) c
 	//   (regardless of submissile which applies only to TorpedoLaunchers) but was not
 	//   able to, see #3951
 	//
-	// land- or air-based launchers cannot target anything not in water
-	if (weaponMuzzlePos.y >  0.0f &&                           !TargetInWater(pos, trg))
-		return false;
-	// water-based launchers cannot target anything not in water unless submissile
-	if (weaponMuzzlePos.y <= 0.0f && !weaponDef->submissile && !TargetInWater(pos, trg))
-		return false;
-
-	return (CWeapon::TestTarget(pos, trg));
+	return trace::TestTargetTorpedoT(trace::LiveView(this), pos, trg);
 }
 
 void CTorpedoLauncher::FireImpl(const bool scriptCall)

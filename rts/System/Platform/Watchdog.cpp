@@ -26,7 +26,7 @@ CONFIG(int, HangTimeout).defaultValue(60).minimumValue(-1).maximumValue(600)
 
 namespace Watchdog
 {
-	static const char* threadNames[] = {"main", "load", "audio", "vfsi"};
+	static const char* threadNames[] = {"main", "load", "audio", "vfsi", "sim"};
 
 	static spring::mutex wdmutex;
 
@@ -142,9 +142,9 @@ namespace Watchdog
 
 			if (hangDetected) {
 				LOG_L(L_WARNING, "[Watchdog] Hang detection triggered for Spring %s.", SpringVersion::GetFull().c_str());
-				LOG_L(L_WARNING, "\t(in threads: {%s,%s,%s,%s}={%d,%d,%d,%d})",
-					threadNames[WDT_MAIN], threadNames[WDT_LOAD], threadNames[WDT_AUDIO], threadNames[WDT_VFSI],
-					hangThreads[WDT_MAIN], hangThreads[WDT_LOAD], hangThreads[WDT_AUDIO], hangThreads[WDT_VFSI]
+				LOG_L(L_WARNING, "\t(in threads: {%s,%s,%s,%s,%s}={%d,%d,%d,%d,%d})",
+					threadNames[WDT_MAIN], threadNames[WDT_LOAD], threadNames[WDT_AUDIO], threadNames[WDT_VFSI], threadNames[WDT_SIM],
+					hangThreads[WDT_MAIN], hangThreads[WDT_LOAD], hangThreads[WDT_AUDIO], hangThreads[WDT_VFSI], hangThreads[WDT_SIM]
 				);
 
 				CrashHandler::PrepareStacktrace(LOG_LEVEL_WARNING);
@@ -264,6 +264,8 @@ namespace Watchdog
 			return (DeregisterThread(WDT_AUDIO));
 		if (Threading::IsFileSysThread())
 			return (DeregisterThread(WDT_VFSI));
+		if (Threading::IsSimThread())
+			return (DeregisterThread(WDT_SIM));
 
 		return false;
 	}

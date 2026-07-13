@@ -26,6 +26,8 @@
 #include "Map/MapDamage.h"
 #include "Map/MapInfo.h"
 #include "Map/ReadMap.h"
+#include "Rendering/Common/DrawMapMirrors.h" // PR 28: terrain-type + orig-heightmap mirror dirty marking
+#include "Rendering/Common/SimSnapshotWriteThrough.h" // WS-3 write-through chokes
 #include "Rendering/Env/GrassDrawer.h"
 #include "Rendering/Env/IGroundDecalDrawer.h"
 #include "Rendering/Models/IModelParser.h"
@@ -663,7 +665,7 @@ static int SetSolidObjectRotation(lua_State* L, T* o)
 	o->SetDirVectorsEuler(angles);
 
 	if constexpr(std::is_same_v<T, CFeature>)
-		o->UpdateTransform(o->pos, true);
+		o->UpdateTransform(o->pos);
 
 	return 0;
 }
@@ -685,7 +687,7 @@ static int SetSolidObjectHeadingAndUpDir(lua_State* L, T* o)
 	o->UpdateMidAndAimPos();
 
 	if constexpr (std::is_same_v<T, CFeature>)
-		o->UpdateTransform(o->pos, true);
+		o->UpdateTransform(o->pos);
 
 	return 0;
 }
@@ -711,7 +713,7 @@ static int SetSolidObjectDirection(lua_State* L, CSolidObject* o, const char* fu
 		);
 	}
 
-	// Note there's no need to call o->UpdateTransform(o->pos, true); because both variants of o->ForcedSpin
+	// Note there's no need to call o->UpdateTransform(o->pos); because both variants of o->ForcedSpin
 	// defined in CFeature do it anyway
 
 	if (lua_isnumber(L, 5) && lua_isnumber(L, 6) && lua_isnumber(L, 7)) {
@@ -821,7 +823,7 @@ static int SetSolidObjectPieceCollisionVolumeData(lua_State* L, CSolidObject* ob
 	if (lmp == nullptr)
 		luaL_argerror(L, 2, "invalid piece");
 
-	CollisionVolume* vol = lmp->GetCollisionVolume();
+	CollisionVolume* vol = lmp->GetCollisionVolumeMutable();
 
 	const float3 scales(luaL_checkfloat(L, 4), luaL_checkfloat(L, 5), luaL_checkfloat(L, 6));
 	const float3 offset(luaL_checkfloat(L, 7), luaL_checkfloat(L, 8), luaL_checkfloat(L, 9));
@@ -1635,6 +1637,9 @@ int LuaSyncedCtrl::SetUnitRulesParam(lua_State* L)
 		return 0;
 
 	SetRulesParam(L, __func__, 1, unit->modParams);
+	// PR 46: version-skip choke -- the SimSnapshot extraction skips the
+	// per-unit map copy while this version is unchanged
+	unit->BumpModParamsVersion();
 	return 0;
 }
 
@@ -1654,6 +1659,8 @@ int LuaSyncedCtrl::SetFeatureRulesParam(lua_State* L)
 		return 0;
 
 	SetRulesParam(L, __func__, 1, feature->modParams);
+	// PR 46: version-skip choke (see SetUnitRulesParam)
+	feature->BumpModParamsVersion();
 	return 0;
 }
 
@@ -2406,6 +2413,7 @@ int LuaSyncedCtrl::SetUnitStockpile(lua_State* L)
 	if (lua_isnumber(L, 3))
 		unit->stockpileWeapon->buildPercent = std::clamp(lua_tofloat(L, 3), 0.0f, 1.0f);
 
+	SimSnapshotWT::NoteStockpile(unit);
 	return 0;
 }
 
@@ -2717,6 +2725,10 @@ int LuaSyncedCtrl::SetUnitWeaponDamages(lua_State* L)
 		damages = DynDamageArray::GetMutable(weapon->damages);
 	}
 
+	// version-skip key for the SimSnapshot damage-array copies; covers ALL of
+	// the unit's damage arrays (unit-level explosion + per-weapon), so any
+	// future weapon-damages gate shares it
+	unit->BumpDamagesVersion();
 
 	if (lua_istable(L, 3)) {
 		// {key1 = value1, ...}
@@ -2732,6 +2744,9 @@ int LuaSyncedCtrl::SetUnitWeaponDamages(lua_State* L)
 		}
 	}
 
+	// WS-3 deep-pair choke: AFTER the key writes above (GetMutable may have
+	// cloned the array; the store must capture the post-mutation values)
+	SimSnapshotWT::NoteWeaponDamages(unit);
 	return 0;
 }
 
@@ -3473,6 +3488,8 @@ int LuaSyncedCtrl::SetUnitFlanking(lua_State* L)
 		unit->flankingBonusAvgDamage = (maxDamage + minDamage) * 0.5f;
 		unit->flankingBonusDifDamage = (maxDamage - minDamage) * 0.5f;
 	}
+
+	SimSnapshotWT::NoteFlanking(unit);
 	return 0;
 }
 
@@ -4249,6 +4266,9 @@ int LuaSyncedCtrl::SetFactoryBuggerOff(lua_State* L)
 	f->boRelHeading  = luaL_optint(    L, 5, f->boRelHeading );
 	f->boSherical    = luaL_optboolean(L, 6, f->boSherical   );
 	f->boForced      = luaL_optboolean(L, 7, f->boForced     );
+
+	// sim|draw WS-5: bugger-off scalars feed the epoch producer unversioned
+	CCommandQueue::MarkDirty(f->id);
 
 	lua_pushboolean(L, f->boPerform);
 	return 1;
@@ -6570,6 +6590,7 @@ int LuaSyncedCtrl::LevelOriginalHeightMap(lua_State* L)
 		}
 	}
 
+	// PR 28: orig-heightmap dirty mark is funneled into CReadMap::SetOriginalHeight
 	return 0;
 }
 
@@ -6664,6 +6685,7 @@ int LuaSyncedCtrl::RevertOriginalHeightMap(lua_State* L)
 		}
 	}
 
+	// PR 28: orig-heightmap dirty mark is funneled into CReadMap::SetOriginalHeight
 	return 0;
 }
 
@@ -6798,6 +6820,8 @@ int LuaSyncedCtrl::SetOriginalHeightMapFunc(lua_State* L)
 		lua_error(L);
 	}
 
+	// PR 28: the callback's Spring.{Set,Add}OriginalHeightMap writes funnel their
+	// orig-heightmap dirty mark into CReadMap::SetOriginalHeight
 	lua_pushnumber(L, originalHeightMapAmountChanged);
 	return 1;
 }
@@ -7091,6 +7115,11 @@ int LuaSyncedCtrl::SetMapSquareTerrainType(lua_State* L)
 	readMap->GetTypeMapSynced()[tz * mapDims.hmapx + tx] = std::max(0, std::min(ntt, (CMapInfo::NUM_TERRAIN_TYPES - 1)));
 	pathManager->TerrainChange(hx, hz,  hx + 1, hz + 1,  TERRAINCHANGE_SQUARE_TYPEMAP_INDEX);
 
+	// PR 38d choke point: the sole runtime writer of readMap's per-square
+	// typeMap -> mark the DrawMapMirrors typemap copy for the barrier drain
+	// (served by Spring.GetGroundInfo)
+	drawMapMirrors.MarkTypeMapDirty();
+
 	lua_pushnumber(L, ott);
 	return 1;
 }
@@ -7136,6 +7165,10 @@ int LuaSyncedCtrl::SetTerrainTypeData(lua_State* L)
 		mapDamage->TerrainTypeHardnessChanged(tti);
 	if (ttSpeedModChanged)
 		mapDamage->TerrainTypeSpeedModChanged(tti);
+
+	// PR 28 choke point: the sole runtime writer of mapInfo->terrainTypes ->
+	// mark the DrawMapMirrors terrain-type copy for the barrier drain
+	drawMapMirrors.MarkTerrainTypesDirty();
 
 	lua_pushboolean(L, true);
 	return 1;

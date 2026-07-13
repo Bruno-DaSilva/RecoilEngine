@@ -51,8 +51,9 @@ CFireBallProjectile::CFireBallProjectile(const ProjectileParams& params)
 	blockPreciseCol = true;
 }
 
-void CFireBallProjectile::Draw()
+void CFireBallProjectile::Draw() const
 {
+	const float3 drawPos = projectileDrawer->GetDrawPos(this);
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (!validTextures[0])
 		return;

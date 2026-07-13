@@ -22,7 +22,7 @@ public:
 		const float3& color
 	);
 
-	void Draw() override;
+	void Draw() const override;
 	void Update() override;
 
 	int GetProjectilesCount() const override;

@@ -35,7 +35,7 @@ public:
 	);
 
 	void Update() override;
-	void Draw() override;
+	void Draw() const override;
 	void DrawOnMinimap() const override;
 	void Collision() override;
 	void Collision(CUnit* unit) override;

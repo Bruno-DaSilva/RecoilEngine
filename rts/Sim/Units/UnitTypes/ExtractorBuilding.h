@@ -18,6 +18,8 @@ public:
 	}
 	~CExtractorBuilding();
 
+	void PreDestruct() override;
+
 	void PreInit(const UnitLoadParams& params) override;
 
 	void ResetExtraction();

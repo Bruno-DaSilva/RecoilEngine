@@ -242,7 +242,7 @@ bool CCobThread::Tick()
 	if (IsDead())
 		return false;
 
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 
 	state = Run;
 

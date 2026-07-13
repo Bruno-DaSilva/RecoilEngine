@@ -97,8 +97,9 @@ void CSmokeProjectile::Update()
 	deleteMe |= (age >= 1.0f);
 }
 
-void CSmokeProjectile::Draw()
+void CSmokeProjectile::Draw() const
 {
+	const float3 drawPos = projectileDrawer->GetDrawPos(this);
 	RECOIL_DETAILED_TRACY_ZONE;
 	unsigned char col[4];
 	unsigned char alpha = (unsigned char) ((1 - age) * 255);

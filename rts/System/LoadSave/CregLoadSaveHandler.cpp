@@ -17,6 +17,7 @@
 #include "Lua/LuaGaia.h"
 #include "Lua/LuaRules.h"
 #include "Net/GameServer.h"
+#include "Rendering/Common/SimSnapshotWriteThrough.h"
 #include "Rendering/Textures/ColorMap.h"
 #include "Rendering/Units/UnitDrawer.h"
 #include "Rendering/Env/Decals/GroundDecalHandler.h"
@@ -398,6 +399,11 @@ void CCregLoadSaveHandler::LoadGame()
 	}
 
 	LEAVE_SYNCED_CODE();
+
+	// WS-3 §3.5/§7.5: creg-constructed units bypass the CUnitLoader creation
+	// choke; rebuild the write-through live store from the loaded objects
+	// (all PostLoads have completed inside LoadPackage above)
+	SimSnapshotWT::RebuildLiveStore();
 #else //USING_CREG
 	LOG_L(L_ERROR, "Load failed: creg is disabled");
 #endif //USING_CREG

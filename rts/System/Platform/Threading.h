@@ -33,7 +33,8 @@ namespace Threading {
 		THREAD_IDX_SND  = 2,
 		THREAD_IDX_VFSI = 3,
 		THREAD_IDX_WDOG = 4,
-		THREAD_IDX_LAST = 5,
+		THREAD_IDX_SIM  = 5, // the sim|draw split's sim thread (PR 27b)
+		THREAD_IDX_LAST = 6,
 	};
 
 
@@ -131,6 +132,16 @@ namespace Threading {
 	uint32_t GetPreferredMainThreadMask(uint32_t affinityMask);
 	uint32_t GetOptimalThreadCount();
 
+	// PR 46 (sim|draw split): the core reserved for the split's sim thread
+	// (0 = no reservation). Set by ThreadPool::SetDefaultThreadCount when the
+	// split is configured on and the per-perf-core pin policy is active;
+	// applied by CGame::SimThreadProc at spawn. Without this the sim thread
+	// has NO affinity: it floats across the pinned workers' cores (or, on
+	// Linux, inherits the spawning main thread's mask) and preempts whichever
+	// worker it lands on -- the for_mt straggler class.
+	void     SetReservedSimAffinityMask(uint32_t mask);
+	uint32_t GetReservedSimAffinityMask();
+
 	/**
 	 * Inform the OS kernel that we are a cpu-intensive task
 	 */
@@ -144,6 +155,8 @@ namespace Threading {
 	void SetAudioThread();
 	void SetFileSysThread();
 	void SetWatchDogThread();
+	void SetSimThread();
+	void ClearSimThread();
 
 	bool IsMainThread();
 	bool IsMainThread(NativeThreadId threadID);
@@ -159,6 +172,9 @@ namespace Threading {
 
 	bool IsWatchDogThread();
 	bool IsWatchDogThread(NativeThreadId threadID);
+
+	bool IsSimThread();
+	bool IsSimThread(NativeThreadId threadID);
 
 	/**
 	 * Give the current thread a name (posix-only)

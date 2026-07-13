@@ -59,8 +59,11 @@ void CTeamHighlight::Disable()
 	oldColors.clear();
 }
 
-void CTeamHighlight::Update(int frameNum) {
-	if ((frameNum % TEAM_SLOWUPDATE_RATE))
+void CTeamHighlight::Update(int prevFrame) {
+	// boundary-crossing gate (was frameNum % TEAM_SLOWUPDATE_RATE): the caller
+	// runs this once per sim-frame batch, so fire when (prevFrame, frameNum]
+	// crosses a slow-update tick (prevFrame < 0 => first frame, always fire)
+	if (prevFrame >= 0 && (gs->frameNum / TEAM_SLOWUPDATE_RATE) == (prevFrame / TEAM_SLOWUPDATE_RATE))
 		return;
 
 	bool hl = false;

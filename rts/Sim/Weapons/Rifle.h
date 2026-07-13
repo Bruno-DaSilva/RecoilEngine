@@ -9,7 +9,7 @@ class CRifle: public CWeapon
 {
 	CR_DECLARE_DERIVED(CRifle)
 public:
-	CRifle(CUnit* owner = nullptr, const WeaponDef* def = nullptr): CWeapon(owner, def) {}
+	CRifle(CUnit* owner = nullptr, const WeaponDef* def = nullptr): CWeapon(owner, def) { weaponClass = trace::WeaponClass::Rifle; }
 
 private:
 	void FireImpl(const bool scriptCall) override final;

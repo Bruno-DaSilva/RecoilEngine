@@ -42,11 +42,8 @@ CR_REG_METADATA(CProjectile,
 		CR_MEMBER(drawOrder),
 	CR_MEMBER_ENDFLAG(CM_Config),
 
-	CR_MEMBER(drawPos),
-
 	CR_MEMBER(myrange),
 	CR_MEMBER(mygravity),
-	CR_IGNORED(sortDist),
 	CR_MEMBER(sortDistOffset),
 
 	CR_MEMBER(validTextures),
@@ -58,7 +55,6 @@ CR_REG_METADATA(CProjectile,
 
 	CR_MEMBER(projectileType),
 	CR_MEMBER(collisionFlags),
-	CR_IGNORED(renderIndex),
 
 	CR_MEMBER(quads)
 ))
@@ -108,10 +104,20 @@ CProjectile::CProjectile(
 CProjectile::~CProjectile()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	if (!synced)
-		return;
+	// deferred-deleted projectiles (CProjectileHandler::DestroyProjectile)
+	// already ran PreDestruct() at the old free site; direct frees
+	// (teardown, ground flashes) run it here
+	if (!detached)
+		CProjectile::PreDestruct();
+}
 
-	quadField.RemoveProjectile(this);
+void CProjectile::PreDestruct()
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	if (synced)
+		quadField.RemoveProjectile(this);
+
+	CExpGenSpawnable::PreDestruct();
 }
 
 void CProjectile::Init(const CUnit* owner, const float3& offset)
@@ -176,7 +182,7 @@ void CProjectile::DrawOnMinimap() const
 	AddMiniMapVertices({ pos        , color4::whiteA }, { pos + speed, color4::whiteA });
 }
 
-bool CProjectile::UpdateAnimParams()
+bool CProjectile::UpdateAnimParams() const
 {
 	if (!validTextures[0])
 		return false;
@@ -205,22 +211,6 @@ CUnit* CProjectile::owner() const {
 	return (unitHandler.GetUnit(ownerID));
 }
 
-
-CMatrix44f CProjectile::GetTransformMatrix(bool offsetPos) const {
-	float3 xdir;
-	float3 ydir;
-
-	if (math::fabs(dir.y) < 0.95f) {
-		xdir = dir.cross(UpVector);
-		xdir.SafeANormalize();
-	} else {
-		xdir.x = 1.0f;
-	}
-
-	ydir = xdir.cross(dir);
-
-	return (CMatrix44f(drawPos + (dir * radius * 0.9f * offsetPos), -xdir, ydir, dir));
-}
 
 bool CProjectile::GetMemberInfo(SExpGenSpawnableMemberInfo& memberInfo)
 {

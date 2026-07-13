@@ -65,15 +65,17 @@ public:
 	const std::vector<CGroup>& GetGroups() const { return groups; }
 
 	bool HasGroup(int groupID) const { return (groupID >= 0 && groupID < groups.size()); }
-	bool SetUnitGroup(int unitID, const CGroup* g) {
-		unitGroups.erase(unitID);
+	// out-of-line: the g==nullptr path clears the draw-owned CUnit::inUiGroup
+	// mirror, which needs the full CUnit definition (see GroupHandler.cpp)
+	bool SetUnitGroup(int unitID, const CGroup* g);
 
-		if (g == nullptr)
-			return false;
-
-		unitGroups.emplace(unitID, g->id);
-		return true;
-	}
+	// team-guard-free removal of a unit id from whatever group it holds on
+	// THIS handler; mirrors SetUnitGroup(id,nullptr)+PushGroupChange and clears
+	// the inUiGroup mirror. Used by the boundary-deferred CUnit::ChangeTeam
+	// prune, where the unit's team has already moved to newteam so the normal
+	// team-guarded path (CGroup::RemoveUnit) would no-op. See
+	// doc/sim-draw-pr44-prerequisites.md "Gap A".
+	void RemoveUnitFromGroups(int unitID);
 
 	void RemoveGroup(CGroup* group);
 

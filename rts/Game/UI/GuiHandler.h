@@ -3,6 +3,7 @@
 #ifndef GUI_HANDLER_H
 #define GUI_HANDLER_H
 
+#include <mutex>
 #include <vector>
 
 #include "KeySet.h"
@@ -16,6 +17,7 @@
 #define DEFAULT_GUI_CONFIG "ctrlpanel.txt"
 
 class CUnit;
+class CFeature;
 struct UnitDef;
 
 class Action;
@@ -96,6 +98,58 @@ public:
 	}
 	int  GetDefaultCommand(int x, int y, const float3& cameraPos, const float3& mouseDir) const;
 
+	// sim|draw PR 44 (prereq D): the served read of the context-cursor default
+	// command for the per-frame draw-path callers (DrawMapStuff, DrawCentroidCursor,
+	// LuaUnsyncedRead::GetDefaultCommand). All query the default command at the
+	// CURRENT mouse ray -- the same single standing slot SetCursorIcon uses -- so
+	// under the running split they read the last barrier's published reply (and
+	// request a re-eval) instead of parking to run the live deep-CAI GetDefaultCmd.
+	// This removes the per-frame GUI_GET_DEFAULT_CMD park those callers engaged.
+	// Flag-off / sim parked / pregame / a non-cursor (x,y): the live parking path
+	// (byte-identical). The DefaultCommand widget override is computed once per
+	// barrier (in the reply) and shared by every reader -- same value, fewer event
+	// fires; the Gap-B cursor path already made this tradeoff.
+	int  GetDefaultCommandServed(int x, int y) const
+	{
+		return GetDefaultCommandServed(x, y, camera->GetPos(), ::mouse->dir);
+	}
+	int  GetDefaultCommandServed(int x, int y, const float3& cameraPos, const float3& mouseDir) const;
+
+	// sim|draw PR 44 (Gap B): SimDrawBarrier hook, LOCKSTEP form. The context-
+	// cursor default command bottoms out in a live deep-CAI virtual call
+	// (GetDefaultCmd) + a GuiTraceRay, which cannot run from draw context under
+	// the running split. SetCursorIcon requests a re-evaluation and reads the
+	// LAST barrier's reply; this hook, called at the lockstep barrier with the
+	// sim quiescent, recomputes the answer against live sim and publishes it
+	// for the next draw frame. No-op unless a request is pending. Fires the
+	// DefaultCommand event once (like the live path).
+	void EvaluateDefaultCmdQuery();
+
+	// PR 44b (the no-park flip): the default-cmd query/reply is RE-HOSTED --
+	// evaluation on the sim thread, presentation on the draw side:
+	//  - StageDefaultCmdQuery() (draw, at request time): runs the DRAW-side
+	//    half -- input-receiver early-out + the snapshot-backed pick
+	//    (GuiTraceRay / minimap GetSelectUnit, PR-25 draw-side searches over
+	//    the pick grid; they may NOT run on the sim thread) -- and captures
+	//    the picked ids + the selection-id snapshot into a mutex-guarded
+	//    standing slot.
+	//  - EvaluateDefaultCmdQueryAtSimEdge() (SIM thread, at its frame edges
+	//    AND from the paused-idle query servicing, so the cursor stays live
+	//    while the game is paused): re-resolves the picked ids against live
+	//    sim (a died-since-stage id degrades to no-target) and runs the
+	//    deep-CAI leader walk (CSelectedUnitsHandler::GetDefaultCmdEval),
+	//    staging the result {unit, feature, raw cmd}.
+	//  - CommitDefaultCmdReply() (draw, at the barrier): fires the main-
+	//    thread-bound DefaultCommand widget callin with the staged results
+	//    (widget cursor overrides apply here), maps the command id to its
+	//    commands[] index and publishes the reply SetCursorIcon reads.
+	// Staged unit/feature pointers stay readable through the commit: an
+	// object that died since the eval is a parked shell whose ack comes after
+	// the commit point in the barrier (dispatch-window ordering).
+	void StageDefaultCmdQuery() const;
+	void EvaluateDefaultCmdQueryAtSimEdge();
+	void CommitDefaultCmdReply();
+
 	bool SetActiveCommand(int cmdIndex, bool rightMouseButton);
 	bool SetActiveCommand(int cmdIndex, int button, bool leftMouseButton, bool rightMouseButton, bool alt, bool ctrl, bool meta, bool shift);
 	bool SetActiveCommand(const Action& action, const CKeySet& ks, int actionIndex);
@@ -161,6 +215,14 @@ private:
 	void SetCursorIcon() const;
 	bool TryTarget(const SCommandDescription& cmdDesc) const;
 
+	// sim|draw PR 44 (Gap B): the body of GetDefaultCommand WITHOUT the
+	// ScopedExternalSimPause (the caller/hook owns the park). `fireEvent` gates the
+	// eventHandler.DefaultCommand callin: true reproduces the live behaviour (used
+	// by GetDefaultCommand and the barrier hook so widget overrides apply once);
+	// false is the raw engine answer used by the armed diff-gate dual-run to
+	// compare the served-channel plumbing without double-firing the event.
+	int  GetDefaultCommandImpl(int x, int y, const float3& cameraPos, const float3& mouseDir, bool fireEvent) const;
+
 	void LoadDefaults();
 	void SanitizeConfig();
 	void ParseFillOrder(const std::string& text);
@@ -181,6 +243,42 @@ private:
 	int maxPage = 0;
 	int activePage = 0;
 	int defaultCmdMemory = -1;
+
+	// sim|draw PR 44 (Gap B): context-cursor default-command query/reply slot.
+	// mutable because SetCursorIcon() (const) sets the request flag. Single
+	// standing slot -- the cursor is one logical query; every SetCursorIcon
+	// consult uses the current mouse ray, so there is no pos-keyed-map miss.
+	mutable bool defaultCmdQueryPending = false; // SetCursorIcon requested a re-eval
+	mutable int  defaultCmdReplyCmd = -1;         // last barrier's evaluated index
+	mutable bool defaultCmdReplyValid = false;    // a reply has been published
+
+	// PR 44b: the re-hosted query/reply staging (see the method comments).
+	// Cross-thread: draw stages the input + commits the output, the sim
+	// thread evaluates -- both slots share the one mutex. The PICK (trace /
+	// minimap closest-unit) happens at STAGE time on the DRAW side: since
+	// PR 25 GuiTraceRay and CGameHelper::GetClosestUnit are snapshot/pick-
+	// grid-backed draw-side searches (with draw-owned scratch) -- running
+	// them on the sim thread races the pick grid's per-epoch rebuild and the
+	// pick scratch (gate-found mimalloc corruption, strict Rosetta f~9700).
+	// Only the deep-CAI leader walk is live-sim work and evaluates sim-side.
+	struct DefaultCmdQueryInput {
+		bool pending = false;
+		bool noCommand = false;    // receiver hit / out-of-map miss: publish -1, no eval
+		int tracedUnitID = -1;     // the stage-time pick (draw-side, snapshot-backed)
+		int tracedFeatureID = -1;
+		std::vector<int> selectedIDs; // request-time selection snapshot
+	};
+	struct DefaultCmdEvalResult {
+		bool valid = false;
+		bool fireCallin = false;   // a trace hit / leader walk ran (live fires there)
+		bool leaderFound = false;
+		const CUnit* unit = nullptr;
+		const CFeature* feature = nullptr;
+		int rawCmdID = 0;          // command ID (not a commands[] index)
+	};
+	mutable std::mutex defaultCmdQueryMtx;
+	mutable DefaultCmdQueryInput defaultCmdQueryIn;
+	mutable DefaultCmdEvalResult defaultCmdEvalOut;
 	int explicitCommand = -1;
 	int curIconCommand = -1;
 

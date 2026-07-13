@@ -3,8 +3,10 @@
 #ifndef _COMMAND_QUEUE_H
 #define _COMMAND_QUEUE_H
 
+#include <cstdint>
 #include <deque>
 #include "Command.h"
+#include "Game/BoundaryStats.h"
 
 /// A wrapper class for std::deque<Command> to keep track of commands
 class CCommandQueue {
@@ -40,14 +42,45 @@ class CCommandQueue {
 
 		inline size_type size() const { return queue.size(); }
 
+		/**
+		 * Queue-content version (sim|draw PR 27b): LuaSnapshotServe's barrier
+		 * refresh re-copies a queue only when this changed. Values are drawn
+		 * from a process-global counter so they are unique across ALL queue
+		 * instances and lifetimes -- a respawned unit reusing an id can never
+		 * alias a cached version. Every structural mutator below bumps it;
+		 * code that mutates a queued Command IN PLACE (through front()/at()/
+		 * operator[]/iterators) must call BumpVersion() itself -- writes only
+		 * happen from sim context, so a plain increment suffices.
+		 */
+		uint64_t GetVersion() const { return version; }
+		void BumpVersion() { version = ++nextGlobalVersion; MarkDirty(ownerId); }
+
+		// sim|draw WS-5: owning unit id, set by CCommandAI / CFactoryCAI via
+		// friend access. -1 => not owned yet (the ctor version draw, or a queue
+		// with no unit) so MarkDirty no-ops. Rides BumpVersion into the epoch
+		// producer's dirty-list (LuaSnapshotServe::RefreshCommandQueues).
+		int ownerId = -1;
+
+		// sim|draw WS-5: dirty-list push hook + invoker. Header-inline function
+		// pointer (installed by LuaSnapshotServe at startup) so every TU reaching
+		// this header stays link-clean whether or not it links LuaSnapshotServe;
+		// nullptr => inert (flag-off / test executables). The push writes only
+		// unsynced producer-side bookkeeping, so it is behavior-identical flag-off.
+		static inline void (*cmdDirtyHook)(int) = nullptr;
+		static void MarkDirty(int id) { if (cmdDirtyHook != nullptr && id >= 0) cmdDirtyHook(id); }
+
 		inline void push_back(const Command& cmd);
 		inline void push_front(const Command& cmd);
 
 		void emplace_back(Command&& cmd) {
+			BoundaryStats::Add(BoundaryStats::ctr.cmdPushBack);
+			BumpVersion();
 			queue.emplace_back(cmd);
 			queue.back().SetTag(GetNextTag());
 		}
 		void emplace_front(Command&& cmd) {
+			BoundaryStats::Add(BoundaryStats::ctr.cmdPushFront);
+			BumpVersion();
 			queue.emplace_front(cmd);
 			queue.front().SetTag(GetNextTag());
 		}
@@ -56,23 +89,33 @@ class CCommandQueue {
 
 		inline void pop_back()
 		{
+			BoundaryStats::Add(BoundaryStats::ctr.cmdPopBack);
+			BumpVersion();
 			queue.pop_back();
 		}
 		inline void pop_front()
 		{
+			BoundaryStats::Add(BoundaryStats::ctr.cmdPopFront);
+			BumpVersion();
 			queue.pop_front();
 		}
 
 		inline iterator erase(iterator pos)
 		{
+			BoundaryStats::Add(BoundaryStats::ctr.cmdErase);
+			BumpVersion();
 			return queue.erase(pos);
 		}
 		inline iterator erase(iterator first, iterator last)
 		{
+			BoundaryStats::Add(BoundaryStats::ctr.cmdErase, last - first);
+			BumpVersion();
 			return queue.erase(first, last);
 		}
 		inline void clear()
 		{
+			BoundaryStats::Add(BoundaryStats::ctr.cmdClearCmds, queue.size());
+			BumpVersion();
 			queue.clear();
 		}
 
@@ -98,7 +141,10 @@ class CCommandQueue {
 		inline const Command& operator[](size_type i) const { return queue[i]; }
 
 	private:
-		CCommandQueue() : queueType(CommandQueueType), tagCounter(0) {};
+		// the ctor draws a fresh version too: a never-mutated queue (fresh
+		// unit, creg reload) must still differ from whatever a serving cache
+		// stored under this unit id before
+		CCommandQueue() : queueType(CommandQueueType), tagCounter(0), version(++nextGlobalVersion) {};
 		CCommandQueue(const CCommandQueue&);
 		CCommandQueue& operator=(const CCommandQueue&);
 
@@ -110,6 +156,13 @@ class CCommandQueue {
 		std::deque<Command> queue;
 		QueueType queueType;
 		int tagCounter;
+
+		// see GetVersion(); CR_IGNORED (runtime-only, not synced state)
+		uint64_t version;
+
+		// header-inline like SimDrawSplit's flags: CommandQueue.h reaches test
+		// executables that do not link a dedicated .cpp for this class
+		static inline uint64_t nextGlobalVersion = 0;
 };
 
 
@@ -125,6 +178,8 @@ inline int CCommandQueue::GetNextTag()
 
 inline void CCommandQueue::push_back(const Command& cmd)
 {
+	BoundaryStats::Add(BoundaryStats::ctr.cmdPushBack);
+	BumpVersion();
 	queue.push_back(cmd);
 	queue.back().SetTag(GetNextTag());
 }
@@ -132,6 +187,8 @@ inline void CCommandQueue::push_back(const Command& cmd)
 
 inline void CCommandQueue::push_front(const Command& cmd)
 {
+	BoundaryStats::Add(BoundaryStats::ctr.cmdPushFront);
+	BumpVersion();
 	queue.push_front(cmd);
 	queue.front().SetTag(GetNextTag());
 }
@@ -139,6 +196,8 @@ inline void CCommandQueue::push_front(const Command& cmd)
 
 inline CCommandQueue::iterator CCommandQueue::insert(iterator pos, const Command& cmd)
 {
+	BoundaryStats::Add(BoundaryStats::ctr.cmdInsert);
+	BumpVersion();
 	Command tmpCmd = cmd;
 	tmpCmd.SetTag(GetNextTag());
 	return queue.insert(pos, tmpCmd);

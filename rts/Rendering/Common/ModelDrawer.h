@@ -105,7 +105,14 @@ public:
 	static bool CanDrawDeferred() { return modelDrawerState->CanDrawDeferred(); }
 	static bool SetTeamColor(int team, const float alpha = 1.0f) { return modelDrawerState->SetTeamColor(team, alpha); }
 	static void SetNanoColor(const float4& color) { modelDrawerState->SetNanoColor(color); }
-	static const ScopedTransformMemAlloc& GetTransformMemAlloc(const ObjType* o) { return const_cast<const TDrawerData*>(modelDrawerData)->GetObjectTransformMemAlloc(o); }
+	// allocates lazily for objects created since the last boundary drain (see
+	// GetOrCreateTransformMemAlloc): Lua handlers on synced events query a new
+	// object's offset mid-sim-phase, before AddObject registers it
+	static const ScopedTransformMemAlloc& GetTransformMemAlloc(const ObjType* o) { return modelDrawerData->GetOrCreateTransformMemAlloc(o); }
+
+	// SCOPE-1: BuildSplitResolveCache / SplitResolveCacheBuilt / ResolveSplitCachedObject
+	// DELETED — draw-window id->object resolution goes through the drawer render
+	// record's deferred-safe handle (see DrawerGetObjectByID<T>).
 public:
 	virtual void Update() const = 0;
 	// Draw*

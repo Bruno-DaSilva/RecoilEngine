@@ -142,7 +142,7 @@ void CFireProjectile::Update()
 	deleteMe |= (ttl <= -particleTime);
 }
 
-void CFireProjectile::Draw()
+void CFireProjectile::Draw() const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	uint8_t col[4];

@@ -1,0 +1,1748 @@
+/* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
+
+#pragma once
+
+#include <array>
+#include <atomic>
+#include <cassert>
+#include <cstdint>
+#include <string>
+#include <utility>
+#include <vector>
+
+class CUnit;
+class CFeature;
+class CProjectile;
+
+#include "Game/Players/PlayerStatistics.h"
+#include "Lua/LuaRulesParams.h" // PR 38: game+team rules-params mirror (Params map)
+#include "Sim/Misc/CollisionVolume.h"
+#include "Sim/Misc/Resource.h"
+#include "Sim/Misc/TeamStatistics.h"
+#include "System/UnorderedMap.hpp"
+#include "System/SimDrawSplit.h" // PR 43: DEAD_THIS_BATCH validity consults the dispatch-window flag
+#include "System/float3.h"
+#include "System/float4.h"
+
+// PR 43 (resurrected from the 38b flip attempt, amended per §7.7): the
+// tri-state row-validity enum. The valid[] arrays hold one of these per id.
+// DEAD_THIS_BATCH is a retained-but-dead row: the object's destroy record is
+// in the epoch just published, and its row was extracted PRODUCER-SIDE from
+// the object's DeferredObjectDeleter shell at the frame edge -- genuine
+// at-death state by construction (this deletes the 38b genuineness-guard
+// class, which existed because 38b retained the possibly-2-boundary-stale
+// front-slot data instead). Valid() promotes it to true ONLY inside the
+// boundary dispatch-drain window (SimDrawSplit::BoundaryShellWindowActive),
+// so the deferred death/LOS/command handlers can read the object at its
+// at-death state; everything else reads the dead-id nil shape. Under PR 43
+// the barrier dispatches still read LIVE under the barrier's
+// ScopedLiveException (43 does not convert them -- that is 44b), so these
+// rows are inert-but-armed: populated, validated by the epoch id-coverage
+// gate, and consumed for real at 44b.
+namespace SimSnapshotValid {
+	inline constexpr uint8_t INACTIVE        = 0; // no object / stale garbage
+	inline constexpr uint8_t ACTIVE          = 1; // live at the stamped simFrame
+	inline constexpr uint8_t DEAD_THIS_BATCH = 2; // destroyed this epoch; at-death row retained
+}
+
+/**
+ * @brief SimSnapshot -- the extracted, flat, render-side copy of hot observable sim state
+ *
+ * Coupling inventory section C of doc/sim-draw-thread-decoupling-research.md
+ * (PR 15): draw-side code that today dereferences live sim objects reads this
+ * snapshot instead. Together with RenderEventQueue (the event half of the
+ * sim->draw boundary) this is the data half: sim state crosses the boundary
+ * only as plain values, never as pointers. The layout doubles as the keyframe
+ * payload of the recorded observable stream (doc/replay-seeking-architecture.md),
+ * so changes here propagate into the stream format.
+ *
+ * Layout and indexing:
+ *  - Structure-of-arrays: one parallel array per field, all indexed by unitID.
+ *    Unit IDs are dense [0, unitHandler.MaxUnits()) and are already the
+ *    Lua-facing handle, so no id->slot indirection exists or is wanted.
+ *  - v1 fields: validity, pos, speed (.w = |velocity|), health, maxHealth,
+ *    team, allyTeam, defID, buildProgress, losStatus. Deliberately excluded:
+ *    piece transforms (extracted separately since PR 8, see
+ *    CModelDrawerDataBase::ExtractTransforms) and command queues / paths
+ *    (unbounded; dirty-versioned copies in a later PR).
+ *  - PR 18 (positions/status callout family) additions: midPos, aimPos,
+ *    paralyzeDamage, captureProgress, beingBuilt, stunned, plus the masking
+ *    inputs (see below): relMidPos + frontdir/updir/rightdir (object-space
+ *    math for the drawer-based midpos variants), posErrorVector, leavesGhost,
+ *    per-allyteam stride rows losStatusAll / posErrorBits, and a per-buffer
+ *    global block (numAllyTeams, radar-error scalars, alliance matrix).
+ *    Second family (projectiles) added radius (IsUnitVisible default) and the
+ *    ProjectileRows namespace below: synced projectiles keyed by synced
+ *    projectile id (free-list ints, bounded by the high-water concurrent
+ *    count -- rows grow-only to the max id seen), same buffer/publish
+ *    lifecycle as the unit rows. Unsynced projectiles are draw-side state and
+ *    are not Lua-visible through the synced callouts, so they have no rows.
+ *  - PR 25 (draw-side picking, section D) additions: the object read set of
+ *    GuiTraceRay + box-select. Units gained selVol (the live per-object
+ *    selectionVolume, copied by value -- an unsynced widget can mutate it at
+ *    runtime, so this is the current value, never the def), noSelect and
+ *    inVoid (the two hit-test gates). The FeatureRows namespace below is the
+ *    first non-unit/non-projectile family (features are pickable): dense but
+ *    sparse-occupancy feature ids, rows grow-only to the max id seen like the
+ *    projectile rows, carrying validity/pos/midPos/relMidPos/radius/allyTeam/
+ *    defID + the same selVol/noSelect/inVoid picking gates + per-allyteam
+ *    positional-LOS bytes (inLosAll) and the two IsInLosForAllyTeam globals
+ *    (featureVisibility mode, gaiaAllyTeam) for the visibility mirror.
+ *    Piece-tree selection volumes (usePieceSelectionVolumes) are deliberately
+ *    NOT served here -- unused in BAR; picking falls back to a live sim read
+ *    for those objects, to be removed at split-enable (see TraceRay.cpp).
+ *  - PR 27a (split-contract serving pass) additions: the remaining
+ *    row-backable per-object callout reads. Units gained the status/eco
+ *    scalar tail (isDead/neutral/activated/isCloaked, armoredState +
+ *    armoredMultiple, heading/buildFacing, height/mass/maxRange/
+ *    seismicSignature, experience/limExperience, selfDCountdown, the seven
+ *    sensor radii, moveDefID, resourcesMake/Use, harvested/harvestStorage,
+ *    cost/buildTime, blockingBits). Features gained their live tail (team,
+ *    health/resurrectProgress, height/mass, speed, heading/buildFacing, the
+ *    transMatrix direction columns, resources/defResources + reclaimLeft/
+ *    reclaimTime, blockingBits, resurrectDefID). Projectiles gained dir,
+ *    mygravity, teamID, isPiece and the weapon-projectile ttl/intercepted
+ *    pair. All of it is synced sim state (hashed + diff-gated).
+ *
+ * Validity rules:
+ *  - Valid(id) mirrors membership in unitHandler's active-unit list at the
+ *    stamped simFrame; dying-but-not-yet-deleted units are therefore valid,
+ *    exactly as master's live reads would see them.
+ *  - Rows of invalid ids hold stale garbage and must never be read directly;
+ *    the field accessors below return a deterministic default (0) for invalid
+ *    ids -- this is the documented stale/nil contract for consumers that hold
+ *    an id the snapshot does not cover (e.g. a unit created after the last
+ *    extraction): the miss is identical every time, never a torn read.
+ *  - A recycled unitID describes the *current* owner of the slot as of the
+ *    stamped simFrame. A consumer resolving a live CUnit* against snapshot
+ *    rows can be one boundary stale (see below); if a future consumer needs
+ *    to detect reuse across that window, add a per-slot generation tag --
+ *    do not widen the staleness contract instead.
+ *
+ * losStatus / masking semantics (masking policy settled in PR 18):
+ *  - losStatusAll holds one byte per (allyTeam, unit), laid out unit-major as
+ *    maxUnits blocks of numAllyTeams consecutive bytes (index unitID *
+ *    numAllyTeams + at), so a unit's per-allyteam bytes are contiguous;
+ *    posErrorBits has the identical layout (CUnit::GetPosErrorBit per
+ *    allyteam). LosStatus(unitID, allyTeam) is the row accessor -- consumers
+ *    that used the old single-row form pass gu->myAllyTeam and read exactly
+ *    the byte they read before. Rows are POV-complete: no re-extraction is
+ *    needed when the viewed allyteam changes (/specteam), the accessor just
+ *    reads a different row.
+ *  - DECIDED (PR 18): masking happens at the SERVING layer, not at
+ *    extraction. The snapshot stores raw synced values plus the masking
+ *    *inputs* for every allyteam (losStatusAll, posErrorBits, posErrorVector,
+ *    leavesGhost, the alliance matrix and the radar-error scalars), and the
+ *    POV helpers below (PovAlliedUnit / PovUnitVisible / PovUnitInLos /
+ *    ErrorVector / LuaErrorVector) replicate the live gate + errorVector
+ *    formulas (LuaUtils::IsUnitVisible / IsUnitInLos, CUnit::GetErrorVector)
+ *    bit-for-bit from those inputs. Rationale: one snapshot serves every
+ *    handle POV at once (LuaUI player POV, LuaRules-unsynced, spectators
+ *    flipping /specteam between boundaries), and the result is directly
+ *    bit-comparable against the live path (SnapshotDiffGate). Since the
+ *    snapshot is CPU-side process memory -- which already holds the full
+ *    lockstep sim -- storing raw rows widens no information surface; the
+ *    leak boundary is what values cross into Lua, and the serving-layer
+ *    gates are the same gates master applies. Extraction-time masking
+ *    remains MANDATORY for GPU-visible surfaces (Lua-shader-readable SSBOs;
+ *    see the LOS gate in UpdateObjectUniforms / ExtractTransforms) -- do not
+ *    copy this policy there.
+ *
+ * Extraction timing:
+ *  - Update() runs at the start of the draw side of the frame -- in
+ *    CGame::Draw, right after renderEventQueue.Drain() and
+ *    AckDrainedDestroys() -- so the snapshot and the drawer containers agree
+ *    on the same completed sim frame N.
+ *  - Zero new sim frames since the last extraction = no-op. A catch-up burst
+ *    of N sim frames produces one extraction (intermediate frames are
+ *    unobservable, same as master's rendering). Extraction also re-runs when
+ *    the alive-unit count changes outside the frame cadence (objects spawned
+ *    before the first sim frame advances -- same edge ExtractTransforms
+ *    handles via its pending flag), when sim marks a between-frames mutation
+ *    (net-message-driven team transfers, see MarkMutatedOutsideFrame), and on
+ *    any frameNum mismatch including backwards jumps (checkpoint load /
+ *    replay rewind). Viewed-allyteam changes need no re-extraction since the
+ *    per-allyteam rows became POV-complete (PR 18).
+ *  - Consumers called outside CGame::Draw (input handlers, e.g. minimap
+ *    select) read the previous boundary's snapshot: at most one draw frame of
+ *    staleness, the same pick-latency semantics decided for boundary picking
+ *    (research doc section D).
+ *
+ * Epoch / publish semantics (PR 43, the epoch ring -- supersedes the PR-15
+ * double buffer):
+ *  - N=3 ring slots, each holding ALL row namespaces (unit/projectile/feature/
+ *    team/player/global) plus an EpochSlotMeta {u64 epochId (monotonic per
+ *    game, reset only at teardown), frame span, refcount}. Extraction fills a
+ *    FREE slot (refcount 0, neither newest nor held); publish makes it the
+ *    newest-complete slot and bumps the epoch counter. The consumer (CGame's
+ *    SimDrawBarrier, right after Update()) ACQUIRES the newest slot (ref++)
+ *    and RELEASES the previously held one (ref--); a slot whose refcount hits
+ *    zero is RETIRED (AcquireNewestEpoch returns its epochId so the caller can
+ *    run retirement hooks, e.g. DeferredObjectDeleter::ReleaseRetired). Under
+ *    PR 43's lockstep (produce at the barrier under the park, consume
+ *    immediately) this is a pointer rotation with exactly the values the old
+ *    double buffer held; N-buffering is exercised but not yet load-bearing
+ *    (that arrives with the PR-44 producer flip).
+ *  - EpochId() replaces the old uint32 Generation() as the key of every
+ *    draw-side derived cache (pick grid, team-unit index, quad-membership
+ *    mirrors, cmd-queue/piece caches). It is u64 and monotonic per game, so
+ *    cross-game aliasing cannot occur; teardown (Clear) resets it with
+ *    everything else.
+ *  - LOCKSTEP EXCEPTION (enumerated; dissolves at PR 44a): when the unit-row
+ *    due-check does not fire, the net-mutable channels (team/player/global
+ *    rows) are re-extracted IN PLACE into the currently held slot -- exactly
+ *    the pre-ring behavior, where they re-extracted+swapped every boundary
+ *    independent of the unit rows. Under the producer flip every epoch is
+ *    fully extracted at the sim frame edge and this in-place refresh goes away.
+ *  - Each slot's rows are stamped with the simFrame they were extracted at;
+ *    the slot meta additionally records the epoch's frame span
+ *    [firstSimFrame, lastSimFrame] (first > last denotes a same-frame
+ *    republish forced by a between-frames net mutation).
+ *
+ * Adding a field (every later consumer conversion follows this recipe):
+ *  1. add the parallel array to UnitRows and size it in Resize();
+ *  2. copy the value in Extract()'s per-unit loop (values only -- never a
+ *     pointer, never lazy recompute of sim-side caches);
+ *  3. add an accessor with the invalid-id default, and a word for the field
+ *     in SnapshotHash::HashUnitRow (fixed order);
+ *  4. add the field compare to SnapshotDiffGate::CheckBoundary;
+ *  5. convert consumers from the live dereference to the accessor, one small
+ *     PR per consumer, keeping any gu->spectatingFullView bypass live.
+ */
+class SimSnapshot
+{
+public:
+	// ---- PR 32 (deep per-unit state): GetUnitMoveTypeData full-table block ----
+	// The deep, subtype-specific AMoveType fields GetUnitMoveTypeData reads
+	// beyond the flat base rows (mtMaxSpeed/mtMaxWantedSpeed/mtGoalPos/
+	// mtProgressState/moveTypeKind). One fixed-shape struct per unit: the table
+	// is bounded per unit (every field is a scalar, the shape is fixed by
+	// moveTypeKind), so this is a flat AoS row -- extracted for ALL units in the
+	// per-unit loop like every other row, NOT dirty-versioned or interest-copied.
+	// DECISION 2 (PR 32) DEVIATION: the plan recommended interest-flagged copy;
+	// full-copy-for-all is decision 2's explicit "full copy for all" alternative
+	// and is used here because (a) the block is bounded-per-unit (not truly
+	// unbounded) so the cost is bounded/measurable, and (b) interest-flagging's
+	// one-boundary first-query latency is incompatible with the armed dual-run's
+	// exact-equality pass criterion (a partial first-query table would flag a
+	// mismatch every unit's first query, so the gate could never reach 0). The
+	// full copy is bit-exact with the live table every boundary. Default-zero for
+	// units whose moveType is not one of the four dynamic subtypes (the twin then
+	// serves only the base rows + name, matching the live "static"/"script"/
+	// "unknown" branches which push name only). Values only, via the live
+	// accessors, so the served table is bit-identical.
+	struct MoveTypeBlock {
+		// ground + hover shared (GetTurnRate/GetAccRate/GetDecRate)
+		float turnRate = 0.0f;
+		float accRate = 0.0f;
+		float decRate = 0.0f;
+		// ground (CGroundMoveType)
+		float maxReverseSpeed = 0.0f; // * GAME_SPEED at extraction
+		float wantedSpeed = 0.0f;     // * GAME_SPEED at extraction
+		float currentSpeed = 0.0f;    // * GAME_SPEED at extraction
+		float goalRadius = 0.0f;
+		float3 currWayPoint;
+		float3 nextWayPoint;
+		// hover/strafe air shared
+		float wantedHeight = 0.0f;
+		uint8_t collide = 0;
+		uint8_t useSmoothMesh = 0;
+		int32_t aircraftState = 0;    // AAirMoveType::AircraftState enum value
+		// hover air (CHoverAirMoveType)
+		int32_t flyState = 0;         // CHoverAirMoveType::FlyState enum value
+		float goalDistance = 0.0f;
+		uint8_t bankingAllowed = 0;
+		uint8_t dontLand = 0;         // GetAllowLanding()
+		float currentBank = 0.0f;
+		float currentPitch = 0.0f;
+		float altitudeRate = 0.0f;
+		float maxDrift = 0.0f;
+		// strafe air (CStrafeAirMoveType)
+		float myGravity = 0.0f;
+		float maxBank = 0.0f;
+		float turnRadius = 0.0f;
+		float maxAileron = 0.0f;
+		float maxElevator = 0.0f;
+		float maxRudder = 0.0f;
+	};
+
+	struct UnitRows {
+		int32_t simFrame = -1;      // sim frame this buffer was extracted at
+		int32_t aliveCount = 0;
+
+		// global block: fixed-at-gamestart sim tables the masking formulas
+		// need; re-extracted (cheap) every boundary like everything else
+		int32_t numAllyTeams = 0;
+		float baseRadarErrorSize = 0.0f;
+		std::vector<float> radarErrorSizes;  // [numAllyTeams]
+		std::vector<uint8_t> allied;         // [numAllyTeams^2], teamHandler.Ally(a,b)
+
+		std::vector<uint8_t> valid;
+		std::vector<float3> pos;
+		std::vector<float3> midPos;
+		std::vector<float3> aimPos;
+		std::vector<float4> speed;
+		std::vector<float> health;
+		std::vector<float> maxHealth;
+		std::vector<float> paralyzeDamage;
+		std::vector<float> captureProgress;
+		std::vector<uint8_t> team;
+		std::vector<uint8_t> allyTeam;
+		std::vector<int32_t> defID;
+		std::vector<float> buildProgress;
+		std::vector<uint8_t> beingBuilt;
+		std::vector<uint8_t> stunned;        // CUnit::IsStunned()
+		std::vector<float> radius;           // IsUnitVisible's default sphere
+
+		// picking (PR 25): the live per-object selection volume (copied by
+		// value; an unsynced widget can mutate it) plus the two MouseHit gates
+		std::vector<CollisionVolume> selVol;
+		std::vector<uint8_t> noSelect;       // CSolidObject::noSelect
+		std::vector<uint8_t> inVoid;         // CSolidObject::IsInVoid()
+
+		// PR 27a: remaining row-backable per-unit callout reads
+		std::vector<uint8_t> isDead;         // CUnit::isDead (dying units stay valid, see the validity contract)
+		std::vector<uint8_t> neutral;
+		std::vector<uint8_t> activated;
+		std::vector<uint8_t> isCloaked;
+		std::vector<uint8_t> armoredState;
+		std::vector<float> armoredMultiple;
+		std::vector<int16_t> heading;        // CSolidObject::heading (SyncedSshort)
+		std::vector<int16_t> buildFacing;    // CSolidObject::buildFacing (SyncedSshort)
+		std::vector<float> height;
+		std::vector<float> mass;
+		std::vector<float> maxRange;
+		std::vector<float> decloakDistance;  // sim|draw split (Stage 0): GuiHandler decloak-range ring
+		std::vector<float> seismicSignature;
+		std::vector<float> experience;
+		std::vector<float> limExperience;
+		std::vector<int32_t> selfDCountdown;
+		std::vector<int32_t> losRadius;
+		std::vector<int32_t> airLosRadius;
+		std::vector<int32_t> radarRadius;
+		std::vector<int32_t> sonarRadius;
+		std::vector<int32_t> seismicRadius;
+		std::vector<int32_t> jammerRadius;
+		std::vector<int32_t> sonarJamRadius;
+		std::vector<int32_t> moveDefID;      // moveDef ? pathType : -1 (the name is immutable MoveDef data)
+		std::vector<SResourcePack> resourcesMake;
+		std::vector<SResourcePack> resourcesUse;
+		std::vector<SResourcePack> harvested;
+		std::vector<SResourcePack> harvestStorage;
+		std::vector<SResourcePack> cost;
+		std::vector<float> buildTime;
+		// GetSolidObjectBlocking's seven pushed booleans, bit i = push slot i:
+		// blocking, solidObjectsCollidable, projectilesCollidable,
+		// raySegmentsCollidable, crushable, blockEnemyPushing, blockHeightChanges
+		std::vector<uint8_t> blockingBits;
+
+		// PLACEMENT REHOST: the mutable occupant scalars the build/move placement
+		// predicates read through a blocking CSolidObject*/CUnit* (footprint dims,
+		// yardmap, reclaimable are immutable def data -> read defs directly, not rows).
+		// physicalState covers IsInWater/IsUnderWater/IsMoving (all PSTATE bits);
+		// isIdle/isPushResistant are the two computed CUnit/AMoveType answers
+		// ObjectBlockType needs (isPushResistant guarded null-moveType -> 0).
+		std::vector<uint8_t> immobile;         // CSolidObject::immobile
+		std::vector<uint8_t> yardOpen;         // CSolidObject::yardOpen
+		std::vector<uint16_t> physicalState;   // CSolidObject::physicalState bitfield
+		std::vector<float> crushResistance;    // CSolidObject::crushResistance
+		std::vector<uint8_t> isIdle;           // CUnit::IsIdle()
+		std::vector<uint8_t> isPushResistant;  // moveType ? IsPushResistant() : 0
+
+		// TRACE REHOST (stage 1): per-unit occupant scalars the trace predicates
+		// read on owner + target units (category / crashing / FPS-control).
+		// allyteam, losStatusAll, physicalState (IsUnderWater/IsInWater),
+		// aimPos/pos/speed, posErrorVector, frontdir, heading, experience,
+		// limExperience, fireState, useHighTrajectory are already captured above.
+		std::vector<uint32_t> category;              // CSolidObject::category
+		std::vector<uint8_t> crashing;               // CUnit::IsCrashing()
+		std::vector<uint8_t> underFirstPersonControl;// CUnit::UnderFirstPersonControl()
+
+		// object-space basis + relative midpoint (drawer midpos math, GetUnitVectors-class reads)
+		std::vector<float3> relMidPos;
+		std::vector<float3> frontdir;
+		std::vector<float3> updir;
+		std::vector<float3> rightdir;
+
+		// masking inputs (see the masking-policy block above)
+		std::vector<float3> posErrorVector;
+		std::vector<uint8_t> leavesGhost;
+		std::vector<uint8_t> losStatusAll;   // [maxUnits * numAllyTeams], unit-major (index unitID * numAllyTeams + at)
+		std::vector<uint8_t> posErrorBits;   // same layout; CUnit::GetPosErrorBit(at)
+		// picking (PR 25): the per-allyteam InRadar answer (GuiTraceRay's radar
+		// gate). InRadar folds sonar/jammer/water logic, so -- like the
+		// projectile/feature inLosAll rows -- we store the computed answer, not
+		// the inputs. Same [maxUnits * numAllyTeams] unit-major layout.
+		std::vector<uint8_t> inRadarAll;
+
+		// ================= PR 32 (deep per-unit state) BEGIN =================
+		// Deep per-unit reads: GetUnitStates, GetUnitStorage, GetUnitMetalExtraction,
+		// GetUnitBuildeeRadius, GetUnitPosErrorParams, GetUnitLastAttacker, the
+		// build-state family (GetUnitIsBuilding/BuildParams/InBuildStance/
+		// CurrentBuildPower/EffectiveBuildRange/NanoPieces), the transport pair
+		// (GetUnitTransporter/IsTransporting), GetUnitTooltip, GetUnitMoveTypeData.
+		// All synced sim state (moveType/CAI/second-object derefs) captured by
+		// value at extraction; the twins never touch a CUnit*.
+		// -- GetUnitStates (ParseAllyUnit) --
+		std::vector<int32_t> fireState;
+		std::vector<int32_t> moveState;
+		std::vector<float> repairBelowHealth;   // CMobileCAI::repairBelowHealth, -1 if not a CMobileCAI
+		std::vector<uint8_t> repeatOrders;       // commandAI->repeatOrders
+		std::vector<uint8_t> wantCloak;
+		std::vector<uint8_t> useHighTrajectory;
+		// -- GetUnitStorage / MetalExtraction / BuildeeRadius (ParseAlly/Typed) --
+		std::vector<SResourcePack> storage;
+		std::vector<float> metalExtract;
+		std::vector<float> buildeeRadius;
+		// -- GetUnitPosErrorParams (posErrorVector + posErrorBits already exist) --
+		std::vector<float3> posErrorDelta;
+		std::vector<int32_t> nextPosErrorUpdate;
+		// -- GetUnitLastAttacker (visibility of the attacker gated in the twin) --
+		std::vector<int32_t> lastAttackerID;     // -1 = none
+		// -- GetUnitTransporter --
+		std::vector<int32_t> transporterID;      // -1 = none
+		// -- build-state family --
+		// 0 = neither builder nor factory, 1 = CBuilder, 2 = CFactory
+		std::vector<uint8_t> builderKind;
+		std::vector<int32_t> curBuildID;         // builder/factory curBuild->id, -1 = none
+		std::vector<float> buildDistance;        // CBuilder::buildDistance (0 if !builder)
+		std::vector<uint8_t> range3D;            // CBuilder::range3D
+		std::vector<uint8_t> inBuildStance;      // CUnit::inBuildStance (returned only for builders)
+		std::vector<float> buildPower;           // NanoPieceCache::GetBuildPower() (builder|factory)
+		// -- GetUnitTooltip custom string (unitToolTipMap.Get(id)) --
+		std::vector<std::string> customTooltip;
+		// -- GetUnitMoveTypeData base fields (flat; deep fields in moveTypeBlock) --
+		// 0 = other/unknown, 1 = ground, 2 = hover-air, 3 = strafe-air, 4 = static, 5 = script
+		std::vector<uint8_t> moveTypeKind;
+		std::vector<float> mtMaxSpeed;           // GetMaxSpeed() * GAME_SPEED
+		std::vector<float> mtMaxWantedSpeed;     // GetMaxWantedSpeed() * GAME_SPEED
+		std::vector<float3> mtGoalPos;
+		std::vector<uint8_t> mtProgressState;    // 0 done, 1 active, 2 failed
+		std::vector<uint8_t> mtAutoLand;         // hover/strafe autoLand (GetUnitStates AMT branch)
+		std::vector<uint8_t> mtLoopbackAttack;   // strafe loopbackAttack (0 for hover)
+		std::vector<MoveTypeBlock> moveTypeBlock;
+		// -- variable-size per-unit blocks (bounded: model/capacity-fixed) --
+		std::vector<std::vector<int32_t>> nanoPieces;   // NanoPieceCache::GetNanoPieces() (model-fixed)
+		std::vector<std::vector<int32_t>> transportees; // transportedUnits ids (capacity-bounded)
+		// -- IsUnitInLos/InAirLos/InJammer unit variants (batch-1 reassignment):
+		// the computed per-(unit,allyteam) answer, exactly like inRadarAll (the
+		// gates fold cloak/stealth/water/globalLOS logic, so we store the answer
+		// losHandler->InLos/InAirLos/InJammer(unit, at), not the inputs). Same
+		// [maxUnits * numAllyTeams] unit-major layout.
+		std::vector<uint8_t> unitInLosAll;
+		std::vector<uint8_t> unitInAirLosAll;
+		std::vector<uint8_t> unitInJammerAll;
+		// ================== PR 32 (deep per-unit state) END ==================
+
+		// ===== PR 38c (zero-sanction flip): per-unit rules-params serving =====
+		// Per-unit LuaRulesParams::Params (CUnit::modParams, via CSolidObject)
+		// mirror, serving GetUnitRulesParam/GetUnitRulesParams from draw context.
+		// EXTENDS PR 38 part 1's game+team mechanism to the per-object namespace:
+		// a plain per-boundary FULL copy indexed by unitID, exactly like the
+		// team modParams copy (values only -- the Param variant is bool/float/
+		// std::string, no pointer or sim-owned container). A full copy has NO
+		// id-reuse ordering hazard (the deferral note only applied to an
+		// incremental RenderEventQueue-ordered DELTA scheme): each boundary the
+		// mirror is the current modParams of whatever unit holds the id, so a
+		// died-then-reused id just reflects the new unit next boundary. SYNCED
+		// state (Spring.SetUnitRulesParam is synced ctrl) but EXCLUDED from the
+		// SnapshotHash like sideName/customOpts/statHistory (an order-independent
+		// fold buys only marginal desync localization); correctness is covered by
+		// the SnapshotDiffGate unit:rules field pass + the serving dual-run.
+		std::vector<LuaRulesParams::Params> unitRulesParams; // [maxUnits]
+		// PR 46: modParamsVersion the slot's map copy reflects (0 = none/
+		// always-recopy); extraction skips the copy when unchanged
+		std::vector<uint64_t> unitRulesParamsVersion; // [maxUnits]
+
+		// ===== PR 38g (Batch-4 P1): GetUnitEstimatedPath serving =====
+		// The unit's own estimated path waypoints, exactly as
+		// LuaPathFinder::PushPathNodes reads them from pathManager->GetPathWayPoints
+		// (a pure CONST read -- unlike PathFinder::Next it does NOT advance/mutate
+		// the path). Captured per boundary for ground-move units with an active
+		// pathID (moveTypeKind==1 && pathID!=0). Variable-size synced state, so --
+		// like nanoPieces/transportees -- it is EXCLUDED from the SnapshotHash
+		// (an order-dependent path fold buys only marginal desync localization; any
+		// path divergence is preceded by a hashed goalPos/moveType divergence, and
+		// the demo-stream sync hash is the real detector) and covered instead by the
+		// SnapshotDiffGate unit:estPath field pass + the serving dual-run. points is
+		// the concatenated max/med/low-res waypoint list; starts holds the 3 segment
+		// offsets (mirrors the live vectors<float3>/vector<int>). hasPath==0 (pathID
+		// 0 or non-ground) reproduces PushPathNodes' 0-return (no tables).
+		std::vector<uint8_t> estPathHasPath;            // [maxUnits]; 1 iff ground move type with pathID!=0
+		std::vector<std::vector<float3>> estPathPoints; // [maxUnits]; GetPathWayPoints points
+		std::vector<std::vector<int>> estPathStarts;    // [maxUnits]; GetPathWayPoints segment starts (int == int32_t)
+		// WS-6 (est-path demand gate): 1 iff the est-path block for this id was
+		// captured into THIS ring slot (the id was registered via a draw-side
+		// first touch). 0 for unregistered ids -- the serve reads the live path
+		// under a park instead, never the stale estPathPoints a prior slot
+		// occupant left. Rides the ring (not a parallel cache) since the est-path
+		// block already lives inside UnitRows. See LuaSnapshotServe est-path read-set.
+		std::vector<uint8_t> estPathCaptured;           // [maxUnits]
+
+		// out-of-range ids (including any id before the first extraction ever
+		// ran, when the arrays are still unsized) are part of the stale/nil
+		// contract: a deterministic miss, not an error.
+		// PR 43 tri-state: DEAD_THIS_BATCH rows (shell-sourced at-death state)
+		// read as valid only while the boundary dispatch-drain window is open;
+		// flag-off DEAD_THIS_BATCH is never set and this reduces to != 0.
+		bool Valid(int unitID) const {
+			if (static_cast<size_t>(unitID) >= valid.size())
+				return false;
+			const uint8_t v = valid[unitID];
+			return (v == SimSnapshotValid::ACTIVE) ||
+			       (v == SimSnapshotValid::DEAD_THIS_BATCH && SimDrawSplit::BoundaryShellWindowActive());
+		}
+
+		size_t MaxUnits() const { return valid.size(); }
+
+		// accessors return a deterministic default for invalid ids (stale/nil contract)
+		uint8_t LosStatus(int unitID, int argAllyTeam) const {
+			return (Valid(unitID) && argAllyTeam >= 0 && argAllyTeam < numAllyTeams) ?
+				losStatusAll[unitID * numAllyTeams + argAllyTeam] : 0;
+		}
+		bool InRadar(int unitID, int argAllyTeam) const {
+			return (Valid(unitID) && argAllyTeam >= 0 && argAllyTeam < numAllyTeams) &&
+				inRadarAll[unitID * numAllyTeams + argAllyTeam] != 0;
+		}
+		float3 Pos(int unitID) const { return Valid(unitID) ? pos[unitID] : float3{}; }
+		float3 MidPos(int unitID) const { return Valid(unitID) ? midPos[unitID] : float3{}; }
+		float4 Speed(int unitID) const { return Valid(unitID) ? speed[unitID] : float4{}; }
+		float Health(int unitID) const { return Valid(unitID) ? health[unitID] : 0.0f; }
+		float MaxHealth(int unitID) const { return Valid(unitID) ? maxHealth[unitID] : 0.0f; }
+		int Team(int unitID) const { return Valid(unitID) ? team[unitID] : -1; }
+		int AllyTeam(int unitID) const { return Valid(unitID) ? allyTeam[unitID] : -1; }
+		int DefID(int unitID) const { return Valid(unitID) ? defID[unitID] : 0; }
+		int WeaponCount(int unitID) const { return Valid(unitID) ? weaponCount[unitID] : 0; }
+		float BuildProgress(int unitID) const { return Valid(unitID) ? buildProgress[unitID] : 0.0f; }
+		float Radius(int unitID) const { return Valid(unitID) ? radius[unitID] : 0.0f; }
+		// object-space basis vectors (drawer-midpos / camera-orientation consumers, PR 24)
+		float3 Frontdir(int unitID) const { return Valid(unitID) ? frontdir[unitID] : float3{}; }
+		float3 Updir(int unitID) const { return Valid(unitID) ? updir[unitID] : float3{}; }
+		float3 Rightdir(int unitID) const { return Valid(unitID) ? rightdir[unitID] : float3{}; }
+
+		// picking accessors (PR 25); stale/nil contract: invalid ids read the
+		// default-constructed sphere volume / no-select / not-in-void
+		bool NoSelect(int unitID) const { return Valid(unitID) && noSelect[unitID] != 0; }
+		bool InVoid(int unitID) const { return Valid(unitID) && inVoid[unitID] != 0; }
+		const CollisionVolume& SelVol(int unitID) const {
+			static const CollisionVolume def;
+			return Valid(unitID) ? selVol[unitID] : def;
+		}
+
+		// PR 27a accessors (stale/nil contract defaults)
+		bool IsDead(int unitID) const { return Valid(unitID) && isDead[unitID] != 0; }
+		bool Neutral(int unitID) const { return Valid(unitID) && neutral[unitID] != 0; }
+		bool Activated(int unitID) const { return Valid(unitID) && activated[unitID] != 0; }
+		bool IsCloaked(int unitID) const { return Valid(unitID) && isCloaked[unitID] != 0; }
+		bool ArmoredState(int unitID) const { return Valid(unitID) && armoredState[unitID] != 0; }
+		float ArmoredMultiple(int unitID) const { return Valid(unitID) ? armoredMultiple[unitID] : 0.0f; }
+		int Heading(int unitID) const { return Valid(unitID) ? heading[unitID] : 0; }
+		int BuildFacing(int unitID) const { return Valid(unitID) ? buildFacing[unitID] : 0; }
+		float Height(int unitID) const { return Valid(unitID) ? height[unitID] : 0.0f; }
+		float Mass(int unitID) const { return Valid(unitID) ? mass[unitID] : 0.0f; }
+		float MaxRange(int unitID) const { return Valid(unitID) ? maxRange[unitID] : 0.0f; }
+		float DecloakDistance(int unitID) const { return Valid(unitID) ? decloakDistance[unitID] : 0.0f; }
+		int StockpileNumStockpiled(int unitID) const { return Valid(unitID) ? stockpileNumStockpiled[unitID] : 0; }
+		bool StockpileIsInterceptor(int unitID) const { return Valid(unitID) && stockpileIsInterceptor[unitID] != 0; }
+		float SeismicSignature(int unitID) const { return Valid(unitID) ? seismicSignature[unitID] : 0.0f; }
+		float Experience(int unitID) const { return Valid(unitID) ? experience[unitID] : 0.0f; }
+		float LimExperience(int unitID) const { return Valid(unitID) ? limExperience[unitID] : 0.0f; }
+		int SelfDCountdown(int unitID) const { return Valid(unitID) ? selfDCountdown[unitID] : 0; }
+		int LosRadius(int unitID) const { return Valid(unitID) ? losRadius[unitID] : 0; }
+		int AirLosRadius(int unitID) const { return Valid(unitID) ? airLosRadius[unitID] : 0; }
+		int RadarRadius(int unitID) const { return Valid(unitID) ? radarRadius[unitID] : 0; }
+		int SonarRadius(int unitID) const { return Valid(unitID) ? sonarRadius[unitID] : 0; }
+		int SeismicRadius(int unitID) const { return Valid(unitID) ? seismicRadius[unitID] : 0; }
+		int JammerRadius(int unitID) const { return Valid(unitID) ? jammerRadius[unitID] : 0; }
+		int SonarJamRadius(int unitID) const { return Valid(unitID) ? sonarJamRadius[unitID] : 0; }
+		// -1 doubles as the "no moveDef" encoding the live body maps to false
+		int MoveDefID(int unitID) const { return Valid(unitID) ? moveDefID[unitID] : -1; }
+		SResourcePack ResourcesMake(int unitID) const { return Valid(unitID) ? resourcesMake[unitID] : SResourcePack{}; }
+		SResourcePack ResourcesUse(int unitID) const { return Valid(unitID) ? resourcesUse[unitID] : SResourcePack{}; }
+		SResourcePack Harvested(int unitID) const { return Valid(unitID) ? harvested[unitID] : SResourcePack{}; }
+		SResourcePack HarvestStorage(int unitID) const { return Valid(unitID) ? harvestStorage[unitID] : SResourcePack{}; }
+		SResourcePack Cost(int unitID) const { return Valid(unitID) ? cost[unitID] : SResourcePack{}; }
+		float BuildTime(int unitID) const { return Valid(unitID) ? buildTime[unitID] : 0.0f; }
+		uint8_t BlockingBits(int unitID) const { return Valid(unitID) ? blockingBits[unitID] : uint8_t(0); }
+
+		// PLACEMENT REHOST occupant accessors (stale/nil contract: invalid id -> the
+		// "does not block" default: immobile=false, closed yard, clear state).
+		bool     Immobile(int unitID) const { return Valid(unitID) && immobile[unitID] != 0; }
+		bool     YardOpen(int unitID) const { return Valid(unitID) && yardOpen[unitID] != 0; }
+		uint16_t PhysicalState(int unitID) const { return Valid(unitID) ? physicalState[unitID] : uint16_t(0); }
+		float    CrushResistance(int unitID) const { return Valid(unitID) ? crushResistance[unitID] : 0.0f; }
+		bool     IsIdle(int unitID) const { return Valid(unitID) && isIdle[unitID] != 0; }
+		bool     IsPushResistant(int unitID) const { return Valid(unitID) && isPushResistant[unitID] != 0; }
+
+		// PR 32 LOS-variant accessors: the computed per-(unit,allyteam) answer
+		// (stale/nil contract: invalid ids / out-of-range allyteams read false).
+		// Callers mirror the live IsUnitInLos/InAirLos/InJammer bodies exactly.
+		bool UnitInLos(int unitID, int argAllyTeam) const {
+			return (Valid(unitID) && argAllyTeam >= 0 && argAllyTeam < numAllyTeams) &&
+				unitInLosAll[unitID * numAllyTeams + argAllyTeam] != 0;
+		}
+		bool UnitInAirLos(int unitID, int argAllyTeam) const {
+			return (Valid(unitID) && argAllyTeam >= 0 && argAllyTeam < numAllyTeams) &&
+				unitInAirLosAll[unitID * numAllyTeams + argAllyTeam] != 0;
+		}
+		bool UnitInJammer(int unitID, int argAllyTeam) const {
+			return (Valid(unitID) && argAllyTeam >= 0 && argAllyTeam < numAllyTeams) &&
+				unitInJammerAll[unitID * numAllyTeams + argAllyTeam] != 0;
+		}
+
+		// ---- serving-layer masking helpers (PR 18) ----
+		// Bit-for-bit mirrors of the live formulas, computed from extracted
+		// inputs only; the Lua serving twins (LuaSnapshotServe) and the diff
+		// gate both call these. readAllyTeam/fullRead are the handle POV
+		// (CLuaHandle::GetHandleReadAllyTeam/GetHandleFullRead).
+
+		// teamHandler.Ally(a, b) mirror; out-of-range reads false
+		bool Allied(int a, int b) const {
+			return (a >= 0 && a < numAllyTeams && b >= 0 && b < numAllyTeams &&
+				allied[a * numAllyTeams + b] != 0);
+		}
+		// LuaUtils::IsAlliedAllyTeam / IsAllyUnit mirror; caller must have
+		// checked Valid(unitID)
+		bool PovAlliedUnit(int unitID, int readAllyTeam, bool fullRead) const {
+			if (readAllyTeam < 0)
+				return fullRead;
+			return (allyTeam[unitID] == readAllyTeam);
+		}
+		// LuaUtils::IsUnitVisible / IsUnitInLos / IsUnitTyped mirrors. A
+		// readAllyTeam that is negative without fullRead indexes losStatus out
+		// of bounds on the live path (cannot arise for real handles); here it
+		// reads as a deterministic not-visible.
+		bool PovUnitVisible(int unitID, int readAllyTeam, bool fullRead) const;
+		bool PovUnitInLos(int unitID, int readAllyTeam, bool fullRead) const;
+		bool PovUnitTyped(int unitID, int readAllyTeam, bool fullRead) const;
+
+		// CUnit::GetErrorVector / GetLuaErrorVector mirrors
+		float3 ErrorVector(int unitID, int argAllyTeam) const;
+		float3 LuaErrorVector(int unitID, int readAllyTeam, bool fullRead) const {
+			return (fullRead ? float3{0.0f, 0.0f, 0.0f} : ErrorVector(unitID, readAllyTeam));
+		}
+		// CSolidObject::GetObjectSpaceVec mirror
+		float3 ObjectSpaceVec(int unitID, const float3& v) const {
+			return ((frontdir[unitID] * v.z) + (rightdir[unitID] * v.x) + (updir[unitID] * v.y));
+		}
+
+		// ================= PR 31: weapon/shield scalar family =================
+		// Per-unit weapon-family scalars + a flat per-weapon SoA (bounded:
+		// numWeapons is def-fixed). Keyed off the same unitID space and the same
+		// UnitRows::Valid()/simFrame/POV as the rest of the struct -- the weapon
+		// twins gate on the unit's ParseAllyUnit/ParseInLosUnit visibility, so no
+		// separate namespace or validity row is needed. The flat arrays are
+		// indexed weaponOffset[unitID] + weaponNum and sized (in Extract, not
+		// Resize -- the total depends on the live weapon count) to the sum of
+		// weaponCount over live units. Serves GetUnitWeaponState/Damages/Vectors/
+		// Target/CanFire, GetUnitShieldState, GetUnitStockpile, GetUnitFlanking.
+		// Trace tests (TryTarget/TestTarget/TestRange/HaveFreeLineOfFire) are NOT
+		// here -- they recompute against the published collision world in PR 35.
+		//
+		// DynDamageArray is Lua-mutable (Spring.SetUnitWeaponDamages ->
+		// DynDamageArray::GetMutable clones a per-weapon heap array), so a raw
+		// shared pointer is neither immutable nor lifetime-stable across the
+		// boundary under the split. Rather than refcount-share a delicate
+		// member/heap-hybrid type across the double buffer + hash scratch, the
+		// damage arrays are FLATTENED into POD (numTypes floats + the scalar
+		// fields) -- the command-queue-flatten discipline (don't hold sim-owned
+		// mutable storage across the boundary). The float vector reuses capacity
+		// across boundaries (numArmorTypes is game-fixed), so steady state is a
+		// memcpy. valid==0 reproduces the live "damages == nullptr" nil shape.
+		struct DamagesSnap {
+			uint8_t valid = 0;              // 1 iff the source DynDamageArray* was non-null
+			int32_t paralyzeDamageTime = 0;
+			float impulseFactor = 0.0f;
+			float impulseBoost = 0.0f;
+			float craterMult = 0.0f;
+			float craterBoost = 0.0f;
+			float dynDamageExp = 0.0f;
+			float dynDamageMin = 0.0f;
+			float dynDamageRange = 0.0f;
+			uint8_t dynDamageInverted = 0;
+			float craterAreaOfEffect = 0.0f;
+			float damageAreaOfEffect = 0.0f;
+			float edgeEffectiveness = 0.0f;
+			float explosionSpeed = 0.0f;
+			std::vector<float> damages;    // per armor type (Get(i) / GetNumTypes())
+		};
+
+		// per-unit weapon-family rows (sized MaxUnits in Resize; only set for
+		// live units, read only behind a Valid()+POV gate like every other field)
+		std::vector<int32_t> weaponOffset;   // start index into the flat arrays
+		std::vector<int32_t> weaponCount;    // unit->weapons.size()
+		std::vector<float> reloadSpeed;      // unit->reloadSpeed (WeaponState reloadTimeXP)
+		std::vector<uint8_t> fpsNoFire;      // CanFire fps gate: fpsControlPlayer && !mouse1 && !mouse2
+		// GetUnitFlanking (all per-unit)
+		std::vector<int32_t> flankingMode;
+		std::vector<float3> flankingDir;
+		std::vector<float> flankingMoveFactor;  // flankingBonusMobilityAdd
+		std::vector<float> flankingAvgDamage;
+		std::vector<float> flankingDifDamage;
+		std::vector<float> flankingMobility;    // flankingBonusMobility
+		// GetUnitStockpile (unit->stockpileWeapon; hasStockpile==0 => nil shape)
+		std::vector<uint8_t> hasStockpile;
+		std::vector<int32_t> stockpileNumStockpiled;
+		std::vector<int32_t> stockpileNumQueued;
+		std::vector<float> stockpileBuildPercent;
+		// sim|draw split (Stage 0): the GuiHandler interceptor-range ring reads
+		// unit->stockpileWeapon->weaponDef->interceptor (the enemy-stockpile branch).
+		std::vector<uint8_t> stockpileIsInterceptor;
+		// GetUnitShieldState default case (unit->shieldWeapon; static_cast in the
+		// live path, so a non-null shieldWeapon is always a CPlasmaRepulser)
+		std::vector<uint8_t> hasShieldWeapon;
+		std::vector<uint8_t> shieldWeaponEnabled;
+		std::vector<float> shieldWeaponPower;
+		// GetUnitWeaponDamages explosion arrays (unit-level; flattened POD).
+		// Version-skipped like unitRulesParams: the slot's copies are current
+		// while CUnit::damagesVersion is unchanged since this slot last copied
+		// them (ctor-seeded globally-unique serial, so a respawned id always
+		// re-copies; bumped by LuaSyncedCtrl::SetUnitWeaponDamages)
+		std::vector<DamagesSnap> deathExpDamages;
+		std::vector<DamagesSnap> selfdExpDamages;
+		std::vector<uint64_t> expDamagesVersion; // [maxUnits]
+
+		// flat per-weapon arrays (index = weaponOffset[unitID] + weaponNum; sized
+		// to the total live weapon count in Extract). GetUnitWeaponState:
+		std::vector<uint8_t> wAngleGood;
+		std::vector<int32_t> wReloadStatus;
+		std::vector<int32_t> wSalvoLeft;
+		std::vector<int32_t> wNumStockpiled;
+		std::vector<int32_t> wNextSalvo;
+		std::vector<int32_t> wReloadTime;
+		std::vector<int32_t> wReaimTime;
+		std::vector<float> wAccuracyExp;      // AccuracyExperience()
+		std::vector<float> wSprayAngleExp;    // SprayAngleExperience()
+		std::vector<float3> wSalvoError;      // SalvoErrorExperience()
+		std::vector<float> wMoveErrorExp;     // MoveErrorExperience()
+		std::vector<float> wRange;
+		std::vector<float> wProjectileSpeed;
+		std::vector<float> wAutoTargetRangeBoost;
+		std::vector<int32_t> wSalvoSize;
+		std::vector<int32_t> wSalvoDelay;
+		std::vector<int32_t> wSalvoWindup;
+		std::vector<int32_t> wProjectilesPerShot;
+		std::vector<uint32_t> wAvoidFlags;
+		std::vector<uint32_t> wCollisionFlags;
+		std::vector<int32_t> wTtl;
+		// GetUnitWeaponVectors:
+		std::vector<float3> wMuzzlePos;       // weaponMuzzlePos
+		std::vector<float3> wWantedDir;
+		std::vector<float3> wWeaponDir;
+		std::vector<int32_t> wProjectileType; // weaponDef->projectileType (Vectors dir switch)
+		// GetUnitWeaponCanFire inputs (immutable def scalars copied by value +
+		// the per-weapon runtime state; the frame comparisons use rows.simFrame):
+		std::vector<uint8_t> wDefStockpile;
+		std::vector<uint8_t> wDefFireSubmersed;
+		std::vector<float> wDefMaxFireAngle;
+		std::vector<uint8_t> wIsBombDropper;  // CBombDropper::CanFire override (ignoreAngleGood/RequestedDir)
+		std::vector<float> wAimFromPosY;
+		std::vector<float3> wLastRequestedDir;
+		// GetUnitWeaponTarget (SWeaponTarget):
+		std::vector<uint8_t> wTargetType;     // TargetType 0 none / 1 unit / 2 pos / 3 intercept
+		std::vector<uint8_t> wTargetIsUser;
+		std::vector<int32_t> wTargetUnitID;
+		std::vector<float3> wTargetGroundPos;
+		std::vector<int32_t> wTargetInterceptID;
+		// GetUnitShieldState explicit-weapon case (dynamic_cast in the live path):
+		std::vector<uint8_t> wIsShield;
+		std::vector<uint8_t> wShieldEnabled;
+		std::vector<float> wShieldPower;
+		// GetUnitWeaponDamages per-weapon (flattened POD):
+		std::vector<DamagesSnap> wDamages;
+
+		// ---- TRACE REHOST (stage 1): trace-predicate read-set delta ----
+		// The mutable CWeapon / subclass members the four trace predicates
+		// (TryTarget/TestTarget/TestRange/HaveFreeLineOfFire + GetLeadTargetPos)
+		// read through a live CWeapon*. Immutable WeaponDef scalars (manualfire,
+		// canAttackGround, interceptor, interceptSolo, waterweapon, heightmod,
+		// cylinderTargeting, targetBorder, predictBoost, leadLimit, leadBonus,
+		// targetMoveError, ownerExpAccWeight, myGravity, trajectoryHeight,
+		// projectilespeed, startvelocity, weaponacceleration, fixedLauncher,
+		// beamburst, ...) are NOT captured -- read directly draw-side from the
+		// def handler via wWeaponDefID (thread-safe immutable, the placement
+		// EpochView unitDef precedent). wWeaponClass drives the draw-side virtual
+		// dispatch over the templated predicate overrides (WeaponPredicates.h).
+		std::vector<uint8_t> wWeaponClass;      // trace::WeaponClass (dispatch discriminator)
+		std::vector<int32_t> wWeaponDefID;      // weaponDef->id (-1 == none)
+		std::vector<float3> wAimFromPos;        // full aimFromPos (PR 31 kept only wAimFromPosY)
+		std::vector<float3> wRelAimFromPos;
+		std::vector<float3> wRelWeaponMuzzlePos;
+		std::vector<float3> wMainDir;           // unit-space main direction
+		std::vector<float3> wCurrentTargetPos;  // GetLeadTargetPos Target_None passthrough
+		std::vector<float3> wErrorVector;       // per-frame target-error vector
+		std::vector<float> wPredictSpeedMod;
+		std::vector<int32_t> wAccurateLeading;
+		std::vector<uint8_t> wOnlyForward;
+		std::vector<uint8_t> wDoTargetGroundPos;
+		std::vector<float> wMaxForwardAngleDif; // cos, CheckTargetAngleConstraint
+		std::vector<float> wMaxMainDirAngleDif; // cos, CheckTargetAngleConstraint
+		std::vector<uint32_t> wOnlyTargetCategory;
+		std::vector<float> wHeightBoostFactor;  // CWeapon::heightBoostFactor (Cannon range boost)
+		// subclass-mutable members read by the ballistic / range overrides
+		// (CCannon GetStaticRange2D + CalcWantedDir; CBombDropper TestRange).
+		// Zero for weapon classes that do not carry them.
+		std::vector<float> wCannonGravity;      // CCannon::gravity
+		std::vector<float> wCannonRangeBoost;   // CCannon::rangeBoostFactor
+		std::vector<uint8_t> wCannonHighTraj;   // CCannon::highTrajectory
+		std::vector<uint8_t> wBombDropTorpedoes;
+		std::vector<float> wBombTorpMoveRange;
+	};
+
+	/**
+	 * Synced-projectile rows (second callout family). Keyed by synced
+	 * projectile id; slots grow-only to the max id seen (ids are free-list
+	 * ints bounded by the high-water concurrent count). Same validity and
+	 * stale/nil contract as UnitRows. Masking input is inLosAll -- the
+	 * positional LOS-map answer losHandler->InLos(pro->pos, allyTeam)
+	 * captured at extraction for every allyteam -- plus allyTeam for the
+	 * own-projectile bypass; PovVisible mirrors LuaUtils::IsProjectileVisible.
+	 */
+	struct ProjectileRows {
+		int32_t numAllyTeams = 0;
+
+		std::vector<uint8_t> valid;
+		std::vector<float3> pos;
+		std::vector<float4> speed;
+		std::vector<int32_t> allyTeam;    // CProjectile::GetAllyteamID(); may be -1
+		std::vector<int32_t> ownerID;     // CProjectile::GetOwnerID(), raw (serving replicates the range check)
+		std::vector<uint8_t> isWeapon;    // CProjectile::weapon
+		std::vector<int32_t> weaponDefID; // -1 = no WeaponDef (nil shape); only meaningful when isWeapon
+		std::vector<uint8_t> targetType;  // 0 = none/not-a-weapon; 'g'/'u'/'f'/'p' as in GetProjectileTarget
+		std::vector<int32_t> targetID;    // for 'u'/'f'/'p'
+		std::vector<float3> targetPos;    // for 'g'
+		// PR 27a: remaining row-backable per-projectile callout reads
+		std::vector<uint8_t> isPiece;     // CProjectile::piece
+		std::vector<float3> dir;
+		std::vector<float> mygravity;
+		std::vector<int32_t> teamID;      // CProjectile::GetTeamID()
+		std::vector<int32_t> ttl;         // CWeaponProjectile::GetTimeToLive(); 0 when !isWeapon
+		std::vector<uint8_t> intercepted; // CWeaponProjectile::IsBeingIntercepted(); 0 when !isWeapon
+		// ---- PR 33 (piece/script family): CPieceProjectile params ----
+		// GetPieceProjectileParams/Name reads. explFlags/spinSpeed/spinVec are
+		// creation-fixed, spinAngle animates per frame; all are synced state
+		// (CPieceProjectile is spawned with isSynced=true). pieceName mirrors
+		// ppro->omp->name (the spawning model piece); empty when !isPiece.
+		std::vector<int32_t> pieceExplFlags; // 0 when !isPiece
+		std::vector<float> pieceSpinAngle;
+		std::vector<float> pieceSpinSpeed;
+		std::vector<float3> pieceSpinVec;
+		std::vector<std::string> pieceName;  // empty when !isPiece
+		// PR 34 (spatial/list remainder): CProjectile::radius, the sphere-test
+		// input GetProjectilesInSphere's quadfield filter reads
+		// (pos.SqDistance(p->pos) >= Square(radius + p->radius))
+		std::vector<float> radius;
+		std::vector<uint8_t> inLosAll;    // [numAllyTeams * MaxSlots()], row-major by allyteam
+
+		// ===== PR 38g (Batch-4 P1): GetProjectileDamages serving =====
+		// The weapon projectile's *wpro->damages (DynDamageArray) flattened into the
+		// POD DamagesSnap -- the SAME flatten discipline (and CopyDamages helper) the
+		// PR-31 unit weapon damages use (DynDamageArray is a member/heap hybrid that
+		// is neither immutable nor lifetime-stable across the boundary, so it is
+		// flattened, not pointer-shared). valid==0 for non-weapon projectiles (the
+		// twin gates on isWeapon first, exactly like the live body). NOT hashed --
+		// same as the unit wDamages precedent (weaponDef-derived; weaponDefID IS
+		// hashed) -- covered by the SnapshotDiffGate proj:damages field pass + the
+		// serving dual-run.
+		std::vector<UnitRows::DamagesSnap> damages; // [MaxSlots()]
+
+		// ===== PR 41 (GetVisibleProjectiles serving) =====
+		// drawRadius: the projectile's draw-authored cull state (p->GetDrawRadius()),
+		// the radius arg of the live camera->InView(p->pos, p->GetDrawRadius()) filter.
+		// Draw-authored (mutable CWorldObject::drawRadius), but the ONLY draw-rate
+		// writer is CBitmapMuzzleFlame::Draw -- an UNSYNCED projectile, which the
+		// callout filters out (!p->synced). Every SYNCED projectile sets drawRadius
+		// only in its ctor / sim-rate Update(), so a sim-boundary snapshot equals the
+		// call-time live value bit-for-bit. It is a snapshot row (not a drawer-owned
+		// array like the PR-40 unit/feature drawRadius) because projectiles have no
+		// id-keyed drawer draw-radius store -- drawRadius lives on the sim object.
+		std::vector<float> drawRadius;
+		// hitscan: CProjectile::hitscan (synced, CR_MEMBER). Selects the quad-
+		// membership rule mirroring CQuadField::AddProjectile: a hitscan projectile
+		// keys a RAY (GetQuadsOnRay(pos, dir, speed.w)); a non-hitscan projectile keys
+		// the SINGLE cell WorldPosToQuadFieldIdx(pos). (speed.w = ray length is
+		// already in the float4 `speed` row; dir already exists above.)
+		std::vector<uint8_t> hitscan;
+		// visInLosAll: [numAllyTeams * MaxSlots()], row-major by allyteam. The
+		// extraction-time answer of losHandler->InLos(p, at) -- the CWorldObject*
+		// overload (alwaysVisible / useAirLos / two-position beam test) the callout's
+		// LOS filter uses. DISTINCT from inLosAll above, which is the positional
+		// losHandler->InLos(p->pos, at) single-point overload (a different function).
+		std::vector<uint8_t> visInLosAll;
+
+		bool Valid(int projID) const {
+			// PR 43 tri-state: see UnitRows::Valid
+			if (static_cast<size_t>(projID) >= valid.size())
+				return false;
+			const uint8_t v = valid[projID];
+			return (v == SimSnapshotValid::ACTIVE) ||
+			       (v == SimSnapshotValid::DEAD_THIS_BATCH && SimDrawSplit::BoundaryShellWindowActive());
+		}
+		size_t MaxSlots() const { return valid.size(); }
+		// PR 34 stale/nil contract default (invalid ids read 0)
+		float Radius(int projID) const { return Valid(projID) ? radius[projID] : 0.0f; }
+
+		bool InLos(int projID, int argAllyTeam) const {
+			return (argAllyTeam >= 0 && argAllyTeam < numAllyTeams &&
+				inLosAll[argAllyTeam * MaxSlots() + projID] != 0);
+		}
+		// PR 41: GetVisibleProjectiles LOS filter -- the losHandler->InLos(p, at)
+		// (CWorldObject* overload) answer, distinct from the positional InLos above
+		bool VisInLos(int projID, int argAllyTeam) const {
+			return (argAllyTeam >= 0 && argAllyTeam < numAllyTeams &&
+				visInLosAll[argAllyTeam * MaxSlots() + projID] != 0);
+		}
+		// LuaUtils::IsProjectileVisible mirror; caller must have checked Valid()
+		bool PovVisible(int projID, int readAllyTeam, bool fullRead) const {
+			if (readAllyTeam < 0)
+				return fullRead;
+			return !((readAllyTeam != allyTeam[projID]) && !InLos(projID, readAllyTeam));
+		}
+	};
+
+	/**
+	 * Feature rows (PR 25, first non-unit/non-projectile family). Keyed by
+	 * feature id; ids are dense but sparse-occupancy (SimObjectIDPool, bounded
+	 * by MAX_FEATURES), so rows grow-only to the max id seen exactly like the
+	 * projectile rows. Carries the GuiTraceRay feature read set. Feature
+	 * visibility is positional like projectiles (losHandler->InLos(pos, at))
+	 * but with CFeature::IsInLosForAllyTeam's mod-config branches, so inLosAll
+	 * holds the per-allyteam positional-LOS answer and the two globals
+	 * (featureVisibility, gaiaAllyTeam) drive the InLosForAllyTeam mirror.
+	 */
+	struct FeatureRows {
+		int32_t numAllyTeams = 0;
+		int32_t featureVisibility = 0;  // CModInfo::featureVisibility (FEATURELOS_*)
+		int32_t gaiaAllyTeam = 0;       // std::max(0, teamHandler.GaiaAllyTeamID())
+
+		std::vector<uint8_t> valid;
+		std::vector<float3> pos;
+		std::vector<float3> midPos;
+		// aimPos can diverge from midPos (Spring.SetFeatureMidAndAimPos); the
+		// GetFeaturePosition twin's optional third return needs the real value
+		std::vector<float3> aimPos;
+		std::vector<float3> relMidPos;
+		std::vector<float> radius;
+		std::vector<int32_t> allyTeam;   // CFeature::allyteam (may be -1)
+		std::vector<int32_t> defID;
+		std::vector<uint8_t> alwaysVisible;
+		std::vector<uint8_t> noSelect;
+		std::vector<uint8_t> inVoid;
+		std::vector<CollisionVolume> selVol;
+		// PR 27a: remaining row-backable per-feature callout reads
+		std::vector<int32_t> team;           // CSolidObject::team
+		std::vector<float> health;
+		std::vector<float> resurrectProgress;
+		std::vector<float> height;
+		std::vector<float> mass;
+		std::vector<float4> speed;
+		// CFeature::transMatrix direction columns, exactly as GetFeatureDirection
+		// reads them (front = Z, right = X, up = Y)
+		std::vector<float3> matXdir;
+		std::vector<float3> matYdir;
+		std::vector<float3> matZdir;
+		std::vector<int16_t> heading;        // CSolidObject::heading (SyncedSshort)
+		std::vector<int16_t> buildFacing;    // CSolidObject::buildFacing (SyncedSshort)
+		std::vector<SResourcePack> resources;
+		std::vector<SResourcePack> defResources;
+		std::vector<float> reclaimLeft;
+		std::vector<float> reclaimTime;
+		std::vector<uint8_t> blockingBits;   // same bit layout as UnitRows::blockingBits
+		// PLACEMENT REHOST: a feature occupant is always immobile, so the placement
+		// predicate reaches only the CrushResistant branch (crushable is in
+		// blockingBits); physicalState carries IsInWater/IsUnderWater for IsNonBlocking.
+		std::vector<uint16_t> physicalState; // CSolidObject::physicalState bitfield
+		std::vector<float> crushResistance;  // CSolidObject::crushResistance
+		std::vector<int32_t> resurrectDefID; // udef ? udef->id : -1 (the name is immutable UnitDef data)
+		// ===== PR 38g (Batch-4 P1): GetFeatureFireTime/GetFeatureSmokeTime =====
+		// CFeature::fireTime/smokeTime (int frame counts); the twins push
+		// value * INV_GAME_SPEED exactly like the live bodies. Synced state, hashed.
+		std::vector<int32_t> fireTime;   // CFeature::fireTime
+		std::vector<int32_t> smokeTime;  // CFeature::smokeTime
+		std::vector<uint8_t> inLosAll;   // [numAllyTeams * MaxSlots()], row-major by allyteam
+
+		// ===== PR 38c (zero-sanction flip): per-feature rules-params serving =====
+		// Per-feature LuaRulesParams::Params (CFeature::modParams, via
+		// CSolidObject) mirror, serving GetFeatureRulesParam/GetFeatureRulesParams
+		// from draw context. Same plain per-boundary FULL copy (indexed by feature
+		// id) as the per-unit mirror above -- see the UnitRows comment for the
+		// id-reuse-hazard and SnapshotHash-exclusion rationale.
+		std::vector<LuaRulesParams::Params> featureRulesParams; // [MaxSlots()]
+		// PR 46: see UnitRows::unitRulesParamsVersion
+		std::vector<uint64_t> featureRulesParamsVersion; // [MaxSlots()]
+
+		bool Valid(int id) const {
+			// PR 43 tri-state: see UnitRows::Valid
+			if (static_cast<size_t>(id) >= valid.size())
+				return false;
+			const uint8_t v = valid[id];
+			return (v == SimSnapshotValid::ACTIVE) ||
+			       (v == SimSnapshotValid::DEAD_THIS_BATCH && SimDrawSplit::BoundaryShellWindowActive());
+		}
+		size_t MaxSlots() const { return valid.size(); }
+
+		float3 Pos(int id) const { return Valid(id) ? pos[id] : float3{}; }
+		float3 MidPos(int id) const { return Valid(id) ? midPos[id] : float3{}; }
+		float3 AimPos(int id) const { return Valid(id) ? aimPos[id] : float3{}; }
+		float Radius(int id) const { return Valid(id) ? radius[id] : 0.0f; }
+		int AllyTeam(int id) const { return Valid(id) ? allyTeam[id] : -1; }
+		int DefID(int id) const { return Valid(id) ? defID[id] : 0; }
+		bool NoSelect(int id) const { return Valid(id) && noSelect[id] != 0; }
+		bool InVoid(int id) const { return Valid(id) && inVoid[id] != 0; }
+		const CollisionVolume& SelVol(int id) const {
+			static const CollisionVolume def;
+			return Valid(id) ? selVol[id] : def;
+		}
+
+		// PR 27a accessors (stale/nil contract defaults)
+		int Team(int id) const { return Valid(id) ? team[id] : -1; }
+		float Health(int id) const { return Valid(id) ? health[id] : 0.0f; }
+		float ResurrectProgress(int id) const { return Valid(id) ? resurrectProgress[id] : 0.0f; }
+		float Height(int id) const { return Valid(id) ? height[id] : 0.0f; }
+		float Mass(int id) const { return Valid(id) ? mass[id] : 0.0f; }
+		float4 Speed(int id) const { return Valid(id) ? speed[id] : float4{}; }
+		float3 MatXdir(int id) const { return Valid(id) ? matXdir[id] : float3{}; }
+		float3 MatYdir(int id) const { return Valid(id) ? matYdir[id] : float3{}; }
+		float3 MatZdir(int id) const { return Valid(id) ? matZdir[id] : float3{}; }
+		int Heading(int id) const { return Valid(id) ? heading[id] : 0; }
+		int BuildFacing(int id) const { return Valid(id) ? buildFacing[id] : 0; }
+		SResourcePack Resources(int id) const { return Valid(id) ? resources[id] : SResourcePack{}; }
+		SResourcePack DefResources(int id) const { return Valid(id) ? defResources[id] : SResourcePack{}; }
+		float ReclaimLeft(int id) const { return Valid(id) ? reclaimLeft[id] : 0.0f; }
+		float ReclaimTime(int id) const { return Valid(id) ? reclaimTime[id] : 0.0f; }
+		uint8_t BlockingBits(int id) const { return Valid(id) ? blockingBits[id] : uint8_t(0); }
+		// PLACEMENT REHOST feature occupant accessors (stale/nil -> clear state)
+		uint16_t PhysicalState(int id) const { return Valid(id) ? physicalState[id] : uint16_t(0); }
+		float    CrushResistance(int id) const { return Valid(id) ? crushResistance[id] : 0.0f; }
+		int ResurrectDefID(int id) const { return Valid(id) ? resurrectDefID[id] : -1; }
+		// PR 38g stale/nil contract defaults (invalid ids read 0)
+		int FireTime(int id) const { return Valid(id) ? fireTime[id] : 0; }
+		int SmokeTime(int id) const { return Valid(id) ? smokeTime[id] : 0; }
+
+		bool InLos(int id, int argAllyTeam) const {
+			return (argAllyTeam >= 0 && argAllyTeam < numAllyTeams &&
+				inLosAll[argAllyTeam * MaxSlots() + id] != 0);
+		}
+		// CFeature::IsInLosForAllyTeam mirror; caller must have checked Valid()
+		bool IsInLosForAllyTeam(int id, int argAllyTeam) const;
+	};
+
+	/**
+	 * Team boundary copy (PR 26, the section-E.3 player/team field spec).
+	 * Serves the (b)-tier team-table callouts (GetTeamInfo/GetTeamList/
+	 * GetTeamResources/GetTeamUnitCount fast path/the TeamStatistics stats
+	 * callouts/GetTeamColor/GetGaiaTeamID) via the LuaSnapshotServe twins.
+	 * Indexed by teamID in [0, activeTeams); the team set is fixed at game
+	 * start, so there is no validity row -- ValidTeam() mirrors
+	 * teamHandler.IsValidTeam and team slots are never null.
+	 *
+	 * Unlike the unit/projectile/feature rows this copy is NOT due-checked:
+	 * net messages mutate the tables *between* sim frames (share/resign
+	 * transfers, PLAYERINFO ping/cpu at net rate -- the class of mutation
+	 * MarkMutatedOutsideFrame() was added for), so Update() re-extracts it
+	 * unconditionally every boundary; the whole copy is KBs.
+	 *
+	 * Deliberately NOT copied (class (d), stale/nil or dirty-versioned
+	 * later): modParams (GetTeamRulesParams) and statHistory
+	 * (GetTeamStatsHistory) -- unbounded containers.
+	 */
+	struct TeamRows {
+		// global block
+		int32_t activeTeams = 0;
+		int32_t activeAllyTeams = 0;
+		int32_t gaiaTeamID = -1;   // teamHandler.GaiaTeamID()
+		uint8_t useLuaGaia = 0;    // gs->useLuaGaia (GetGaiaTeamID gate)
+		uint8_t gameOver = 0;      // game->IsGameOver() (stats callouts' spectator gate)
+
+		// per-team rows
+		std::vector<int32_t> leader;
+		std::vector<uint8_t> isDead;
+		std::vector<uint8_t> hasAIs;             // skirmishAIHandler.HasSkirmishAIsInTeam
+		std::vector<int32_t> allyTeam;           // teamHandler.AllyTeam(t)
+		std::vector<float> incomeMultiplier;
+		std::vector<int32_t> numUnits;           // unitHandler.NumUnitsByTeam(t)
+		// UNSYNCED-mutable (Spring.SetTeamColor); excluded from SnapshotHash
+		// like selVol, covered by the diff gate
+		std::vector<std::array<uint8_t, 4>> color;
+		std::vector<std::array<uint8_t, 4>> origColor;
+		std::vector<std::string> sideName;
+		std::vector<TeamStatistics> currentStats; // team->GetCurrentStats() (statHistory.back())
+		// the GetTeamResources pack set, in its push order
+		std::vector<SResourcePack> res;
+		std::vector<SResourcePack> resStorage;
+		std::vector<SResourcePack> resPrevPull;
+		std::vector<SResourcePack> resPrevIncome;
+		std::vector<SResourcePack> resPrevExpense;
+		std::vector<SResourcePack> resShare;
+		std::vector<SResourcePack> resPrevSent;
+		std::vector<SResourcePack> resPrevReceived;
+		std::vector<SResourcePack> resPrevExcess;
+		std::vector<spring::unordered_map<std::string, std::string>> customOpts;
+
+		// ---- PR 36 (pathing + team/player misc + misc tail): team/player misc ----
+		// Serves GetTeamStartPosition/GetTeamMaxUnits/GetTeamLuaAI/GetAIInfo/
+		// GetTeamStatsHistory (per-team) and GetAllyTeamStartBox/GetAllyTeamInfo
+		// (per-allyteam). Same unconditional per-boundary re-extraction as the
+		// rest of this struct. startPos/maxUnits are synced (hashed); the AI
+		// short-name/version/options and luaAIName are the LOCAL machine's view
+		// (GetAIInfo returns SYNCED_* for synced handles), so like sideName they
+		// are excluded from the SnapshotHash.
+		std::vector<float3> startPos;            // TeamBase::GetStartPos()
+		std::vector<uint8_t> hasValidStartPos;   // TeamBase::HasValidStartPos()
+		std::vector<int32_t> maxUnits;           // CTeam::GetMaxUnits()
+		std::vector<uint8_t> hasLuaAI;           // GetTeamLuaAI: any isLuaAI in the team (distinguishes nil from an empty shortName)
+		std::vector<std::string> luaAIName;      // GetTeamLuaAI: first isLuaAI shortName
+		// GetAIInfo per-team first-AI block (teamAIs[0]); aiID/aiName/aiHostPlayer
+		// are the "synced AI info" the live body pushes unconditionally,
+		// aiIsLocal/aiShortName/aiVersion/aiOptions the local unsynced view
+		std::vector<uint8_t> aiHasAI;            // !GetSkirmishAIsInTeam(t).empty()
+		std::vector<int32_t> aiID;               // teamAIs[0]
+		std::vector<std::string> aiName;
+		std::vector<int32_t> aiHostPlayer;
+		std::vector<uint8_t> aiIsLocal;          // skirmishAIHandler.IsLocalSkirmishAI
+		std::vector<std::string> aiShortName;
+		std::vector<std::string> aiVersion;
+		std::vector<spring::unordered_map<std::string, std::string>> aiOptions;
+		// GetTeamStatsHistory: the full append-only statHistory copy (grows only
+		// at the stats interval). currentStats == statHistory.back() is already
+		// its own row; the whole vector is copied so the range form is served.
+		std::vector<std::vector<TeamStatistics>> statHistory;
+		// per-allyteam global block (sized to activeAllyTeams). GetAllyTeamStartBox
+		// stores the pre-computed corners in the live float-expression order
+		// ((mapDims.mapx * SQUARE_SIZE) * startRect...), so the twin push is
+		// bit-identical without a mapDims dependency; allyTeamOpts is the custom
+		// options map GetAllyTeamInfo returns.
+		std::vector<float4> allyStartBox;        // [activeAllyTeams] {xMin,zMin,xMax,zMax}
+		std::vector<spring::unordered_map<std::string, std::string>> allyTeamOpts; // [activeAllyTeams]
+
+		// ===== PR 38 (zero-sanction flip): game+team rules-params serving =====
+		// Per-team LuaRulesParams::Params (CTeam::modParams) mirror, serving
+		// GetTeamRulesParam/GetTeamRulesParams from draw context. Rules params are
+		// SYNCED state (Spring.SetTeamRulesParam is synced ctrl), but -- like
+		// sideName/customOpts/statHistory above -- they are EXCLUDED from the
+		// SnapshotHash: an order-independent fold of an unordered_map<string,
+		// variant> (string bytes + float bits) buys only marginal desync
+		// localization (any unit-row or demo-stream divergence pinpoints better),
+		// so correctness is covered instead by the SnapshotDiffGate field pass
+		// (team:rules) + the serving dual-run. Re-copied unconditionally every
+		// boundary like the rest of TeamRows. Teams are fixed-count and never
+		// recreated mid-game, so there is NO id-reuse ordering hazard -- the
+		// unit/feature/player rules-params namespaces (unit/feature ids DO reuse)
+		// stay sanctioned and are deferred to the RenderEventQueue-ordered delta
+		// mechanism (see the PR-38 escalation note in the commit message).
+		std::vector<LuaRulesParams::Params> teamRulesParams; // [activeTeams]
+
+		// teamHandler.IsValidTeam mirror
+		bool ValidTeam(int teamID) const { return (teamID >= 0 && teamID < activeTeams); }
+		// teamHandler.ValidAllyTeam mirror (the ally-team callouts' own gate)
+		bool ValidAllyTeam(int allyTeamID) const { return (allyTeamID >= 0 && allyTeamID < activeAllyTeams); }
+
+		// LuaUtils::IsAlliedTeam mirror; readAllyTeam/fullRead are the handle POV
+		bool PovAlliedTeam(int teamID, int readAllyTeam, bool fullRead) const {
+			if (readAllyTeam < 0)
+				return fullRead;
+
+			return (allyTeam[teamID] == readAllyTeam);
+		}
+	};
+
+	/**
+	 * Player boundary copy (PR 26, section E.3). Serves GetPlayerInfo /
+	 * GetPlayerList. Indexed by playerID in [0, activePlayers); player slots
+	 * are never null (playerHandler.Player returns &players[id]). Same
+	 * unconditional per-boundary re-extraction as TeamRows: ping/cpuUsage
+	 * arrive via NETMSG_PLAYERINFO between sim frames. Entirely excluded from
+	 * the synced-desync SnapshotHash -- player state is net-layer, not
+	 * per-sim-frame synced state.
+	 */
+	struct PlayerRows {
+		int32_t activePlayers = 0;
+		uint8_t hostDemo = 0;   // gameSetup->hostDemo (the IsPlayerUnsynced gate input)
+
+		std::vector<std::string> name;
+		std::vector<std::string> countryCode;
+		std::vector<int32_t> team;
+		std::vector<int32_t> rank;
+		std::vector<int32_t> ping;
+		std::vector<float> cpuUsage;
+		std::vector<uint8_t> active;
+		std::vector<uint8_t> spectator;
+		std::vector<uint8_t> isFromDemo;
+		std::vector<uint8_t> desynced;
+		std::vector<spring::unordered_map<std::string, std::string>> customOpts;
+
+		// ---- PR 36: GetPlayerControlledUnit + GetPlayerStatistics ----
+		// controlleeID is the FPS-controlled unit's id (-1 = none) and
+		// controlleeAllyTeam its allyteam (the access-gate input, captured so the
+		// twin needs no live unit deref); currentStats is the input/command stat
+		// block GetPlayerStatistics returns. Net-layer state, excluded from the
+		// SnapshotHash like the rest of PlayerRows.
+		std::vector<int32_t> controlleeID;
+		std::vector<int32_t> controlleeAllyTeam;
+		std::vector<PlayerStatistics> currentStats;
+
+		// ===== PR 38c (zero-sanction flip): per-player rules-params serving =====
+		// Per-player LuaRulesParams::Params (CPlayer::modParams) mirror, serving
+		// GetPlayerRulesParam/GetPlayerRulesParams from draw context. Plain
+		// per-boundary FULL copy indexed by playerID; the player roster is fixed
+		// at gamestart (no id reuse at all), so this is the simplest of the three.
+		// SNAPSHOT-hash-excluded like the rest of PlayerRows; correctness via the
+		// SnapshotDiffGate player:rules field pass + the serving dual-run.
+		std::vector<LuaRulesParams::Params> playerRulesParams; // [activePlayers]
+
+		// playerHandler.IsValidPlayer mirror
+		bool ValidPlayer(int playerID) const { return (playerID >= 0 && playerID < activePlayers); }
+	};
+
+	/**
+	 * Global-scalar boundary copy (PR 27a, the split-contract serving pass):
+	 * the sim-global reads the hot no-object callouts need at draw time --
+	 * GetGameFrame/GetGameSeconds(Interpolated) (census: 3.2 + 0.9 per draw
+	 * frame), GetGameSpeed/GetGameState, GetWind, the gs cheat/debug flags,
+	 * GetGroundExtremes, GetGlobalLos. Same lifecycle as TeamRows/PlayerRows:
+	 * re-extracted unconditionally every boundary (net messages mutate
+	 * speed/pause/cheat state between sim frames; wind moves per frame), the
+	 * whole copy is a few dozen bytes. Excluded from SnapshotHash: every
+	 * synced field here is a pure global whose divergence localizes nothing
+	 * (any unit-row divergence pinpoints better, and frameNum is the dump key
+	 * itself); correctness is covered by the diff gate's field pass + the
+	 * serving dual-runs.
+	 */
+	struct GlobalRows {
+		// GetGameFrame / GetGameSeconds / GetGameSecondsInterpolated
+		int32_t luaSimFrame = 0;         // gs->GetLuaSimFrame()
+		// GetGameSpeed + the gs inputs of GetGameState's IsSimLagging
+		float wantedSpeedFactor = 1.0f;  // gs->wantedSpeedFactor
+		float speedFactor = 1.0f;        // gs->speedFactor
+		uint8_t paused = 0;              // gs->paused
+		// synced cheat/debug flags
+		uint8_t cheatEnabled = 0;        // gs->cheatEnabled
+		int32_t godMode = 0;             // gs->godMode (GODMODE_*_BIT mask)
+		uint8_t editDefsEnabled = 0;     // gs->editDefsEnabled
+		uint8_t noHelperAIs = 0;         // gs->noHelperAIs
+		uint8_t defsNoCost = 0;          // unitDefHandler->GetNoCost()
+		// GetGameState flags (doneLoading/savedGame are load-time-stable,
+		// clientPaused arrives via net)
+		uint8_t doneLoading = 0;         // game->IsDoneLoading()
+		uint8_t savedGame = 0;           // game->IsSavedGame()
+		uint8_t clientPaused = 0;        // game->IsClientPaused()
+		// GetWind (current values move every sim frame)
+		float3 windVec;                  // envResHandler.GetCurrentWindVec()
+		float3 windDir;                  // envResHandler.GetCurrentWindDir()
+		float windStrength = 0.0f;       // envResHandler.GetCurrentWindStrength()
+		// GetGroundExtremes (init pair is constant; captured so the twin is
+		// snapshot-only, curr pair mutates on terraform)
+		float initMinHeight = 0.0f;
+		float initMaxHeight = 0.0f;
+		float currMinHeight = 0.0f;
+		float currMaxHeight = 0.0f;
+		// GetGlobalLos, one byte per allyteam
+		int32_t numAllyTeams = 0;
+		std::vector<uint8_t> globalLos;
+
+		// ===== PR 38 (zero-sanction flip): game rules-params serving =====
+		// The global game rules-params map (CSplitLuaHandle::GetGameParams(), the
+		// singleton behind GetGameRulesParam/GetGameRulesParams). SYNCED state, but
+		// EXCLUDED from the SnapshotHash for the same reason as the per-team mirror
+		// in TeamRows (see there); verified by the SnapshotDiffGate glob:gameRules
+		// field pass + the serving dual-run. Re-copied unconditionally every
+		// boundary like the rest of GlobalRows.
+		LuaRulesParams::Params gameRulesParams;
+
+		// teamHandler.IsValidAllyTeam mirror
+		bool ValidAllyTeam(int allyTeam) const { return (allyTeam >= 0 && allyTeam < numAllyTeams); }
+	};
+public:
+	/// extract-if-due + publish; called once per draw frame from CGame::Draw,
+	/// after the render-event drain (see the timing contract above)
+	void Update();
+
+	/// sim-side notification: a v1 field of a live unit changed *between* sim
+	/// frames, invisibly to the frameNum/aliveCount due-checks. Sole caller is
+	/// CUnit::ChangedTeam -- net-message-driven transfers (resign/share/take)
+	/// run from ClientReadNet outside any sim frame and rewrite team/allyteam/
+	/// losStatus (found by the armed SnapshotDiffGate: one-boundary-stale team
+	/// rows at a mid-game resign). Makes the next Update() re-extract even
+	/// though frameNum is unchanged. Sync-safe by the render-event-queue
+	/// precedent: sim only writes a render-side bool, nothing synced reads it.
+	void MarkMutatedOutsideFrame() { mutatedOutsideFrame = true; }
+
+	/// game teardown (CGame::KillRendering); resets the stamps so the next
+	/// game's first Update() extracts, and logs the extraction-cost stats
+	void Clear();
+
+	// ---- WS-3 (write-through mirrors): sim-side choke entry points, called
+	// via the SimSnapshotWT free functions (SimSnapshotWriteThrough.h) ----
+	void WTUnitCreated(const CUnit* u);
+	void WTRebuildLiveStore();
+	void WTNoteFlanking(const CUnit* u);
+	void WTNoteFlankingMobility(const CUnit* u);
+	void WTNoteReloadSpeed(const CUnit* u);
+	void WTNoteFpsControl(const CUnit* u);
+	void WTNoteStockpile(const CUnit* u);
+	void WTNoteShieldState(const CUnit* u);
+	void WTNoteWeaponDamages(const CUnit* u);
+
+	/// PR 16: while a SnapshotHash dump is armed, hash this completed sim frame.
+	/// Called once per sim frame from CGame::SimFrame (NOT draw time) so every
+	/// sim frame is hashed regardless of the draw/catch-up rate. Extracts into a
+	/// private scratch buffer and hands it to SnapshotHash without touching the
+	/// published front/back buffers or the generation, so draw-side behavior is
+	/// unchanged. No-op (single relaxed bool load) unless armed.
+	void HashCompletedFrame(int frameNum);
+
+	const UnitRows& Read() const { return buffers[HeldIdx()]; }
+	const ProjectileRows& ReadProjectiles() const { return projBuffers[HeldIdx()]; }
+	const FeatureRows& ReadFeatures() const { return featBuffers[HeldIdx()]; }
+	const TeamRows& ReadTeams() const { return teamBuffers[HeldIdx()]; }
+	const PlayerRows& ReadPlayers() const { return playerBuffers[HeldIdx()]; }
+	const GlobalRows& ReadGlobals() const { return globBuffers[HeldIdx()]; }
+
+	/// the newest PUBLISHED epoch id (0 = nothing published yet). Monotonic
+	/// u64 per game. PR 44a: under the producer flip this ADVANCES MID-DRAW-
+	/// FRAME (the sim thread publishes concurrently), so draw-side derived
+	/// caches must key on HeldEpochId() below -- EpochId() remains for
+	/// producer-side/pacing logic only.
+	uint64_t EpochId() const { return epochCounter.load(std::memory_order_relaxed); }
+
+	/// the epoch id of the slot the consumer currently HOLDS (0 = nothing
+	/// acquired yet -- the pregame state every `== 0` fallback keys on).
+	/// Main-thread stable between acquires: THE cache key for every draw-side
+	/// derived structure (PR 43 §2.5, re-keyed by PR 44a).
+	uint64_t HeldEpochId() const { return slotMeta[HeldIdx()].epochId; }
+
+	// ---- PR 43: the epoch ring (see the header block) ----
+
+	/// consumer half: acquire the newest complete epoch (ref++), release the
+	/// previously held one (ref--). Called once per boundary from
+	/// CGame::SimDrawBarrier, right after Update(). Returns the epochId of a
+	/// slot RETIRED by the release (refcount hit 0), or 0 when nothing retired
+	/// -- the caller runs the retirement hooks (DeferredObjectDeleter release).
+	uint64_t AcquireNewestEpoch();
+
+	/// record the per-slot channel-version scalars of the held epoch (the old
+	/// singleton cmdQueueCacheGeneration / pieceCacheGeneration / mirror
+	/// drained-version scalars become per-slot state, PR 43 §2.1); called by
+	/// the barrier after the cache refreshes. Telemetry/bookkeeping only under
+	/// the 43 lockstep (the physical caches track the newest epoch).
+	void SealEpochChannelVersions(uint64_t cmdQueueCacheEpoch, uint64_t pieceCacheEpoch, uint32_t mirrorDrainSerial);
+
+	// ---- PR 44a: the producer flip (extraction on the sim thread) ----
+
+	/// pacing gate (§3.2 skip-if-unconsumed): true when the newest published
+	/// epoch has been FULLY consumed by the draw side. Producer (sim) thread.
+	bool NewestEpochConsumed() const {
+		return consumedEpochId.load(std::memory_order_acquire) == epochCounter.load(std::memory_order_relaxed);
+	}
+
+	/// PR 44b: the consumer's consume-complete signal (moved out of
+	/// AcquireNewestEpoch -- see the comment there): stamped after the batch
+	/// dispatch AND the drawer Update/upload consumption finished, so the
+	/// producer's next extraction (which walks drawer containers) is mutually
+	/// exclusive with all consumer-side drawer mutation. Main thread;
+	/// idempotent (re-stamps the held epoch id).
+	void MarkNewestEpochConsumed() {
+		consumedEpochId.store(slotMeta[HeldIdx()].epochId, std::memory_order_release);
+	}
+
+	/// PR 44c (§3.4): published epochs not yet RETIRED (retirement = the
+	/// consumer's acquire dropped a slot's refcount to 0; in-order, single
+	/// consumer). THE backpressure key: ClientReadNet consumes a NEWFRAME
+	/// only while this is < EPOCH_RING_SLOTS-1 unless free-running (the
+	/// LastBoundaryFrame()+1 gate's successor). Sim thread; relaxed reads of
+	/// two monotone counters -- a transiently stale value delays or admits
+	/// at most one packet-loop round.
+	uint64_t UnretiredEpochCount() const {
+		return epochCounter.load(std::memory_order_relaxed) - retiredEpochId.load(std::memory_order_relaxed);
+	}
+
+	/// the row-namespace half of the flip's produce due-check (new sim frames
+	/// since the newest publish / alive-count change / between-frames
+	/// mutation); Game.cpp adds the pending-records/closures + fallback-timer
+	/// conditions. Producer (sim) thread.
+	bool ProduceDue() const;
+	/// the FRAME-DRIVEN half only (new sim frames / alive-count change) --
+	/// the flip producer publishes these unconditionally, while the mutation
+	/// mark below joins the frame-idle-gated classes (see ProduceEpochAtSimEdge)
+	bool FramesDue() const;
+	/// the between-frames mutation mark, unconsumed (cleared by production)
+	bool MutatedOutsideFrameMark() const { return mutatedOutsideFrame; }
+
+	/// the epoch id the next production will stamp (counter+1) -- the producer
+	/// keys its channel refreshes (cmd/piece caches) on it pre-publish
+	uint64_t NextEpochId() const { return epochCounter.load(std::memory_order_relaxed) + 1; }
+
+	/// flip producer half 1: extract ALL row namespaces (+ §7.7 dead rows,
+	/// sourced from the pending-destroy ledger) into a free ring slot and
+	/// stage its meta (epochId/frame span). NOT yet visible to the consumer.
+	/// Returns the slot index. Sim thread, frame edge only.
+	int BeginEpochProduction();
+
+	/// flip producer half 2: seal the channel-version scalars into the staged
+	/// slot's meta and publish it as newest-complete. Sim thread.
+	void PublishEpoch(int slot, uint64_t cmdQueueCacheEpoch, uint64_t pieceCacheEpoch, uint32_t mirrorDrainSerial);
+
+	/// PR 36 + 44a: fill the MapParser-backed start-position cache on the
+	/// MAIN thread (SpawnSimThread) -- the flip producer must never run the
+	/// MapParser on the sim thread. Idempotent.
+	void EnsureMapStartPositionsCached() { CacheMapStartPositions(); }
+
+	/// /epochstats telemetry: log ring occupancy + per-channel payload bytes
+	/// of the held epoch (the §7.1 standing-TODO measurement hook)
+	void LogEpochStats() const;
+
+	/// PR 43 §2.6/§3.6a -- THE ARMED ID-COVERAGE GATE: verify every object id
+	/// this batch's records referenced (RenderEventQueue::BatchCoverageRefs)
+	/// resolves in the just-published epoch as ACTIVE or DEAD_THIS_BATCH.
+	/// This is 44b's make-or-break invariant (no record may dispatch against
+	/// an unservable id); 43 proves it holds under the park. A violation is a
+	/// deterministic LOG_L(L_ERROR) "[EpochIdCoverage]" line (log-capped) +
+	/// counter, converting the 38b headful-widget-error attrition class into
+	/// a greppable gate failure. Called from the barrier after the acquire;
+	/// no-op flag-off (refs are only collected under the split).
+	void CheckEpochIdCoverage();
+
+	uint64_t IdCoverageViolations() const { return idCoverageViolations; }
+	uint64_t IdCoverageChecked() const { return idCoverageChecked; }
+
+	// PR 36: GetMapStartPositions -- the map-defined start positions are
+	// immutable map data, so they are parsed once (LoadStartPositionsFromMap is
+	// expensive) into a SimSnapshot-level cache, not a double-buffered TeamRows
+	// field, and reused every boundary. Not hashed; verified by the Route
+	// dual-run (the twin's table vs the live re-parse). Accessors below serve
+	// the twin.
+	int MapStartPosCount() const { return static_cast<int>(mapStartPos.size()); }
+	bool MapStartPosValid(int teamNum) const {
+		return (static_cast<size_t>(teamNum) < mapStartPosValid.size() && mapStartPosValid[teamNum] != 0);
+	}
+	float3 MapStartPos(int teamNum) const {
+		return MapStartPosValid(teamNum) ? mapStartPos[teamNum] : float3{};
+	}
+public:
+	// PR 43: revert this epoch's DEAD_THIS_BATCH marks in the published slot
+	// to INACTIVE once its dispatch window closed (barrier step 8). With
+	// per-slot data the marks would also die on slot recycle; the explicit
+	// clear keeps the published slot's validity well-defined for consumers
+	// that scan valid[] directly between boundaries.
+	void ClearDeadThisBatch();
+private:
+	// WS-6: the est-path read-set (producer-owned, drained from the draw->producer
+	// mailbox by LuaSnapshotServe::AcquireEstPathReadSet) gates the per-unit
+	// GetPathWayPoints copy; nullptr => capture no est-path (the hash scratch and
+	// the flag-off/unarmed path, where the est-path rows are unread).
+	// WS-3: slot >= 0 identifies the target ring slot so the write-through
+	// publisher can consult that slot's per-column copy serials; slot < 0 (the
+	// hash scratch) always takes the retained legacy gather for the migrated
+	// columns -- HashCompletedFrame must not consult ring serials.
+	void Extract(UnitRows& rows, std::vector<uint8_t>* estPathReadSet = nullptr, int slot = -1);
+	// minSlots (PR 43): grow-only row sizing may need to cover ids that died
+	// in the batch (shell-sourced DEAD_THIS_BATCH rows for ids the live
+	// containers no longer hold); Update() passes the dead-id maxima, the
+	// sim-thread hash scratch passes nothing
+	void ExtractProjectiles(ProjectileRows& rows, size_t minSlots = 0);
+	void ExtractFeatures(FeatureRows& rows, size_t minSlots = 0);
+	// PR 43 §7.7: producer-side extraction of the batch's dying ids from
+	// their DeferredObjectDeleter shells (readable until the step-8 ack) into
+	// the publishing slot, marked DEAD_THIS_BATCH. Genuine at-death state for
+	// every plain-field row; sub-blocks whose owning objects PreDestruct()
+	// already destroyed (commandAI/moveType/weapons) read documented defaults.
+	// Split-only; INACTIVE-guarded so a same-batch id reuse stays ACTIVE.
+	// PR 44a: the (id, shell) lists come from the caller -- the dispatch-time
+	// dead maps under lockstep, the pending-destroy ledger under the flip
+	// (ProduceSlotInternal builds the union; the two sources never overlap).
+	void ExtractDeadRowsFromShells(UnitRows& urows, FeatureRows& frows, ProjectileRows& prows,
+		const std::vector<std::pair<int, const CUnit*>>& deadUnits,
+		const std::vector<std::pair<int, const CFeature*>>& deadFeatures,
+		const std::vector<std::pair<int, const CProjectile*>>& deadProjectiles);
+	void ExtractTeams(TeamRows& rows);
+	void ExtractPlayers(PlayerRows& rows);
+	void ExtractGlobals(GlobalRows& rows);
+	// PR 36: fill mapStartPos/mapStartPosValid once (LoadStartPositionsFromMap)
+	void CacheMapStartPositions();
+	static void Resize(UnitRows& rows, size_t maxUnits, int numAllyTeams);
+public:
+	// PR 43: the epoch ring depth. N=3 so the PR-44 producer can fill a slot
+	// while the consumer holds one and a third retires (start value per the
+	// plan; under 43's lockstep only two are ever in flight).
+	static constexpr int EPOCH_RING_SLOTS = 3;
+
+	// per-slot bookkeeping (see the header block). refCount is atomic for the
+	// PR-44 cross-thread acquire/release; under 43's lockstep every access is
+	// main-thread inside the park.
+	struct EpochSlotMeta {
+		uint64_t epochId = 0;          // 0 = never published
+		int32_t firstSimFrame = -1;    // frame span (first > last: same-frame republish)
+		int32_t lastSimFrame = -1;
+		std::atomic<int32_t> refCount = {0};
+		// per-slot channel-version scalars (§2.1; sealed by the barrier)
+		uint64_t cmdQueueCacheEpoch = 0;
+		uint64_t pieceCacheEpoch = 0;
+		uint32_t mirrorDrainSerial = 0;
+	};
+
+	const EpochSlotMeta& SlotMeta(int slot) const { return slotMeta[slot]; }
+	int HeldSlot() const { return HeldIdx(); }
+	int NewestSlot() const { return NewestIdx(); }
+private:
+	// relaxed slot-index loads. heldSlot is written by the consumer under the
+	// park and read by the producer while running (PickFreeSlot) -- the park
+	// handshake fences the handoff; the atomics keep the loads well-defined.
+	int HeldIdx() const { return heldSlot.load(std::memory_order_relaxed); }
+	int NewestIdx() const { return newestSlot.load(std::memory_order_relaxed); }
+
+	// pick a slot to extract into: refcount 0, neither the newest-complete nor
+	// the held slot (both still readable). Guaranteed to exist at N=3 under
+	// lockstep; falls back to the newest slot (in-place republish) defensively.
+	int PickFreeSlot() const;
+
+	// shared produce body (lockstep Update + flip BeginEpochProduction):
+	// extract all row namespaces + §7.7 dead rows into PickFreeSlot(), stage
+	// the slot's meta (epochId = counter+1, frame span); returns the slot.
+	int ProduceSlotInternal();
+
+private:
+	UnitRows buffers[EPOCH_RING_SLOTS];
+	ProjectileRows projBuffers[EPOCH_RING_SLOTS];
+	FeatureRows featBuffers[EPOCH_RING_SLOTS];
+	TeamRows teamBuffers[EPOCH_RING_SLOTS];
+	PlayerRows playerBuffers[EPOCH_RING_SLOTS];
+	GlobalRows globBuffers[EPOCH_RING_SLOTS];
+	EpochSlotMeta slotMeta[EPOCH_RING_SLOTS];
+
+	// consumer-held slot (Read() views) and newest-complete slot; equal under
+	// 43's lockstep once the first epoch is acquired. Slot 0's default rows
+	// serve the pre-publish state (simFrame -1, HeldEpochId() 0). PR 44a:
+	// atomics -- newestSlot is the producer->consumer publish point (release
+	// store / acquire load), heldSlot crosses the other way (park-fenced).
+	std::atomic<int> heldSlot = {0};
+	std::atomic<int> newestSlot = {0};
+	// the consumer holds no reference until its first AcquireNewestEpoch()
+	bool holdingRef = false;
+
+	// PR 16: scratch rows for per-sim-frame hashing; never published, kept only
+	// to avoid reallocating its arrays every armed frame
+	UnitRows hashScratch;
+	ProjectileRows hashProjScratch;
+	FeatureRows hashFeatScratch;
+	TeamRows hashTeamScratch;
+
+	// ---- WS-3 (write-through mirrors, doc/sim-draw-split-optimization/
+	// write-through-mirrors.md) -- Stage 0 infra + the Stage 1 pilot columns
+	// (the retired UnitsWeaponsPerUnit pass) ----
+public:
+	// migrated-column ids, indexing mutCounter[] / slotColSerial[][]; order
+	// must match WT_COL_NAMES in SimSnapshot.cpp
+	enum WTColumn : int {
+		WTCOL_WEAPON_COUNT = 0,
+		WTCOL_RELOAD_SPEED,
+		WTCOL_FPS_NO_FIRE,
+		WTCOL_FLANKING_MODE,
+		WTCOL_FLANKING_DIR,
+		WTCOL_FLANKING_MOVE_FACTOR,
+		WTCOL_FLANKING_AVG_DAMAGE,
+		WTCOL_FLANKING_DIF_DAMAGE,
+		WTCOL_FLANKING_MOBILITY,
+		WTCOL_HAS_STOCKPILE,
+		WTCOL_STOCKPILE_NUM_STOCKPILED,
+		WTCOL_STOCKPILE_NUM_QUEUED,
+		WTCOL_STOCKPILE_BUILD_PERCENT,
+		WTCOL_STOCKPILE_IS_INTERCEPTOR,
+		WTCOL_HAS_SHIELD_WEAPON,
+		WTCOL_SHIELD_WEAPON_ENABLED,
+		WTCOL_SHIELD_WEAPON_POWER,
+		WTCOL_COUNT
+	};
+private:
+	/**
+	 * Producer-owned live column store: one flat array per migrated column,
+	 * indexed by unit id (sized MaxUnits like the slot rows, element types
+	 * byte-identical so the publisher is a straight prefix memcpy). Every
+	 * mutation of a migrated field double-writes at a choke (the authoritative
+	 * member unchanged, plus the column entry) and bumps the column's counter;
+	 * the publisher copies only the columns whose counter differs from the
+	 * target slot's copy serial.
+	 *
+	 * SINGLE-WRITER, NO ATOMICS, deliberately (doc §3.2/§9): every choke
+	 * executes in synced-sim or net-consumption context -- CUnit::Update /
+	 * GetFlankingDamageBonus / AddExperience, CWeapon::UpdateFire /
+	 * UpdateStockpile, the CPlasmaRepulser curPower/isEnabled writers,
+	 * CCommandAI CMD_STOCKPILE, synced Lua ctrl (SetUnitFlanking /
+	 * SetUnitStockpile / SetUnitShieldState / SetUnitWeaponDamages), COB
+	 * (Get/SetUnitVal, CobInstance shield-enable callback), the ClientReadNet
+	 * direct-control handlers (CPlayer::Start/StopControllingUnit,
+	 * FPSUnitController::RecvStateUpdate), unit creation (CUnitLoader) and
+	 * creg load. All of those run on the sim thread under the split and on
+	 * the main thread flag-off. The sole reader is the publisher
+	 * (PublishLiveStore, inside ProduceSlotInternal), which runs on that SAME
+	 * thread in both modes (lockstep Update() = main thread, flip
+	 * BeginEpochProduction = sim thread). No concurrent access exists, so the
+	 * counters are plain uint64_t. Counter granularity is per-column, not
+	 * per-(column,id): a bump means "this column has >= 1 changed entry",
+	 * triggering a whole-prefix copy (bandwidth is cheap, doc insight §2.1).
+	 *
+	 * The store is unsynced render-side state: nothing synced reads it (the
+	 * MarkMutatedOutsideFrame precedent), no gsRNG/streflop involvement, so
+	 * flag-off demo resim stays byte-identical.
+	 */
+	struct LiveUnitStore {
+		std::vector<int32_t> weaponCount;
+		std::vector<float> reloadSpeed;
+		std::vector<uint8_t> fpsNoFire;
+		std::vector<int32_t> flankingMode;
+		std::vector<float3> flankingDir;
+		std::vector<float> flankingMoveFactor;
+		std::vector<float> flankingAvgDamage;
+		std::vector<float> flankingDifDamage;
+		std::vector<float> flankingMobility;
+		std::vector<uint8_t> hasStockpile;
+		std::vector<int32_t> stockpileNumStockpiled;
+		std::vector<int32_t> stockpileNumQueued;
+		std::vector<float> stockpileBuildPercent;
+		std::vector<uint8_t> stockpileIsInterceptor;
+		std::vector<uint8_t> hasShieldWeapon;
+		std::vector<uint8_t> shieldWeaponEnabled;
+		std::vector<float> shieldWeaponPower;
+
+		// deep columns (doc §3.4): the version-gated damages pair cannot
+		// memcpy; the choke pushes the id onto per-slot pending-apply lists
+		// (push-to-all-slots keeps the "must reach every rotating slot"
+		// property) and the publisher drains the target slot's list with
+		// per-id deep copies, deduped by the version compare
+		std::vector<UnitRows::DamagesSnap> deathExpDamages;
+		std::vector<UnitRows::DamagesSnap> selfdExpDamages;
+		std::vector<uint64_t> expDamagesVersion;
+		std::vector<int> damagesPending[EPOCH_RING_SLOTS];
+
+		// per-column mutation counters (plain uint64, see the class comment)
+		uint64_t mutCounter[WTCOL_COUNT] = {};
+
+		// max live id + 1: the memcpy prefix bound. Monotone within a game
+		// (grown at creation, reset only at Clear()), so it also covers this
+		// batch's died-in-batch ids -- their DEAD_THIS_BATCH shell overlays
+		// land inside the copied prefix (the §7.7 minSlots analogue).
+		size_t highWaterId = 0;
+	};
+
+	// per-ring-slot per-column copy serials: the column's mutCounter value
+	// when this slot last copied it. A column dirtied once reaches EVERY slot
+	// as slots rotate, because each slot only advances its own serial when it
+	// copies (the WS-5 ring subtlety solved by construction, doc §3.3).
+	uint64_t slotColSerial[EPOCH_RING_SLOTS][WTCOL_COUNT] = {};
+
+	LiveUnitStore liveStore;
+
+	// belt-and-braces rewind detection (doc §3.5/§7.5): the publisher rebuilds
+	// the store on a backwards sim-frame jump; the explicit creg-load hook
+	// (CCregLoadSaveHandler::LoadGame) covers loads including forward jumps
+	int32_t lastProduceFrame = -1;
+
+	// oracle bookkeeping (doc §3.6): per-column mismatch counters, reported at
+	// teardown next to the extraction stats
+	uint64_t wtOracleEpochs = 0;
+	uint64_t wtOracleMismatches[WTCOL_COUNT + 2] = {}; // +2: the deep damages pair
+
+	void EnsureLiveStoreSized();
+	void PublishLiveStore(UnitRows& rows, int slot);
+	void RunWriteThroughOracle(const UnitRows& rows);
+
+	// PR 43: the monotonic epoch counter (see EpochId()); PR 44a: atomic --
+	// the producer bumps it at publish while the draw side may load it
+	std::atomic<uint64_t> epochCounter = {0};
+	// PR 44a: the epoch id the consumer last ACQUIRED (§3.2 pacing input);
+	// written by AcquireNewestEpoch (release), read by the producer (acquire)
+	std::atomic<uint64_t> consumedEpochId = {0};
+
+	// PR 44c: id of the last epoch RETIRED by the consumer's acquire (see
+	// UnretiredEpochCount); monotone, teardown-reset with the counter
+	std::atomic<uint64_t> retiredEpochId = {0};
+
+	// PR 43 §2.6: id-coverage gate counters (see CheckEpochIdCoverage)
+	uint64_t idCoverageChecked = 0;
+	uint64_t idCoverageViolations = 0;
+
+	// PR 43 §2.8: latched at extraction; keys the teardown LogEpochStats
+	// (SimDrawSplit::Clear precedes SimSnapshot::Clear at teardown)
+	bool splitWasEnabled = false;
+
+	// PR 36: GetMapStartPositions cache (immutable map data, parsed once)
+	std::vector<float3> mapStartPos;
+	std::vector<uint8_t> mapStartPosValid;
+	bool mapStartPosCached = false;
+
+	// see MarkMutatedOutsideFrame(); cleared by the extraction it forces
+	bool mutatedOutsideFrame = false;
+
+	// extraction-cost stats, reported by Clear()
+	float sumExtractMs = 0.0f;
+	float maxExtractMs = 0.0f;
+	uint32_t numExtractions = 0;
+	int32_t peakAliveCount = 0;
+};
+
+extern SimSnapshot simSnapshot;
+
+
+// ---- PR 38f/38g: event-time LOS-exit visibility override -------------------
+// Amendment (b) of the PR-38 event-time mechanism, refined by PR 38g (operator
+// ruling: option (b) = NO behavior change vs master). A synced UnitLeftLos event
+// dispatches to unsynced Lua handlers; under the split those handlers run
+// DEFERRED at the SimDrawBarrier, by which point the published snapshot reflects
+// the END-of-frame LOS state -- which may have cleared the unit's radar/LOS bits
+// for the leaving allyteam past what master's SYNCHRONOUS mid-sim handler saw --
+// so the UnitRows Pov gates nil out Spring.GetUnitPosition and the handler (e.g.
+// unit_ghostradar_gl4) errors.
+//
+// Master's real behavior (CUnit::SetLosStatus, Unit.cpp): LOS_INLOS is cleared
+// BEFORE eventHandler.UnitLeftLos fires; the radar bit, if also leaving this
+// same call, clears only in a LATER block, so it is still set at dispatch. The
+// synchronous handler thus observes the POST-transition losStatus, and
+// GetUnitPosition -> GetErrorVector returns a FUZZY radar-error-offset position
+// (AllyTeamRadarErrorSize on radar, BaseRadarErrorSize*2 when neither radar nor
+// ghost, zero error only when seenGhost).
+//
+// PR 38g captures the EXACT at-dispatch losStatus byte at FIRE time (the sim
+// thread owns the unit; unit->losStatus[at] there == master's observed value)
+// and presents it as a per-(unit, allyTeam) override for the deferred handler
+// call. The UnitRows::PovUnit{Visible,InLos,Typed} gates and ErrorVector, when
+// the override matches, substitute this residual byte for the row's end-of-frame
+// losStatusAll byte and run their UNCHANGED logic. So the read gate re-opens
+// exactly when master's did (residual radar/ghost) -- fixing the nil -- and the
+// bit-for-bit GetErrorVector mirror reproduces master's radar-error position
+// EXACTLY, with NO forced in-LOS and NO forced zero error. If the residual byte
+// is neither-visible, the gate stays closed -> nil, matching master (no
+// over-disclosure). PR 38f previously forced in-LOS + zero error, over-
+// disclosing exact positions; 38g removes both.
+//
+// Main-thread dispatch-window only -- never installed flag-off or during the
+// diff-gate dual-run (both dispatch immediately at fire time), so the Pov reads
+// are inert there and behavior stays byte-identical. UNSYNCED (draw-only): the
+// fire-time unit->losStatus[at] access is a READ, stored into draw-side state;
+// no synced write, no sync-hash impact, no gsRNG/streflop.
+namespace SimSnapshotLosEvent {
+	struct ScopedVisibility {
+		ScopedVisibility(int unitID, int allyTeam, uint8_t losStatus);
+		~ScopedVisibility();
+		ScopedVisibility(const ScopedVisibility&) = delete;
+		ScopedVisibility& operator=(const ScopedVisibility&) = delete;
+	private:
+		int prevUnitID;
+		int prevAllyTeam;
+		uint8_t prevLosStatus;
+	};
+
+	// consulted by the UnitRows Pov gates + ErrorVector in SimSnapshot.cpp:
+	// Active() reports whether the override matches (unit, allyTeam); when it
+	// does, LosStatus() is master's captured at-dispatch losStatus byte, used in
+	// place of the row's end-of-frame losStatusAll byte.
+	bool Active(int unitID, int allyTeam);
+	uint8_t LosStatus();
+
+	// PR 38j: Installed() is a cheap flag-off/inert fast-reject (true only while
+	// a deferred UnitLeftLos handler is dispatching). ActiveForUnit() is the
+	// allyTeam-agnostic unit match used by the position/direction callouts to
+	// decide, at their top, whether to serve arg#1's unit via the snapshot twin
+	// (whose Pov gates then apply the precise per-allyTeam Active() check). The
+	// override globals are inert (-1) flag-off and during the diff-gate dual-run.
+	bool Installed();
+	bool ActiveForUnit(int unitID);
+}

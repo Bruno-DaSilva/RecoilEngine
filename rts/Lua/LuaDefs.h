@@ -85,8 +85,13 @@ namespace {
 
 
 
+// PR 27b: handler (re)load/free rewires the shared eventHandler lists and
+// creates/destroys lua_States -- under the running split this may only
+// happen with the sim thread parked (ScopedExternalSimPause no-ops when the
+// split is off or the game is not up)
 #define DECL_LOAD_HANDLER(HandlerType, handlerInst)         \
 	bool HandlerType::LoadHandler() {                       \
+		CGame::ScopedExternalSimPause simPause;             \
 		std::lock_guard<spring::mutex> lk(m_singleton);     \
                                                             \
 		if (handlerInst != nullptr)                         \
@@ -102,6 +107,7 @@ namespace {
 
 #define DECL_LOAD_SPLIT_HANDLER(HandlerType, handlerInst)             \
 	bool HandlerType::LoadHandler(bool dryRun) {                      \
+		CGame::ScopedExternalSimPause simPause;                       \
 		std::lock_guard<spring::mutex> lk(m_singleton);               \
                                                                       \
 		if (handlerInst != nullptr)                                   \
@@ -117,6 +123,7 @@ namespace {
 
 #define DECL_FREE_HANDLER(HandlerType, handlerInst)      \
 	bool HandlerType::FreeHandler() {                    \
+		CGame::ScopedExternalSimPause simPause;          \
 		std::lock_guard<spring::mutex> lk(m_singleton);  \
                                                          \
 		if (handlerInst == nullptr)                      \

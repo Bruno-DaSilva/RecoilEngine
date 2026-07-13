@@ -230,6 +230,11 @@ bool CBuilder::UpdateTerraform(const Command&)
 				terraforming = false;
 				curBuildee->groundLevelled = true;
 
+				// sim|draw WS-5: this terraforming toggle can flip without the
+				// StopBuild below (TerraformComplete may return false), so the
+				// worker-task push must be explicit here
+				CCommandQueue::MarkDirty(id);
+
 				if (eventHandler.TerraformComplete(this, curBuildee)) {
 					StopBuild();
 				}
@@ -471,6 +476,7 @@ bool CBuilder::UpdateResurrect(const Command& fCommand)
 			// increment the number of wasted hours below:
 			//   number_of_hours_wasted = 3;
 			c.SetParam(0, INT_MAX / 2);
+			resurrecterCAI->commandQue.BumpVersion(); // c aliases its queued front command
 		}
 
 		// this takes one simframe to do the deletion
@@ -722,6 +728,14 @@ void CBuilder::StopBuild(bool callScript)
 		script->StopBuilding();
 
 	SetHoldFire(false);
+
+	// sim|draw WS-5: worker-task choke. curBuild/curReclaim/curResurrect/
+	// curCapture/terraforming feed ResolveWorkerTask but do NOT bump the queue.
+	// Every worker-task setter (SetRepairTarget/SetReclaimTarget/... /StartBuild/
+	// HelpTerraform) calls StopBuild(false) before installing the new target and
+	// the drain reads live at the boundary, so this single push covers the whole
+	// setter family (the "cleared" transition and the subsequent set).
+	CCommandQueue::MarkDirty(id);
 }
 
 
@@ -793,7 +807,7 @@ bool CBuilder::StartBuild(BuildInfo& buildInfo, CFeature*& feature, bool& inWait
 			// <pos> might map to a non-blocking portion
 			// of the buildee's yardmap, fallback check
 			if (u == nullptr)
-				u = CGameHelper::GetClosestFriendlyUnit(nullptr, buildInfo.pos, buildDistance, allyteam);
+				u = CGameHelper::GetClosestFriendlyUnit(nullptr, buildInfo.pos, buildDistance, allyteam, true);
 
 			if (u != nullptr) {
 				if (CanAssistUnit(u, buildInfo.def)) {

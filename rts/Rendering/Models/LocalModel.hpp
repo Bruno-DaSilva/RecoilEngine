@@ -28,9 +28,6 @@ struct LocalModel
 	const LocalModelPiece* GetRoot() const { return (GetPiece(0)); }
 	const CollisionVolume* GetBoundingVolume() const { return &boundingVolume; }
 
-	const LuaObjectMaterialData* GetLuaMaterialData() const { return &luaMaterialData; }
-	      LuaObjectMaterialData* GetLuaMaterialData()       { return &luaMaterialData; }
-
 	const float3 GetRelMidPos() const { return (boundingVolume.GetOffsets()); }
 
 	// raw forms, the piece-index must be valid
@@ -40,17 +37,20 @@ struct LocalModel
 	float GetDrawRadius() const { return (boundingVolume.GetBoundingRadius()); }
 
 
-	void Draw() const {
-		if (!luaMaterialData.Enabled()) {
+	// luaMaterialData + per-piece lodDispLists were evicted to the drawer-owned
+	// render record (sim/draw PR 10); draw callers thread them in as primitives
+	// so LocalModel stays free of the drawer types
+	void Draw(const LuaObjectMaterialData* lmd, const std::vector<std::vector<uint32_t>>* lodLists) const {
+		if (!lmd->Enabled()) {
 			DrawPieces();
 			return;
 		}
 
-		DrawPiecesLOD(luaMaterialData.GetCurrentLOD());
+		DrawPiecesLOD(lmd->GetCurrentLOD(), lmd, lodLists);
 	}
 
 	void SetModel(const S3DModel* model, bool initialize = true);
-	void SetLODCount(unsigned int lodCount);
+	void SetLODCount(unsigned int lodCount, LuaObjectMaterialData* lmd, std::vector<std::vector<uint32_t>>* lodLists) const;
 	void UpdateBoundingVolume();
 
 	void GetBoundingBoxVerts(std::vector<float3>& verts) const {
@@ -78,11 +78,39 @@ struct LocalModel
 
 	void SetBoundariesNeedsRecalc()       { needsBoundariesRecalc = true; }
 	bool GetBoundariesNeedsRecalc() const { return needsBoundariesRecalc; }
+
+	// sim|draw WS-1: piece-tree capture version, packed {instanceSeed:32 |
+	// localCount:32}. The seed is assigned from a process-wide monotonic source
+	// in SetModel ONLY (unit/feature creation and creg PostLoad, both single-
+	// threaded contexts), so values are unique across LocalModel instances and a
+	// died-then-reused id can never alias a predecessor's captured version. The
+	// count is a plain per-instance increment at every piece-mutation choke
+	// (LocalModelPiece::SetDirty / SetScriptVisible / colvol + no-interpolation
+	// chokes, CLuaUnitScript::CreateScript): the anim-tick for_mt partitions by
+	// unit script (one script per unit, touching only its own model's pieces)
+	// and every other mutator is single-threaded sim code phase-separated from
+	// it, so the member is single-writer at any instant -- no atomics. Readers
+	// (the epoch producer's piece capture, WS-2's transform extraction) run at
+	// the sim frame edge, after the anim for_mt joined. localCount wraps after
+	// 2^32 bumps of one instance (~33 days of continuous max-rate animation),
+	// the only false-skip mode -- accepted and documented (WS-2 §7 ask 1). The
+	// masked increment keeps the seed bits intact across a wrap. The draw-side
+	// ResetWasUpdated must never bump (it is not a sim mutation).
+	uint64_t GetPieceTreeVersion() const { return pieceTreeVersion; }
+	void BumpPieceTreeVersion() {
+		pieceTreeVersion = (pieceTreeVersion & PIECE_TREE_SEED_MASK) | ((pieceTreeVersion + 1) & PIECE_TREE_COUNT_MASK);
+	}
+
 private:
+	static constexpr uint64_t PIECE_TREE_SEED_MASK  = 0xFFFFFFFF00000000ull;
+	static constexpr uint64_t PIECE_TREE_COUNT_MASK = 0x00000000FFFFFFFFull;
+
+	void SeedPieceTreeVersion();
+
 	LocalModelPiece* CreateLocalModelPieces(const S3DModelPiece* mpParent);
 
 	void DrawPieces() const;
-	void DrawPiecesLOD(unsigned int lod) const;
+	void DrawPiecesLOD(unsigned int lod, const LuaObjectMaterialData* lmd, const std::vector<std::vector<uint32_t>>* lodLists) const;
 
 public:
 	std::vector<LocalModelPiece> pieces;
@@ -91,8 +119,7 @@ private:
 	// object-oriented box; accounts for piece movement
 	CollisionVolume boundingVolume;
 
-	// custom Lua-set material this model should be rendered with
-	LuaObjectMaterialData luaMaterialData;
-
 	bool needsBoundariesRecalc = true;
+
+	uint64_t pieceTreeVersion = 0;
 };

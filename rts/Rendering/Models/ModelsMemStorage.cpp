@@ -1,5 +1,6 @@
 #include "ModelsMemStorage.h"
-#include "Sim/Objects/WorldObject.h"
+#include "Sim/Features/Feature.h"
+#include "Sim/Units/Unit.h"
 
 #include "System/Misc/TracyDefs.h"
 
@@ -11,10 +12,11 @@ ModelUniformsStorage modelUniformsStorage;
 void ModelUniformsStorage::Init()
 {
 	assert(updateList.Empty());
-	assert(objectsMap.empty());
+	assert(objectsMaps[OBJ_UNIT].empty() && objectsMaps[OBJ_FEATURE].empty());
 	assert(storage.empty());
 
-	storage[AddObject(static_cast<const CWorldObject*>(nullptr))] = dummy;
+	// reserve slot 0 as the shared dummy element (INVALID_INDEX)
+	storage[AddSlot()] = dummy;
 }
 
 void ModelUniformsStorage::Kill()
@@ -22,14 +24,14 @@ void ModelUniformsStorage::Kill()
 	// Remaining objects are not cleared anywhere (not a good thing) so delete them here
 	updateList.Clear();
 	storage.clear();
-	objectsMap.clear();
+
+	for (auto& objectsMap : objectsMaps)
+		objectsMap.clear();
 }
 
-size_t ModelUniformsStorage::AddObject(const CWorldObject* o)
+size_t ModelUniformsStorage::AddSlot()
 {
-	RECOIL_DETAILED_TRACY_ZONE;
 	const size_t idx = storage.Add(ModelUniformData());
-	objectsMap[const_cast<CWorldObject*>(o)] = idx;
 
 	if (storage.size() > updateList.Size()) {
 		//new item got added to the end of storage
@@ -43,10 +45,20 @@ size_t ModelUniformsStorage::AddObject(const CWorldObject* o)
 	return idx;
 }
 
-void ModelUniformsStorage::DelObject(const CWorldObject* o)
+size_t ModelUniformsStorage::AddObjectImpl(ObjKind kind, int id)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	const auto it = objectsMap.find(const_cast<CWorldObject*>(o));
+	const size_t idx = AddSlot();
+	objectsMaps[kind][id] = idx;
+
+	return idx;
+}
+
+void ModelUniformsStorage::DelObjectImpl(ObjKind kind, int id)
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	auto& objectsMap = objectsMaps[kind];
+	const auto it = objectsMap.find(id);
 
 	if (it == objectsMap.end())
 		return;
@@ -66,38 +78,52 @@ void ModelUniformsStorage::DelObject(const CWorldObject* o)
 	objectsMap.erase(it);
 }
 
-size_t ModelUniformsStorage::GetObjOffset(const CWorldObject* o)
+size_t ModelUniformsStorage::GetObjOffsetImpl(ObjKind kind, int id)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	const auto it = objectsMap.find(const_cast<CWorldObject*>(o));
+	const auto& objectsMap = objectsMaps[kind];
+	const auto it = objectsMap.find(id);
 	if (it != objectsMap.end())
 		return it->second;
 
-	size_t idx = AddObject(o);
-	return idx;
+	return AddObjectImpl(kind, id);
 }
 
-size_t ModelUniformsStorage::GetObjOffset(const CWorldObject* o) const
+size_t ModelUniformsStorage::GetObjOffsetImpl(ObjKind kind, int id) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	const auto it = objectsMap.find(const_cast<CWorldObject*>(o));
+	const auto& objectsMap = objectsMaps[kind];
+	const auto it = objectsMap.find(id);
 	if (it != objectsMap.end())
 		return it->second;
 
 	return INVALID_INDEX;
 }
 
-const ModelUniformsStorage::MyType& ModelUniformsStorage::GetObjUniformsArray(const CWorldObject* o) const
+size_t ModelUniformsStorage::AddObject(const CUnit* o)    { return AddObjectImpl(OBJ_UNIT   , o->id); }
+size_t ModelUniformsStorage::AddObject(const CFeature* o) { return AddObjectImpl(OBJ_FEATURE, o->id); }
+
+void ModelUniformsStorage::DelObject(const CUnit* o)    { DelObjectImpl(OBJ_UNIT   , o->id); }
+void ModelUniformsStorage::DelObject(const CFeature* o) { DelObjectImpl(OBJ_FEATURE, o->id); }
+
+size_t ModelUniformsStorage::GetObjOffset(const CUnit* o)          { return GetObjOffsetImpl(OBJ_UNIT   , o->id); }
+size_t ModelUniformsStorage::GetObjOffset(const CFeature* o)       { return GetObjOffsetImpl(OBJ_FEATURE, o->id); }
+size_t ModelUniformsStorage::GetObjOffset(const CUnit* o) const    { return GetObjOffsetImpl(OBJ_UNIT   , o->id); }
+size_t ModelUniformsStorage::GetObjOffset(const CFeature* o) const { return GetObjOffsetImpl(OBJ_FEATURE, o->id); }
+
+const ModelUniformsStorage::MyType& ModelUniformsStorage::GetObjUniformsArray(const CUnit* o) const    { return storage[GetObjOffset(o)]; }
+const ModelUniformsStorage::MyType& ModelUniformsStorage::GetObjUniformsArray(const CFeature* o) const { return storage[GetObjOffset(o)]; }
+
+ModelUniformsStorage::MyType& ModelUniformsStorage::GetObjUniformsArray(const CUnit* o)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
-	size_t offset = GetObjOffset(o);
+	const size_t offset = GetObjOffset(o);
+	updateList.SetUpdate(offset);
 	return storage[offset];
 }
 
-ModelUniformsStorage::MyType& ModelUniformsStorage::GetObjUniformsArray(const CWorldObject* o)
+ModelUniformsStorage::MyType& ModelUniformsStorage::GetObjUniformsArray(const CFeature* o)
 {
-	RECOIL_DETAILED_TRACY_ZONE;
-	size_t offset = GetObjOffset(o);
+	const size_t offset = GetObjOffset(o);
 	updateList.SetUpdate(offset);
 	return storage[offset];
 }

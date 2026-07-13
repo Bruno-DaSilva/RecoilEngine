@@ -628,7 +628,7 @@ void CLuaUnitScript::Create()
 
 void CLuaUnitScript::Killed()
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	const int fn = LUAFN_Killed;
 
 	if (!HasFunction(fn)) {
@@ -670,14 +670,14 @@ void CLuaUnitScript::Killed()
 
 void CLuaUnitScript::WindChanged(float heading, float speed)
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	Call(LUAFN_WindChanged, heading, speed);
 }
 
 
 void CLuaUnitScript::ExtractionRateChanged(float speed)
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	Call(LUAFN_ExtractionRateChanged, speed);
 }
 
@@ -686,14 +686,14 @@ void CLuaUnitScript::ExtractionRateChanged(float speed)
 void CLuaUnitScript::WorldRockUnit(const float3& rockDir) { RockUnit(unit->GetObjectSpaceVec(rockDir)); }
 void CLuaUnitScript::RockUnit(const float3& rockDir)
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	Call(LUAFN_RockUnit, rockDir.x, rockDir.z);
 }
 
 void CLuaUnitScript::WorldHitByWeapon(const float3& hitDir, int weaponDefId, float& inoutDamage) { HitByWeapon(unit->GetObjectSpaceVec(hitDir), weaponDefId, inoutDamage); }
 void CLuaUnitScript::HitByWeapon(const float3& hitDir, int weaponDefId, float& inoutDamage)
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 
 	const int fn = LUAFN_HitByWeapon;
 
@@ -728,7 +728,7 @@ void CLuaUnitScript::HitByWeapon(const float3& hitDir, int weaponDefId, float& i
 
 void CLuaUnitScript::SetSFXOccupy(int curTerrainType)
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	const int fn = LUAFN_SetSFXOccupy;
 
 	if (!HasFunction(fn))
@@ -746,7 +746,7 @@ void CLuaUnitScript::SetSFXOccupy(int curTerrainType)
 
 void CLuaUnitScript::QueryLandingPads(std::vector<int>& out_pieces)
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	const int fn = LUAFN_QueryLandingPads;
 
 	if (!HasFunction(fn))
@@ -786,28 +786,28 @@ void CLuaUnitScript::QueryLandingPads(std::vector<int>& out_pieces)
 
 void CLuaUnitScript::BeginTransport(const CUnit* unit)
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	Call(LUAFN_BeginTransport, unit->id);
 }
 
 
 int CLuaUnitScript::QueryTransport(const CUnit* unit)
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	return RunQueryCallIn(LUAFN_QueryTransport, unit->id);
 }
 
 
 void CLuaUnitScript::TransportPickup(const CUnit* unit)
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	Call(LUAFN_TransportPickup, unit->id);
 }
 
 
 void CLuaUnitScript::TransportDrop(const CUnit* unit, const float3& pos)
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	const int fn = LUAFN_TransportDrop;
 
 	if (!HasFunction(fn))
@@ -828,56 +828,56 @@ void CLuaUnitScript::TransportDrop(const CUnit* unit, const float3& pos)
 
 void CLuaUnitScript::StartBuilding(float heading, float pitch)
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	Call(LUAFN_StartBuilding, heading, pitch);
 }
 
 
 int CLuaUnitScript::QueryNanoPiece()
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	return RunQueryCallIn(LUAFN_QueryNanoPiece);
 }
 
 
 int CLuaUnitScript::QueryBuildInfo()
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	return RunQueryCallIn(LUAFN_QueryBuildInfo);
 }
 
 
 int CLuaUnitScript::QueryWeapon(int weaponNum)
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	return RunQueryCallIn(LUAFN_QueryWeapon, weaponNum + LUA_WEAPON_BASE_INDEX);
 }
 
 
 void CLuaUnitScript::AimWeapon(int weaponNum, float heading, float pitch)
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	Call(LUAFN_AimWeapon, weaponNum + LUA_WEAPON_BASE_INDEX, heading, pitch);
 }
 
 
 void  CLuaUnitScript::AimShieldWeapon(CPlasmaRepulser* weapon)
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	Call(LUAFN_AimShield, weapon->weaponNum + LUA_WEAPON_BASE_INDEX);
 }
 
 
 int CLuaUnitScript::AimFromWeapon(int weaponNum)
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	return RunQueryCallIn(LUAFN_AimFromWeapon, weaponNum + LUA_WEAPON_BASE_INDEX);
 }
 
 
 void CLuaUnitScript::Shot(int weaponNum)
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	// FIXME: pass projectileID?
 	Call(LUAFN_Shot, weaponNum + LUA_WEAPON_BASE_INDEX);
 }
@@ -885,7 +885,7 @@ void CLuaUnitScript::Shot(int weaponNum)
 
 bool CLuaUnitScript::BlockShot(int weaponNum, const CUnit* targetUnit, bool userTarget)
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	const int fn = LUAFN_BlockShot;
 
 	if (!HasFunction(fn))
@@ -908,7 +908,7 @@ bool CLuaUnitScript::BlockShot(int weaponNum, const CUnit* targetUnit, bool user
 
 float CLuaUnitScript::TargetWeight(int weaponNum, const CUnit* targetUnit)
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	const int fn = LUAFN_TargetWeight;
 
 	if (!HasFunction(fn))
@@ -930,7 +930,7 @@ float CLuaUnitScript::TargetWeight(int weaponNum, const CUnit* targetUnit)
 
 void CLuaUnitScript::AnimFinished(AnimType type, int piece, int axis)
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 	switch (type) {
 	case ATurn:
 		Call(LUAFN_TurnFinished, piece + 1, axis + 1); break;
@@ -1000,23 +1000,23 @@ bool CLuaUnitScript::RawRunCallIn(int functionId, int inArgs, int outArgs)
 }
 
 
-void CLuaUnitScript::Destroy() { ZoneScoped; Call(LUAFN_Destroy); }
-void CLuaUnitScript::StartMoving(bool reversing) { ZoneScoped; Call(LUAFN_StartMoving, reversing * 1.0f); }
-void CLuaUnitScript::StopMoving() { ZoneScoped; Call(LUAFN_StopMoving); }
-void CLuaUnitScript::StartSkidding(const float3& vel) { ZoneScoped; Call(LUAFN_StartSkidding, vel.x, vel.y, vel.z); }
-void CLuaUnitScript::StopSkidding() { ZoneScoped; Call(LUAFN_StopSkidding); }
-void CLuaUnitScript::ChangeHeading(short deltaHeading) { ZoneScoped; Call(LUAFN_ChangeHeading, deltaHeading * 1.0f); }
-void CLuaUnitScript::StartUnload() { ZoneScoped; Call(LUAFN_StartUnload); }
-void CLuaUnitScript::EndTransport() { ZoneScoped; Call(LUAFN_EndTransport); }
-void CLuaUnitScript::StartBuilding() { ZoneScoped; Call(LUAFN_StartBuilding); }
-void CLuaUnitScript::StopBuilding() { ZoneScoped; Call(LUAFN_StopBuilding); }
-void CLuaUnitScript::Falling() { ZoneScoped; Call(LUAFN_Falling); }
-void CLuaUnitScript::Landed() { ZoneScoped; Call(LUAFN_Landed); }
-void CLuaUnitScript::Activate() { ZoneScoped; Call(LUAFN_Activate); }
-void CLuaUnitScript::Deactivate() { ZoneScoped; Call(LUAFN_Deactivate); }
-void CLuaUnitScript::MoveRate(int curRate) { ZoneScoped; Call(LUAFN_MoveRate, curRate); }
-void CLuaUnitScript::FireWeapon(int weaponNum) { ZoneScoped; Call(LUAFN_FireWeapon, weaponNum + LUA_WEAPON_BASE_INDEX); }
-void CLuaUnitScript::EndBurst(int weaponNum) { ZoneScoped; Call(LUAFN_EndBurst, weaponNum + LUA_WEAPON_BASE_INDEX); }
+void CLuaUnitScript::Destroy() { RECOIL_DETAILED_TRACY_ZONE; Call(LUAFN_Destroy); }
+void CLuaUnitScript::StartMoving(bool reversing) { RECOIL_DETAILED_TRACY_ZONE; Call(LUAFN_StartMoving, reversing * 1.0f); }
+void CLuaUnitScript::StopMoving() { RECOIL_DETAILED_TRACY_ZONE; Call(LUAFN_StopMoving); }
+void CLuaUnitScript::StartSkidding(const float3& vel) { RECOIL_DETAILED_TRACY_ZONE; Call(LUAFN_StartSkidding, vel.x, vel.y, vel.z); }
+void CLuaUnitScript::StopSkidding() { RECOIL_DETAILED_TRACY_ZONE; Call(LUAFN_StopSkidding); }
+void CLuaUnitScript::ChangeHeading(short deltaHeading) { RECOIL_DETAILED_TRACY_ZONE; Call(LUAFN_ChangeHeading, deltaHeading * 1.0f); }
+void CLuaUnitScript::StartUnload() { RECOIL_DETAILED_TRACY_ZONE; Call(LUAFN_StartUnload); }
+void CLuaUnitScript::EndTransport() { RECOIL_DETAILED_TRACY_ZONE; Call(LUAFN_EndTransport); }
+void CLuaUnitScript::StartBuilding() { RECOIL_DETAILED_TRACY_ZONE; Call(LUAFN_StartBuilding); }
+void CLuaUnitScript::StopBuilding() { RECOIL_DETAILED_TRACY_ZONE; Call(LUAFN_StopBuilding); }
+void CLuaUnitScript::Falling() { RECOIL_DETAILED_TRACY_ZONE; Call(LUAFN_Falling); }
+void CLuaUnitScript::Landed() { RECOIL_DETAILED_TRACY_ZONE; Call(LUAFN_Landed); }
+void CLuaUnitScript::Activate() { RECOIL_DETAILED_TRACY_ZONE; Call(LUAFN_Activate); }
+void CLuaUnitScript::Deactivate() { RECOIL_DETAILED_TRACY_ZONE; Call(LUAFN_Deactivate); }
+void CLuaUnitScript::MoveRate(int curRate) { RECOIL_DETAILED_TRACY_ZONE; Call(LUAFN_MoveRate, curRate); }
+void CLuaUnitScript::FireWeapon(int weaponNum) { RECOIL_DETAILED_TRACY_ZONE; Call(LUAFN_FireWeapon, weaponNum + LUA_WEAPON_BASE_INDEX); }
+void CLuaUnitScript::EndBurst(int weaponNum) { RECOIL_DETAILED_TRACY_ZONE; Call(LUAFN_EndBurst, weaponNum + LUA_WEAPON_BASE_INDEX); }
 
 
 /******************************************************************************/
@@ -1168,6 +1168,10 @@ int CLuaUnitScript::CreateScript(lua_State* L)
 
 	// replace the unit's script (ctor parses callIn table)
 	unit->script = CUnitScriptFactory::CreateLuaScript(unit, L);
+
+	// WS-1 §4.1-E: the swap changes the served script->model piece mapping
+	// (GetUnitScriptPiece/Names) while the piece tree may be value-identical
+	unit->localModel.BumpPieceTreeVersion();
 	return 0;
 }
 

@@ -53,7 +53,8 @@ CR_REG_METADATA(CGlobalUnsynced, (
 	CR_MEMBER(spectatingFullSelect),
 	CR_IGNORED(fpsMode),
 	CR_IGNORED(globalQuit),
-	CR_IGNORED(globalReload)
+	CR_IGNORED(globalReload),
+	CR_IGNORED(unsyncedTempNum)
 ))
 
 
@@ -82,6 +83,8 @@ void CGlobalUnsynced::ResetState()
 	fpsMode = false;
 	globalQuit = false;
 	globalReload = false;
+
+	unsyncedTempNum = 1;
 
 	guRNG.Seed(time(nullptr) % ((spring_gettime().toNanoSecsi() + 1) * 9007));
 	playerHandler.ResetState();

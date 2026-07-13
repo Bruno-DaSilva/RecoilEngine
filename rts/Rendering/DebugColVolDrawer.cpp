@@ -6,6 +6,7 @@
 #include "Game/GlobalUnsynced.h"
 #include "Map/ReadMap.h"
 #include "Rendering/Units/UnitDrawer.h"
+#include "Rendering/Features/FeatureDrawer.h"
 #include "Rendering/GlobalRendering.h"
 #include "Rendering/GL/glExtra.h"
 #include "Rendering/GL/myGL.h"
@@ -18,6 +19,8 @@
 #include "Sim/Weapons/PlasmaRepulser.h"
 #include "Sim/Weapons/Weapon.h"
 #include "System/UnorderedSet.hpp"
+#include "System/Log/ILog.h"
+#include "System/SimDrawSplit.h"
 
 static constexpr float4 DEFAULT_COLVOL_COLOR = float4(0.45f, 0.00f, 0.45f, 0.35f); // purple (light)
 static constexpr float4 DEFAULT_SELVOL_COLOR = float4(0.00f, 0.45f, 0.00f, 0.20f); // dark green
@@ -77,9 +80,13 @@ static inline void DrawCollisionVolume(const CollisionVolume* vol, const CMatrix
 	}
 }
 
-static void DrawObjectDebugPieces(const CSolidObject* o, const float4& defColor)
+static CMatrix44f GetDrawTransformMatrix(const CUnit* u) { return CUnitDrawer::GetUnsyncedTransformMatrix(u); }
+static CMatrix44f GetDrawTransformMatrix(const CFeature* f) { return CFeatureDrawer::GetUnsyncedTransformMatrix(f); }
+
+template<typename TObj>
+static void DrawObjectDebugPieces(const TObj* o, const float4& defColor)
 {
-	const CMatrix44f mo = o->GetTransformMatrix(false);
+	const CMatrix44f mo = GetDrawTransformMatrix(o);
 
 	const int hitDeltaTime = gs->frameNum - o->pieceHitFrames[true];
 	const int setFadeColor = (o->pieceHitFrames[true] > 0 && hitDeltaTime < 150);
@@ -103,7 +110,8 @@ static void DrawObjectDebugPieces(const CSolidObject* o, const float4& defColor)
 
 
 
-static inline void DrawObjectMidAndAimPos(const CSolidObject* o)
+template<typename TObj>
+static inline void DrawObjectMidAndAimPos(const TObj* o)
 {
 	using namespace GL::State;
 	auto state = GL::SubState(
@@ -113,7 +121,7 @@ static inline void DrawObjectMidAndAimPos(const CSolidObject* o)
 	auto* shader = GL::shapes.GetShader();
 	auto shToken = shader->EnableScoped();
 
-	auto m = o->GetTransformMatrix(false);
+	auto m = GetDrawTransformMatrix(o);
 
 	shader->SetUniformMatrix4x4("viewProjMat", false, camera->GetViewProjectionMatrix().m);
 
@@ -154,7 +162,7 @@ static inline void DrawFeatureColVol(const CFeature* f)
 	if (!camera->InView(f->pos, f->GetDrawRadius()))
 		return;
 
-	CMatrix44f fm(f->GetTransformMatrixRef(false));
+	CMatrix44f fm(CFeatureDrawer::GetUnsyncedTransformMatrix(f));
 	fm.Translate(f->relMidPos);
 
 	DrawObjectMidAndAimPos(f);
@@ -183,7 +191,7 @@ static inline void DrawUnitColVol(const CUnit* u)
 		return;
 	if (!(u->losStatus[gu->myAllyTeam] & LOS_INLOS) && !gu->spectatingFullView)
 		return;
-	if (!camera->InView(u->drawMidPos, u->GetDrawRadius()))
+	if (!camera->InView(CUnitDrawer::GetDrawMidPos(u), u->GetDrawRadius()))
 		return;
 
 	const CollisionVolume* v = &u->collisionVolume;
@@ -236,7 +244,7 @@ static inline void DrawUnitColVol(const CUnit* u)
 
 		DrawObjectMidAndAimPos(u);
 
-		CMatrix44f um(u->GetTransformMatrix(false));
+		CMatrix44f um(CUnitDrawer::GetUnsyncedTransformMatrix(u));
 		um.Translate(u->relMidPos);
 		DrawCollisionVolume(&u->selectionVolume, um, DEFAULT_SELVOL_COLOR);
 
@@ -327,6 +335,16 @@ namespace DebugColVolDrawer
 	{
 		if (!enable)
 			return;
+	// PR 27b: this overlay walks live sim containers; under the running
+	// split that is a cross-thread race, so it stays dark (dev tool)
+	if (SimDrawSplit::Enabled() && SimDrawSplit::SimThreadRunning()) {
+		static bool warned = false;
+		if (!warned) {
+			LOG_L(L_WARNING, "[%s] debug overlay unavailable with SimDrawSplit=1", "DebugColVolDrawer");
+			warned = true;
+		}
+		return;
+	}
 
 		using namespace GL::State;
 		auto state = GL::SubState(

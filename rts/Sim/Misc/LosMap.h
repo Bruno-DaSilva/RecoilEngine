@@ -33,6 +33,12 @@ public:
 
 	void Kill() {}
 
+	// PR 28 (sim|draw map-layer mirrors): identity of this map within the
+	// DrawMapMirrors LOS store (mirrorType = ILosType::LosType, mirrorAlly =
+	// losMaps index == allyTeam). Set by ILosType::Init; the two cell mutators
+	// below use it to mark the mirror dirty (the choke points).
+	void SetMirrorId(int type, int ally) { mirrorType = type; mirrorAlly = ally; }
+
 public:
 	/// circular area, for airLosMap, circular radar maps, jammer maps, ...
 	void AddCircle(SLosInstance* instance, int amount);
@@ -70,6 +76,10 @@ protected:
 	const float* mipHeightMap = nullptr;
 
 	bool sendReadmapEvents = false;
+
+	// PR 28: DrawMapMirrors LOS-store identity (see SetMirrorId)
+	int mirrorType = -1;
+	int mirrorAlly = -1;
 };
 
 #endif // LOS_MAP_H
