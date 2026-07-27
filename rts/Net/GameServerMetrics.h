@@ -4,6 +4,7 @@
 
 #include <string>
 
+#include "NetworkMetrics.h"
 #include "ServerHealthMetrics.h"
 #include "System/Misc/SpringTime.h"
 
@@ -12,9 +13,10 @@ class CGameServer;
 /**
  * @brief every prometheus series the game server exports
  *
- * A facade over the metric groups: it owns the endpoint's lifetime and the
- * publish interval, and forwards everything else. Every method no-ops when the
- * subsystem is disabled (the default), so callers never test for it.
+ * A facade over NetworkMetrics (recoil_network_) and ServerHealthMetrics
+ * (recoil_server_): it owns the endpoint's lifetime and the publish interval,
+ * and forwards everything else. Every method no-ops when the subsystem is
+ * disabled (the default), so callers never test for it.
  *
  * Entry points are called from both the netcode and the game thread, but always
  * under CGameServer::gameServerMutex.
@@ -45,7 +47,10 @@ public:
 
 	void SetGameStartTime(double unixSecs);
 
+	void ResetConnectionDeltas(int playerId);
+
 private:
+	NetworkMetrics network;
 	ServerHealthMetrics health;
 
 	/// null families until Init() has registered against an enabled registry

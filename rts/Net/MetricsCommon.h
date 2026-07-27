@@ -8,8 +8,8 @@
 #include <prometheus/counter.h>
 #include <prometheus/family.h>
 
-/// shared by the metric groups; not included by the facade header, so a build
-/// without prometheus never sees these
+/// shared by NetworkMetrics and ServerHealthMetrics; not included by the facade
+/// header, so a build without prometheus never sees these
 namespace metrics {
 
 /// the netcode works in milliseconds, prometheus wants base units
