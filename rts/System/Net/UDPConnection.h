@@ -1,7 +1,6 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
-#ifndef _UDP_CONNECTION_H
-#define _UDP_CONNECTION_H
+#pragma once
 
 #include <asio/ip/udp.hpp>
 #include <memory>
@@ -107,6 +106,8 @@ public:
 
 	unsigned int GetPacketQueueSize() const override { return msgQueue.size(); }
 
+	ConnectionStats GetStats() const override;
+
 	std::string Statistics() const override;
 	std::string GetFullAddress() const override;
 
@@ -152,6 +153,21 @@ private:
 	void RequestResend(ChunkPtr ptr, bool noSort);
 	void SendPacket(Packet& pkt);
 
+	/// application bytes queued for this link but not yet transmitted, across
+	/// both stages of the send path. Walked rather than tracked incrementally:
+	/// read once per metrics poll, not per packet.
+	unsigned int SendQueuedBytes() const {
+		unsigned int bytes = 0;
+
+		for (const std::shared_ptr<const RawPacket>& pkt: outgoingData)
+			bytes += pkt->length;
+
+		for (const ChunkPtr& chunk: newChunks)
+			bytes += chunk->data.size();
+
+		return bytes;
+	}
+
 	void UpdateWaitingPackets();
 	void UpdateResendRequests();
 
@@ -185,7 +201,9 @@ private:
 
 	/// outgoing stuff (pure data without header) waiting to be sent
 	std::deque< std::shared_ptr<const RawPacket> > outgoingData;
-	/// packets we have received but not yet read
+	/// received chunks that cannot be delivered yet, because an earlier chunk
+	/// in the sequence has not arrived. Keyed by chunk number; delivered
+	/// entries are removed at the end of each ProcessRawPacket.
 	std::vector< std::pair<int, RawPacket> > waitingPackets;
 	spring::unordered_set<int> incomingChunkNums;
 
@@ -239,7 +257,10 @@ private:
 
 	/// packets that are resent
 	unsigned int resentChunks;
+	/// chunks discarded on arrival because we already had them
 	unsigned int droppedChunks;
+	unsigned int sendErrors;
+	unsigned int recvErrors;
 
 	unsigned int sentOverhead, recvOverhead;
 	unsigned int sentPackets, recvPackets;
@@ -264,6 +285,4 @@ private:
 };
 
 } // namespace netcode
-
-#endif // _UDP_CONNECTION_H
 

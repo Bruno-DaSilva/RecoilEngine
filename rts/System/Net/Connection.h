@@ -1,7 +1,6 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
-#ifndef _CONNECTION_H
-#define _CONNECTION_H
+#pragma once
 
 #include <string>
 #include <memory>
@@ -10,6 +9,41 @@
 
 namespace netcode
 {
+
+/**
+ * @brief per-link traffic statistics
+ *
+ * Byte counts are tracked by every connection type; everything else is UDP-only
+ * -- see isNetworkLink.
+ */
+struct ConnectionStats {
+	// cumulative
+	unsigned int sentBytes = 0;
+	unsigned int receivedBytes = 0;
+	unsigned int sentPackets = 0;
+	unsigned int receivedPackets = 0;
+	/// chunks we put back on the wire after they had already been sent once
+	unsigned int retransmittedChunks = 0;
+	/// inbound chunks discarded because the same chunk had already arrived
+	unsigned int discardedChunks = 0;
+	/// socket-level failures; ours or the environment's, not the peer's link
+	unsigned int sendErrors = 0;
+	unsigned int receiveErrors = 0;
+
+	// instantaneous
+	float sendRateBytesPerSec = 0.0f;
+	unsigned int unackedChunks = 0;
+	unsigned int queuedResendChunks = 0;
+	/// inbound chunks held because an earlier chunk has not arrived
+	unsigned int queuedInboundChunks = 0;
+	/// application bytes handed to the link and not yet on the wire
+	unsigned int queuedSendBytes = 0;
+
+	/// whether the other fields describe a real network link. False on a
+	/// loopback, which moves bytes but reports no packets, loss or queue depths,
+	/// so its zeroes are missing data rather than a healthy link.
+	bool isNetworkLink = false;
+};
 
 /**
  * @brief Base class for connecting to various receivers / senders
@@ -62,6 +96,7 @@ public:
 	virtual bool NeedsReconnect() = 0;
 
 	unsigned int GetDataReceived() const { return dataRecv; }
+	virtual ConnectionStats GetStats() const { return {dataSent, dataRecv}; }
 	unsigned int GetNumQueuedPings() const { return numPings; }
 	virtual unsigned int GetPacketQueueSize() const { return 0; }
 
@@ -84,6 +119,3 @@ protected:
 };
 
 } // namespace netcode
-
-#endif // _CONNECTION_H
-

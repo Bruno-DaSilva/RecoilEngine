@@ -307,6 +307,8 @@ void UDPConnection::Init()
 	sentPackets = 0;
 	recvPackets = 0;
 	droppedChunks = 0;
+	sendErrors = 0;
+	recvErrors = 0;
 	mtu = globalConfig.mtu;
 	reconnectTime = globalConfig.reconnectTimeout;
 
@@ -453,8 +455,10 @@ void UDPConnection::Update()
 
 			const size_t bytesReceived = mySocket->receive_from(asio::buffer(recvBuffer), udpEndPoint, msgFlags, err);
 
-			if (CheckErrorCode(err))
+			if (CheckErrorCode(err)) {
+				recvErrors += 1;
 				break;
+			}
 
 			if (bytesReceived < Packet::headerSize)
 				continue;
@@ -801,6 +805,26 @@ bool UDPConnection::CanReconnect() const {
 	return (globalConfig.reconnectTimeout > 0);
 }
 
+ConnectionStats UDPConnection::GetStats() const
+{
+	ConnectionStats stats;
+	stats.sentBytes = dataSent;
+	stats.receivedBytes = dataRecv;
+	stats.sentPackets = sentPackets;
+	stats.receivedPackets = recvPackets;
+	stats.retransmittedChunks = resentChunks;
+	stats.discardedChunks = droppedChunks;
+	stats.sendErrors = sendErrors;
+	stats.receiveErrors = recvErrors;
+	stats.sendRateBytesPerSec = outgoing.GetAverage();
+	stats.unackedChunks = unackedChunks.size();
+	stats.queuedResendChunks = resendRequested.size();
+	stats.queuedInboundChunks = waitingPackets.size();
+	stats.queuedSendBytes = SendQueuedBytes();
+	stats.isNetworkLink = true;
+	return stats;
+}
+
 std::string UDPConnection::Statistics() const
 {
 	const char* fmts[] = {
@@ -1060,8 +1084,10 @@ void UDPConnection::SendPacket(Packet& pkt)
 		mySocket->send_to(buffer(sendBuffer), addr, flags, err);
 	}
 
-	if (CheckErrorCode(err))
+	if (CheckErrorCode(err)) {
+		sendErrors += 1;
 		return;
+	}
 
 	dataSent += sendBuffer.size();
 	sentPackets += 1;

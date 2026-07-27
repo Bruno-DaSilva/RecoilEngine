@@ -1,7 +1,6 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
-#ifndef _UDP_LISTENER_H
-#define _UDP_LISTENER_H
+#pragma once
 
 #include "System/Misc/NonCopyable.h"
 #include <memory>
@@ -77,12 +76,18 @@ public:
 	void UpdateConnections(); // Updates connections when the endpoint has been reconnected
 
 	auto& GetSocket() { return socket; }
+	/// socket-level receive failures on the shared listen socket; ours or the
+	/// host environment's, not a peer's
+	unsigned int GetReceiveErrors() const { return recvErrors; }
+
 private:
 	/**
 	 * @brief Do we accept packets from unknown sources?
 	 * If true, we will create a new connection, if false, they get dropped.
 	 */
 	bool acceptNewConnections;
+
+	unsigned int recvErrors = 0;
 
 	/// socket being listened on
 	std::shared_ptr<asio::ip::udp::socket> socket;
@@ -97,5 +102,3 @@ private:
 };
 
 }
-
-#endif // _UDP_LISTENER_H
