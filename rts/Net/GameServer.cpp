@@ -12,6 +12,7 @@
 #include "GameServer.h"
 
 #include "GameParticipant.h"
+#include "GameServerMetrics.h"
 #include "GameSkirmishAI.h"
 #include "AutohostInterface.h"
 
@@ -43,6 +44,7 @@
 #include "System/SpringExitCode.h"
 #include "System/SpringFormat.h"
 #include "System/TdfParser.h"
+#include "System/TimeUtil.h"
 #include "System/StringHash.h"
 #include "System/StringUtil.h"
 #include "System/Config/ConfigHandler.h"
@@ -135,6 +137,8 @@ CGameServer::CGameServer(
 	lastPlayerInfo = serverStartTime;
 	lastUpdate = serverStartTime;
 
+	serverMetrics = std::make_unique<ServerMetrics>();
+
 	myClientSetup = newClientSetup;
 	myGameData = newGameData;
 	myGameSetup = newGameSetup;
@@ -149,6 +153,9 @@ CGameServer::~CGameServer()
 	LOG_L(L_INFO, "[%s][1]", __func__);
 	thread.join();
 	LOG_L(L_INFO, "[%s][2]", __func__);
+
+	// invalidates every metric pointer, so only safe with the netcode thread gone
+	serverMetrics->Shutdown();
 
 	// after this, demoRecorder goes out of scope and its dtor is called
 	WriteDemoData();
@@ -259,6 +266,12 @@ void CGameServer::Initialize()
 
 	lastNewFrameTick = spring_gettime();
 	lastBandwidthUpdate = spring_gettime();
+
+	// before ServerMetrics::Init, which labels recoil_server_info with the id
+	if (!demoReader)
+		ComputeGameID();
+
+	serverMetrics->Init(GetGameIDHex());
 
 	thread = spring::thread(std::bind(&CGameServer::UpdateLoop, this));
 
@@ -874,8 +887,9 @@ void CGameServer::Update()
 		if ((quitServer = (quitServer || !hasPlayers)))
 			Message(NoClientsExit);
 	}
-}
 
+	serverMetrics->Update(*this);
+}
 
 
 void CGameServer::LagProtection()
@@ -2137,7 +2151,7 @@ void CGameServer::ServerReadNet()
 }
 
 
-void CGameServer::GenerateAndSendGameID()
+void CGameServer::ComputeGameID()
 {
 	// First and second dword are time based (current time and load time).
 	gameID.intArray[0] = (unsigned) time(nullptr);
@@ -2158,29 +2172,46 @@ void CGameServer::GenerateAndSendGameID()
 		unsigned char p[16];
 	#if defined(__MINGW32__) && !defined(__MINGW64_VERSION_MAJOR)
 		// workaround missing C99 support in a msvc lib with %2hhx
-		generatedGameID = (sscanf(myGameSetup->gameID.c_str(),
+		const bool parsedFixedID = (sscanf(myGameSetup->gameID.c_str(),
 		      "%02hc%02hc%02hc%02hc%02hc%02hc%02hc%02hc"
 		      "%02hc%02hc%02hc%02hc%02hc%02hc%02hc%02hc",
 		      &p[ 0], &p[ 1], &p[ 2], &p[ 3], &p[ 4], &p[ 5], &p[ 6], &p[ 7],
 		      &p[ 8], &p[ 9], &p[10], &p[11], &p[12], &p[13], &p[14], &p[15]) == 16);
 	#else
-		generatedGameID = (sscanf(myGameSetup->gameID.c_str(),
+		const bool parsedFixedID = (sscanf(myGameSetup->gameID.c_str(),
 		       "%hhx%hhx%hhx%hhx%hhx%hhx%hhx%hhx"
 		       "%hhx%hhx%hhx%hhx%hhx%hhx%hhx%hhx",
 		       &p[ 0], &p[ 1], &p[ 2], &p[ 3], &p[ 4], &p[ 5], &p[ 6], &p[ 7],
 		       &p[ 8], &p[ 9], &p[10], &p[11], &p[12], &p[13], &p[14], &p[15]) == 16);
 	#endif
-		if (generatedGameID)
+		if (parsedFixedID)
 			for (int i = 0; i<16; ++i)
 				gameID.charArray[i] = p[i];
 	}
+}
 
+
+std::string CGameServer::GetGameIDHex() const
+{
+	std::string hex;
+
+	for (const unsigned char b: gameID.charArray)
+		hex += spring::format("%02x", b);
+
+	return hex;
+}
+
+
+void CGameServer::GenerateAndSendGameID()
+{
 	Broadcast(CBaseNetProtocol::Get().SendGameID(gameID.charArray));
 
 	if (demoRecorder != nullptr) {
 		demoRecorder->SetGameID(gameID.charArray);
 	}
 
+	// HasGameID() is what the dedicated server waits on, so it must not flip
+	// until the id has reached the clients and the demo
 	generatedGameID = true;
 }
 
@@ -2234,6 +2265,8 @@ void CGameServer::StartGame(bool forced)
 	assert(!gameHasStarted);
 	gameHasStarted = true;
 	startTime = gameTime;
+
+	serverMetrics->SetGameStartTime(CTimeUtil::GetCurrentTime());
 
 	if (!canReconnect && !allowSpecJoin)
 		packetCache.clear(); // free memory
@@ -3097,6 +3130,7 @@ unsigned CGameServer::BindConnection(
 	// finally send player all packets he missed until now
 	for (const std::shared_ptr<const netcode::RawPacket>& p: packetCache)
 		newPlayer.SendData(p);
+
 
 	// new connection established
 	Message(spring::format(" -> Connection established (given id %i)", newPlayerNumber));

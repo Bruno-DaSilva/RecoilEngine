@@ -1,10 +1,10 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
-#ifndef _GAME_SERVER_H
-#define _GAME_SERVER_H
+#pragma once
 
 // #include <asio/ip/udp.hpp>
 
+#include <algorithm> // IsServerCommand -> std::lower_bound
 #include <atomic>
 #include <memory>
 #include <string>
@@ -42,6 +42,7 @@ class CGameSetup;
 class ChatMessage;
 class GameParticipant;
 class GameSkirmishAI;
+class ServerMetrics;
 
 class GameTeam : public TeamBase
 {
@@ -65,6 +66,9 @@ private:
 class CGameServer
 {
 	friend class CCregLoadSaveHandler; // For initializing server state after load
+	// the metrics classes read server state to publish it; never write
+	friend class ServerMetrics;
+	friend class ServerHealthMetrics;
 public:
 	CGameServer(
 		const std::shared_ptr<const ClientSetup> newClientSetup,
@@ -167,12 +171,30 @@ private:
 
 	void LagProtection();
 
-	/** @brief Generate a unique game identifier and send it to all clients. */
+	/**
+	 * @brief derive this game's unique identifier
+	 *
+	 * Must run before ServerMetrics::Init, which labels recoil_server_info with
+	 * the id. Does not flip HasGameID(); the broadcast below does.
+	 */
+	void ComputeGameID();
+	/// the game id as 32 lowercase hex chars, for use as a metric label value
+	std::string GetGameIDHex() const;
+	/** @brief Send the game identifier to all clients. */
 	void GenerateAndSendGameID();
 
 	void WriteDemoData();
 	/// read data from demo and send it to clients
 	bool SendDemoData(int targetFrameNum);
+
+	/**
+	 * @brief send one packet to one participant, attributing its bytes
+	 *
+	 * Not attributed here: pre-bind handshake replies, the per-AI links in
+	 * ServerReadNet (counted on consumption), and a listen-server host's own
+	 * loopback slot.
+	 */
+	void SendTo(GameParticipant& p, const std::shared_ptr<const netcode::RawPacket>& packet);
 
 	void Broadcast(std::shared_ptr<const netcode::RawPacket> packet);
 
@@ -224,6 +246,9 @@ private:
 
 	std::deque< std::shared_ptr<const netcode::RawPacket> > packetCache;
 
+	/// always allocated; every method no-ops when metrics are disabled
+	std::unique_ptr<ServerMetrics> serverMetrics;
+
 	/////////////////// sync stuff ///////////////////
 #ifdef SYNCCHECK
 	std::set<int> outstandingSyncFrames;
@@ -237,6 +262,7 @@ private:
 	spring_time lastPlayerInfo = spring_notime;
 	spring_time lastUpdate = spring_notime;
 	spring_time lastBandwidthUpdate = spring_notime;
+	spring_time lastReadNetTime = spring_gettime();
 
 	float modGameTime = 0.0f;
 	float gameTime = 0.0f;
@@ -301,12 +327,11 @@ private:
 	std::atomic<bool> reloadingServer{false};
 	std::atomic<bool> quitServer{false};
 
+	/// zero-initialised: demo playback never computes one
 	union {
 		unsigned char charArray[16];
 		unsigned int intArray[4];
-	} gameID;
+	} gameID = {};
 };
 
 extern CGameServer* gameServer;
-
-#endif // _GAME_SERVER_H
