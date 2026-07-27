@@ -312,6 +312,9 @@ void UDPConnection::Init()
 	highestMissingCounted = -1;
 	sendErrors = 0;
 	recvErrors = 0;
+	throttledMilliSecs = 0.0;
+	reorderStallMilliSecs = 0.0;
+	lastDurationSampleTime = spring_gettime();
 	mtu = globalConfig.mtu;
 	reconnectTime = globalConfig.reconnectTimeout;
 
@@ -412,6 +415,20 @@ void UDPConnection::Update()
 {
 	spring_time curTime = spring_gettime();
 	outgoing.UpdateTime(spring_tomsecs(curTime));
+
+	const float durationDeltaMs = (curTime - lastDurationSampleTime).toMilliSecsf();
+	lastDurationSampleTime = curTime;
+
+	if (StatsSampling()) {
+		const bool chunkingBlocked = !outgoingData.empty() && OutgoingBandwidthExceeded(true);
+		const bool sendingBlocked  = !newChunks.empty()    && OutgoingBandwidthExceeded(false);
+
+		if (chunkingBlocked || sendingBlocked)
+			throttledMilliSecs += durationDeltaMs;
+
+		if (!waitingPackets.empty())
+			reorderStallMilliSecs += durationDeltaMs;
+	}
 
 	#ifdef ENABLE_DEBUG_STATS
 	{
@@ -731,8 +748,7 @@ void UDPConnection::Flush(const bool forced)
 		bool sendMore = true;
 
 		do {
-			sendMore  = (outgoing.GetAverage(true) <= globalConfig.linkOutgoingBandwidth);
-			sendMore |= ((globalConfig.linkOutgoingBandwidth <= 0) || partialPacket || forced);
+			sendMore = (!OutgoingBandwidthExceeded(true) || partialPacket || forced);
 
 			if (!outgoingData.empty() && sendMore) {
 				std::shared_ptr<const RawPacket>& packet = *(outgoingData.begin());
@@ -821,6 +837,8 @@ ConnectionStats UDPConnection::GetStats() const
 	stats.missingChunks = lostIncomingChunks;
 	stats.sendErrors = sendErrors;
 	stats.receiveErrors = recvErrors;
+	stats.sendBlockedMs = throttledMilliSecs;
+	stats.receiveStalledMs = reorderStallMilliSecs;
 	stats.sendRateBytesPerSec = outgoing.GetAverage();
 	stats.lossFactor = netLossFactor;
 	stats.unackedChunks = unackedChunks.size();
@@ -871,6 +889,11 @@ void UDPConnection::CreateChunk(const unsigned char* data, const unsigned length
 	std::copy(data, data + length, std::back_inserter(buf->data));
 	newChunks.push_back(buf);
 	lastChunkCreatedTime = spring_gettime();
+}
+
+bool UDPConnection::OutgoingBandwidthExceeded(bool includeQueued) const
+{
+	return (globalConfig.linkOutgoingBandwidth > 0 && outgoing.GetAverage(includeQueued) > globalConfig.linkOutgoingBandwidth);
 }
 
 void UDPConnection::SendIfNecessary(bool flushed)
@@ -992,7 +1015,7 @@ void UDPConnection::SendIfNecessary(bool flushed)
 	}
 
 
-	while (((outgoing.GetAverage() <= globalConfig.linkOutgoingBandwidth) || (globalConfig.linkOutgoingBandwidth <= 0))) {
+	while (!OutgoingBandwidthExceeded(false)) {
 		Packet buf(lastInOrder, nak);
 
 		if (nak > 0) {

@@ -35,6 +35,10 @@ struct ConnectionStats {
 	/// socket-level failures; ours or the environment's, not the peer's link
 	unsigned int sendErrors = 0;
 	unsigned int receiveErrors = 0;
+	/// time outbound data spent blocked by the bandwidth cap
+	double sendBlockedMs = 0.0;
+	/// time inbound delivery was stalled behind a missing chunk
+	double receiveStalledMs = 0.0;
 
 	// instantaneous
 	float sendRateBytesPerSec = 0.0f;

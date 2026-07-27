@@ -157,6 +157,9 @@ private:
 	void RequestResend(const ChunkPtr& ptr, bool noSort, bool lossSuspected);
 	void SendPacket(Packet& pkt);
 
+	/// true while the outgoing bandwidth cap is exceeded
+	bool OutgoingBandwidthExceeded(bool includeQueued) const;
+
 	/// application bytes queued for this link but not yet transmitted, across
 	/// both stages of the send path. Walked rather than tracked incrementally:
 	/// read once per metrics poll, not per packet.
@@ -273,6 +276,12 @@ private:
 	/// high-water mark so each inbound gap is counted once, even though the
 	/// gap list is rebuilt from scratch on every send pass
 	int highestMissingCounted;
+
+	/// time spent with queued data blocked by the outgoing bandwidth cap
+	double throttledMilliSecs;
+	/// time spent with inbound delivery stalled behind a missing chunk
+	double reorderStallMilliSecs;
+	spring_time lastDurationSampleTime;
 
 	unsigned int sentOverhead, recvOverhead;
 	unsigned int sentPackets, recvPackets;
