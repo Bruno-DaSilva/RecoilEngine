@@ -2,7 +2,11 @@
 
 #pragma once
 
+#include <algorithm>
+#include <array>
 #include <atomic>
+#include <cmath>
+#include <iterator>
 #include <string>
 #include <memory>
 
@@ -10,6 +14,57 @@
 
 namespace netcode
 {
+
+/// Response-time histogram bucket upper bounds in milliseconds.
+/// A bucket-count mismatch makes prometheus-cpp throw, so keep these in step
+/// with the histogram registered in ServerMetrics::Init.
+inline constexpr auto responseTimeBucketBoundsMs = std::to_array<float>(
+	{5.0f, 10.0f, 25.0f, 50.0f, 100.0f, 200.0f, 400.0f, 800.0f, 1600.0f});
+constexpr unsigned responseTimeNumBucketBounds = responseTimeBucketBoundsMs.size();
+/// one more than the bounds: the trailing bucket catches everything above
+constexpr unsigned responseTimeNumBuckets = responseTimeNumBucketBounds + 1;
+
+static_assert(
+	std::adjacent_find(
+		responseTimeBucketBoundsMs.begin(),
+		responseTimeBucketBoundsMs.end(),
+		[](float lhs, float rhs) { return lhs >= rhs; }
+	) == responseTimeBucketBoundsMs.end(),
+	"responseTimeBucketBoundsMs must be strictly ascending"
+);
+
+/// bucket index for a response-time sample, in [0, responseTimeNumBuckets)
+inline unsigned ResponseTimeBucketIndex(float sampleMs)
+{
+	const auto bound = std::lower_bound(responseTimeBucketBoundsMs.begin(), responseTimeBucketBoundsMs.end(), sampleMs);
+
+	return static_cast<unsigned>(std::distance(responseTimeBucketBoundsMs.begin(), bound));
+}
+
+/**
+ * @brief fold one send->ack sample into the smoothed response time and its jitter
+ *
+ * An exponentially weighted moving average: every sample shifts the average by a
+ * fixed fraction of the gap, so older samples fade out instead of dropping off.
+ * The 1/8 and 1/4 weights, and seeding the deviation at half the first sample,
+ * are what RFC 6298 specifies for TCP's round-trip estimator.
+ *
+ * @param sampled whether any earlier sample has been folded in. Gating the
+ *   seeding on this rather than on movingAvgMs != 0 keeps a link fast enough to
+ *   sample 0ms from re-seeding on every ack.
+ */
+inline void UpdateResponseTimeMovingAvg(float sampleMs, bool sampled, float& movingAvgMs, float& jitterMs)
+{
+	if (!sampled) {
+		movingAvgMs = sampleMs;
+		jitterMs = sampleMs * 0.5f;
+		return;
+	}
+
+	// the deviation is measured against the previous average, so it moves first
+	jitterMs += (std::fabs(movingAvgMs - sampleMs) - jitterMs) * 0.25f;
+	movingAvgMs += (sampleMs - movingAvgMs) * 0.125f;
+}
 
 /**
  * @brief per-link traffic statistics
@@ -42,6 +97,15 @@ struct ConnectionStats {
 
 	// instantaneous
 	float sendRateBytesPerSec = 0.0f;
+	/// smoothed send->ack time. A chunk that had to be retransmitted contributes
+	/// no sample, since there is no way to tell which copy was acked, so this
+	/// stays a latency measure and does not rise with loss. See AckChunks.
+	float responseTimeMs = 0.0f;
+	float responseTimePeakMs = 0.0f;
+	/// age of the oldest chunk still awaiting an ack, 0 when none is pending
+	float oldestUnackedMs = 0.0f;
+	/// mean deviation of the response time (RFC 6298 RTTVAR)
+	float responseTimeJitterMs = 0.0f;
 	unsigned int unackedChunks = 0;
 	unsigned int queuedResendChunks = 0;
 	/// inbound chunks held because an earlier chunk has not arrived; the depth
@@ -58,6 +122,14 @@ struct ConnectionStats {
 	/// loopback, which moves bytes but reports no packets, loss or queue depths,
 	/// so its zeroes are missing data rather than a healthy link.
 	bool isNetworkLink = false;
+	/// false until a send->ack time has been measured; gates all three
+	/// response-time fields
+	bool hasResponseSample = false;
+
+	/// cumulative per-bucket sample counts (matching responseTimeBucketBoundsMs)
+	/// and their sum, so a 1Hz poll still reproduces the distribution
+	std::array<unsigned int, responseTimeNumBuckets> responseTimeBuckets = {};
+	double responseTimeSumMs = 0.0;
 };
 
 /**

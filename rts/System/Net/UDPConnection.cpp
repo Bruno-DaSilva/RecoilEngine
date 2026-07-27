@@ -2,6 +2,7 @@
 
 #include "UDPConnection.h"
 
+#include <algorithm>
 #include <cinttypes>
 
 
@@ -315,6 +316,14 @@ void UDPConnection::Init()
 	throttledMilliSecs = 0.0;
 	reorderStallMilliSecs = 0.0;
 	lastDurationSampleTime = spring_gettime();
+	responseTimeMovingAvgMs = 0.0f;
+	responseTimeJitterMs = 0.0f;
+	responseTimeMaxMs[0] = 0.0f;
+	responseTimeMaxMs[1] = 0.0f;
+	responseTimeBucketStart = spring_gettime();
+	responseTimeSampled = false;
+	responseTimeBuckets = {};
+	responseTimeSumMs = 0.0;
 	mtu = globalConfig.mtu;
 	reconnectTime = globalConfig.reconnectTimeout;
 
@@ -428,6 +437,14 @@ void UDPConnection::Update()
 
 		if (!waitingPackets.empty())
 			reorderStallMilliSecs += durationDeltaMs;
+
+		// rotate on a timer, not on sample arrival: a link that stops acking
+		// would otherwise pin the window open around an old spike
+		if ((curTime - responseTimeBucketStart).toMilliSecsf() >= responseTimeBucketMs) {
+			responseTimeMaxMs[1] = responseTimeMaxMs[0];
+			responseTimeMaxMs[0] = 0.0f;
+			responseTimeBucketStart = curTime;
+		}
 	}
 
 	#ifdef ENABLE_DEBUG_STATS
@@ -572,7 +589,7 @@ void UDPConnection::ProcessRawPacket(Packet& incoming)
 	}
 
 
-	AckChunks(incoming.lastContinuous);
+	AckChunks(incoming.lastContinuous, lastPacketRecvTime);
 	UpdateResendRequests();
 
 	if (!unackedChunks.empty()) {
@@ -824,6 +841,27 @@ bool UDPConnection::CanReconnect() const {
 	return (globalConfig.reconnectTimeout > 0);
 }
 
+float UDPConnection::OldestUnackedAgeMs() const
+{
+	if (unackedChunks.empty() || !unackedChunks.front()->sendTime.isTime())
+		return 0.0f;
+
+	return (spring_gettime() - unackedChunks.front()->sendTime).toMilliSecsf();
+}
+
+unsigned int UDPConnection::SendQueuedBytes() const
+{
+	unsigned int bytes = 0;
+
+	for (const std::shared_ptr<const RawPacket>& pkt: outgoingData)
+		bytes += pkt->length;
+
+	for (const ChunkPtr& chunk: newChunks)
+		bytes += chunk->data.size();
+
+	return bytes;
+}
+
 ConnectionStats UDPConnection::GetStats() const
 {
 	ConnectionStats stats;
@@ -841,10 +879,18 @@ ConnectionStats UDPConnection::GetStats() const
 	stats.receiveStalledMs = reorderStallMilliSecs;
 	stats.sendRateBytesPerSec = outgoing.GetAverage();
 	stats.lossFactor = netLossFactor;
+
+	stats.hasResponseSample = responseTimeSampled;
+	stats.responseTimeMs = responseTimeMovingAvgMs;
+	stats.responseTimePeakMs = std::max(responseTimeMaxMs[0], responseTimeMaxMs[1]);
+	stats.responseTimeJitterMs = responseTimeJitterMs;
+	stats.oldestUnackedMs = OldestUnackedAgeMs();
 	stats.unackedChunks = unackedChunks.size();
 	stats.queuedResendChunks = resendRequested.size();
 	stats.queuedInboundChunks = waitingPackets.size();
 	stats.queuedSendBytes = SendQueuedBytes();
+	stats.responseTimeBuckets = responseTimeBuckets;
+	stats.responseTimeSumMs = responseTimeSumMs;
 	stats.isNetworkLink = true;
 	return stats;
 }
@@ -1088,6 +1134,8 @@ void UDPConnection::SendIfNecessary(bool flushed)
 
 				sent = true;
 			} else if (!resend && canSendNew) {
+				newChunks[0]->sendTime = curTime;
+
 				buf.chunks.push_back(newChunks[0]);
 				unackedChunks.push_back(newChunks[0]);
 				newChunks.pop_front();
@@ -1141,11 +1189,32 @@ void UDPConnection::SendPacket(Packet& pkt)
 	sentPackets += 1;
 }
 
-void UDPConnection::AckChunks(int lastAck)
+void UDPConnection::AckChunks(int lastAck, spring_time ackTime)
 {
+	// One sample per ack, not per acked chunk: a send pass stamps every chunk it
+	// emits with the same time, so sampling each would weight one round trip by
+	// the size of the burst.
+	const bool sampling = StatsSampling();
+
+	spring_time newestAckedSendTime = spring_notime;
+	bool newestAckedRetransmitted = false;
+
 	while (!unackedChunks.empty() && (lastAck >= (*unackedChunks.begin())->chunkNumber)) {
+		const Chunk& chunk = *unackedChunks.front();
+
+		if (sampling && chunk.sendTime.isTime()) {
+			newestAckedSendTime = chunk.sendTime;
+			newestAckedRetransmitted = chunk.lossSuspected;
+		}
+
 		unackedChunks.pop_front();
 	}
+
+	// Karn's algorithm (RFC 6298 §3): sendTime is the *first* copy of a
+	// retransmitted chunk, and nothing says which copy this ack answers, so
+	// measuring it would make response time rise with loss.
+	if (newestAckedSendTime.isTime() && !newestAckedRetransmitted)
+		SampleResponseTime((ackTime - newestAckedSendTime).toMilliSecsf());
 
 	// resend requested and later acked, happens every now and then
 	for (size_t i = 0, n = resendRequested.size(); i < n; i++) {
@@ -1154,6 +1223,17 @@ void UDPConnection::AckChunks(int lastAck)
 
 		erasedResendChunks.insert(resendRequested[i].first);
 	}
+}
+
+void UDPConnection::SampleResponseTime(float sampleMs)
+{
+	responseTimeBuckets[ResponseTimeBucketIndex(sampleMs)] += 1;
+	responseTimeSumMs += sampleMs;
+
+	UpdateResponseTimeMovingAvg(sampleMs, responseTimeSampled, responseTimeMovingAvgMs, responseTimeJitterMs);
+
+	responseTimeSampled = true;
+	responseTimeMaxMs[0] = std::max(responseTimeMaxMs[0], sampleMs);
 }
 
 void UDPConnection::RequestResend(const ChunkPtr& ptr, bool noSort, bool lossSuspected)

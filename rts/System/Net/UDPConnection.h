@@ -3,6 +3,7 @@
 #pragma once
 
 #include <asio/ip/udp.hpp>
+#include <array>
 #include <memory>
 #include <deque>
 
@@ -36,6 +37,8 @@ public:
 	std::uint8_t chunkSize;
 	std::vector<std::uint8_t> data;
 
+	/// when this chunk *first* went on the wire, for response-time sampling
+	spring_time sendTime = spring_notime;
 	/// retransmission was requested because the chunk looks lost (nak or ack
 	/// timeout), not because the link duplicates by policy
 	bool lossSuspected = false;
@@ -152,28 +155,20 @@ private:
 	/// add header to data and send it
 	void CreateChunk(const unsigned char* data, const unsigned length, const int packetNum);
 	void SendIfNecessary(bool flushed);
-	void AckChunks(int lastAck);
+	void AckChunks(int lastAck, spring_time ackTime);
 
 	void RequestResend(const ChunkPtr& ptr, bool noSort, bool lossSuspected);
 	void SendPacket(Packet& pkt);
+	void SampleResponseTime(float sampleMs);
 
 	/// true while the outgoing bandwidth cap is exceeded
 	bool OutgoingBandwidthExceeded(bool includeQueued) const;
 
-	/// application bytes queued for this link but not yet transmitted, across
-	/// both stages of the send path. Walked rather than tracked incrementally:
-	/// read once per metrics poll, not per packet.
-	unsigned int SendQueuedBytes() const {
-		unsigned int bytes = 0;
+	/// how long the oldest chunk still awaiting an ack has been in flight
+	float OldestUnackedAgeMs() const;
 
-		for (const std::shared_ptr<const RawPacket>& pkt: outgoingData)
-			bytes += pkt->length;
-
-		for (const ChunkPtr& chunk: newChunks)
-			bytes += chunk->data.size();
-
-		return bytes;
-	}
+	/// application bytes queued for this link but not yet transmitted
+	unsigned int SendQueuedBytes() const;
 
 	void UpdateWaitingPackets();
 	void UpdateResendRequests();
@@ -282,6 +277,20 @@ private:
 	/// time spent with inbound delivery stalled behind a missing chunk
 	double reorderStallMilliSecs;
 	spring_time lastDurationSampleTime;
+
+	/// smoothed send->ack time
+	float responseTimeMovingAvgMs;
+	/// mean deviation of the samples around the smoothed value (RFC 6298 RTTVAR)
+	float responseTimeJitterMs;
+	float responseTimeMaxMs[2]; // two rotating buckets -> max over trailing window
+	spring_time responseTimeBucketStart;
+	bool responseTimeSampled;
+	/// cumulative sample counts per bucket, plus their summed value
+	std::array<unsigned int, responseTimeNumBuckets> responseTimeBuckets;
+	double responseTimeSumMs;
+
+	/// bucket width; the reported spike covers the trailing 15-30 seconds
+	static constexpr float responseTimeBucketMs = 15000.0f;
 
 	unsigned int sentOverhead, recvOverhead;
 	unsigned int sentPackets, recvPackets;
