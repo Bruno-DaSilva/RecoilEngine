@@ -41,6 +41,7 @@ private:
 		/// last seen value of a monotonically increasing link counter, which
 		/// Update() publishes as a delta
 		struct DeltaCounter {
+			prometheus::Counter* player = nullptr;
 			double last = 0.0;
 		};
 		DeltaCounter sentBytes;
@@ -56,13 +57,53 @@ private:
 		DeltaCounter outgoingThrottled;
 		DeltaCounter reorderStall;
 
+		prometheus::Gauge* lossFactor = nullptr;
+		prometheus::Gauge* outgoingBw = nullptr;
+		prometheus::Gauge* responseTime = nullptr;
+		prometheus::Gauge* responseTimeMax = nullptr;
+		prometheus::Gauge* responseTimeJitter = nullptr;
+		prometheus::Gauge* unackedChunks = nullptr;
+		prometheus::Gauge* unackedAge = nullptr;
+		prometheus::Gauge* resendQueueDepth = nullptr;
+		prometheus::Gauge* reorderQueueDepth = nullptr;
+		prometheus::Gauge* sendQueueBytes = nullptr;
+		prometheus::Gauge* incomingBandwidthUsage = nullptr;
+
 		/// previous cumulative histogram state, so each poll contributes only
 		/// the samples taken since the last one
 		std::array<unsigned int, netcode::responseTimeNumBuckets> lastResponseTimeBuckets = {};
 		double lastResponseTimeSumMs = 0.0;
 	};
 
+	/// drop a connection's gauges from the registry rather than leave them
+	/// reporting a link that is gone. Counters are cumulative and stay.
+	void ReleaseConnectionGauges(ConnectionMetrics& cm);
+
 	std::vector<ConnectionMetrics> connectionMetrics;
+
+	// per-player families; null unless MetricsPerPlayer is on
+	prometheus::Family<prometheus::Counter>* metricSentBytes = nullptr;
+	prometheus::Family<prometheus::Counter>* metricRecvBytes = nullptr;
+	prometheus::Family<prometheus::Counter>* metricOutgoingThrottled = nullptr;
+	prometheus::Family<prometheus::Counter>* metricSentPackets = nullptr;
+	prometheus::Family<prometheus::Counter>* metricRecvPackets = nullptr;
+	prometheus::Family<prometheus::Counter>* metricResentChunks = nullptr;
+	prometheus::Family<prometheus::Counter>* metricRedundantChunks = nullptr;
+	prometheus::Family<prometheus::Counter>* metricDroppedChunks = nullptr;
+	prometheus::Family<prometheus::Counter>* metricLostIncomingChunks = nullptr;
+	prometheus::Family<prometheus::Counter>* metricSocketErrors = nullptr;
+	prometheus::Family<prometheus::Counter>* metricReorderStall = nullptr;
+	prometheus::Family<prometheus::Gauge>* metricLossFactor = nullptr;
+	prometheus::Family<prometheus::Gauge>* metricOutgoingBw = nullptr;
+	prometheus::Family<prometheus::Gauge>* metricResponseTime = nullptr;
+	prometheus::Family<prometheus::Gauge>* metricResponseTimeMax = nullptr;
+	prometheus::Family<prometheus::Gauge>* metricResponseTimeJitter = nullptr;
+	prometheus::Family<prometheus::Gauge>* metricUnackedChunks = nullptr;
+	prometheus::Family<prometheus::Gauge>* metricUnackedAge = nullptr;
+	prometheus::Family<prometheus::Gauge>* metricResendQueueDepth = nullptr;
+	prometheus::Family<prometheus::Gauge>* metricReorderQueueDepth = nullptr;
+	prometheus::Family<prometheus::Gauge>* metricSendQueueBytes = nullptr;
+	prometheus::Family<prometheus::Gauge>* metricIncomingBwUsage = nullptr;
 
 	// server-wide aggregates, exported whether or not per-player metrics are on
 	prometheus::Counter* metricTotalSentBytes = nullptr;

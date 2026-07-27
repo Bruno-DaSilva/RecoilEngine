@@ -115,6 +115,78 @@ void NetworkMetrics::Init(prometheus::Registry& registry)
 
 	metricTotalUnackedChunks = gauge("recoil_network_unacked_chunks",
 		"Chunks sent to clients and not yet acked, summed over all connections");
+
+	if (!metrics::PerPlayerEnabled())
+		return;
+
+	metricSentBytes = counterFamily("recoil_network_connection_sent_bytes_total",
+		"Bytes sent over this client connection. No series exists for a listen-server host's own slot, which has no network link");
+	metricRecvBytes = counterFamily("recoil_network_connection_received_bytes_total",
+		"Bytes received over this client connection");
+	metricOutgoingThrottled = counterFamily("recoil_network_connection_outgoing_throttled_seconds_total",
+		"Time sending to this client was blocked by the outgoing bandwidth cap while data was queued");
+	metricLossFactor = gaugeFamily("recoil_network_connection_loss_factor",
+		"Client-declared network loss factor for this link (0 = normal). Above zero the link duplicates chunks by policy; that lands in redundant_chunks_total, not resent_chunks_total, but it does inflate the resend rate relative to a loss_factor=0 link");
+	metricOutgoingBw = gaugeFamily("recoil_network_connection_outgoing_bandwidth_bytes_per_second",
+		"Rolling average of the send rate to this client, as used by outgoing bandwidth limiting");
+	metricSentPackets = counterFamily("recoil_network_connection_sent_packets_total",
+		"UDP packets sent over this client connection");
+	metricRecvPackets = counterFamily("recoil_network_connection_received_packets_total",
+		"UDP packets received over this client connection");
+	metricResentChunks = counterFamily("recoil_network_connection_resent_chunks_total",
+		"Chunks retransmitted to this client because they looked lost, excluding redundancy-mode duplication; see the aggregate resent_chunks_total");
+	metricRedundantChunks = counterFamily("recoil_network_connection_redundant_chunks_total",
+		"Chunks retransmitted to this client purely because the link duplicates by policy");
+	metricDroppedChunks = counterFamily("recoil_network_connection_duplicate_chunks_received_total",
+		"Chunks from this client discarded on arrival because the same chunk had already been received");
+	metricLostIncomingChunks = counterFamily("recoil_network_connection_lost_incoming_chunks_total",
+		"Chunks from this client observed missing at a send pass; long-lived reordering counts here as well as real loss");
+	metricResponseTime = gaugeFamily("recoil_network_connection_response_time_seconds",
+		"Smoothed send->ack time for this client; latency plus client processing, not pure RTT. Retransmitted chunks contribute no sample, so loss shows up in this link's resent_chunks_total rather than here");
+	metricResponseTimeMax = gaugeFamily("recoil_network_connection_response_time_spike_seconds",
+		"Worst single send->ack sample for this client over the trailing window");
+	metricResponseTimeJitter = gaugeFamily("recoil_network_connection_response_time_jitter_seconds",
+		"Mean deviation of this client's send->ack samples; how unsteady the link is rather than how slow");
+	metricUnackedChunks = gaugeFamily("recoil_network_connection_unacked_chunks",
+		"Chunks sent to this client and not yet acked");
+	metricUnackedAge = gaugeFamily("recoil_network_connection_unacked_age_seconds",
+		"How long this client's oldest un-acked chunk has waited; 0 when nothing is outstanding. Rising while response_time holds steady means the link stalled, not slowed");
+	metricResendQueueDepth = gaugeFamily("recoil_network_connection_resend_queue_depth",
+		"Chunks queued for retransmission to this client");
+	metricReorderQueueDepth = gaugeFamily("recoil_network_connection_reorder_queue_depth",
+		"Chunks from this client held in the reorder buffer behind a missing chunk");
+	metricReorderStall = counterFamily("recoil_network_connection_reorder_stall_seconds_total",
+		"Time inbound delivery from this client was stalled behind a missing chunk; rate() is the fraction of the interval this player's input was blocked");
+	metricSendQueueBytes = gaugeFamily("recoil_network_connection_send_queue_bytes",
+		"Application bytes queued for this client and not yet transmitted");
+	metricIncomingBwUsage = gaugeFamily("recoil_network_connection_incoming_bandwidth_usage",
+		"Incoming-limiter accumulator for this link, in the same units as the incoming bandwidth caps");
+	metricSocketErrors = counterFamily("recoil_network_connection_socket_errors_total",
+		"Socket failures on this link by direction");
+}
+
+
+void NetworkMetrics::ReleaseConnectionGauges(ConnectionMetrics& cm)
+{
+	const auto release = [](prometheus::Family<prometheus::Gauge>* family, prometheus::Gauge*& child) {
+		if (child == nullptr)
+			return;
+
+		family->Remove(child);
+		child = nullptr;
+	};
+
+	release(metricLossFactor, cm.lossFactor);
+	release(metricOutgoingBw, cm.outgoingBw);
+	release(metricResponseTime, cm.responseTime);
+	release(metricResponseTimeMax, cm.responseTimeMax);
+	release(metricResponseTimeJitter, cm.responseTimeJitter);
+	release(metricUnackedChunks, cm.unackedChunks);
+	release(metricUnackedAge, cm.unackedAge);
+	release(metricResendQueueDepth, cm.resendQueueDepth);
+	release(metricReorderQueueDepth, cm.reorderQueueDepth);
+	release(metricSendQueueBytes, cm.sendQueueBytes);
+	release(metricIncomingBwUsage, cm.incomingBandwidthUsage);
 }
 
 
@@ -143,12 +215,17 @@ void NetworkMetrics::Update(const CGameServer& server)
 		const double delta = DeltaSince(cur, dc.last) * scale;
 
 		total->Increment(delta);
+
+		if (dc.player != nullptr)
+			dc.player->Increment(delta);
 	};
 
 	for (const GameParticipant& p: server.players) {
 		ConnectionMetrics& cm = AtGrowing(connectionMetrics, p.id);
 
 		if (p.clientLink == nullptr) {
+			// dropped from the registry, or they go on being scraped
+			ReleaseConnectionGauges(cm);
 			cm = ConnectionMetrics{};
 			continue;
 		}
@@ -158,6 +235,34 @@ void NetworkMetrics::Update(const CGameServer& server)
 		// a loopback is not a network
 		if (!stats.isNetworkLink)
 			continue;
+
+		// Label by slot id: stable within a game, and not PII the way names are.
+		// lossFactor stands in for the whole group -- ReleaseConnectionGauges
+		// drops it, so this re-resolves when a slot's link was replaced.
+		if (metricSentBytes != nullptr && cm.lossFactor == nullptr) {
+			const std::string playerIdStr = std::to_string(p.id);
+			const std::map<std::string, std::string> labels = {{"playerid", playerIdStr}};
+			cm.sentBytes.player      = &metricSentBytes->Add(labels);
+			cm.recvBytes.player      = &metricRecvBytes->Add(labels);
+			cm.sentPackets.player    = &metricSentPackets->Add(labels);
+			cm.recvPackets.player    = &metricRecvPackets->Add(labels);
+			cm.resentChunks.player   = &metricResentChunks->Add(labels);
+			cm.droppedChunks.player  = &metricDroppedChunks->Add(labels);
+			cm.redundantChunks.player = &metricRedundantChunks->Add(labels);
+			cm.lostIncomingChunks.player = &metricLostIncomingChunks->Add(labels);
+			cm.sendErrors.player = &metricSocketErrors->Add({{"playerid", playerIdStr}, {"direction", "send"}});
+			cm.recvErrors.player = &metricSocketErrors->Add({{"playerid", playerIdStr}, {"direction", "receive"}});
+			cm.outgoingThrottled.player = &metricOutgoingThrottled->Add(labels);
+			cm.reorderStall.player = &metricReorderStall->Add(labels);
+			cm.lossFactor = &metricLossFactor->Add(labels);
+			cm.outgoingBw = &metricOutgoingBw->Add(labels);
+			cm.unackedChunks = &metricUnackedChunks->Add(labels);
+			cm.unackedAge = &metricUnackedAge->Add(labels);
+			cm.resendQueueDepth = &metricResendQueueDepth->Add(labels);
+			cm.reorderQueueDepth = &metricReorderQueueDepth->Add(labels);
+			cm.sendQueueBytes = &metricSendQueueBytes->Add(labels);
+			cm.incomingBandwidthUsage = &metricIncomingBwUsage->Add(labels);
+		}
 
 		// always zero while ServerReadNet never writes the accumulator back
 		int maxLinkBwUsage = 0;
@@ -190,6 +295,17 @@ void NetworkMetrics::Update(const CGameServer& server)
 
 		maxUnackedAge = std::max(maxUnackedAge, stats.oldestUnackedMs);
 
+		if (cm.outgoingBw != nullptr) {
+			cm.lossFactor->Set(stats.lossFactor);
+			cm.outgoingBw->Set(stats.sendRateBytesPerSec);
+			cm.unackedChunks->Set(stats.unackedChunks);
+			cm.unackedAge->Set(stats.oldestUnackedMs * msToSecs);
+			cm.resendQueueDepth->Set(stats.queuedResendChunks);
+			cm.reorderQueueDepth->Set(stats.queuedInboundChunks);
+			cm.sendQueueBytes->Set(stats.queuedSendBytes);
+			cm.incomingBandwidthUsage->Set(maxLinkBwUsage);
+		}
+
 		if (metricResponseTimeHist != nullptr) {
 			bool anySamples = false;
 
@@ -211,6 +327,20 @@ void NetworkMetrics::Update(const CGameServer& server)
 		if (stats.hasResponseSample) {
 			maxResponseTime = std::max(maxResponseTime, stats.responseTimeMs);
 			maxResponseTimeJitter = std::max(maxResponseTimeJitter, stats.responseTimeJitterMs);
+
+			if (metricResponseTime != nullptr) {
+				if (cm.responseTime == nullptr) {
+					const std::map<std::string, std::string> labels = {{"playerid", std::to_string(p.id)}};
+
+					cm.responseTime = &metricResponseTime->Add(labels);
+					cm.responseTimeMax = &metricResponseTimeMax->Add(labels);
+					cm.responseTimeJitter = &metricResponseTimeJitter->Add(labels);
+				}
+
+				cm.responseTime->Set(stats.responseTimeMs * msToSecs);
+				cm.responseTimeMax->Set(stats.responseTimePeakMs * msToSecs);
+				cm.responseTimeJitter->Set(stats.responseTimeJitterMs * msToSecs);
+			}
 		}
 	}
 

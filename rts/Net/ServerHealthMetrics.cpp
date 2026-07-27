@@ -64,6 +64,14 @@ void ServerHealthMetrics::Init(prometheus::Registry& registry, const std::string
 	// CGameServer, re-registering with a new id throws outright.
 	gaugeFamily("recoil_server_info", "Constant 1; labels carry engine build and game identity")
 		->Add({{"engine_version", SpringVersion::GetFull()}, {"gameid", gameIDHex}}).Set(1);
+
+	if (!metrics::PerPlayerEnabled())
+		return;
+
+	metricPlayerLag = gaugeFamily("recoil_server_player_lag_seconds",
+		"How far the player's last acked sim frame is behind the server, in game time");
+	metricPlayerCpu = gaugeFamily("recoil_server_player_cpu_usage",
+		"Client-reported cpu usage in [0,1]");
 }
 
 
@@ -90,6 +98,8 @@ void ServerHealthMetrics::Update(const CGameServer& server)
 		else
 			numPlayers++;
 
+		PlayerMetrics& pm = AtGrowing(playerMetrics, p.id);
+
 		if (server.gameHasStarted && p.myState == GameParticipant::INGAME) {
 			// same lag definition as LagProtection(), including its 0.1 speed floor:
 			// a zero internalSpeed would publish an infinity std::max does not catch
@@ -99,6 +109,25 @@ void ServerHealthMetrics::Update(const CGameServer& server)
 
 			maxLag = std::max(maxLag, lagMs);
 			maxCpu = std::max(maxCpu, cpu);
+
+			if (metricPlayerLag != nullptr) {
+				if (pm.lagSeconds == nullptr) {
+					const std::map<std::string, std::string> labels = {{"playerid", std::to_string(p.id)}};
+
+					pm.lagSeconds = &metricPlayerLag->Add(labels);
+					pm.cpuUsage = &metricPlayerCpu->Add(labels);
+				}
+
+				pm.lagSeconds->Set(lagMs * msToSecs);
+				pm.cpuUsage->Set(cpu);
+			}
+		} else if (pm.lagSeconds != nullptr) {
+			// dropped rather than held: a frozen gauge scrapes like a live one
+			metricPlayerLag->Remove(pm.lagSeconds);
+			metricPlayerCpu->Remove(pm.cpuUsage);
+
+			pm.lagSeconds = nullptr;
+			pm.cpuUsage = nullptr;
 		}
 	}
 

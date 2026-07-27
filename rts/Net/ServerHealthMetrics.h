@@ -31,6 +31,13 @@ public:
 	void SetGameStartTime(double unixSecs);
 
 private:
+	struct PlayerMetrics {
+		prometheus::Gauge* lagSeconds = nullptr;
+		prometheus::Gauge* cpuUsage = nullptr;
+	};
+
+	std::vector<PlayerMetrics> playerMetrics;
+
 	prometheus::Gauge* metricServerFrame = nullptr;
 	prometheus::Gauge* metricMaxLag = nullptr;
 	prometheus::Gauge* metricMaxCpu = nullptr;
@@ -43,4 +50,8 @@ private:
 	prometheus::Gauge* metricPaused = nullptr;
 	prometheus::Gauge* metricGameStartTs = nullptr;
 
+
+	// per-player families; null unless MetricsPerPlayer is on
+	prometheus::Family<prometheus::Gauge>* metricPlayerLag = nullptr;
+	prometheus::Family<prometheus::Gauge>* metricPlayerCpu = nullptr;
 };
