@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <string>
 #include <memory>
 
@@ -22,10 +23,15 @@ struct ConnectionStats {
 	unsigned int receivedBytes = 0;
 	unsigned int sentPackets = 0;
 	unsigned int receivedPackets = 0;
-	/// chunks we put back on the wire after they had already been sent once
+	/// retransmissions we made because a chunk looked lost
 	unsigned int retransmittedChunks = 0;
+	/// retransmissions we made purely because the link duplicates by policy
+	unsigned int duplicatedChunks = 0;
 	/// inbound chunks discarded because the same chunk had already arrived
 	unsigned int discardedChunks = 0;
+	/// inbound chunks observed missing at a send pass; long-lived reordering is
+	/// indistinguishable from loss and counts here too
+	unsigned int missingChunks = 0;
 	/// socket-level failures; ours or the environment's, not the peer's link
 	unsigned int sendErrors = 0;
 	unsigned int receiveErrors = 0;
@@ -34,10 +40,15 @@ struct ConnectionStats {
 	float sendRateBytesPerSec = 0.0f;
 	unsigned int unackedChunks = 0;
 	unsigned int queuedResendChunks = 0;
-	/// inbound chunks held because an earlier chunk has not arrived
+	/// inbound chunks held because an earlier chunk has not arrived; the depth
+	/// counterpart to missingChunks
 	unsigned int queuedInboundChunks = 0;
 	/// application bytes handed to the link and not yet on the wire
 	unsigned int queuedSendBytes = 0;
+
+	/// loss factor the link is actually running with, already clamped to the
+	/// range the transport accepts
+	unsigned int lossFactor = 0;
 
 	/// whether the other fields describe a real network link. False on a
 	/// loopback, which moves bytes but reports no packets, loss or queue depths,
@@ -100,6 +111,18 @@ public:
 	unsigned int GetNumQueuedPings() const { return numPings; }
 	virtual unsigned int GetPacketQueueSize() const { return 0; }
 
+	/**
+	 * @brief whether links should collect the optional telemetry in ConnectionStats
+	 *
+	 * Byte and packet counters are always kept; the rest exists purely to be
+	 * exported, so it is off unless something is exporting.
+	 *
+	 * Atomic because a host client's own CNetProtocol link is already being
+	 * serviced when the server it just started flips this.
+	 */
+	static void SetStatsSampling(bool enable) { statsSampling.store(enable, std::memory_order_relaxed); }
+	static bool StatsSampling() { return statsSampling.load(std::memory_order_relaxed); }
+
 	virtual std::string Statistics() const = 0;
 	virtual std::string GetFullAddress() const = 0;
 	virtual void Unmute() = 0;
@@ -116,6 +139,9 @@ protected:
 	unsigned int dataSent = 0;
 	unsigned int dataRecv = 0;
 	unsigned int numPings = 0;
+
+private:
+	inline static std::atomic<bool> statsSampling = false;
 };
 
 } // namespace netcode

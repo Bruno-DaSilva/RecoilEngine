@@ -35,6 +35,10 @@ public:
 	std::int32_t chunkNumber;
 	std::uint8_t chunkSize;
 	std::vector<std::uint8_t> data;
+
+	/// retransmission was requested because the chunk looks lost (nak or ack
+	/// timeout), not because the link duplicates by policy
+	bool lossSuspected = false;
 };
 typedef std::shared_ptr<Chunk> ChunkPtr;
 
@@ -150,7 +154,7 @@ private:
 	void SendIfNecessary(bool flushed);
 	void AckChunks(int lastAck);
 
-	void RequestResend(ChunkPtr ptr, bool noSort);
+	void RequestResend(const ChunkPtr& ptr, bool noSort, bool lossSuspected);
 	void SendPacket(Packet& pkt);
 
 	/// application bytes queued for this link but not yet transmitted, across
@@ -255,12 +259,20 @@ private:
 	#endif
 	unsigned int currentPacketChunkNum;
 
-	/// packets that are resent
+	/// chunks retransmitted because they looked lost
 	unsigned int resentChunks;
+	/// chunks retransmitted purely because the link duplicates by policy
+	unsigned int redundantChunks;
 	/// chunks discarded on arrival because we already had them
 	unsigned int droppedChunks;
+	/// inbound chunks observed missing at a send pass; long-lived reordering is
+	/// indistinguishable from loss and counts here too
+	unsigned int lostIncomingChunks;
 	unsigned int sendErrors;
 	unsigned int recvErrors;
+	/// high-water mark so each inbound gap is counted once, even though the
+	/// gap list is rebuilt from scratch on every send pass
+	int highestMissingCounted;
 
 	unsigned int sentOverhead, recvOverhead;
 	unsigned int sentPackets, recvPackets;
