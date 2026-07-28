@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <string>
 #include <variant>
 
@@ -55,6 +56,20 @@ struct UdpStats {
 };
 
 using ConnectionStats = std::variant<BasicStats, UdpStats>;
+
+/**
+ * @brief whether links should collect the optional telemetry in ConnectionStats
+ *
+ * Byte and packet counters are always kept, the rest exists purely to be
+ * exported, so the rest are off unless the stats need to be exported somewhere.
+ *
+ * Atomic because a host client's own CNetProtocol link is already alive
+ * when the server it just started flips this.
+ */
+inline std::atomic<bool> statsSampling = false;
+
+inline void SetStatsSampling(bool enable) { statsSampling.store(enable, std::memory_order_relaxed); }
+inline bool StatsSampling() { return statsSampling.load(std::memory_order_relaxed); }
 
 std::string FormatConnectionStats(const BasicStats& stats);
 std::string FormatConnectionStats(const UdpStats& stats);
