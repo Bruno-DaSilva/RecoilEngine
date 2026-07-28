@@ -180,6 +180,27 @@ option(TRACY_PROFILE_MEMORY "Profile memory allocations" OFF)
 
 add_subdirectory(tracy)
 
+# prometheus-cpp: metrics registry + embedded /metrics HTTP endpoint (pull).
+# civetweb is vendored inside it as a submodule; push-gateway support would
+# require libcurl, so it stays off. Pinned to the v1.3.0 release tag rather
+# than a master commit, so a checkout is reproducible and auditable.
+if    (ENABLE_METRICS OR ENABLE_METRICS_CLIENT)
+	# block() so none of this leaks: ENABLE_TESTING and friends are generic names
+	# and prometheus-cpp is not the last add_subdirectory here. Normal variables
+	# suffice -- it requires cmake 3.14, so CMP0077 is NEW in its scope.
+	block()
+		set(ENABLE_PULL ON)
+		set(ENABLE_PUSH OFF)
+		set(ENABLE_COMPRESSION OFF)
+		set(ENABLE_TESTING OFF)
+		set(GENERATE_PKGCONFIG OFF)
+		# Metric values are doubles; keep its FP constants double-precision
+		# (same treatment as lunasvg below).
+		string(REPLACE "-fsingle-precision-constant" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+		add_subdirectory(prometheus-cpp)
+	endblock()
+endif (ENABLE_METRICS OR ENABLE_METRICS_CLIENT)
+
 if (TRACY_ENABLE)
 	option(RMLUI_TRACY_PROFILING "Enable RmlUi profiling with Tracy." ON)
 	# We have our own memory profiling, never enable RmlUi one.
