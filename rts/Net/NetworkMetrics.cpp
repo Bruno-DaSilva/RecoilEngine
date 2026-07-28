@@ -49,6 +49,16 @@ void NetworkMetrics::Init(prometheus::Registry& registry)
 	metricTotalRecvErrors    = &socketErrors.Add({{"direction", "receive"}, {"socket", "connection"}});
 	metricListenerRecvErrors = &socketErrors.Add({{"direction", "receive"}, {"socket", "listener"}});
 
+	metricTotalResentChunks = counter("recoil_network_resent_chunks_total",
+		"Chunks retransmitted to clients because they looked lost (nak or ack timeout), excluding redundancy-mode duplication. Counts retransmission events, not distinct chunks, so it is inflated on links with a non-zero loss factor");
+	metricTotalRedundantChunks = counter("recoil_network_redundant_chunks_total",
+		"Chunks retransmitted purely because the link duplicates by policy; the bandwidth cost of redundancy mode, not a loss symptom");
+	metricTotalDroppedChunks = counter("recoil_network_duplicate_chunks_received_total",
+		"Chunks discarded on arrival because the same chunk had already been received");
+	metricTotalLostIncomingChunks = counter("recoil_network_lost_incoming_chunks_total",
+		"Chunks from clients observed missing at a send pass. Reordering that outlives a pass counts here as well as real loss");
+	metricRedundancyLinks = gauge("recoil_network_redundancy_mode_connections",
+		"Live connections with a non-zero loss factor, i.e. running in proactive-retransmit mode");
 	metricTotalOutgoingBw = gauge("recoil_network_outgoing_bandwidth_bytes_per_second",
 		"Rolling average of the send rate over all client connections");
 	metricTotalUnackedChunks = gauge("recoil_network_unacked_chunks",
@@ -76,6 +86,16 @@ void NetworkMetrics::Init(prometheus::Registry& registry)
 		"UDP packets received over this client connection");
 	metricSocketErrors = counterFamily("recoil_network_connection_socket_errors_total",
 		"Socket failures on this link by direction");
+	metricResentChunks = counterFamily("recoil_network_connection_resent_chunks_total",
+		"Chunks retransmitted to this client because they looked lost, excluding redundancy-mode duplication; see the aggregate resent_chunks_total");
+	metricRedundantChunks = counterFamily("recoil_network_connection_redundant_chunks_total",
+		"Chunks retransmitted to this client purely because the link duplicates by policy");
+	metricDroppedChunks = counterFamily("recoil_network_connection_duplicate_chunks_received_total",
+		"Chunks from this client discarded on arrival because the same chunk had already been received");
+	metricLostIncomingChunks = counterFamily("recoil_network_connection_lost_incoming_chunks_total",
+		"Chunks from this client observed missing at a send pass; long-lived reordering counts here as well as real loss");
+	metricLossFactor = gaugeFamily("recoil_network_connection_loss_factor",
+		"Client-declared network loss factor for this link (0 = normal). Above zero the link duplicates chunks by policy; that lands in redundant_chunks_total, not resent_chunks_total");
 	metricOutgoingBw = gaugeFamily("recoil_network_connection_outgoing_bandwidth_bytes_per_second",
 		"Rolling average of the send rate to this client, as used by outgoing bandwidth limiting");
 	metricUnackedChunks = gaugeFamily("recoil_network_connection_unacked_chunks",
@@ -99,6 +119,7 @@ void NetworkMetrics::ReleaseConnectionGauges(ConnectionMetrics& cm)
 		child = nullptr;
 	};
 
+	release(metricLossFactor, cm.lossFactor);
 	release(metricOutgoingBw, cm.outgoingBw);
 	release(metricUnackedChunks, cm.unackedChunks);
 	release(metricResendQueueDepth, cm.resendQueueDepth);
@@ -115,6 +136,7 @@ void NetworkMetrics::ResetConnectionDeltas(int playerId)
 
 void NetworkMetrics::Update(const CGameServer& server)
 {
+	int numRedundancyLinks = 0;
 	float totalOutgoingBw = 0.0f;
 	unsigned int totalUnackedChunks = 0;
 	unsigned int totalResendQueueDepth = 0;
@@ -159,6 +181,11 @@ void NetworkMetrics::Update(const CGameServer& server)
 			cm.recvPackets.player = &metricRecvPackets->Add(labels);
 			cm.sendErrors.player  = &metricSocketErrors->Add({{"playerid", playerIdStr}, {"direction", "send"}});
 			cm.recvErrors.player  = &metricSocketErrors->Add({{"playerid", playerIdStr}, {"direction", "receive"}});
+			cm.resentChunks.player   = &metricResentChunks->Add(labels);
+			cm.redundantChunks.player = &metricRedundantChunks->Add(labels);
+			cm.droppedChunks.player  = &metricDroppedChunks->Add(labels);
+			cm.lostIncomingChunks.player = &metricLostIncomingChunks->Add(labels);
+			cm.lossFactor         = &metricLossFactor->Add(labels);
 			cm.outgoingBw         = &metricOutgoingBw->Add(labels);
 			cm.unackedChunks      = &metricUnackedChunks->Add(labels);
 			cm.resendQueueDepth   = &metricResendQueueDepth->Add(labels);
@@ -170,6 +197,10 @@ void NetworkMetrics::Update(const CGameServer& server)
 		publishDelta(metricTotalRecvBytes, cm.recvBytes, stats.receivedBytes);
 		publishDelta(metricTotalSentPackets, cm.sentPackets, stats.sentPackets);
 		publishDelta(metricTotalRecvPackets, cm.recvPackets, stats.receivedPackets);
+		publishDelta(metricTotalResentChunks, cm.resentChunks, stats.retransmittedChunks);
+		publishDelta(metricTotalRedundantChunks, cm.redundantChunks, stats.duplicatedChunks);
+		publishDelta(metricTotalDroppedChunks, cm.droppedChunks, stats.discardedChunks);
+		publishDelta(metricTotalLostIncomingChunks, cm.lostIncomingChunks, stats.missingChunks);
 		publishDelta(metricTotalSendErrors, cm.sendErrors, stats.sendErrors);
 		publishDelta(metricTotalRecvErrors, cm.recvErrors, stats.receiveErrors);
 
@@ -179,7 +210,10 @@ void NetworkMetrics::Update(const CGameServer& server)
 		totalReorderQueueDepth += stats.queuedInboundChunks;
 		totalSendQueueBytes += stats.queuedSendBytes;
 
+		numRedundancyLinks += (stats.lossFactor > 0);
+
 		if (cm.outgoingBw != nullptr) {
+			cm.lossFactor->Set(stats.lossFactor);
 			cm.outgoingBw->Set(stats.sendRateBytesPerSec);
 			cm.unackedChunks->Set(stats.unackedChunks);
 			cm.resendQueueDepth->Set(stats.queuedResendChunks);
@@ -188,6 +222,7 @@ void NetworkMetrics::Update(const CGameServer& server)
 		}
 	}
 
+	metricRedundancyLinks->Set(numRedundancyLinks);
 	metricTotalOutgoingBw->Set(totalOutgoingBw);
 	metricTotalUnackedChunks->Set(totalUnackedChunks);
 	metricTotalResendQueueDepth->Set(totalResendQueueDepth);

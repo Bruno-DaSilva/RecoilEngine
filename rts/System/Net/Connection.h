@@ -28,8 +28,13 @@ struct ConnectionStats {
 	unsigned int receivedPackets = 0;
 	/// chunks put back on the wire after having been sent once
 	unsigned int retransmittedChunks = 0;
+	/// retransmitted purely because the link duplicates by policy
+	unsigned int duplicatedChunks = 0;
 	/// chunks discarded on arrival because the same chunk had already been received
 	unsigned int discardedChunks = 0;
+	/// seen missing at a send pass; long-lived reordering is indistinguishable
+	/// from loss and counts here too
+	unsigned int missingChunks = 0;
 	/// protocol header bytes, against the payload bytes above
 	unsigned int sentOverheadBytes = 0;
 	unsigned int receivedOverheadBytes = 0;
@@ -47,6 +52,9 @@ struct ConnectionStats {
 	unsigned int queuedInboundChunks = 0;
 	/// handed to the link and not yet on the wire
 	unsigned int queuedSendBytes = 0;
+	/// loss factor the link is running with, already clamped to the range the
+	/// transport accepts
+	unsigned int lossFactor = 0;
 
 	/// whether the fields beyond the byte counts describe anything. False on a
 	/// loopback, which moves bytes but has no wire to report on.

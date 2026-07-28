@@ -304,11 +304,14 @@ void UDPConnection::Init()
 	recvOverhead = 0;
 
 	resentChunks = 0;
+	redundantChunks = 0;
 	sentPackets = 0;
 	recvPackets = 0;
 	sendErrors = 0;
 	recvErrors = 0;
 	droppedChunks = 0;
+	lostIncomingChunks = 0;
+	highestMissingCounted = -1;
 	mtu = globalConfig.mtu;
 	reconnectTime = globalConfig.reconnectTimeout;
 
@@ -566,7 +569,7 @@ void UDPConnection::ProcessRawPacket(Packet& incoming)
 
 					if (unAckPos >= 0 && unAckPos < unackedChunks.size()) {
 						assert(unackedChunks[unAckPos]->chunkNumber == nextCont + i);
-						RequestResend(unackedChunks[unAckPos], true);
+						RequestResend(unackedChunks[unAckPos], true, true);
 					}
 				}
 			} else if (incoming.nakType > 0) {
@@ -586,7 +589,7 @@ void UDPConnection::ProcessRawPacket(Packet& incoming)
 
 					if (unAckPos < unackedChunks.size()) {
 						assert(unackedChunks[unAckPos]->chunkNumber == (nextCont + incoming.naks[i]));
-						RequestResend(unackedChunks[unAckPos], true);
+						RequestResend(unackedChunks[unAckPos], true, true);
 					}
 
 					++unAckPos;
@@ -827,7 +830,10 @@ ConnectionStats UDPConnection::GetStats() const
 	stats.sentPackets = sentPackets;
 	stats.receivedPackets = recvPackets;
 	stats.retransmittedChunks = resentChunks;
+	stats.duplicatedChunks = redundantChunks;
 	stats.discardedChunks = droppedChunks;
+	stats.missingChunks = lostIncomingChunks;
+	stats.lossFactor = netLossFactor;
 	stats.sentOverheadBytes = sentOverhead;
 	stats.receivedOverheadBytes = recvOverhead;
 	stats.processedChunks = lastInOrder + 1;
@@ -899,6 +905,20 @@ void UDPConnection::SendIfNecessary(bool flushed)
 		}
 
 
+		// droppedPackets is rebuilt from scratch every pass, so the ascending
+		// high-water mark is what makes each chunk number count once. Counts
+		// "missing", not "lost": a gap later filled by a straggler or by a
+		// retransmission was still missing here.
+		if (StatsSampling()) {
+			for (const int missingChunkNum: droppedPackets) {
+				if (missingChunkNum <= highestMissingCounted)
+					continue;
+
+				highestMissingCounted = missingChunkNum;
+				lostIncomingChunks += 1;
+			}
+		}
+
 		unsigned int numContinuous = 0;
 
 		for (unsigned int i = 0; i != droppedPackets.size(); ++i) {
@@ -924,7 +944,7 @@ void UDPConnection::SendIfNecessary(bool flushed)
 		// resend last packet if we didn't get an ack within reasonable time
 		// and don't plan sending out a new chunk either
 		if (newChunks.empty())
-			RequestResend(*unackedChunks.rbegin(), false);
+			RequestResend(*unackedChunks.rbegin(), false, true);
 
 		lastUnackResentTime = curTime;
 	}
@@ -1008,6 +1028,9 @@ void UDPConnection::SendIfNecessary(bool flushed)
 			resend = !resend;
 
 			if (resend && canResend) {
+				// the branches below push at most one chunk
+				const size_t numChunksBefore = buf.chunks.size();
+
 				if (UseMinLossFactor()) {
 					if (erasedResendChunks.find(resFwdIter->first) == erasedResendChunks.end())
 						buf.chunks.push_back(resFwdIter->second);
@@ -1038,7 +1061,14 @@ void UDPConnection::SendIfNecessary(bool flushed)
 					rev = (rev + 1) % 4;
 				}
 
-				resentChunks += 1;
+				// loss is a link-quality signal, policy duplication is only a
+				// bandwidth cost
+				if (buf.chunks.size() > numChunksBefore) {
+					if (buf.chunks.back()->lossSuspected)
+						resentChunks += 1;
+					else
+						redundantChunks += 1;
+				}
 				maxResend -= 1;
 
 				sent = true;
@@ -1067,7 +1097,7 @@ void UDPConnection::SendIfNecessary(bool flushed)
 
 	// on a lossy connection chunks can be sent multiple times, see switch above
 	for (int i = unackPrevSize; i < unackedChunks.size(); ++i) {
-		RequestResend(unackedChunks[i], true);
+		RequestResend(unackedChunks[i], true, false);
 	}
 
 	UpdateResendRequests();
@@ -1111,8 +1141,11 @@ void UDPConnection::AckChunks(int lastAck)
 	}
 }
 
-void UDPConnection::RequestResend(ChunkPtr ptr, bool noSort)
+void UDPConnection::RequestResend(const ChunkPtr& ptr, bool noSort, bool lossSuspected)
 {
+	// sticky: redundancy mode queueing the chunk again later does not clear it
+	ptr->lossSuspected |= lossSuspected;
+
 	resendRequested.emplace_back(ptr->chunkNumber, ptr);
 
 	if (noSort)

@@ -36,6 +36,10 @@ public:
 	std::int32_t chunkNumber;
 	std::uint8_t chunkSize;
 	std::vector<std::uint8_t> data;
+
+	/// retransmission was requested because the chunk looks lost (nak or ack
+	/// timeout), not because the link duplicates by policy
+	bool lossSuspected = false;
 };
 typedef std::shared_ptr<Chunk> ChunkPtr;
 
@@ -149,7 +153,7 @@ private:
 	void SendIfNecessary(bool flushed);
 	void AckChunks(int lastAck);
 
-	void RequestResend(ChunkPtr ptr, bool noSort);
+	void RequestResend(const ChunkPtr& ptr, bool noSort, bool lossSuspected);
 	void SendPacket(Packet& pkt);
 
 	/// true while the outgoing bandwidth cap is exceeded
@@ -247,6 +251,14 @@ private:
 	unsigned int resentChunks;
 	unsigned int droppedChunks;
 
+	/// chunks retransmitted purely because the link duplicates by policy
+	unsigned int redundantChunks;
+	/// inbound chunks observed missing at a send pass; long-lived reordering is
+	/// indistinguishable from loss and counts here too
+	unsigned int lostIncomingChunks;
+	/// high-water mark so each inbound gap is counted once, even though the
+	/// gap list is rebuilt from scratch on every send pass
+	int highestMissingCounted;
 	unsigned int sendErrors;
 	unsigned int recvErrors;
 	unsigned int sentOverhead, recvOverhead;
