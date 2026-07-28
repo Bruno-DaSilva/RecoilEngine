@@ -8,6 +8,7 @@ title = "Running changelog"
 This is the bleeding-edge changelog since version 2026.06, for **pre-release 2026.07**.
 
 ## Caveats
+- Barbarian AI updated to version 1.6.26
 
 ## Build
 - Fixes for MSVC build
@@ -78,6 +79,7 @@ This is the bleeding-edge changelog since version 2026.06, for **pre-release 202
 - Fix /unbind for keychains
 - Fix stale spGetActionHotKeys returns [PR 3082](https://github.com/beyond-all-reason/RecoilEngine/pull/3082)
 - Use a portable type cast in MemPoolTypes logging
+- Support alternate file extensions for replays [PR 2975](https://github.com/beyond-all-reason/RecoilEngine/pull/2975)
 
 ## Rendering
 - Added sorting icon names before adding to atlas so insertion order is consistent across runs.

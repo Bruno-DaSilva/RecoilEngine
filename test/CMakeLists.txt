@@ -349,8 +349,10 @@ endif()
 			${test_Common_sources}
 		)
 
+	find_package_static(ZLIB 1.2.7 REQUIRED)
+
 	set(test_libs
-			z
+			ZLIB::ZLIB
 		)
 
 	add_spring_test(${test_name} "${test_src}" "${test_libs}" "")
