@@ -2665,15 +2665,15 @@ bool CGameServer::HasFinished() const
 
 void CGameServer::CreateNewFrame(bool fromServerThread, bool fixedFrameTime)
 {
+	std::unique_lock<spring::recursive_mutex> lck(gameServerMutex, std::defer_lock);
+	if (!fromServerThread)
+		lck.lock();
+
 	if (demoReader != nullptr) {
 		CheckSync();
 		SendDemoData(-1);
 		return;
 	}
-
-	std::unique_lock<spring::recursive_mutex> lck(gameServerMutex, std::defer_lock);
-	if (!fromServerThread)
-		lck.lock();
 
 	CheckSync();
 #ifndef DEDICATED
