@@ -312,6 +312,14 @@ void UDPConnection::Init()
 	throttledMilliSecs = 0.0;
 	reorderStallMilliSecs = 0.0;
 	lastDurationSampleTime = spring_gettime();
+	responseTimeMovingAvgMs = 0.0f;
+	responseTimeJitterMs = 0.0f;
+	responseTimeMaxMs[0] = 0.0f;
+	responseTimeMaxMs[1] = 0.0f;
+	responseTimeBucketStart = spring_gettime();
+	responseTimeSampled = false;
+	responseTimeBuckets = {};
+	responseTimeSumMs = 0.0;
 	droppedChunks = 0;
 	lostIncomingChunks = 0;
 	highestMissingCounted = -1;
@@ -435,6 +443,14 @@ void UDPConnection::Update()
 
 		if (!waitingPackets.empty())
 			reorderStallMilliSecs += durationDeltaMs;
+
+		// rotate on a timer, not on sample arrival: a link that stops acking
+		// would otherwise pin the window open around an old spike
+		if ((curTime - responseTimeBucketStart).toMilliSecsf() >= responseTimeBucketMs) {
+			responseTimeMaxMs[1] = responseTimeMaxMs[0];
+			responseTimeMaxMs[0] = 0.0f;
+			responseTimeBucketStart = curTime;
+		}
 	}
 
 	#ifdef ENABLE_DEBUG_STATS
@@ -579,7 +595,10 @@ void UDPConnection::ProcessRawPacket(Packet& incoming)
 	}
 
 
-	AckChunks(incoming.lastContinuous);
+	// TODO: sample against the kernel's receive timestamp instead. This one is
+	// taken when we get round to processing the packet, so scheduling delay on
+	// our side lands in the response time.
+	AckChunks(incoming.lastContinuous, lastPacketRecvTime);
 	UpdateResendRequests();
 
 	if (!unackedChunks.empty()) {
@@ -833,6 +852,27 @@ bool UDPConnection::CanReconnect() const {
 
 // walked rather than tracked incrementally: read once per metrics poll, not per
 // packet
+float UDPConnection::OldestUnackedAgeMs() const
+{
+	if (unackedChunks.empty() || !unackedChunks.front()->sendTime.isTime())
+		return 0.0f;
+
+	return (spring_gettime() - unackedChunks.front()->sendTime).toMilliSecsf();
+}
+
+void UDPConnection::SampleResponseTime(float sampleMs)
+{
+	// binning and smoothing live in Connection.h next to the bucket bounds, so
+	// both are reachable from a unit test without a socket
+	responseTimeBuckets[ResponseTimeBucketIndex(sampleMs)] += 1;
+	responseTimeSumMs += sampleMs;
+
+	UpdateResponseTimeMovingAvg(sampleMs, responseTimeSampled, responseTimeMovingAvgMs, responseTimeJitterMs);
+
+	responseTimeSampled = true;
+	responseTimeMaxMs[0] = std::max(responseTimeMaxMs[0], sampleMs);
+}
+
 unsigned int UDPConnection::SendQueuedBytes() const
 {
 	unsigned int bytes = 0;
@@ -860,6 +900,13 @@ ConnectionStats UDPConnection::GetStats() const
 	stats.lossFactor = netLossFactor;
 	stats.sendBlockedMs = throttledMilliSecs;
 	stats.receiveStalledMs = reorderStallMilliSecs;
+	stats.hasResponseSample = responseTimeSampled;
+	stats.responseTimeMs = responseTimeMovingAvgMs;
+	stats.responseTimePeakMs = std::max(responseTimeMaxMs[0], responseTimeMaxMs[1]);
+	stats.responseTimeJitterMs = responseTimeJitterMs;
+	stats.oldestUnackedMs = OldestUnackedAgeMs();
+	stats.responseTimeBuckets = responseTimeBuckets;
+	stats.responseTimeSumMs = responseTimeSumMs;
 	stats.sentOverheadBytes = sentOverhead;
 	stats.receivedOverheadBytes = recvOverhead;
 	stats.processedChunks = lastInOrder + 1;
@@ -1099,6 +1146,10 @@ void UDPConnection::SendIfNecessary(bool flushed)
 
 				sent = true;
 			} else if (!resend && canSendNew) {
+				// stamped here rather than in SendPacket, which would have to
+				// re-walk every packet's chunks
+				newChunks[0]->sendTime = curTime;
+
 				buf.chunks.push_back(newChunks[0]);
 				unackedChunks.push_back(newChunks[0]);
 				newChunks.pop_front();
@@ -1152,11 +1203,41 @@ void UDPConnection::SendPacket(Packet& pkt)
 	sentPackets += 1;
 }
 
-void UDPConnection::AckChunks(int lastAck)
+void UDPConnection::AckChunks(int lastAck, spring_time ackTime)
 {
+	// One sample per ack, not per acked chunk: a send pass stamps every chunk it
+	// emits with the same time, so sampling each would weight one round trip by
+	// the size of the burst.
+	//
+	// unackedChunks is in send order with non-decreasing sendTime, so the last
+	// chunk popped is the newest this ack covers; an older one would fold our
+	// own send pacing into the measurement.
+	const bool sampling = StatsSampling();
+
+	spring_time newestAckedSendTime = spring_notime;
+	bool newestAckedRetransmitted = false;
+
 	while (!unackedChunks.empty() && (lastAck >= (*unackedChunks.begin())->chunkNumber)) {
+		const Chunk& chunk = *unackedChunks.front();
+
+		if (sampling && chunk.sendTime.isTime()) {
+			newestAckedSendTime = chunk.sendTime;
+			newestAckedRetransmitted = chunk.lossSuspected;
+		}
+
 		unackedChunks.pop_front();
 	}
+
+	// Karn's algorithm (RFC 6298 3): sendTime is the *first* copy of a
+	// retransmitted chunk, and nothing says which copy this ack answers, so
+	// measuring it would make response time rise with loss.
+	//
+	// Dropped outright rather than substituting an older un-retransmitted chunk,
+	// for the send-pacing reason above; a link losing that heavily holds its last
+	// response time and climbs in oldestUnackedMs instead. Redundancy-mode
+	// duplication leaves lossSuspected false, so it keeps sampling normally.
+	if (newestAckedSendTime.isTime() && !newestAckedRetransmitted)
+		SampleResponseTime((ackTime - newestAckedSendTime).toMilliSecsf());
 
 	// resend requested and later acked, happens every now and then
 	for (size_t i = 0, n = resendRequested.size(); i < n; i++) {

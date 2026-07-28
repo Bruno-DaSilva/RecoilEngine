@@ -2,13 +2,17 @@
 
 #pragma once
 
+#include <array>
 #include <vector>
+
+#include "System/Net/Connection.h" // netcode::responseTimeNumBuckets
 
 namespace prometheus
 {
 	template<typename T> class Family;
 	class Counter;
 	class Gauge;
+	class Histogram;
 	class Registry;
 }
 
@@ -58,6 +62,15 @@ private:
 		prometheus::Gauge* resendQueueDepth = nullptr;
 		prometheus::Gauge* reorderQueueDepth = nullptr;
 		prometheus::Gauge* sendQueueBytes = nullptr;
+		prometheus::Gauge* responseTime = nullptr;
+		prometheus::Gauge* responseTimeMax = nullptr;
+		prometheus::Gauge* responseTimeJitter = nullptr;
+		prometheus::Gauge* unackedAge = nullptr;
+
+		/// previous cumulative histogram state, so each poll contributes only
+		/// the samples taken since the last one
+		std::array<unsigned int, netcode::responseTimeNumBuckets> lastResponseTimeBuckets = {};
+		double lastResponseTimeSumMs = 0.0;
 	};
 
 	/// drop a connection's gauges from the registry rather than leave them
@@ -84,6 +97,10 @@ private:
 	prometheus::Family<prometheus::Gauge>* metricResendQueueDepth = nullptr;
 	prometheus::Family<prometheus::Gauge>* metricReorderQueueDepth = nullptr;
 	prometheus::Family<prometheus::Gauge>* metricSendQueueBytes = nullptr;
+	prometheus::Family<prometheus::Gauge>* metricResponseTime = nullptr;
+	prometheus::Family<prometheus::Gauge>* metricResponseTimeMax = nullptr;
+	prometheus::Family<prometheus::Gauge>* metricResponseTimeJitter = nullptr;
+	prometheus::Family<prometheus::Gauge>* metricUnackedAge = nullptr;
 
 	// server-wide aggregates, exported whether or not per-player metrics are on
 	prometheus::Counter* metricTotalSentBytes = nullptr;
@@ -106,6 +123,14 @@ private:
 	prometheus::Gauge* metricTotalResendQueueDepth = nullptr;
 	prometheus::Gauge* metricTotalReorderQueueDepth = nullptr;
 	prometheus::Gauge* metricTotalSendQueueBytes = nullptr;
+
+	prometheus::Gauge* metricMaxResponseTime = nullptr;
+	prometheus::Gauge* metricMaxResponseTimeJitter = nullptr;
+	prometheus::Gauge* metricMaxUnackedAge = nullptr;
+	/// one entry per bucket for ObserveMultiple; reused across connections
+	std::vector<double> histogramIncrements;
+	/// aggregate only: a per-player histogram would multiply series by ~12
+	prometheus::Histogram* metricResponseTimeHist = nullptr;
 
 	unsigned int lastListenerRecvErrors = 0;
 };

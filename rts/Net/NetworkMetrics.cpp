@@ -8,6 +8,7 @@
 
 #include <prometheus/counter.h>
 #include <prometheus/gauge.h>
+#include <prometheus/histogram.h>
 #include <prometheus/registry.h>
 
 #include "GameParticipant.h"
@@ -58,6 +59,35 @@ void NetworkMetrics::Init(prometheus::Registry& registry)
 		"Chunks discarded on arrival because the same chunk had already been received");
 	metricTotalLostIncomingChunks = counter("recoil_network_lost_incoming_chunks_total",
 		"Chunks from clients observed missing at a send pass. Reordering that outlives a pass counts here as well as real loss");
+	// ObserveMultiple throws length_error on a size mismatch
+	static_assert(netcode::responseTimeNumBuckets == netcode::responseTimeNumBucketBounds + 1,
+		"one increment per bucket, i.e. one more than the bounds");
+	histogramIncrements.assign(netcode::responseTimeNumBuckets, 0.0);
+
+	metricMaxResponseTime = gauge("recoil_network_max_response_time_seconds",
+		"Worst smoothed send->ack time across client connections; latency plus client processing, not pure RTT. Retransmitted chunks contribute no sample, so this stays a latency signal and does not rise with loss -- see resent_chunks_total for that");
+	metricMaxUnackedAge = gauge("recoil_network_max_unacked_age_seconds",
+		"Longest an already-sent chunk has waited for an ack, across client connections; sustained growth means a stalled link rather than a slow one");
+	metricMaxResponseTimeJitter = gauge("recoil_network_max_response_time_jitter_seconds",
+		"Worst response-time mean deviation across client connections; how unsteady the links are rather than how slow");
+	{
+		// Scaled to seconds here rather than in the netcode, which bins against
+		// the millisecond bounds it measures in; the scaling is monotone, so
+		// only the labels move and the bucket count stays tied to the source.
+		prometheus::Histogram::BucketBoundaries bounds;
+		bounds.reserve(netcode::responseTimeNumBucketBounds);
+
+		for (const float boundMs: netcode::responseTimeBucketBoundsMs)
+			bounds.push_back(boundMs * msToSecs);
+
+		auto& family = prometheus::BuildHistogram()
+			.Name("recoil_network_response_time_seconds")
+			.Help("Distribution of send->ack times over all client connections; one observation per ack, not per acked chunk, and none at all for an ack whose newest chunk had been retransmitted. A lossy link therefore contributes fewer observations rather than inflated ones")
+			.Register(registry);
+
+		metricResponseTimeHist = &family.Add({}, std::move(bounds));
+	}
+
 	metricTotalOutgoingThrottled = counter("recoil_network_outgoing_throttled_seconds_total",
 		"Time sending to clients was blocked by the outgoing bandwidth cap while data was queued, summed over connections");
 	metricTotalReorderStall = counter("recoil_network_reorder_stall_seconds_total",
@@ -115,6 +145,14 @@ void NetworkMetrics::Init(prometheus::Registry& registry)
 		"Chunks from this client held in the reorder buffer behind a missing chunk");
 	metricSendQueueBytes = gaugeFamily("recoil_network_connection_send_queue_bytes",
 		"Application bytes queued for this client and not yet transmitted");
+	metricResponseTime = gaugeFamily("recoil_network_connection_response_time_seconds",
+		"Smoothed send->ack time for this client; latency plus client processing, not pure RTT. Retransmitted chunks contribute no sample, so loss shows up in this link's resent_chunks_total rather than here");
+	metricResponseTimeMax = gaugeFamily("recoil_network_connection_response_time_spike_seconds",
+		"Worst single send->ack sample for this client over the trailing window");
+	metricResponseTimeJitter = gaugeFamily("recoil_network_connection_response_time_jitter_seconds",
+		"Mean deviation of this client's send->ack samples; how unsteady the link is rather than how slow");
+	metricUnackedAge = gaugeFamily("recoil_network_connection_unacked_age_seconds",
+		"How long this client's oldest un-acked chunk has waited; 0 when nothing is outstanding. Rising while response_time holds steady means the link stalled, not slowed");
 }
 
 
@@ -134,6 +172,10 @@ void NetworkMetrics::ReleaseConnectionGauges(ConnectionMetrics& cm)
 	release(metricResendQueueDepth, cm.resendQueueDepth);
 	release(metricReorderQueueDepth, cm.reorderQueueDepth);
 	release(metricSendQueueBytes, cm.sendQueueBytes);
+	release(metricResponseTime, cm.responseTime);
+	release(metricResponseTimeMax, cm.responseTimeMax);
+	release(metricResponseTimeJitter, cm.responseTimeJitter);
+	release(metricUnackedAge, cm.unackedAge);
 }
 
 
@@ -147,6 +189,9 @@ void NetworkMetrics::Update(const CGameServer& server)
 {
 	int numRedundancyLinks = 0;
 	float totalOutgoingBw = 0.0f;
+	float maxResponseTime = 0.0f;
+	float maxResponseTimeJitter = 0.0f;
+	float maxUnackedAge = 0.0f;
 	unsigned int totalUnackedChunks = 0;
 	unsigned int totalResendQueueDepth = 0;
 	unsigned int totalReorderQueueDepth = 0;
@@ -202,6 +247,7 @@ void NetworkMetrics::Update(const CGameServer& server)
 			cm.resendQueueDepth   = &metricResendQueueDepth->Add(labels);
 			cm.reorderQueueDepth  = &metricReorderQueueDepth->Add(labels);
 			cm.sendQueueBytes     = &metricSendQueueBytes->Add(labels);
+			cm.unackedAge         = &metricUnackedAge->Add(labels);
 		}
 
 		publishDelta(metricTotalSentBytes, cm.sentBytes, stats.sentBytes);
@@ -225,6 +271,47 @@ void NetworkMetrics::Update(const CGameServer& server)
 
 		numRedundancyLinks += (stats.lossFactor > 0);
 
+		maxUnackedAge = std::max(maxUnackedAge, stats.oldestUnackedMs);
+
+		if (metricResponseTimeHist != nullptr) {
+			bool anySamples = false;
+
+			for (unsigned b = 0; b < netcode::responseTimeNumBuckets; b++) {
+				const unsigned int delta = DeltaSince(stats.responseTimeBuckets[b], cm.lastResponseTimeBuckets[b]);
+
+				histogramIncrements[b] = delta;
+				anySamples |= (delta > 0);
+			}
+
+			// bucket counts are scale-free; only the sum follows the bounds
+			// into seconds
+			const double sumDelta = DeltaSince(stats.responseTimeSumMs, cm.lastResponseTimeSumMs) * msToSecs;
+
+			if (anySamples)
+				metricResponseTimeHist->ObserveMultiple(histogramIncrements, sumDelta);
+		}
+
+		// only once measured: an absent series says "unknown" where a zero would
+		// claim a perfect link
+		if (stats.hasResponseSample) {
+			maxResponseTime = std::max(maxResponseTime, stats.responseTimeMs);
+			maxResponseTimeJitter = std::max(maxResponseTimeJitter, stats.responseTimeJitterMs);
+
+			if (metricResponseTime != nullptr) {
+				if (cm.responseTime == nullptr) {
+					const std::map<std::string, std::string> labels = {{"playerid", std::to_string(p.id)}};
+
+					cm.responseTime = &metricResponseTime->Add(labels);
+					cm.responseTimeMax = &metricResponseTimeMax->Add(labels);
+					cm.responseTimeJitter = &metricResponseTimeJitter->Add(labels);
+				}
+
+				cm.responseTime->Set(stats.responseTimeMs * msToSecs);
+				cm.responseTimeMax->Set(stats.responseTimePeakMs * msToSecs);
+				cm.responseTimeJitter->Set(stats.responseTimeJitterMs * msToSecs);
+			}
+		}
+
 		if (cm.outgoingBw != nullptr) {
 			cm.lossFactor->Set(stats.lossFactor);
 			cm.outgoingBw->Set(stats.sendRateBytesPerSec);
@@ -232,10 +319,14 @@ void NetworkMetrics::Update(const CGameServer& server)
 			cm.resendQueueDepth->Set(stats.queuedResendChunks);
 			cm.reorderQueueDepth->Set(stats.queuedInboundChunks);
 			cm.sendQueueBytes->Set(stats.queuedSendBytes);
+			cm.unackedAge->Set(stats.oldestUnackedMs * msToSecs);
 		}
 	}
 
 	metricRedundancyLinks->Set(numRedundancyLinks);
+	metricMaxResponseTime->Set(maxResponseTime * msToSecs);
+	metricMaxResponseTimeJitter->Set(maxResponseTimeJitter * msToSecs);
+	metricMaxUnackedAge->Set(maxUnackedAge * msToSecs);
 	metricTotalOutgoingBw->Set(totalOutgoingBw);
 	metricTotalUnackedChunks->Set(totalUnackedChunks);
 	metricTotalResendQueueDepth->Set(totalResendQueueDepth);
