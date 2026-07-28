@@ -8,6 +8,7 @@
 namespace prometheus
 {
 	template<typename T> class Family;
+	class Counter;
 	class Gauge;
 	class Registry;
 }
@@ -27,12 +28,18 @@ public:
 	void Init(prometheus::Registry& registry, const std::string& gameIDHex);
 	void Update(const CGameServer& server);
 
+	/// @return whether CountPlayerDesync() is worth calling for the players in it
+	bool CountDesyncEvent();
+	void CountPlayerDesync(int playerId);
+
 	void SetGameStartTime(double unixSecs);
 
 private:
 	struct PlayerMetrics {
 		prometheus::Gauge* lagSeconds = nullptr;
 		prometheus::Gauge* cpuUsage = nullptr;
+		// resolved lazily on first event, see AddPlayerMetric
+		prometheus::Counter* desyncs = nullptr;
 	};
 
 	std::vector<PlayerMetrics> playerMetrics;
@@ -49,7 +56,11 @@ private:
 	prometheus::Gauge* metricPaused = nullptr;
 	prometheus::Gauge* metricGameStartTs = nullptr;
 
+	prometheus::Counter* metricDesyncEvents = nullptr;
+	prometheus::Counter* metricTotalPlayerDesyncs = nullptr;
+
 	// per-player families; null unless MetricsPerPlayer is on
 	prometheus::Family<prometheus::Gauge>* metricPlayerLag = nullptr;
 	prometheus::Family<prometheus::Gauge>* metricPlayerCpu = nullptr;
+	prometheus::Family<prometheus::Counter>* metricPlayerDesyncs = nullptr;
 };

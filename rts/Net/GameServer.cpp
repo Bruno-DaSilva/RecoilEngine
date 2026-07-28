@@ -378,6 +378,9 @@ void CGameServer::AddLocalClient(const std::string& myName, const std::string& m
 	std::lock_guard<spring::recursive_mutex> scoped_lock(gameServerMutex);
 	assert(!HasLocalClient());
 
+	// HandleConnectionAttempts only sees remote peers
+	serverMetrics->CountConnectionAttempt();
+
 	localClientNumber = BindConnection(std::shared_ptr<netcode::CConnection>(new netcode::CLocalConnection()), myName, "", myVersion, myPlatform, true);
 }
 
@@ -732,6 +735,15 @@ void CGameServer::CheckSync()
 		if (/*completeResponseSet && */ (!desyncGroups.empty() || !desyncSpecs.empty())) {
 			if (syncErrorFrame == 0 || (outstandingSyncFrame - syncErrorFrame > static_cast<int>(SYNCCHECK_MSG_TIMEOUT))) {
 				syncErrorFrame = outstandingSyncFrame;
+
+				if (serverMetrics->CountDesyncEvent()) {
+					for (const auto& desyncGroup: desyncGroups)
+						for (const int playerNum: desyncGroup.second)
+							serverMetrics->CountPlayerDesync(playerNum);
+
+					for (const auto& p: desyncSpecs)
+						serverMetrics->CountPlayerDesync(p.first);
+				}
 
 			#ifdef SYNCDEBUG
 				CSyncDebugger::GetInstance()->ServerTriggerSyncErrorHandling(serverFrameNum);
@@ -1123,6 +1135,7 @@ void CGameServer::ProcessPacket(const unsigned playerNum, std::shared_ptr<const 
 			Message(spring::format(PlayerLeft, players[a].GetType(), players[a].name.c_str(), " normal quit"));
 			Broadcast(CBaseNetProtocol::Get().SendPlayerLeft(a, 1));
 			players[a].Kill("[GameServer] user exited", true);
+			serverMetrics->CountConnectionClosed("quit");
 			if (hostif != nullptr)
 				hostif->SendPlayerLeft(a, 1);
 			break;
@@ -1885,10 +1898,17 @@ void CGameServer::HandleConnectionAttempts()
 		std::shared_ptr<netcode::UDPConnection> prev = udpListener->PreviewConnection().lock();
 		std::shared_ptr<const RawPacket> packet = prev->GetData();
 
+		serverMetrics->CountConnectionAttempt();
+
 		if (packet == nullptr) {
+			serverMetrics->CountConnectionRejected("handshake");
 			udpListener->RejectConnection();
 			continue;
 		}
+
+		// a wrong-protocol client raises the same exception as a malformed
+		// handshake, but is what a rollout produces, so it gets its own bucket
+		const char* rejectReason = "handshake";
 
 		try {
 			if (packet->length < 3) {
@@ -1918,11 +1938,15 @@ void CGameServer::HandleConnectionAttempts()
 			msg >> reconnect;
 			msg >> netloss;
 
-			if (netversion != NETWORK_VERSION)
+			if (netversion != NETWORK_VERSION) {
+				rejectReason = "netversion";
 				throw netcode::UnpackPacketException(spring::format("Wrong network version: received %d, required %d", (int)netversion, (int)NETWORK_VERSION));
+			}
 
 			BindConnection(udpListener->AcceptConnection(), name, passwd, version, platform, false, reconnect, netloss);
 		} catch (const netcode::UnpackPacketException& ex) {
+			serverMetrics->CountConnectionRejected(rejectReason);
+
 			const asio::ip::udp::endpoint endp = prev->GetEndpoint();
 			const asio::ip::address addr = endp.address();
 
@@ -2009,9 +2033,15 @@ void CGameServer::ServerReadNet()
 	// handle new connections
 	HandleConnectionAttempts();
 
-	const float updateBandwidth = spring_tomsecs(spring_gettime() - lastBandwidthUpdate) / (float)playerBandwidthInterval;
+	const spring_time now = spring_gettime();
+
+	const float updateBandwidth = spring_tomsecs(now - lastBandwidthUpdate) / (float)playerBandwidthInterval;
 	if (updateBandwidth >= 1.0f)
-		lastBandwidthUpdate = spring_gettime();
+		lastBandwidthUpdate = now;
+
+	// time covered by this pass, for the incoming-throttle duration metric
+	const double readNetDeltaMs = (now - lastReadNetTime).toMilliSecsf();
+	lastReadNetTime = now;
 
 	for (GameParticipant& player: players) {
 		std::shared_ptr<netcode::CConnection>& playerLink = player.clientLink;
@@ -2030,6 +2060,7 @@ void CGameServer::ServerReadNet()
 			Broadcast(CBaseNetProtocol::Get().SendPlayerLeft(player.id, 0));
 
 			player.Kill("User timeout");
+			serverMetrics->CountConnectionClosed("timeout");
 
 			if (hostif != nullptr)
 				hostif->SendPlayerLeft(player.id, 0);
@@ -2071,6 +2102,8 @@ void CGameServer::ServerReadNet()
 		for (const auto& pair: aiClientLinks) {
 			aiClientNumbers[ aiClientNumbers[MAX_AIS]++ ] = pair.first;
 		}
+
+		bool anyLinkBwLimited = false;
 
 		for (size_t i = 0, n = aiClientLinks.size(); i < n; i++) {
 			const uint8_t aiClientNum = aiClientNumbers[i];
@@ -2132,11 +2165,15 @@ void CGameServer::ServerReadNet()
 				it->second.numPacketsSent = numPacketsSent;
 
 			if (numPktsDropped > 0) {
+				serverMetrics->CountThrottledPackets(player.id, numPktsDropped);
+
 				if (aiClientNum == MAX_AIS)
 					PrivateMessage(player.id, spring::format("Warning: Waiting packet limit was reached for %s [%d packets dropped, %d sent]", player.name.c_str(), numPktsDropped, numPacketsSent));
 				else
 					PrivateMessage(player.id, spring::format("Warning: Waiting packet limit was reached for %s AI %d [%d packets dropped, %d sent]", player.name.c_str(), (int)aiClientNum, numPktsDropped, numPacketsSent));
 			}
+
+			anyLinkBwLimited |= bwLimitIsReached;
 
 			if (!bwLimitWasReached && bwLimitIsReached) {
 				if (aiClientNum == MAX_AIS)
@@ -2145,6 +2182,11 @@ void CGameServer::ServerReadNet()
 					PrivateMessage(player.id, spring::format("Warning: Bandwidth limit was reached for %s AI %d [packets delayed, %d sent]", player.name.c_str(), (int)aiClientNum, numPacketsSent));
 			}
 		}
+
+		// throttled while any of the player's links left packets queued for a
+		// later pass
+		if (anyLinkBwLimited)
+			serverMetrics->CountIncomingThrottled(player.id, readNetDeltaMs);
 	}
 
 #ifdef SYNCDEBUG
@@ -2854,6 +2896,7 @@ void CGameServer::KickPlayer(int playerNum)
 	Broadcast(CBaseNetProtocol::Get().SendPlayerLeft(playerNum, 2));
 
 	players[playerNum].Kill("Kicked from the battle", true);
+	serverMetrics->CountConnectionClosed("kick");
 
 	if (hostif != nullptr)
 		hostif->SendPlayerLeft(playerNum, 2);
@@ -2982,6 +3025,14 @@ unsigned CGameServer::BindConnection(
 		refClientVersion = {clientName, clientVersion};
 
 	std::string errMsg;
+	const char* rejectReason = "other";
+
+	// assigned together so they cannot drift: errMsg drives the control flow
+	// below and is shown to the user, rejectReason is the metric's label
+	const auto reject = [&](const char* reason, std::string msg) {
+		rejectReason = reason;
+		errMsg = std::move(msg);
+	};
 
 	size_t newPlayerNumber = players.size();
 
@@ -2989,7 +3040,7 @@ unsigned CGameServer::BindConnection(
 	// bool reconnectAllowed = canReconnect;
 
 	if (clientVersion != refClientVersion.second) {
-		errMsg = "client version '" + clientVersion + "' mismatch, reference is '" + refClientVersion.second + "' set by '" + refClientVersion.first + "'";
+		reject("version", "client version '" + clientVersion + "' mismatch, reference is '" + refClientVersion.second + "' set by '" + refClientVersion.first + "'");
 	} else {
 		struct ConnectionFlags {
 			const char* error;
@@ -3037,7 +3088,7 @@ unsigned CGameServer::BindConnection(
 				killExistingLink = gpConnectionFlags.forceNewLink;
 			} else {
 				// disallowed
-				errMsg = gpConnectionFlags.error;
+				reject("state", gpConnectionFlags.error);
 			}
 		}
 
@@ -3050,13 +3101,13 @@ unsigned CGameServer::BindConnection(
 			if (demoReader || allowSpecJoin)
 				AddAdditionalUser(clientName, clientPassword);
 			else
-				errMsg = "User name not authorized to connect";
+				reject("name", "User name not authorized to connect");
 		}
 
 		// check user's password; disabled for local host
 		if (errMsg.empty() && !isLocal)
 			if (!CheckPlayerPassword(newPlayerNumber, clientPassword))
-				errMsg = "Incorrect password";
+				reject("password", "Incorrect password");
 
 		// do not respond before we are sure we want to, and never respond to
 		// reconnection attempts since it could interfere with the protocol and
@@ -3067,6 +3118,7 @@ unsigned CGameServer::BindConnection(
 
 	// >> Reject Connection <<
 	if (!errMsg.empty() || newPlayerNumber >= players.size()) {
+		serverMetrics->CountConnectionRejected(rejectReason);
 		Message(spring::format(" -> %s", errMsg.c_str()));
 		clientLink->SendData(CBaseNetProtocol::Get().SendQuit(spring::format("Connection rejected: %s", errMsg.c_str())));
 		return 0;
@@ -3084,6 +3136,7 @@ unsigned CGameServer::BindConnection(
 		// prevent sending a quit message since that might kill the new connection
 		newPlayer.clientLink.reset();
 		newPlayer.Kill("Terminating connection");
+		serverMetrics->CountConnectionClosed("replaced");
 
 		if (hostif != nullptr)
 			hostif->SendPlayerLeft(newPlayerNumber, 0);
@@ -3102,6 +3155,10 @@ unsigned CGameServer::BindConnection(
 
 		if (newPlayer.myState == GameParticipant::State::DISCONNECTING)
 			newPlayer.myState = GameParticipant::State::CONNECTED;
+
+		// no ResetConnectionDeltas here: ReconnectTo retargets the existing link,
+		// so its counters carry on rather than restarting at zero
+		serverMetrics->CountConnectionEstablished(true);
 
 		Message(spring::format(" -> Connection reestablished (id %i)", newPlayerNumber));
 		newPlayer.clientLink->SetLossFactor(netloss);
@@ -3136,6 +3193,7 @@ unsigned CGameServer::BindConnection(
 	// a fresh link restarts its counters at zero, so the exported deltas have
 	// to rebaseline with it
 	serverMetrics->ResetConnectionDeltas(newPlayerNumber);
+	serverMetrics->CountConnectionEstablished(reconnect);
 
 	// new connection established
 	Message(spring::format(" -> Connection established (given id %i)", newPlayerNumber));

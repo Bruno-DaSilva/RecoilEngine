@@ -20,3 +20,15 @@ void ServerMetrics::Update(const CGameServer&) {}
 void ServerMetrics::SetGameStartTime(double) {}
 
 void ServerMetrics::ResetConnectionDeltas(int) {}
+
+void ServerMetrics::CountConnectionAttempt() {}
+void ServerMetrics::CountConnectionRejected(const char*) {}
+void ServerMetrics::CountConnectionEstablished(bool) {}
+void ServerMetrics::CountConnectionClosed(const char*) {}
+
+/// false, so CheckSync skips the per-player walk over the desync groups
+bool ServerMetrics::CountDesyncEvent() { return false; }
+void ServerMetrics::CountPlayerDesync(int) {}
+
+void ServerMetrics::CountThrottledPackets(int, int) {}
+void ServerMetrics::CountIncomingThrottled(int, double) {}

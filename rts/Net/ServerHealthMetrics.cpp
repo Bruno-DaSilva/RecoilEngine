@@ -17,6 +17,7 @@
 #include "Sim/Misc/GlobalConstants.h"
 #include "System/Metrics/Metrics.h"
 
+using metrics::AddPlayerMetric;
 using metrics::AtGrowing;
 using metrics::msToSecs;
 
@@ -55,6 +56,10 @@ void ServerHealthMetrics::Init(prometheus::Registry& registry, const std::string
 	metricPaused = gauge("recoil_server_paused",
 		"1 while the game is paused");
 
+	metricDesyncEvents = counter("recoil_server_desync_events_total",
+		"Desyncs detected by sync checking; counted once per detection, not per frame");
+	metricTotalPlayerDesyncs = counter("recoil_server_desynced_players_total",
+		"Summed count of players whose checksum differed from the reference, over all desyncs");
 	metricGameStartTs = gauge("recoil_server_game_start_timestamp_seconds",
 		"Unix time the game started; 0 while still in the lobby");
 
@@ -71,12 +76,35 @@ void ServerHealthMetrics::Init(prometheus::Registry& registry, const std::string
 		"How far the player's last acked sim frame is behind the server, in game time");
 	metricPlayerCpu = gaugeFamily("recoil_server_player_cpu_usage",
 		"Client-reported cpu usage in [0,1]");
+	metricPlayerDesyncs = counterFamily("recoil_server_player_desyncs_total",
+		"Desyncs in which this player had a checksum differing from the reference");
 }
 
 
 
 
 
+
+
+bool ServerHealthMetrics::CountDesyncEvent()
+{
+	if (metricDesyncEvents == nullptr)
+		return false;
+
+	metricDesyncEvents->Increment();
+	return true;
+}
+
+// the aggregate counter is null exactly when metrics are off; testing it before
+// AtGrowing keeps this from growing a vector nobody reads
+void ServerHealthMetrics::CountPlayerDesync(int playerId)
+{
+	if (metricTotalPlayerDesyncs == nullptr)
+		return;
+
+	AddPlayerMetric(metricTotalPlayerDesyncs, metricPlayerDesyncs,
+		AtGrowing(playerMetrics, playerId).desyncs, playerId, 1);
+}
 
 
 void ServerHealthMetrics::SetGameStartTime(double unixSecs)

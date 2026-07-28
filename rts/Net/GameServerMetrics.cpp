@@ -58,3 +58,21 @@ void ServerMetrics::Update(const CGameServer& server)
 
 void ServerMetrics::SetGameStartTime(double unixSecs)       { health.SetGameStartTime(unixSecs); }
 void ServerMetrics::ResetConnectionDeltas(int playerId)     { network.ResetConnectionDeltas(playerId); }
+
+void ServerMetrics::CountConnectionAttempt()                    { network.CountConnectionAttempt(); }
+void ServerMetrics::CountConnectionRejected(const char* reason)  { network.CountConnectionRejected(reason); }
+void ServerMetrics::CountConnectionEstablished(bool reconnect)   { network.CountConnectionEstablished(reconnect); }
+void ServerMetrics::CountConnectionClosed(const char* reason)    { network.CountConnectionClosed(reason); }
+
+bool ServerMetrics::CountDesyncEvent()              { return health.CountDesyncEvent(); }
+void ServerMetrics::CountPlayerDesync(int playerId) { health.CountPlayerDesync(playerId); }
+
+void ServerMetrics::CountThrottledPackets(int playerId, int numPackets)
+{
+	network.CountThrottledPackets(playerId, numPackets);
+}
+
+void ServerMetrics::CountIncomingThrottled(int playerId, double milliSecs)
+{
+	network.CountIncomingThrottled(playerId, milliSecs);
+}
