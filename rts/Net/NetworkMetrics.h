@@ -49,6 +49,8 @@ private:
 		DeltaCounter redundantChunks;
 		DeltaCounter droppedChunks;
 		DeltaCounter lostIncomingChunks;
+		DeltaCounter outgoingThrottled;
+		DeltaCounter reorderStall;
 
 		prometheus::Gauge* lossFactor = nullptr;
 		prometheus::Gauge* outgoingBw = nullptr;
@@ -74,6 +76,8 @@ private:
 	prometheus::Family<prometheus::Counter>* metricRedundantChunks = nullptr;
 	prometheus::Family<prometheus::Counter>* metricDroppedChunks = nullptr;
 	prometheus::Family<prometheus::Counter>* metricLostIncomingChunks = nullptr;
+	prometheus::Family<prometheus::Counter>* metricOutgoingThrottled = nullptr;
+	prometheus::Family<prometheus::Counter>* metricReorderStall = nullptr;
 	prometheus::Family<prometheus::Gauge>* metricLossFactor = nullptr;
 	prometheus::Family<prometheus::Gauge>* metricOutgoingBw = nullptr;
 	prometheus::Family<prometheus::Gauge>* metricUnackedChunks = nullptr;
@@ -94,6 +98,8 @@ private:
 	prometheus::Counter* metricTotalRedundantChunks = nullptr;
 	prometheus::Counter* metricTotalDroppedChunks = nullptr;
 	prometheus::Counter* metricTotalLostIncomingChunks = nullptr;
+	prometheus::Counter* metricTotalOutgoingThrottled = nullptr;
+	prometheus::Counter* metricTotalReorderStall = nullptr;
 	prometheus::Gauge* metricRedundancyLinks = nullptr;
 	prometheus::Gauge* metricTotalOutgoingBw = nullptr;
 	prometheus::Gauge* metricTotalUnackedChunks = nullptr;

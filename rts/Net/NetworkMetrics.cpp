@@ -20,6 +20,7 @@
 
 using metrics::AtGrowing;
 using metrics::DeltaSince;
+using metrics::msToSecs;
 
 
 void NetworkMetrics::Init(prometheus::Registry& registry)
@@ -57,6 +58,10 @@ void NetworkMetrics::Init(prometheus::Registry& registry)
 		"Chunks discarded on arrival because the same chunk had already been received");
 	metricTotalLostIncomingChunks = counter("recoil_network_lost_incoming_chunks_total",
 		"Chunks from clients observed missing at a send pass. Reordering that outlives a pass counts here as well as real loss");
+	metricTotalOutgoingThrottled = counter("recoil_network_outgoing_throttled_seconds_total",
+		"Time sending to clients was blocked by the outgoing bandwidth cap while data was queued, summed over connections");
+	metricTotalReorderStall = counter("recoil_network_reorder_stall_seconds_total",
+		"Time inbound delivery was stalled behind a missing chunk, summed over connections. Accumulated at loop rate, so it cannot miss a stall that opens and closes between two scrapes");
 	metricRedundancyLinks = gauge("recoil_network_redundancy_mode_connections",
 		"Live connections with a non-zero loss factor, i.e. running in proactive-retransmit mode");
 	metricTotalOutgoingBw = gauge("recoil_network_outgoing_bandwidth_bytes_per_second",
@@ -94,6 +99,10 @@ void NetworkMetrics::Init(prometheus::Registry& registry)
 		"Chunks from this client discarded on arrival because the same chunk had already been received");
 	metricLostIncomingChunks = counterFamily("recoil_network_connection_lost_incoming_chunks_total",
 		"Chunks from this client observed missing at a send pass; long-lived reordering counts here as well as real loss");
+	metricOutgoingThrottled = counterFamily("recoil_network_connection_outgoing_throttled_seconds_total",
+		"Time sending to this client was blocked by the outgoing bandwidth cap while data was queued");
+	metricReorderStall = counterFamily("recoil_network_connection_reorder_stall_seconds_total",
+		"Time inbound delivery from this client was stalled behind a missing chunk; rate() is the fraction of the interval this player's input was blocked");
 	metricLossFactor = gaugeFamily("recoil_network_connection_loss_factor",
 		"Client-declared network loss factor for this link (0 = normal). Above zero the link duplicates chunks by policy; that lands in redundant_chunks_total, not resent_chunks_total");
 	metricOutgoingBw = gaugeFamily("recoil_network_connection_outgoing_bandwidth_bytes_per_second",
@@ -185,6 +194,8 @@ void NetworkMetrics::Update(const CGameServer& server)
 			cm.redundantChunks.player = &metricRedundantChunks->Add(labels);
 			cm.droppedChunks.player  = &metricDroppedChunks->Add(labels);
 			cm.lostIncomingChunks.player = &metricLostIncomingChunks->Add(labels);
+			cm.outgoingThrottled.player = &metricOutgoingThrottled->Add(labels);
+			cm.reorderStall.player = &metricReorderStall->Add(labels);
 			cm.lossFactor         = &metricLossFactor->Add(labels);
 			cm.outgoingBw         = &metricOutgoingBw->Add(labels);
 			cm.unackedChunks      = &metricUnackedChunks->Add(labels);
@@ -203,6 +214,8 @@ void NetworkMetrics::Update(const CGameServer& server)
 		publishDelta(metricTotalLostIncomingChunks, cm.lostIncomingChunks, stats.missingChunks);
 		publishDelta(metricTotalSendErrors, cm.sendErrors, stats.sendErrors);
 		publishDelta(metricTotalRecvErrors, cm.recvErrors, stats.receiveErrors);
+		publishDelta(metricTotalOutgoingThrottled, cm.outgoingThrottled, stats.sendBlockedMs, msToSecs);
+		publishDelta(metricTotalReorderStall, cm.reorderStall, stats.receiveStalledMs, msToSecs);
 
 		totalOutgoingBw += stats.sendRateBytesPerSec;
 		totalUnackedChunks += stats.unackedChunks;

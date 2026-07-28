@@ -261,6 +261,13 @@ private:
 	int highestMissingCounted;
 	unsigned int sendErrors;
 	unsigned int recvErrors;
+
+	/// time spent with queued data blocked by the outgoing bandwidth cap
+	double throttledMilliSecs;
+	/// time spent with inbound delivery stalled behind a missing chunk
+	double reorderStallMilliSecs;
+	/// both duration accumulators above sample the same interval off this
+	spring_time lastDurationSampleTime;
 	unsigned int sentOverhead, recvOverhead;
 	unsigned int sentPackets, recvPackets;
 

@@ -309,6 +309,9 @@ void UDPConnection::Init()
 	recvPackets = 0;
 	sendErrors = 0;
 	recvErrors = 0;
+	throttledMilliSecs = 0.0;
+	reorderStallMilliSecs = 0.0;
+	lastDurationSampleTime = spring_gettime();
 	droppedChunks = 0;
 	lostIncomingChunks = 0;
 	highestMissingCounted = -1;
@@ -412,6 +415,27 @@ void UDPConnection::Update()
 {
 	spring_time curTime = spring_gettime();
 	outgoing.UpdateTime(spring_tomsecs(curTime));
+
+	// Sampled at loop rate rather than at the 1Hz metrics poll, so a queue that
+	// fills and drains between two polls is still visible. The timestamp advances
+	// whether or not anything is collecting, so enabling collection late cannot
+	// make the first interval span the whole uptime.
+	const float durationDeltaMs = (curTime - lastDurationSampleTime).toMilliSecsf();
+	lastDurationSampleTime = curTime;
+
+	if (StatsSampling()) {
+		// one term per send stage, each against that stage's own gate: Flush
+		// chunks outgoingData against the preliminary average, SendIfNecessary
+		// drains newChunks against what actually went out
+		const bool chunkingBlocked = !outgoingData.empty() && OutgoingBandwidthExceeded(true);
+		const bool sendingBlocked  = !newChunks.empty()    && OutgoingBandwidthExceeded(false);
+
+		if (chunkingBlocked || sendingBlocked)
+			throttledMilliSecs += durationDeltaMs;
+
+		if (!waitingPackets.empty())
+			reorderStallMilliSecs += durationDeltaMs;
+	}
 
 	#ifdef ENABLE_DEBUG_STATS
 	{
@@ -834,6 +858,8 @@ ConnectionStats UDPConnection::GetStats() const
 	stats.discardedChunks = droppedChunks;
 	stats.missingChunks = lostIncomingChunks;
 	stats.lossFactor = netLossFactor;
+	stats.sendBlockedMs = throttledMilliSecs;
+	stats.receiveStalledMs = reorderStallMilliSecs;
 	stats.sentOverheadBytes = sentOverhead;
 	stats.receivedOverheadBytes = recvOverhead;
 	stats.processedChunks = lastInOrder + 1;
