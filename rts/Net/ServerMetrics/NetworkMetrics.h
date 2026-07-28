@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <array>
 #include <vector>
 
 #include "System/Misc/SpringTime.h"
@@ -27,6 +28,9 @@ class NetworkMetrics
 public:
 	void Init(prometheus::Registry& registry);
 	void Update(const CGameServer& server);
+
+	/// attribute packet bytes to a NETMSG type; aggregate only
+	void CountMessageBytes(bool outgoing, unsigned char msgId, unsigned int bytes);
 
 	void CountConnectionAttempt();
 	void CountConnectionRejected(const char* reason);
@@ -105,6 +109,10 @@ private:
 	prometheus::Family<prometheus::Counter>* metricDuplicateIncomingChunks = nullptr;
 	prometheus::Family<prometheus::Counter>* metricMissingIncomingChunks = nullptr;
 	prometheus::Family<prometheus::Counter>* metricThrottled = nullptr;
+	prometheus::Family<prometheus::Counter>* metricMessageBytes = nullptr;
+	/// [outgoing][NETMSG id] -> counter, resolved on first sighting so only
+	/// message types that occur create series
+	std::array<std::array<prometheus::Counter*, 256>, 2> messageBytesCounters = {};
 	prometheus::Family<prometheus::Counter>* metricThrottledPackets = nullptr;
 	prometheus::Family<prometheus::Counter>* metricIncomingReorderStall = nullptr;
 	prometheus::Family<prometheus::Gauge>* metricLossFactor = nullptr;

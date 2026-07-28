@@ -32,3 +32,5 @@ void ServerMetrics::CountPlayerDesync(int) {}
 
 void ServerMetrics::CountThrottledPackets(int, int) {}
 void ServerMetrics::CountIncomingThrottled(int, double) {}
+
+void ServerMetrics::CountMessageBytes(bool, unsigned char, unsigned int) {}

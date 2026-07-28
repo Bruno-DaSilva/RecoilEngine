@@ -567,7 +567,14 @@ bool CGameServer::SendDemoData(int targetFrameNum)
 
 void CGameServer::SendTo(GameParticipant& p, const std::shared_ptr<const netcode::RawPacket>& packet)
 {
-	p.SendData(packet);
+	// gate on what SendData did rather than re-testing its condition, so
+	// attribution cannot drift from the send
+	const bool sent = p.SendData(packet);
+
+	// isLocal is the participant-level form of the link reporting UdpStats, and
+	// unlike GetStats() it is free to test per packet
+	if (sent && !p.isLocal && packet->length > 0)
+		serverMetrics->CountMessageBytes(true, packet->data[0], packet->length);
 }
 
 
@@ -2137,8 +2144,12 @@ void CGameServer::ServerReadNet()
 				if (forcedDropPacket)
 					forcedDropPacket = ((aiPacket = aiLink->Peek(globalConfig.linkIncomingMaxWaitingPackets)) != nullptr);
 
-				// if packet is to be dropped, just pull it from queue instead of peek
-				if (!bwLimitIsReached || forcedDropPacket)
+				// if packet is to be dropped, just pull it from queue instead of peek.
+				// A bandwidth-limited pass only peeks and sees the same packet again
+				// later, hence attribution on consumption below.
+				const bool consumedPacket = (!bwLimitIsReached || forcedDropPacket);
+
+				if (consumedPacket)
 					numPacketsSent += ((aiPacket = aiLink->GetData()) != nullptr);
 				else
 					aiPacket = aiLink->Peek(peekAheadIndex++);
@@ -2155,6 +2166,12 @@ void CGameServer::ServerReadNet()
 
 				if (bwLimitIsReached && droppablePacket)
 					continue;
+
+				// inbound counterpart of SendTo's exclusion: these links are loopbacks
+				// either way, but a remote player's traffic was demuxed into them off a
+				// real link and a local client's was not
+				if (consumedPacket && !player.isLocal && aiPacket->length > 0)
+					serverMetrics->CountMessageBytes(false, aiPacket->data[0], aiPacket->length);
 
 				// non-droppable packets may be processed more than once, but this does no harm
 				ProcessPacket(player.id, aiPacket);

@@ -1,7 +1,6 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
-#ifndef NET_MESSAGE_TYPES_H
-#define NET_MESSAGE_TYPES_H
+#pragma once
 
 /*
  * Comment behind NETMSG enumeration constant gives the extra data belonging to
@@ -100,6 +99,107 @@ enum NETMSG {
 };
 
 
+/**
+ * @brief stable short name for a declared NETMSG
+ *
+ * @return nullptr for a value that is not a declared NETMSG.
+ *
+ * Do not add a default case: without one, -Wswitch turns a NETMSG added without
+ * a name here into a diagnostic rather than traffic silently pooling into
+ * "unknown". test_NetMetrics promotes that diagnostic to an error, since the
+ * engine only enables -Wall for DEBUG and PROFILE builds.
+ */
+inline const char* TryNetMessageName(NETMSG msg)
+{
+	switch (msg) {
+		case NETMSG_KEYFRAME:           return "keyframe";
+		case NETMSG_NEWFRAME:           return "newframe";
+		case NETMSG_QUIT:               return "quit";
+		case NETMSG_STARTPLAYING:       return "startplaying";
+		case NETMSG_SETPLAYERNUM:       return "setplayernum";
+		case NETMSG_PLAYERNAME:         return "playername";
+		case NETMSG_CHAT:               return "chat";
+		case NETMSG_RANDSEED:           return "randseed";
+		case NETMSG_GAMEID:             return "gameid";
+		case NETMSG_PATH_CHECKSUM:      return "path_checksum";
+		case NETMSG_COMMAND:            return "command";
+		case NETMSG_SELECT:             return "select";
+		case NETMSG_PAUSE:              return "pause";
+		case NETMSG_AICOMMAND:          return "aicommand";
+		case NETMSG_AICOMMANDS:         return "aicommands";
+		case NETMSG_AISHARE:            return "aishare";
+		case NETMSG_USER_SPEED:         return "user_speed";
+		case NETMSG_INTERNAL_SPEED:     return "internal_speed";
+		case NETMSG_CPU_USAGE:          return "cpu_usage";
+		case NETMSG_DIRECT_CONTROL:     return "direct_control";
+		case NETMSG_DC_UPDATE:          return "dc_update";
+		case NETMSG_SHARE:              return "share";
+		case NETMSG_SETSHARE:           return "setshare";
+		case NETMSG_PLAYERSTAT:         return "playerstat";
+		case NETMSG_GAMEOVER:           return "gameover";
+		case NETMSG_MAPDRAW_OLD:        return "mapdraw_old";
+		case NETMSG_MAPDRAW:            return "mapdraw";
+		case NETMSG_SYNCRESPONSE:       return "syncresponse";
+		case NETMSG_SYSTEMMSG:          return "systemmsg";
+		case NETMSG_STARTPOS:           return "startpos";
+		case NETMSG_PLAYERINFO:         return "playerinfo";
+		case NETMSG_PLAYERLEFT:         return "playerleft";
+	#ifdef SYNCDEBUG
+		case NETMSG_SD_CHKREQUEST:      return "sd_chkrequest";
+		case NETMSG_SD_CHKRESPONSE:     return "sd_chkresponse";
+		case NETMSG_SD_BLKREQUEST:      return "sd_blkrequest";
+		case NETMSG_SD_BLKRESPONSE:     return "sd_blkresponse";
+		case NETMSG_SD_RESET:           return "sd_reset";
+	#endif
+		case NETMSG_GAMESTATE_DUMP:     return "gamestate_dump";
+		case NETMSG_LOGMSG:             return "logmsg";
+		case NETMSG_LUAMSG:             return "luamsg";
+		case NETMSG_TEAM:               return "team";
+		case NETMSG_GAMEDATA:           return "gamedata";
+		case NETMSG_ALLIANCE:           return "alliance";
+		case NETMSG_CCOMMAND:           return "ccommand";
+		case NETMSG_TEAMSTAT:           return "teamstat";
+		case NETMSG_CLIENTDATA:         return "clientdata";
+		case NETMSG_ATTEMPTCONNECT:     return "attemptconnect";
+		case NETMSG_REJECT_CONNECT:     return "reject_connect";
+		case NETMSG_AI_CREATED:         return "ai_created";
+		case NETMSG_AI_STATE_CHANGED:   return "ai_state_changed";
+		case NETMSG_REQUEST_TEAMSTAT:   return "request_teamstat";
+		case NETMSG_CREATE_NEWPLAYER:   return "create_newplayer";
+		case NETMSG_AICOMMAND_TRACKED:  return "aicommand_tracked";
+		case NETMSG_GAME_FRAME_PROGRESS: return "game_frame_progress";
+		case NETMSG_PING:               return "ping";
+
+		// listed only to keep the switch exhaustive; NetMessageName rejects it
+		// before the cast
+		case NETMSG_LAST:               break;
+	}
+
+	return nullptr;
+}
+
+
+/**
+ * @brief stable short name for a NETMSG id, for use as a metric label value
+ *
+ * "unknown" rather than the numeric id for anything unrecognised: the id comes
+ * off the wire, and an open-ended label value is an unbounded-cardinality
+ * hazard. Sustained traffic under it means a type is missing from
+ * TryNetMessageName.
+ */
+inline const char* NetMessageName(unsigned char msgId)
+{
+	// NETMSG has no fixed underlying type, so casting a byte outside its
+	// enumerators' range is UB; that range is undeclared anyway
+	if (msgId >= NETMSG_LAST)
+		return "unknown";
+
+	const char* const name = TryNetMessageName(static_cast<NETMSG>(msgId));
+
+	return (name != nullptr) ? name : "unknown";
+}
+
+
 /// sub-action-types of NETMSG_TEAM
 enum TEAMMSG {
 //	TEAMMSG_NAME            = number    parameter1, ...
@@ -117,6 +217,4 @@ enum MapDrawAction {
 	MAPDRAW_ERASE,
 	MAPDRAW_LINE
 };
-
-#endif
 
