@@ -19,11 +19,12 @@ namespace netcode
 
 class GameParticipant : public PlayerBase
 {
+	friend class CGameServer;
+
 public:
 	GameParticipant();
 	~GameParticipant();
 
-	void SendData(std::shared_ptr<const netcode::RawPacket> packet);
 	void Connected(std::shared_ptr<netcode::CConnection> link, bool local);
 	void Kill(const std::string& reason, const bool flush = false);
 
@@ -72,6 +73,16 @@ public:
 	#endif
 
 private:
+	/**
+	 * @brief hand a packet to this participant's link
+	 *
+	 * Private so CGameServer::SendTo stays the only send path.
+	 *
+	 * @return whether the link took it -- false with no connection, or one
+	 *   already tearing down.
+	 */
+	bool SendData(const std::shared_ptr<const netcode::RawPacket>& packet);
+
 	void CloseConnection(bool flush);
 };
 

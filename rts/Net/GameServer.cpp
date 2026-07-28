@@ -565,10 +565,16 @@ bool CGameServer::SendDemoData(int targetFrameNum)
 	return ret;
 }
 
+void CGameServer::SendTo(GameParticipant& p, const std::shared_ptr<const netcode::RawPacket>& packet)
+{
+	p.SendData(packet);
+}
+
+
 void CGameServer::Broadcast(std::shared_ptr<const netcode::RawPacket> packet)
 {
 	for (GameParticipant& p: players) {
-		p.SendData(packet);
+		SendTo(p, packet);
 	}
 
 	if (canReconnect || allowSpecJoin || !gameHasStarted)
@@ -586,7 +592,7 @@ void CGameServer::Message(const std::string& message, bool broadcast, bool inter
 		}
 		else if (HasLocalClient()) {
 			// host should see
-			players[localClientNumber].SendData(CBaseNetProtocol::Get().SendSystemMessage(SERVER_PLAYER, message));
+			SendTo(players[localClientNumber], CBaseNetProtocol::Get().SendSystemMessage(SERVER_PLAYER, message));
 		}
 		if (hostif != nullptr)
 			hostif->Message(message);
@@ -598,7 +604,7 @@ void CGameServer::Message(const std::string& message, bool broadcast, bool inter
 }
 
 void CGameServer::PrivateMessage(int playerNum, const std::string& message) {
-	players[playerNum].SendData(CBaseNetProtocol::Get().SendSystemMessage(SERVER_PLAYER, message));
+	SendTo(players[playerNum], CBaseNetProtocol::Get().SendSystemMessage(SERVER_PLAYER, message));
 }
 
 
@@ -1092,7 +1098,7 @@ void CGameServer::ProcessPacket(const unsigned playerNum, std::shared_ptr<const 
 
 			// limit to 50 pings per second
 			if (spring_diffmsecs(spring_now(), netPingTimings[playerNum]) >= 20) {
-				players[playerNum].SendData(CBaseNetProtocol::Get().SendPing(playerNum, inbuf[2], *(reinterpret_cast<const float*>(&inbuf[3]))));
+				SendTo(players[playerNum], CBaseNetProtocol::Get().SendPing(playerNum, inbuf[2], *(reinterpret_cast<const float*>(&inbuf[3]))));
 				netPingTimings[playerNum] = spring_now();
 			}
 		} break;
@@ -2808,7 +2814,7 @@ void CGameServer::CreateNewFrame(bool fromServerThread, bool fixedFrameTime)
 				CBaseNetProtocol::PacketType progressPacket = CBaseNetProtocol::Get().SendCurrentFrameProgress(serverFrameNum);
 				// we cannot use broadcast here, since we want to skip caching
 				for (GameParticipant& p: players) {
-					p.SendData(progressPacket);
+					SendTo(p, progressPacket);
 				}
 			}
 		#ifdef SYNCCHECK
@@ -3168,8 +3174,8 @@ unsigned CGameServer::BindConnection(
 	}
 
 	newPlayer.Connected(clientLink, isLocal);
-	newPlayer.SendData(std::shared_ptr<const RawPacket>(myGameData->Pack()));
-	newPlayer.SendData(CBaseNetProtocol::Get().SendSetPlayerNum((unsigned char)newPlayerNumber));
+	SendTo(newPlayer, std::shared_ptr<const RawPacket>(myGameData->Pack()));
+	SendTo(newPlayer, CBaseNetProtocol::Get().SendSetPlayerNum((unsigned char)newPlayerNumber));
 
 	// after gamedata and playerNum, the player can start loading
 	if (demoReader == nullptr || myGameSetup->demoName.empty()) {
@@ -3189,7 +3195,7 @@ unsigned CGameServer::BindConnection(
 
 	// finally send player all packets he missed until now
 	for (const std::shared_ptr<const netcode::RawPacket>& p: packetCache)
-		newPlayer.SendData(p);
+		SendTo(newPlayer, p);
 
 	// a fresh connection restarts its counters at zero, so the exported metrics
 	// need a reset, too.
