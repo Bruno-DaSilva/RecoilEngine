@@ -107,7 +107,7 @@ public:
 
 	unsigned int GetPacketQueueSize() const override { return msgQueue.size(); }
 
-	std::string Statistics() const override;
+	ConnectionStats GetStats() const override;
 	std::string GetFullAddress() const override;
 
 	void Update() override;
