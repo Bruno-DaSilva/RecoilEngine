@@ -20,10 +20,13 @@ GameParticipant::~GameParticipant()
 	}
 }
 
-void GameParticipant::SendData(std::shared_ptr<const netcode::RawPacket> packet)
+bool GameParticipant::SendData(const std::shared_ptr<const netcode::RawPacket>& packet)
 {
-	if (clientLink != nullptr && myState != GameParticipant::State::DISCONNECTING)
-		clientLink->SendData(packet);
+	if (clientLink == nullptr || myState == GameParticipant::State::DISCONNECTING)
+		return false;
+
+	clientLink->SendData(packet);
+	return true;
 }
 
 void GameParticipant::Connected(std::shared_ptr<netcode::CConnection> _link, bool local)
