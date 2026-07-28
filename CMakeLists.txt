@@ -267,6 +267,16 @@ endif (NO_CREG)
 
 option(NO_SOUND "No sound output support" FALSE)
 
+# Pulls in prometheus-cpp and the civetweb HTTP server it vendors. Split per
+# target because the cost differs: a dedicated server is the thing being
+# monitored, a client would carry an HTTP server it almost never serves from.
+#
+# These only decide whether the code is there at all -- nothing binds or serves
+# unless MetricsPort is set. Off substitutes a no-op ServerMetrics, builds
+# neither dependency, and drops the Metrics* settings.
+option(ENABLE_METRICS "Build the Prometheus /metrics endpoint into the dedicated server" TRUE)
+option(ENABLE_METRICS_CLIENT "Build it into spring / spring-headless too, which can host a listen-server game" FALSE)
+
 if    (WIN32)
 	## internal AVI recorder (w/o sound atm)
 	option(NO_AVI "Disable in-game video recording" FALSE)

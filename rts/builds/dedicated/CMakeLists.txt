@@ -24,6 +24,13 @@ list(APPEND engineDedicatedLibraries ${Boost_REGEX_LIBRARY})
 list(APPEND engineDedicatedLibraries lua archives_nothreadpool 7zip prd::jsoncpp
 	${SPRING_MINIZIP_LIBRARY} ZLIB::ZLIB gflags_nothreads_static Tracy::TracyClient)
 list(APPEND engineDedicatedLibraries headlessStubs engineSystemNet)
+# gated separately from the client targets, see rts/Net/CMakeLists.txt
+if    (ENABLE_METRICS)
+	list(APPEND engineDedicatedLibraries engineMetrics)
+	set(sources_engine_ServerMetricsImpl ${sources_engine_ServerMetrics})
+else  (ENABLE_METRICS)
+	set(sources_engine_ServerMetricsImpl ${sources_engine_ServerMetricsNull})
+endif (ENABLE_METRICS)
 if(UNIX AND NOT (CMAKE_SYSTEM_NAME MATCHES "OpenBSD"))
 	list(APPEND engineDedicatedLibraries libunwind::libunwind)
 endif()
@@ -148,6 +155,7 @@ endif ()
 set(engineDedicatedSources
 	${system_files}
 	${sources_engine_NetServer}
+	${sources_engine_ServerMetricsImpl}
 	${sources_engine_System_Log}
 	${ENGINE_SRC_ROOT_DIR}/Game/ClientSetup.cpp
 	${ENGINE_SRC_ROOT_DIR}/Game/GameSetup.cpp

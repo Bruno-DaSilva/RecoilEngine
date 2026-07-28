@@ -55,6 +55,15 @@ list(APPEND engineCommonLibraries "prd::base64")
 ### smmalloc
 list(APPEND engineCommonLibraries "smmalloc")
 
+### prometheus metrics subsystem
+# built once if any target wants it, linked only by the targets that do
+if    (ENABLE_METRICS OR ENABLE_METRICS_CLIENT)
+	add_subdirectory(System/Metrics)
+endif (ENABLE_METRICS OR ENABLE_METRICS_CLIENT)
+if    (ENABLE_METRICS_CLIENT)
+	list(APPEND engineCommonLibraries "engineMetrics")
+endif (ENABLE_METRICS_CLIENT)
+
 ### Assemble common libraries
 add_subdirectory(System/Sound)
 if    (NO_SOUND)
