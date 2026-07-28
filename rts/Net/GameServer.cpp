@@ -44,6 +44,7 @@
 #include "System/SpringExitCode.h"
 #include "System/SpringFormat.h"
 #include "System/TdfParser.h"
+#include "System/TimeUtil.h"
 #include "System/StringHash.h"
 #include "System/StringUtil.h"
 #include "System/Config/ConfigHandler.h"
@@ -266,7 +267,11 @@ void CGameServer::Initialize()
 	lastNewFrameTick = spring_gettime();
 	lastBandwidthUpdate = spring_gettime();
 
-	serverMetrics->Init();
+	// before ServerMetrics::Init, which labels recoil_server_info with the id
+	if (!demoReader)
+		ComputeGameID();
+
+	serverMetrics->Init(GetGameIDHex());
 
 	thread = spring::thread(std::bind(&CGameServer::UpdateLoop, this));
 
@@ -2262,6 +2267,8 @@ void CGameServer::StartGame(bool forced)
 	assert(!gameHasStarted);
 	gameHasStarted = true;
 	startTime = gameTime;
+
+	serverMetrics->SetGameStartTime(CTimeUtil::GetCurrentTime());
 
 	if (!canReconnect && !allowSpecJoin)
 		packetCache.clear(); // free memory

@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include <string>
+
 #include "NetworkMetrics.h"
 #include "ServerHealthMetrics.h"
 #include "System/Misc/SpringTime.h"
@@ -21,8 +23,13 @@ class CGameServer;
 class ServerMetrics
 {
 public:
-	/// register every family
-	void Init();
+	/**
+	 * @brief register every family
+	 *
+	 * @param gameIDHex identity label for recoil_server_info; must be known
+	 *   before this runs.
+	 */
+	void Init(const std::string& gameIDHex);
 
 	/**
 	 * @brief stop the endpoint and drop the registry
@@ -35,6 +42,8 @@ public:
 
 	/// republish every value; rate-limited internally, cheap to call per loop
 	void Update(const CGameServer& server);
+
+	void SetGameStartTime(double unixSecs);
 
 	void ResetConnectionDeltas(int playerId);
 

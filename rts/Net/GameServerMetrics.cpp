@@ -10,7 +10,7 @@
 static const spring_time metricsUpdateTime = spring_secs(1);
 
 
-void ServerMetrics::Init()
+void ServerMetrics::Init(const std::string& gameIDHex)
 {
 	metrics::Init();
 
@@ -22,7 +22,7 @@ void ServerMetrics::Init()
 	auto& registry = metrics::GetRegistry();
 
 	network.Init(registry);
-	health.Init(registry);
+	health.Init(registry, gameIDHex);
 	registered = true;
 }
 
@@ -56,4 +56,5 @@ void ServerMetrics::Update(const CGameServer& server)
 	health.Update(server);
 }
 
+void ServerMetrics::SetGameStartTime(double unixSecs)       { health.SetGameStartTime(unixSecs); }
 void ServerMetrics::ResetConnectionDeltas(int playerId)     { network.ResetConnectionDeltas(playerId); }
