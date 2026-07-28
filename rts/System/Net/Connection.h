@@ -3,6 +3,7 @@
 #ifndef _CONNECTION_H
 #define _CONNECTION_H
 
+#include <atomic>
 #include <string>
 #include <memory>
 
@@ -115,6 +116,18 @@ public:
 
 	unsigned int GetDataReceived() const { return dataRecv; }
 	virtual ConnectionStats GetStats() const { return {dataSent, dataRecv}; }
+
+	/**
+	 * @brief whether links should collect the optional telemetry in ConnectionStats
+	 *
+	 * Byte and packet counters are always kept; the rest exists purely to be
+	 * exported, so it is off unless something is exporting.
+	 *
+	 * Atomic because a host client's own CNetProtocol link is already being
+	 * serviced when the server it just started flips this.
+	 */
+	static void SetStatsSampling(bool enable) { statsSampling.store(enable, std::memory_order_relaxed); }
+	static bool StatsSampling() { return statsSampling.load(std::memory_order_relaxed); }
 	unsigned int GetNumQueuedPings() const { return numPings; }
 	virtual unsigned int GetPacketQueueSize() const { return 0; }
 
@@ -132,6 +145,9 @@ public:
 	 * Check for unack'd packets, timeout etc.
 	 */
 	virtual void Update() {}
+
+private:
+	inline static std::atomic<bool> statsSampling = false;
 
 protected:
 	unsigned int dataSent = 0;
