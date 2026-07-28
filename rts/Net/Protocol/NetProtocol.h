@@ -8,6 +8,7 @@
 
 #include "BaseNetProtocol.h" // not used in here, but in all files including this one
 #include "System/Threading/SpringThreading.h"
+#include "System/Misc/SpringTime.h"
 
 class ClientSetup;
 class CDemoRecorder;
@@ -112,6 +113,9 @@ public:
 	unsigned int GetNumWaitingPingPackets() const;
 
 private:
+	/// start of the interval passed to each connection's Update; one clock
+	/// here rather than one per connection
+	spring_time lastUpdateTime = spring_gettime();
 	std::atomic<bool> keepUpdating;
 
 	spring::spinlock serverConnMutex;

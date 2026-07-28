@@ -167,7 +167,9 @@ void CNetProtocol::Update()
 	// any call to clientNet->Send is unsafe while heartbeat thread exists, i.e. during loading
 	std::lock_guard<spring::spinlock> lock(serverConnMutex);
 
-	serverConnPtr->Update();
+	const spring_time now = spring_gettime();
+	serverConnPtr->Update((now - lastUpdateTime).toMilliSecsf());
+	lastUpdateTime = now;
 }
 
 void CNetProtocol::Close(bool flush)

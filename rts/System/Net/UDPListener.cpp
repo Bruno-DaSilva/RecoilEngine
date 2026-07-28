@@ -106,6 +106,11 @@ std::string UDPListener::TryBindSocket(int port, std::shared_ptr<asio::ip::udp::
 }
 
 void UDPListener::Update(int loopSleepTime) {
+	// one clock for every connection this listener drives
+	const spring_time now = spring_gettime();
+	const float deltaMs = (now - lastUpdateTime).toMilliSecsf();
+	lastUpdateTime = now;
+
 	if (loopSleepTime == 0)
 		netservice.poll();
 	else {
@@ -189,7 +194,7 @@ void UDPListener::Update(int loopSleepTime) {
 			i = connMap.erase(i);
 			continue;
 		}
-		i->second.lock()->Update();
+		i->second.lock()->Update(deltaMs);
 		++i;
 	}
 }

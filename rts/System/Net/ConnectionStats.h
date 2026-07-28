@@ -53,6 +53,10 @@ struct UdpStats {
 		/// number of send->ack samples behind the sum, so the mean over any
 		/// window is rate(sum)/rate(count)
 		double responseTimeCount = 0.0;
+		/// time sending was blocked by the outgoing bandwidth cap
+		double outgoingThrottledMs = 0.0;
+		/// time inbound delivery was stalled behind a missing chunk
+		double incomingReorderStallMs = 0.0;
 
 		/// the sum and count describe one sample, so they only ever move together
 		void ObserveResponseTime(float sampleMs) {

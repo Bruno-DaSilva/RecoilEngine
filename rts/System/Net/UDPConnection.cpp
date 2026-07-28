@@ -398,10 +398,32 @@ void UDPConnection::DeleteBufferPacketAt(unsigned index)
 	msgQueue.erase(msgQueue.begin() + index);
 }
 
-void UDPConnection::Update()
+void UDPConnection::Update(float deltaMs)
 {
 	spring_time curTime = spring_gettime();
 	outgoing.UpdateTime(spring_tomsecs(curTime));
+
+	// Sampled at loop rate rather than at the 1Hz metrics poll, so a queue that
+	// fills and drains between two polls is still visible. The caller advances
+	// the clock whether or not anything is collecting, so enabling collection
+	// late cannot make the first interval span the whole uptime.
+	if (StatsSampling()) {
+		// one term per send stage, each against that stage's own gate: Flush
+		// chunks outgoingData against the preliminary average, SendIfNecessary
+		// drains newChunks against what actually went out. includeQueued counts
+		// bytes committed to chunks but not yet on the wire.
+		const auto bandwidthExceeded = [&](bool includeQueued) {
+			return globalConfig.linkOutgoingBandwidth > 0 && outgoing.GetAverage(includeQueued) > globalConfig.linkOutgoingBandwidth;
+		};
+		const bool chunkingBlocked = !outgoingData.empty() && bandwidthExceeded(true);
+		const bool sendingBlocked  = !newChunks.empty()    && bandwidthExceeded(false);
+
+		if (chunkingBlocked || sendingBlocked)
+			accumulatedStats.outgoingThrottledMs += deltaMs;
+
+		if (!waitingPackets.empty())
+			accumulatedStats.incomingReorderStallMs += deltaMs;
+	}
 
 	#ifdef ENABLE_DEBUG_STATS
 	{
