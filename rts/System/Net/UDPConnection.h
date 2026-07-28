@@ -116,7 +116,7 @@ public:
 	ConnectionStats GetStats() const override;
 	std::string GetFullAddress() const override;
 
-	void Update() override;
+	void Update(float deltaMs) override;
 	// END overriding CConnection
 
 
@@ -253,6 +253,7 @@ private:
 
 	/// for accurately counting lost chunks
 	int highestMissingCounted;
+
 
 	class BandwidthUsage {
 	public:

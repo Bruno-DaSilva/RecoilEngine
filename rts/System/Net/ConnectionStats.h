@@ -57,6 +57,10 @@ struct UdpStats {
 		double responseTimeCount = 0.0;
 		/// the same samples binned, for the exported histogram
 		ResponseTimeHistogram responseTime;
+		/// time sending was blocked by the outgoing bandwidth cap
+		double outgoingThrottledMs = 0.0;
+		/// time inbound delivery was stalled behind a missing chunk
+		double incomingReorderStallMs = 0.0;
 
 		/// the three response-time fields describe one sample, so they only ever move together
 		void ObserveResponseTime(float sampleMs) {

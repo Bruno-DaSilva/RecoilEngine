@@ -54,6 +54,8 @@ private:
 		DeltaCounter redundantOutgoingChunks;
 		DeltaCounter duplicateIncomingChunks;
 		DeltaCounter missingIncomingChunks;
+		DeltaCounter outgoingThrottled;
+		DeltaCounter incomingReorderStall;
 
 		prometheus::Gauge* lossFactor = nullptr;
 		prometheus::Gauge* outgoingBw = nullptr;
@@ -94,6 +96,8 @@ private:
 	prometheus::Family<prometheus::Counter>* metricRedundantOutgoingChunks = nullptr;
 	prometheus::Family<prometheus::Counter>* metricDuplicateIncomingChunks = nullptr;
 	prometheus::Family<prometheus::Counter>* metricMissingIncomingChunks = nullptr;
+	prometheus::Family<prometheus::Counter>* metricThrottled = nullptr;
+	prometheus::Family<prometheus::Counter>* metricIncomingReorderStall = nullptr;
 	prometheus::Family<prometheus::Gauge>* metricLossFactor = nullptr;
 	prometheus::Family<prometheus::Gauge>* metricOutgoingBw = nullptr;
 	prometheus::Family<prometheus::Gauge>* metricUnackedOutgoingChunks = nullptr;
@@ -114,6 +118,10 @@ private:
 	prometheus::Counter* metricTotalDuplicateIncomingChunks = nullptr;
 	prometheus::Counter* metricTotalMissingIncomingChunks = nullptr;
 	prometheus::Histogram* metricResponseTimeHist = nullptr;
+	/// holds the family so a later direction child can be added to it
+	prometheus::Family<prometheus::Counter>* metricThrottledFamily = nullptr;
+	prometheus::Counter* metricTotalOutgoingThrottled = nullptr;
+	prometheus::Counter* metricTotalIncomingReorderStall = nullptr;
 	prometheus::Gauge* metricRedundancyLinks = nullptr;
 	prometheus::Gauge* metricTotalOutgoingBw = nullptr;
 	prometheus::Gauge* metricTotalUnackedOutgoingChunks = nullptr;

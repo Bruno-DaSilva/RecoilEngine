@@ -83,7 +83,14 @@ public:
 	 * @brief update internals
 	 * Check for unack'd packets, timeout etc.
 	 */
-	virtual void Update() {}
+	/**
+	 * @brief advance by deltaMs since the previous call
+	 *
+	 * The interval is the caller's to measure: one listener drives every
+	 * connection it holds from the same pass, so keeping a timestamp per
+	 * connection would be N copies of one clock.
+	 */
+	virtual void Update(float deltaMs) {}
 
 protected:
 	unsigned int dataSent = 0;
