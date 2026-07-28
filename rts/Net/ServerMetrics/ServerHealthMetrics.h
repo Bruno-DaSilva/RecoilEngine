@@ -8,6 +8,7 @@
 namespace prometheus
 {
 	template<typename T> class Family;
+	class Counter;
 	class Gauge;
 	class Registry;
 }
@@ -27,6 +28,10 @@ public:
 	void Init(prometheus::Registry& registry, const std::string& gameIDHex);
 	void Update(const CGameServer& server);
 
+	/// @return whether CountPlayerDesync() is worth calling for the players in it
+	bool CountDesyncEvent();
+	void CountPlayerDesync(int playerId);
+
 	void SetGameStartTime(double unixSecs);
 
 private:
@@ -35,6 +40,8 @@ private:
 		prometheus::Gauge* lagFrames = nullptr;
 		prometheus::Gauge* cpuUsage = nullptr;
 		prometheus::Gauge* info = nullptr;
+		// resolved lazily on first event, see AddPlayerMetric
+		prometheus::Counter* desyncs = nullptr;
 	};
 
 	/// get this player's metric slot, created on first use
@@ -55,9 +62,13 @@ private:
 	prometheus::Gauge* metricPaused = nullptr;
 	prometheus::Gauge* metricGameStartTs = nullptr;
 
+	prometheus::Counter* metricDesyncEvents = nullptr;
+	prometheus::Counter* metricTotalPlayerDesyncs = nullptr;
+
 	// per-player families. always null unless MetricsPerPlayer is on
 	prometheus::Family<prometheus::Gauge>* metricPlayerLag = nullptr;
 	prometheus::Family<prometheus::Gauge>* metricPlayerLagFrames = nullptr;
 	prometheus::Family<prometheus::Gauge>* metricPlayerCpu = nullptr;
 	prometheus::Family<prometheus::Gauge>* metricPlayerInfo = nullptr;
+	prometheus::Family<prometheus::Counter>* metricPlayerDesyncs = nullptr;
 };

@@ -248,6 +248,7 @@ private:
 	spring_time lastPlayerInfo = spring_notime;
 	spring_time lastUpdate = spring_notime;
 	spring_time lastBandwidthUpdate = spring_notime;
+	spring_time lastReadNetTime = spring_gettime();
 
 	float modGameTime = 0.0f;
 	float gameTime = 0.0f;
