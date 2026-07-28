@@ -172,8 +172,17 @@ private:
 
 	void LagProtection();
 
-	/** @brief Generate a unique game identifier and send it to all clients. */
-	void GenerateAndSendGameID();
+	/**
+	 * @brief derive this game's unique identifier
+	 *
+	 * Split from the broadcast because the id is needed before it is sent.
+	 * Does not flip HasGameID(); the broadcast below does.
+	 */
+	void ComputeGameID();
+	/// the game id as 32 lowercase hex chars, for use as a metric label value
+	std::string GetGameIDHex() const;
+	/// send the game identifier to all clients
+	void SendGameID();
 
 	void WriteDemoData();
 	/// read data from demo and send it to clients
@@ -309,10 +318,11 @@ private:
 	std::atomic<bool> reloadingServer{false};
 	std::atomic<bool> quitServer{false};
 
+	/// zero-initialised: demo playback never computes one
 	union {
 		unsigned char charArray[16];
 		unsigned int intArray[4];
-	} gameID;
+	} gameID = {};
 };
 
 extern CGameServer* gameServer;
