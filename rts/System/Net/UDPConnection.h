@@ -155,6 +155,9 @@ private:
 	/// true while the outgoing bandwidth cap is exceeded
 	bool OutgoingBandwidthExceeded(bool includeQueued) const;
 
+	/// application bytes queued for this link but not yet transmitted
+	unsigned int SendQueuedBytes() const;
+
 	void UpdateWaitingPackets();
 	void UpdateResendRequests();
 
@@ -244,6 +247,8 @@ private:
 	unsigned int resentChunks;
 	unsigned int droppedChunks;
 
+	unsigned int sendErrors;
+	unsigned int recvErrors;
 	unsigned int sentOverhead, recvOverhead;
 	unsigned int sentPackets, recvPackets;
 

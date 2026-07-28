@@ -306,6 +306,8 @@ void UDPConnection::Init()
 	resentChunks = 0;
 	sentPackets = 0;
 	recvPackets = 0;
+	sendErrors = 0;
+	recvErrors = 0;
 	droppedChunks = 0;
 	mtu = globalConfig.mtu;
 	reconnectTime = globalConfig.reconnectTimeout;
@@ -453,8 +455,10 @@ void UDPConnection::Update()
 
 			const size_t bytesReceived = mySocket->receive_from(asio::buffer(recvBuffer), udpEndPoint, msgFlags, err);
 
-			if (CheckErrorCode(err))
+			if (CheckErrorCode(err)) {
+				recvErrors += 1;
 				break;
+			}
 
 			if (bytesReceived < Packet::headerSize)
 				continue;
@@ -800,6 +804,21 @@ bool UDPConnection::CanReconnect() const {
 	return (globalConfig.reconnectTimeout > 0);
 }
 
+// walked rather than tracked incrementally: read once per metrics poll, not per
+// packet
+unsigned int UDPConnection::SendQueuedBytes() const
+{
+	unsigned int bytes = 0;
+
+	for (const std::shared_ptr<const RawPacket>& pkt: outgoingData)
+		bytes += pkt->length;
+
+	for (const ChunkPtr& chunk: newChunks)
+		bytes += chunk->data.size();
+
+	return bytes;
+}
+
 ConnectionStats UDPConnection::GetStats() const
 {
 	ConnectionStats stats;
@@ -812,6 +831,13 @@ ConnectionStats UDPConnection::GetStats() const
 	stats.sentOverheadBytes = sentOverhead;
 	stats.receivedOverheadBytes = recvOverhead;
 	stats.processedChunks = lastInOrder + 1;
+	stats.sendErrors = sendErrors;
+	stats.receiveErrors = recvErrors;
+	stats.sendRateBytesPerSec = outgoing.GetAverage();
+	stats.unackedChunks = unackedChunks.size();
+	stats.queuedResendChunks = resendRequested.size();
+	stats.queuedInboundChunks = waitingPackets.size();
+	stats.queuedSendBytes = SendQueuedBytes();
 	stats.isNetworkLink = true;
 	return stats;
 }
@@ -1061,8 +1087,10 @@ void UDPConnection::SendPacket(Packet& pkt)
 		mySocket->send_to(buffer(sendBuffer), addr, flags, err);
 	}
 
-	if (CheckErrorCode(err))
+	if (CheckErrorCode(err)) {
+		sendErrors += 1;
 		return;
+	}
 
 	dataSent += sendBuffer.size();
 	sentPackets += 1;

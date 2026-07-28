@@ -3108,6 +3108,10 @@ unsigned CGameServer::BindConnection(
 	for (const std::shared_ptr<const netcode::RawPacket>& p: packetCache)
 		newPlayer.SendData(p);
 
+	// a fresh link restarts its counters at zero, so the exported deltas have
+	// to rebaseline with it
+	serverMetrics->ResetConnectionDeltas(newPlayerNumber);
+
 	// new connection established
 	Message(spring::format(" -> Connection established (given id %i)", newPlayerNumber));
 	clientLink->SetLossFactor(netloss);

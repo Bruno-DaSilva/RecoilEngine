@@ -35,6 +35,18 @@ struct ConnectionStats {
 	unsigned int receivedOverheadBytes = 0;
 	/// inbound chunks delivered in order so far
 	unsigned int processedChunks = 0;
+	/// socket-level failures; ours or the environment's, not the peer's link
+	unsigned int sendErrors = 0;
+	unsigned int receiveErrors = 0;
+
+	// current state
+	float sendRateBytesPerSec = 0.0f;
+	unsigned int unackedChunks = 0;
+	unsigned int queuedResendChunks = 0;
+	/// received but undeliverable until an earlier chunk arrives
+	unsigned int queuedInboundChunks = 0;
+	/// handed to the link and not yet on the wire
+	unsigned int queuedSendBytes = 0;
 
 	/// whether the fields beyond the byte counts describe anything. False on a
 	/// loopback, which moves bytes but has no wire to report on.
