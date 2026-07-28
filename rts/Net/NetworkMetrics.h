@@ -33,6 +33,9 @@ public:
 
 	/// a fresh link restarts its counters at zero, so the delta baselines must
 	/// follow or DeltaSince's clamp swallows everything up to the old totals
+	/// attribute packet bytes to a NETMSG type; aggregate only
+	void CountMessageBytes(bool outgoing, unsigned char msgId, unsigned int bytes);
+
 	void CountConnectionAttempt();
 	void CountConnectionRejected(const char* reason);
 	void CountConnectionEstablished(bool reconnect);
@@ -102,6 +105,10 @@ private:
 	prometheus::Family<prometheus::Counter>* metricRedundantChunks = nullptr;
 	prometheus::Family<prometheus::Counter>* metricDroppedChunks = nullptr;
 	prometheus::Family<prometheus::Counter>* metricLostIncomingChunks = nullptr;
+	prometheus::Family<prometheus::Counter>* metricMessageBytes = nullptr;
+	/// [outgoing][NETMSG id] -> counter, resolved on first sighting so only
+	/// message types that occur create series
+	std::array<std::array<prometheus::Counter*, 256>, 2> messageBytesCounters = {};
 	prometheus::Family<prometheus::Counter>* metricThrottledPackets = nullptr;
 	prometheus::Family<prometheus::Counter>* metricIncomingThrottled = nullptr;
 	prometheus::Family<prometheus::Counter>* metricOutgoingThrottled = nullptr;

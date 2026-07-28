@@ -14,6 +14,7 @@
 #include "GameParticipant.h"
 #include "GameServer.h"
 #include "MetricsCommon.h"
+#include "Protocol/NetMessageTypes.h"
 #include "System/GlobalConfig.h"
 #include "System/Metrics/Delta.h"
 #include "System/Metrics/Metrics.h"
@@ -90,6 +91,8 @@ void NetworkMetrics::Init(prometheus::Registry& registry)
 		metricResponseTimeHist = &family.Add({}, std::move(bounds));
 	}
 
+	metricMessageBytes = counterFamily("recoil_network_message_bytes_total",
+		"Message payload bytes by NETMSG type and direction, unicast and broadcast alike (counted once per recipient). Payload only, so it does not sum to sent_bytes_total / received_bytes_total");
 	metricTotalThrottledPackets = counter("recoil_network_throttle_dropped_packets_total",
 		"Incoming packets dropped because a client exceeded the waiting-packet limit");
 	metricTotalIncomingThrottled = counter("recoil_network_incoming_throttled_seconds_total",
@@ -208,6 +211,24 @@ void NetworkMetrics::ReleaseConnectionGauges(ConnectionMetrics& cm)
 	release(metricResponseTimeJitter, cm.responseTimeJitter);
 	release(metricUnackedAge, cm.unackedAge);
 	release(metricIncomingBwUsage, cm.incomingBandwidthUsage);
+}
+
+
+void NetworkMetrics::CountMessageBytes(bool outgoing, unsigned char msgId, unsigned int bytes)
+{
+	if (metricMessageBytes == nullptr)
+		return;
+
+	prometheus::Counter*& counter = messageBytesCounters[outgoing][msgId];
+
+	if (counter == nullptr) {
+		counter = &metricMessageBytes->Add({
+			{"direction", outgoing ? "send" : "receive"},
+			{"type", NetMessageName(msgId)}
+		});
+	}
+
+	counter->Increment(bytes);
 }
 
 

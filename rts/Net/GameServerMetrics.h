@@ -43,6 +43,9 @@ public:
 	/// republish every value; rate-limited internally, cheap to call per loop
 	void Update(const CGameServer& server);
 
+	/// attribute packet bytes to a NETMSG type; aggregate only
+	void CountMessageBytes(bool outgoing, unsigned char msgId, unsigned int bytes);
+
 	// connection lifecycle funnel
 	void CountConnectionAttempt();
 	void CountConnectionRejected(const char* reason);

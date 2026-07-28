@@ -1,19 +1,94 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 /*
- * Unit tests for the parts of the metrics path that are pure logic: the
- * send->ack smoothing and binning, and the delta baselines.
+ * Unit tests for the parts of the metrics path that are pure logic: the NETMSG
+ * label table, the send->ack smoothing and binning, and the delta baselines.
  *
  * All header-only by design, so this needs no socket, no registry and no
  * running server, and unlike test_UDPListener is not gated off under CI.
  */
 
+/*
+ * MUST be the first include. -Wswitch fires on a NETMSG missing from
+ * TryNetMessageName; promoting it to an error makes that a build failure in
+ * every configuration, not just the DEBUG and PROFILE ones where the engine
+ * turns -Wall on. NetMessageTypes.h is #pragma once, so an earlier include
+ * anywhere would leave the switch uncovered.
+ */
+#if defined(__GNUC__)
+	#pragma GCC diagnostic push
+	#pragma GCC diagnostic error "-Wswitch"
+#endif
+#include "Net/Protocol/NetMessageTypes.h"
+#if defined(__GNUC__)
+	#pragma GCC diagnostic pop
+#endif
+
+
+#include <set>
 #include <string>
 
 #include <catch_amalgamated.hpp>
 
 #include "System/Metrics/Delta.h"
 #include "System/Net/Connection.h"
+
+
+TEST_CASE("NetMessageName")
+{
+	SECTION("undeclared ids are not labelled") {
+		// the id is a wire byte, so anything unrecognised has to collapse to a
+		// single bucket: an open-ended label value is unbounded cardinality
+		CHECK(std::string(NetMessageName(0)) == "unknown");
+		// a gap inside the declared range (17 and 18 are unused)
+		CHECK(std::string(NetMessageName(17)) == "unknown");
+
+		for (int id = NETMSG_LAST; id <= 255; ++id) {
+			INFO("id " << id);
+			CHECK(std::string(NetMessageName(static_cast<unsigned char>(id))) == "unknown");
+		}
+	}
+
+	SECTION("declared ids map to their own name") {
+		CHECK(std::string(NetMessageName(NETMSG_KEYFRAME)) == "keyframe");
+		CHECK(std::string(NetMessageName(NETMSG_CHAT)) == "chat");
+		CHECK(std::string(NetMessageName(NETMSG_ATTEMPTCONNECT)) == "attemptconnect");
+		CHECK(std::string(NetMessageName(NETMSG_PING)) == "ping");
+	}
+
+	// -Wswitch above covers "a NETMSG has no name". These cover the two ways a
+	// name can be wrong in a way no compiler can see.
+	SECTION("names are unique") {
+		// two message types sharing a name silently merge their series, and the
+		// merged total still looks plausible
+		std::set<std::string> seen;
+
+		for (int id = 0; id < NETMSG_LAST; ++id) {
+			const char* const name = TryNetMessageName(static_cast<NETMSG>(id));
+
+			if (name == nullptr)
+				continue;
+
+			INFO("id " << id << " name '" << name << "'");
+			CHECK(seen.insert(name).second);
+		}
+	}
+
+	SECTION("names are label-safe") {
+		for (int id = 0; id < NETMSG_LAST; ++id) {
+			const char* const name = TryNetMessageName(static_cast<NETMSG>(id));
+
+			if (name == nullptr)
+				continue;
+
+			const std::string str = name;
+
+			INFO("id " << id << " name '" << str << "'");
+			CHECK(!str.empty());
+			CHECK(str.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_") == std::string::npos);
+		}
+	}
+}
 
 
 TEST_CASE("ResponseTimeBucketIndex")
