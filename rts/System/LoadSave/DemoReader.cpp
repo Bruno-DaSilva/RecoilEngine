@@ -6,9 +6,11 @@
 #include "Sim/Misc/GlobalConstants.h"
 
 #ifndef TOOLS
+#include "DemoFileExtension.h"
 #include "System/Config/ConfigHandler.h"
 CONFIG(bool, DisableDemoVersionCheck).defaultValue(false).description("Allow to play every replay file (may crash / cause undefined behaviour in replays)");
 #endif
+
 #include "System/Exceptions.h"
 #include "System/FileSystem/GZFileHandler.h"
 #include "System/FileSystem/FileSystem.h"
@@ -53,8 +55,8 @@ CDemoReader::CDemoReader(const std::string& filename, float curTime): playbackDe
 {
 	demoName = filename;
 
-	if (FileSystem::GetExtensionLowerCase(filename) != "sdfz")
-		throw content_error("Unknown demo extension: " + FileSystem::GetExtensionLowerCase(filename));
+	if (!IsDemoExtension(FileSystem::GetExtensionLowerCase(filename)))
+		throw content_error("Unsupported demo extension: " + FileSystem::GetExtensionLowerCase(filename));
 
 	// file not found -> exception
 	if (!playbackDemo->FileExists())
