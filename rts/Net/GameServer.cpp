@@ -101,6 +101,9 @@ static constexpr unsigned SYNCCHECK_MSG_TIMEOUT = 400;
 static const spring_time playerInfoTime = spring_secs(2);
 
 /// every n'th frame will be a keyframe (and contain the server's framenumber)
+/// most wall time a single frame-pacing pass may convert into sim frames
+static constexpr int maxFrameTimeStepMs = 200;
+
 static constexpr unsigned serverKeyframeInterval = 16;
 
 /// players incoming bandwidth new allowance every X milliseconds
@@ -2764,8 +2767,13 @@ void CGameServer::CreateNewFrame(bool fromServerThread, bool fixedFrameTime)
 		spring_time currentTick = spring_gettime();
 		spring_time timeElapsed = currentTick - lastNewFrameTick;
 
-		if (timeElapsed > spring_msecs(200))
-			timeElapsed = spring_msecs(200);
+		// what the clamp cuts is discarded, not deferred: lastNewFrameTick
+		// advances by the *full* elapsed time below
+		if (timeElapsed > spring_msecs(maxFrameTimeStepMs)) {
+			serverMetrics->CountDroppedFrameTime(timeElapsed.toMilliSecsf() - maxFrameTimeStepMs);
+
+			timeElapsed = spring_msecs(maxFrameTimeStepMs);
+		}
 
 		frameTimeLeft += ((GAME_SPEED * 0.001f) * internalSpeed * timeElapsed.toMilliSecsf());
 		lastNewFrameTick = currentTick;
@@ -2878,6 +2886,9 @@ void CGameServer::UpdateLoop()
 				spring_msecs(loopSleepTime).sleep(true);
 
 			std::lock_guard<spring::recursive_mutex> scoped_lock(gameServerMutex);
+
+			serverMetrics->CountLoopIteration();
+
 			ServerReadNet();
 			Update();
 		}

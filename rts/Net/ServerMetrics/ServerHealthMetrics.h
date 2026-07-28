@@ -32,6 +32,9 @@ public:
 	bool CountDesyncEvent();
 	void CountPlayerDesync(int playerId);
 
+	/// takes milliseconds; scaled to prometheus base units here
+	void CountDroppedFrameTime(double milliSecs);
+
 	void SetGameStartTime(double unixSecs);
 
 private:
@@ -64,6 +67,7 @@ private:
 
 	prometheus::Counter* metricDesyncEvents = nullptr;
 	prometheus::Counter* metricTotalPlayerDesyncs = nullptr;
+	prometheus::Counter* metricDroppedFrameTime = nullptr;
 
 	// per-player families. always null unless MetricsPerPlayer is on
 	prometheus::Family<prometheus::Gauge>* metricPlayerLag = nullptr;

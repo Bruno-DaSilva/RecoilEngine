@@ -58,6 +58,8 @@ void ServerHealthMetrics::Init(prometheus::Registry& registry, const std::string
 	metricPaused = gauge("recoil_server_paused",
 		"1 while the game is paused");
 
+	metricDroppedFrameTime = counter("recoil_server_dropped_frame_time_seconds_total",
+		"Game time discarded because a server-thread stall exceeded the frame-pacing clamp; the simulation falls permanently behind wall clock by this much. Non-zero only when the host itself stalled, never when a player's connection did");
 	metricDesyncEvents = counter("recoil_server_desync_events_total",
 		"Desyncs detected by sync checking; counted once per detection, not per frame");
 	metricTotalPlayerDesyncs = counter("recoil_server_desynced_players_total",
@@ -108,6 +110,13 @@ void ServerHealthMetrics::CountPlayerDesync(int playerId)
 
 	AddPlayerMetric(metricTotalPlayerDesyncs, metricPlayerDesyncs,
 		GetPlayerSlot(playerId).desyncs, playerId, 1);
+}
+
+
+void ServerHealthMetrics::CountDroppedFrameTime(double milliSecs)
+{
+	if (metricDroppedFrameTime != nullptr)
+		metricDroppedFrameTime->Increment(milliSecs * msToSecs);
 }
 
 

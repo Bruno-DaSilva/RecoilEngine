@@ -32,6 +32,8 @@ public:
 	/// attribute packet bytes to a NETMSG type; aggregate only
 	void CountMessageBytes(bool outgoing, unsigned char msgId, unsigned int bytes);
 
+	void CountLoopIteration();
+
 	void CountConnectionAttempt();
 	void CountConnectionRejected(const char* reason);
 	void CountConnectionEstablished(bool reconnect);
@@ -147,6 +149,7 @@ private:
 	prometheus::Family<prometheus::Counter>* metricConnRejected = nullptr;
 	prometheus::Family<prometheus::Counter>* metricConnEstablished = nullptr;
 	prometheus::Family<prometheus::Counter>* metricConnClosed = nullptr;
+	prometheus::Counter* metricLoopIterations = nullptr;
 	prometheus::Counter* metricTotalThrottledPackets = nullptr;
 	prometheus::Counter* metricTotalIncomingThrottled = nullptr;
 	prometheus::Counter* metricTotalOutgoingThrottled = nullptr;

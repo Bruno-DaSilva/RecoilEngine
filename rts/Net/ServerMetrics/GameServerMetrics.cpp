@@ -84,3 +84,6 @@ void ServerMetrics::CountMessageBytes(bool outgoing, unsigned char msgId, unsign
 {
 	networkMetrics.CountMessageBytes(outgoing, msgId, bytes);
 }
+
+void ServerMetrics::CountDroppedFrameTime(double milliSecs) { healthMetrics.CountDroppedFrameTime(milliSecs); }
+void ServerMetrics::CountLoopIteration()                    { networkMetrics.CountLoopIteration(); }
