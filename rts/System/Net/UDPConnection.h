@@ -152,6 +152,9 @@ private:
 	void RequestResend(ChunkPtr ptr, bool noSort);
 	void SendPacket(Packet& pkt);
 
+	/// true while the outgoing bandwidth cap is exceeded
+	bool OutgoingBandwidthExceeded(bool includeQueued) const;
+
 	void UpdateWaitingPackets();
 	void UpdateResendRequests();
 
