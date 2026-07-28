@@ -158,6 +158,9 @@ private:
 	void RequestResend(const ChunkPtr& ptr, bool noSort, bool lossSuspected);
 	void SendPacket(Packet& pkt);
 
+	/// true while the outgoing bandwidth cap is exceeded
+	bool OutgoingBandwidthExceeded(bool includeQueued) const;
+
 	/// application bytes queued for this link but not yet transmitted
 	unsigned int OutgoingQueuedBytes() const;
 
