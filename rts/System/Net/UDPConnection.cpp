@@ -800,23 +800,20 @@ bool UDPConnection::CanReconnect() const {
 	return (globalConfig.reconnectTimeout > 0);
 }
 
-std::string UDPConnection::Statistics() const
+ConnectionStats UDPConnection::GetStats() const
 {
-	const char* fmts[] = {
-		"\t%u bytes sent   in %u packets (%.3f bytes/packet)\n",
-		"\t%u bytes recv'd in %u packets (%.3f bytes/packet)\n",
-		"\t{%.3fx, %.3fx} relative protocol overhead {up, down}\n",
-		"\t%u incoming chunks dropped, %u outgoing chunks resent\n",
-		"\t%u incoming chunks processed\n",
-	};
-
-	std::string msg = "[UDPConnection::Statistics]\n";
-	msg += spring::format(fmts[0], dataSent, sentPackets, spring::SafeDivide(dataSent * 1.0f, sentPackets * 1.0f));
-	msg += spring::format(fmts[1], dataRecv, recvPackets, spring::SafeDivide(dataRecv * 1.0f, recvPackets * 1.0f));
-	msg += spring::format(fmts[2], spring::SafeDivide(sentOverhead * 1.0f, dataSent * 1.0f), spring::SafeDivide(recvOverhead * 1.0f, dataRecv * 1.0f));
-	msg += spring::format(fmts[3], droppedChunks, resentChunks);
-	msg += spring::format(fmts[4], lastInOrder + 1);
-	return msg;
+	ConnectionStats stats;
+	stats.sentBytes = dataSent;
+	stats.receivedBytes = dataRecv;
+	stats.sentPackets = sentPackets;
+	stats.receivedPackets = recvPackets;
+	stats.retransmittedChunks = resentChunks;
+	stats.discardedChunks = droppedChunks;
+	stats.sentOverheadBytes = sentOverhead;
+	stats.receivedOverheadBytes = recvOverhead;
+	stats.processedChunks = lastInOrder + 1;
+	stats.isNetworkLink = true;
+	return stats;
 }
 
 std::string UDPConnection::GetFullAddress() const

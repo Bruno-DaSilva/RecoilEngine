@@ -7,9 +7,61 @@
 #include <memory>
 
 #include "RawPacket.h"
+#include "System/SafeUtil.h"
+#include "System/SpringFormat.h"
 
 namespace netcode
 {
+
+/**
+ * @brief per-link traffic counters
+ *
+ * Single extension point for link telemetry: add a field here and fill it in
+ * GetStats rather than adding another virtual getter. Byte counts are tracked by
+ * every connection type; the rest is UDP-only -- see isNetworkLink.
+ */
+struct ConnectionStats {
+	unsigned int sentBytes = 0;
+	unsigned int receivedBytes = 0;
+	unsigned int sentPackets = 0;
+	unsigned int receivedPackets = 0;
+	/// chunks put back on the wire after having been sent once
+	unsigned int retransmittedChunks = 0;
+	/// chunks discarded on arrival because the same chunk had already been received
+	unsigned int discardedChunks = 0;
+	/// protocol header bytes, against the payload bytes above
+	unsigned int sentOverheadBytes = 0;
+	unsigned int receivedOverheadBytes = 0;
+	/// inbound chunks delivered in order so far
+	unsigned int processedChunks = 0;
+
+	/// whether the fields beyond the byte counts describe anything. False on a
+	/// loopback, which moves bytes but has no wire to report on.
+	bool isNetworkLink = false;
+};
+
+
+/// human-readable dump of a link's counters, for the disconnect log
+inline std::string FormatConnectionStats(const ConnectionStats& s)
+{
+	if (!s.isNetworkLink) {
+		return spring::format("\t%u bytes sent\n\t%u bytes recv'd\n", s.sentBytes, s.receivedBytes);
+	}
+
+	std::string msg;
+	msg += spring::format("\t%u bytes sent   in %u packets (%.3f bytes/packet)\n",
+		s.sentBytes, s.sentPackets, spring::SafeDivide(s.sentBytes * 1.0f, s.sentPackets * 1.0f));
+	msg += spring::format("\t%u bytes recv'd in %u packets (%.3f bytes/packet)\n",
+		s.receivedBytes, s.receivedPackets, spring::SafeDivide(s.receivedBytes * 1.0f, s.receivedPackets * 1.0f));
+	msg += spring::format("\t{%.3fx, %.3fx} relative protocol overhead {up, down}\n",
+		spring::SafeDivide(s.sentOverheadBytes * 1.0f, s.sentBytes * 1.0f),
+		spring::SafeDivide(s.receivedOverheadBytes * 1.0f, s.receivedBytes * 1.0f));
+	msg += spring::format("\t%u incoming chunks dropped, %u outgoing chunks resent\n",
+		s.discardedChunks, s.retransmittedChunks);
+	msg += spring::format("\t%u incoming chunks processed\n", s.processedChunks);
+	return msg;
+}
+
 
 /**
  * @brief Base class for connecting to various receivers / senders
@@ -62,10 +114,14 @@ public:
 	virtual bool NeedsReconnect() = 0;
 
 	unsigned int GetDataReceived() const { return dataRecv; }
+	virtual ConnectionStats GetStats() const { return {dataSent, dataRecv}; }
 	unsigned int GetNumQueuedPings() const { return numPings; }
 	virtual unsigned int GetPacketQueueSize() const { return 0; }
 
-	virtual std::string Statistics() const = 0;
+	/// one formatter for every link type; GetStats is the extension point
+	std::string Statistics() const {
+		return "[" + GetFullAddress() + "]\n" + FormatConnectionStats(GetStats());
+	}
 	virtual std::string GetFullAddress() const = 0;
 	virtual void Unmute() = 0;
 	virtual void Close(bool flush = false) = 0;
