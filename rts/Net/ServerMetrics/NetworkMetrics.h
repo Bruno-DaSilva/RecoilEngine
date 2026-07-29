@@ -48,6 +48,8 @@ private:
 		DeltaCounter recvBytes;
 		DeltaCounter sentPackets;
 		DeltaCounter recvPackets;
+		DeltaCounter sendErrors;
+		DeltaCounter recvErrors;
 		DeltaCounter resentOutgoingChunks;
 		DeltaCounter redundantOutgoingChunks;
 		DeltaCounter duplicateIncomingChunks;
@@ -84,6 +86,7 @@ private:
 	// per-player metrics, null unless perPlayerEnabled
 	prometheus::Family<prometheus::Counter>* metricBytes = nullptr;
 	prometheus::Family<prometheus::Counter>* metricPackets = nullptr;
+	prometheus::Family<prometheus::Counter>* metricSocketErrors = nullptr;
 	prometheus::Family<prometheus::Counter>* metricResentOutgoingChunks = nullptr;
 	prometheus::Family<prometheus::Counter>* metricRedundantOutgoingChunks = nullptr;
 	prometheus::Family<prometheus::Counter>* metricDuplicateIncomingChunks = nullptr;
@@ -105,6 +108,10 @@ private:
 	prometheus::Counter* metricTotalRecvBytes = nullptr;
 	prometheus::Counter* metricTotalSentPackets = nullptr;
 	prometheus::Counter* metricTotalRecvPackets = nullptr;
+	/// three children of one {direction, socket}-labelled family
+	prometheus::Counter* metricTotalSendErrors = nullptr;
+	prometheus::Counter* metricTotalRecvErrors = nullptr;
+	prometheus::Counter* metricListenerRecvErrors = nullptr;
 	prometheus::Counter* metricTotalResentOutgoingChunks = nullptr;
 	prometheus::Counter* metricTotalRedundantOutgoingChunks = nullptr;
 	prometheus::Counter* metricTotalDuplicateIncomingChunks = nullptr;
@@ -128,4 +135,6 @@ private:
 	/// read. See NetworkMetrics::Update.
 	float windowMaxUnackedAgeMs = 0.0f;
 	spring_time lastUnackedAgePeakReset = spring_notime;
+
+	unsigned int lastListenerRecvErrors = 0;
 };

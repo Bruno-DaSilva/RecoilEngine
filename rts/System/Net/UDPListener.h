@@ -78,6 +78,8 @@ public:
 	void UpdateConnections(); // Updates connections when the endpoint has been reconnected
 
 	auto& GetSocket() { return socket; }
+	/// socket-level receive failures on the shared listen socket
+	unsigned int GetReceiveErrors() const { return recvErrors; }
 private:
 	spring_time lastUpdateTime = spring_gettime();
 	/**
@@ -85,6 +87,8 @@ private:
 	 * If true, we will create a new connection, if false, they get dropped.
 	 */
 	bool acceptNewConnections;
+
+	unsigned int recvErrors = 0;
 
 	/// socket being listened on
 	std::shared_ptr<asio::ip::udp::socket> socket;
