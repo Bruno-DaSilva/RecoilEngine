@@ -42,6 +42,8 @@ private:
 		DeltaCounter recvBytes;
 		DeltaCounter sentPackets;
 		DeltaCounter recvPackets;
+		DeltaCounter sendErrors;
+		DeltaCounter recvErrors;
 	};
 
 	/// this player's metric slot, created on first use
@@ -54,10 +56,17 @@ private:
 	prometheus::Family<prometheus::Counter>* metricRecvBytes = nullptr;
 	prometheus::Family<prometheus::Counter>* metricSentPackets = nullptr;
 	prometheus::Family<prometheus::Counter>* metricRecvPackets = nullptr;
+	prometheus::Family<prometheus::Counter>* metricSocketErrors = nullptr;
 
 	// server-wide aggregates, exported whether or not per-player metrics are on
 	prometheus::Counter* metricTotalSentBytes = nullptr;
 	prometheus::Counter* metricTotalRecvBytes = nullptr;
 	prometheus::Counter* metricTotalSentPackets = nullptr;
 	prometheus::Counter* metricTotalRecvPackets = nullptr;
+	/// three children of one {direction, socket}-labelled family
+	prometheus::Counter* metricTotalSendErrors = nullptr;
+	prometheus::Counter* metricTotalRecvErrors = nullptr;
+	prometheus::Counter* metricListenerRecvErrors = nullptr;
+
+	unsigned int lastListenerRecvErrors = 0;
 };

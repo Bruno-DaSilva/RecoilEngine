@@ -244,6 +244,8 @@ private:
 	unsigned int resentChunks;
 	unsigned int droppedChunks;
 
+	unsigned int sendErrors;
+	unsigned int recvErrors;
 	unsigned int sentOverhead, recvOverhead;
 	unsigned int sentPackets, recvPackets;
 

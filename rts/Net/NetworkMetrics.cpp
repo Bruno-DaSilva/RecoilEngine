@@ -12,6 +12,7 @@
 #include "GameServer.h"
 #include "System/Metrics/Delta.h"
 #include "System/Metrics/Metrics.h"
+#include "System/Net/UDPListener.h"
 
 using metrics::DeltaSince;
 
@@ -32,6 +33,12 @@ void NetworkMetrics::Init(prometheus::Registry& registry)
 		"UDP packets sent over all client connections");
 	metricTotalRecvPackets = counter("recoil_network_received_packets_total",
 		"UDP packets received over all client connections");
+	// the listening socket only receives, so there is no {send,listener} child
+	auto& socketErrors = *counterFamily("recoil_network_socket_errors_total",
+		"Socket-level failures, by direction and socket. Ours or the host environment's, not a peer's link");
+	metricTotalSendErrors    = &socketErrors.Add({{"direction", "send"},    {"socket", "connection"}});
+	metricTotalRecvErrors    = &socketErrors.Add({{"direction", "receive"}, {"socket", "connection"}});
+	metricListenerRecvErrors = &socketErrors.Add({{"direction", "receive"}, {"socket", "listener"}});
 
 	if (!metrics::PerPlayerEnabled())
 		return;
@@ -44,6 +51,8 @@ void NetworkMetrics::Init(prometheus::Registry& registry)
 		"UDP packets sent over this client connection");
 	metricRecvPackets = counterFamily("recoil_network_connection_received_packets_total",
 		"UDP packets received over this client connection");
+	metricSocketErrors = counterFamily("recoil_network_connection_socket_errors_total",
+		"Socket failures on this link by direction");
 }
 
 
@@ -92,16 +101,24 @@ void NetworkMetrics::Update(const CGameServer& server)
 		// Label by slot id: stable within a game, and not PII the way names are.
 		// sentBytes stands in for the whole group -- they are resolved together.
 		if (metricSentBytes != nullptr && cm.sentBytes.player == nullptr) {
-			const std::map<std::string, std::string> labels = {{"playerid", std::to_string(p.id)}};
+			const std::string playerIdStr = std::to_string(p.id);
+			const std::map<std::string, std::string> labels = {{"playerid", playerIdStr}};
 			cm.sentBytes.player   = &metricSentBytes->Add(labels);
 			cm.recvBytes.player   = &metricRecvBytes->Add(labels);
 			cm.sentPackets.player = &metricSentPackets->Add(labels);
 			cm.recvPackets.player = &metricRecvPackets->Add(labels);
+			cm.sendErrors.player  = &metricSocketErrors->Add({{"playerid", playerIdStr}, {"direction", "send"}});
+			cm.recvErrors.player  = &metricSocketErrors->Add({{"playerid", playerIdStr}, {"direction", "receive"}});
 		}
 
 		publishDelta(metricTotalSentBytes, cm.sentBytes, stats.sentBytes);
 		publishDelta(metricTotalRecvBytes, cm.recvBytes, stats.receivedBytes);
 		publishDelta(metricTotalSentPackets, cm.sentPackets, stats.sentPackets);
 		publishDelta(metricTotalRecvPackets, cm.recvPackets, stats.receivedPackets);
+		publishDelta(metricTotalSendErrors, cm.sendErrors, stats.sendErrors);
+		publishDelta(metricTotalRecvErrors, cm.recvErrors, stats.receiveErrors);
 	}
+
+	if (server.udpListener != nullptr)
+		metricListenerRecvErrors->Increment(DeltaSince(server.udpListener->GetReceiveErrors(), lastListenerRecvErrors));
 }
