@@ -142,8 +142,10 @@ void UDPListener::Update(int loopSleepTime) {
 		if (ci != connMap.end() && ci->second.expired())
 			continue;
 
-		if (CheckErrorCode(err))
+		if (CheckErrorCode(err)) {
+			recvErrors += 1;
 			break;
+		}
 
 		if (bytesReceived < Packet::headerSize)
 			continue;

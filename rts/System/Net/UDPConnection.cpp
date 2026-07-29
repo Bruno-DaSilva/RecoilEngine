@@ -470,8 +470,10 @@ void UDPConnection::Update(float deltaMs)
 
 			const size_t bytesReceived = mySocket->receive_from(asio::buffer(recvBuffer), udpEndPoint, msgFlags, err);
 
-			if (CheckErrorCode(err))
+			if (CheckErrorCode(err)) {
+				accumulatedStats.receiveErrors += 1;
 				break;
+			}
 
 			if (bytesReceived < Packet::headerSize)
 				continue;
@@ -1122,8 +1124,10 @@ void UDPConnection::SendPacket(Packet& pkt)
 		mySocket->send_to(buffer(sendBuffer), addr, flags, err);
 	}
 
-	if (CheckErrorCode(err))
+	if (CheckErrorCode(err)) {
+		accumulatedStats.sendErrors += 1;
 		return;
+	}
 
 	dataSent += sendBuffer.size();
 	accumulatedStats.sentPackets += 1;

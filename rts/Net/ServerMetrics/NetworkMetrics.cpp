@@ -17,6 +17,7 @@
 #include "System/Metrics/Helpers.h"
 #include "System/Metrics/Metrics.h"
 #include "System/Net/ConnectionStats.h"
+#include "System/Net/UDPListener.h"
 
 using metrics::DeltaSince;
 using metrics::msToSecs;
@@ -48,6 +49,12 @@ void NetworkMetrics::Init(prometheus::Registry& registry)
 		"UDP packets over all client connections, by direction");
 	metricTotalSentPackets = &packets.Add({{"direction", "outgoing"}});
 	metricTotalRecvPackets = &packets.Add({{"direction", "incoming"}});
+	// the listening socket only receives, so there is no {send,listener} child
+	auto& socketErrors = *counterFamily("recoil_network_socket_errors_total",
+		"Socket-level failures, by direction and socket. Ours or the host environment's, not a peer's link");
+	metricTotalSendErrors    = &socketErrors.Add({{"direction", "outgoing"},    {"socket", "connection"}});
+	metricTotalRecvErrors    = &socketErrors.Add({{"direction", "incoming"}, {"socket", "connection"}});
+	metricListenerRecvErrors = &socketErrors.Add({{"direction", "incoming"}, {"socket", "listener"}});
 
 	metricTotalResentOutgoingChunks = counter("recoil_network_resent_outgoing_chunks_total",
 		"Chunks retransmitted to clients after they looked lost, i.e. a resend driven by a nak or an ack timeout. Each retransmission counts, so one chunk resent repeatedly adds repeatedly. Proactive duplication from redundancy mode is counted separately in recoil_network_redundant_outgoing_chunks_total, not here; a high loss factor still raises this counter indirectly, by shortening the ack timeout that triggers these resends");
@@ -90,6 +97,8 @@ void NetworkMetrics::Init(prometheus::Registry& registry)
 		"Bytes over this client connection, by direction. No series exists for local loopback connections");
 	metricPackets = counterFamily("recoil_network_per_connection_packets_total",
 		"UDP packets over this client connection, by direction");
+	metricSocketErrors = counterFamily("recoil_network_per_connection_socket_errors_total",
+		"Socket failures on this link by direction");
 	metricResentOutgoingChunks = counterFamily("recoil_network_per_connection_resent_outgoing_chunks_total",
 		"Chunks retransmitted to this client because they looked lost, excluding redundancy-mode duplication. see the aggregate recoil_network_resent_outgoing_chunks_total");
 	metricRedundantOutgoingChunks = counterFamily("recoil_network_per_connection_redundant_outgoing_chunks_total",
@@ -206,6 +215,8 @@ void NetworkMetrics::Update(const CGameServer& server)
 			cm.recvBytes.player   = &metricBytes->Add({{"playerid", playerId}, {"direction", "incoming"}});
 			cm.sentPackets.player = &metricPackets->Add({{"playerid", playerId}, {"direction", "outgoing"}});
 			cm.recvPackets.player = &metricPackets->Add({{"playerid", playerId}, {"direction", "incoming"}});
+			cm.sendErrors.player  = &metricSocketErrors->Add({{"playerid", playerId}, {"direction", "outgoing"}});
+			cm.recvErrors.player  = &metricSocketErrors->Add({{"playerid", playerId}, {"direction", "incoming"}});
 			cm.resentOutgoingChunks.player   = &metricResentOutgoingChunks->Add(labels);
 			cm.redundantOutgoingChunks.player = &metricRedundantOutgoingChunks->Add(labels);
 			cm.duplicateIncomingChunks.player  = &metricDuplicateIncomingChunks->Add(labels);
@@ -231,6 +242,8 @@ void NetworkMetrics::Update(const CGameServer& server)
 		publishDelta(metricTotalRedundantOutgoingChunks, cm.redundantOutgoingChunks, stats.accumulated.redundantOutgoingChunks);
 		publishDelta(metricTotalDuplicateIncomingChunks, cm.duplicateIncomingChunks, stats.accumulated.duplicateIncomingChunks);
 		publishDelta(metricTotalMissingIncomingChunks, cm.missingIncomingChunks, stats.accumulated.missingIncomingChunks);
+		publishDelta(metricTotalSendErrors, cm.sendErrors, stats.accumulated.sendErrors);
+		publishDelta(metricTotalRecvErrors, cm.recvErrors, stats.accumulated.receiveErrors);
 		publishDelta(metricTotalOutgoingThrottled, cm.outgoingThrottled, stats.accumulated.outgoingThrottledMs, msToSecs);
 		publishDelta(metricTotalIncomingReorderStall, cm.incomingReorderStall, stats.accumulated.incomingReorderStallMs, msToSecs);
 
@@ -274,4 +287,7 @@ void NetworkMetrics::Update(const CGameServer& server)
 	metricTotalOutgoingResendQueueDepth->Set(totalOutgoingResendQueueDepth);
 	metricTotalIncomingReorderQueueDepth->Set(totalIncomingReorderQueueDepth);
 	metricTotalOutgoingQueueBytes->Set(totalOutgoingQueueBytes);
+
+	if (server.udpListener != nullptr)
+		metricListenerRecvErrors->Increment(DeltaSince(server.udpListener->GetReceiveErrors(), lastListenerRecvErrors));
 }
