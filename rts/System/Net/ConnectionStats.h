@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <string>
 
 namespace netcode
@@ -33,6 +34,22 @@ struct ConnectionStats {
 	/// loopback, which moves bytes but has no wire to report on.
 	bool isNetworkLink = false;
 };
+
+namespace detail {
+	inline std::atomic<bool> statsSampling = false;
+}
+
+/**
+ * @brief whether links should collect the optional telemetry in ConnectionStats
+ *
+ * Byte and packet counters are always kept; the rest exists purely to be
+ * exported, so it is off unless something is exporting.
+ *
+ * Atomic because a host client's own CNetProtocol link is already being
+ * serviced when the server it just started flips this.
+ */
+inline void SetStatsSampling(bool enable) { detail::statsSampling.store(enable, std::memory_order_relaxed); }
+inline bool StatsSampling() { return detail::statsSampling.load(std::memory_order_relaxed); }
 
 /// human-readable dump of a link's counters, for the disconnect log
 std::string FormatConnectionStats(const ConnectionStats& stats);

@@ -9,6 +9,8 @@
 # are gated separately, so consumers of that list pick an implementation.
 make_global_var(sources_engine_ServerMetrics
 		"${CMAKE_CURRENT_SOURCE_DIR}/GameServerMetrics.cpp"
+		"${CMAKE_CURRENT_SOURCE_DIR}/NetworkMetrics.cpp"
+		"${CMAKE_CURRENT_SOURCE_DIR}/ServerHealthMetrics.cpp"
 	)
 make_global_var(sources_engine_ServerMetricsNull "${CMAKE_CURRENT_SOURCE_DIR}/GameServerMetricsNull.cpp")
 

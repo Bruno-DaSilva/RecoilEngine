@@ -4,6 +4,7 @@
 
 #include "GameServer.h"
 #include "System/Metrics/Metrics.h"
+#include "System/Net/ConnectionStats.h"
 
 /// how often metric values are republished; well below any sane scrape interval
 static const spring_time metricsUpdateTime = spring_secs(1);
@@ -13,15 +14,25 @@ void ServerMetrics::Init()
 {
 	metrics::Init();
 
+	netcode::SetStatsSampling(metrics::Enabled());
+
 	if (!metrics::Enabled())
 		return;
 
+	auto& registry = metrics::GetRegistry();
+
+	network.Init(registry);
+	health.Init(registry);
 	registered = true;
 }
 
 
 void ServerMetrics::Shutdown()
 {
+	// nothing else clears this: a client that hosted a game and then joins a
+	// remote one runs no server, so its link would sample forever
+	netcode::SetStatsSampling(false);
+
 	metrics::Shutdown();
 
 	// the registry is gone, so every metric pointer cached in this object now
@@ -40,4 +51,7 @@ void ServerMetrics::Update(const CGameServer& server)
 		return;
 
 	lastPublishTime = server.lastUpdate;
+
+	network.Update(server);
+	health.Update(server);
 }

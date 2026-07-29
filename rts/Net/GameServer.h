@@ -66,8 +66,10 @@ private:
 class CGameServer
 {
 	friend class CCregLoadSaveHandler; // For initializing server state after load
-	// reads server state to publish it; never writes
+	// the metrics classes read server state to publish it; never write
 	friend class ServerMetrics;
+	friend class NetworkMetrics;
+	friend class ServerHealthMetrics;
 public:
 	CGameServer(
 		const std::shared_ptr<const ClientSetup> newClientSetup,

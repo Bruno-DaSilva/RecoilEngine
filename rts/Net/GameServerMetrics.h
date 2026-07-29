@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "NetworkMetrics.h"
+#include "ServerHealthMetrics.h"
 #include "System/Misc/SpringTime.h"
 
 class CGameServer;
@@ -9,8 +11,9 @@ class CGameServer;
 /**
  * @brief every prometheus series the game server exports
  *
- * Owns the endpoint's lifetime and the publish interval. Every method no-ops
- * when the subsystem is disabled (the default), so callers never test for it.
+ * A facade over the metric groups: it owns the endpoint's lifetime and the
+ * publish interval, and forwards everything else. Every method no-ops when the
+ * subsystem is disabled (the default), so callers never test for it.
  *
  * Entry points are called from both the netcode and the game thread, but always
  * under CGameServer::gameServerMutex.
@@ -34,6 +37,9 @@ public:
 	void Update(const CGameServer& server);
 
 private:
+	NetworkMetrics network;
+	ServerHealthMetrics health;
+
 	/// null families until Init() has registered against an enabled registry
 	bool registered = false;
 
