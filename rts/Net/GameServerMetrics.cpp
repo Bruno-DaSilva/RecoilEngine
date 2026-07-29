@@ -55,3 +55,5 @@ void ServerMetrics::Update(const CGameServer& server)
 	network.Update(server);
 	health.Update(server);
 }
+
+void ServerMetrics::ResetConnectionDeltas(int playerId)     { network.ResetConnectionDeltas(playerId); }

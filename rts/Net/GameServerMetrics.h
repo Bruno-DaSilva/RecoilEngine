@@ -36,6 +36,8 @@ public:
 	/// republish every value; rate-limited internally, cheap to call per loop
 	void Update(const CGameServer& server);
 
+	void ResetConnectionDeltas(int playerId);
+
 private:
 	NetworkMetrics network;
 	ServerHealthMetrics health;
