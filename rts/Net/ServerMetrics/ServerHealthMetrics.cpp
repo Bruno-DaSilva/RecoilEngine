@@ -72,7 +72,7 @@ void ServerHealthMetrics::Init(prometheus::Registry& registry, const std::string
 	// The name is here rather than on every per-player series for the same
 	// reason the game id is: it keeps the series themselves stable/reduces
 	// churn.
-	metricPlayerInfo = gaugeFamily("recoil_server_player_info",
+	metricPlayerInfo = gaugeFamily("recoil_server_per_player_info",
 		"Constant 1, labels map a player slot to their name");
 }
 
