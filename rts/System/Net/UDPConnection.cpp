@@ -804,6 +804,21 @@ bool UDPConnection::CanReconnect() const {
 	return (globalConfig.reconnectTimeout > 0);
 }
 
+// walked rather than tracked incrementally: read once per metrics poll, not per
+// packet
+unsigned int UDPConnection::SendQueuedBytes() const
+{
+	unsigned int bytes = 0;
+
+	for (const std::shared_ptr<const RawPacket>& pkt: outgoingData)
+		bytes += pkt->length;
+
+	for (const ChunkPtr& chunk: newChunks)
+		bytes += chunk->data.size();
+
+	return bytes;
+}
+
 ConnectionStats UDPConnection::GetStats() const
 {
 	ConnectionStats stats;
@@ -818,6 +833,11 @@ ConnectionStats UDPConnection::GetStats() const
 	stats.processedChunks = lastInOrder + 1;
 	stats.sendErrors = sendErrors;
 	stats.receiveErrors = recvErrors;
+	stats.sendRateBytesPerSec = outgoing.GetAverage();
+	stats.unackedChunks = unackedChunks.size();
+	stats.queuedResendChunks = resendRequested.size();
+	stats.queuedInboundChunks = waitingPackets.size();
+	stats.queuedSendBytes = SendQueuedBytes();
 	stats.isNetworkLink = true;
 	return stats;
 }

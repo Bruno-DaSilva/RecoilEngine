@@ -8,6 +8,7 @@ namespace prometheus
 {
 	template<typename T> class Family;
 	class Counter;
+	class Gauge;
 	class Registry;
 }
 
@@ -44,10 +45,20 @@ private:
 		DeltaCounter recvPackets;
 		DeltaCounter sendErrors;
 		DeltaCounter recvErrors;
+
+		prometheus::Gauge* outgoingBw = nullptr;
+		prometheus::Gauge* unackedChunks = nullptr;
+		prometheus::Gauge* resendQueueDepth = nullptr;
+		prometheus::Gauge* reorderQueueDepth = nullptr;
+		prometheus::Gauge* sendQueueBytes = nullptr;
 	};
 
 	/// this player's metric slot, created on first use
 	ConnectionMetrics& ConnectionSlot(int playerId);
+
+	/// drop a connection's gauges from the registry rather than leave them
+	/// reporting a link that is gone. Counters are cumulative and stay.
+	void ReleaseConnectionGauges(ConnectionMetrics& cm);
 
 	std::vector<ConnectionMetrics> connectionMetrics;
 
@@ -57,6 +68,11 @@ private:
 	prometheus::Family<prometheus::Counter>* metricSentPackets = nullptr;
 	prometheus::Family<prometheus::Counter>* metricRecvPackets = nullptr;
 	prometheus::Family<prometheus::Counter>* metricSocketErrors = nullptr;
+	prometheus::Family<prometheus::Gauge>* metricOutgoingBw = nullptr;
+	prometheus::Family<prometheus::Gauge>* metricUnackedChunks = nullptr;
+	prometheus::Family<prometheus::Gauge>* metricResendQueueDepth = nullptr;
+	prometheus::Family<prometheus::Gauge>* metricReorderQueueDepth = nullptr;
+	prometheus::Family<prometheus::Gauge>* metricSendQueueBytes = nullptr;
 
 	// server-wide aggregates, exported whether or not per-player metrics are on
 	prometheus::Counter* metricTotalSentBytes = nullptr;
@@ -67,6 +83,11 @@ private:
 	prometheus::Counter* metricTotalSendErrors = nullptr;
 	prometheus::Counter* metricTotalRecvErrors = nullptr;
 	prometheus::Counter* metricListenerRecvErrors = nullptr;
+	prometheus::Gauge* metricTotalOutgoingBw = nullptr;
+	prometheus::Gauge* metricTotalUnackedChunks = nullptr;
+	prometheus::Gauge* metricTotalResendQueueDepth = nullptr;
+	prometheus::Gauge* metricTotalReorderQueueDepth = nullptr;
+	prometheus::Gauge* metricTotalSendQueueBytes = nullptr;
 
 	unsigned int lastListenerRecvErrors = 0;
 };
