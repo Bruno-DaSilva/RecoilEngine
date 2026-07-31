@@ -1289,6 +1289,22 @@ namespace {
 		return changed;
 	}
 
+	// Unmasked pixel diff between any two captured passes, for the pairwise
+	// breakdown logged when a compare comes back nonzero: which passes actually
+	// disagree says whether the odd one out is a fixed pass (a warmup/lazy-work
+	// effect) or varies (per-draw state).
+	long ABRawDiff(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, int& maxDelta) {
+		const size_t n = (a.size() < b.size()) ? a.size() : b.size();
+		long changed = 0; int mx = 0;
+		for (size_t p = 0; p * 4 + 3 < n; ++p) {
+			const int d = abMaxRGB(&a[p*4], &b[p*4]);
+			if (d > mx) mx = d;
+			changed += (d > 1);
+		}
+		maxDelta = mx;
+		return changed;
+	}
+
 	// Paint the held legacy image (optionally with a noise-masked red diff heatmap)
 	// straight to the backbuffer. glReadPixels/glDrawPixels share a bottom-up origin.
 	void ABDisplayLegacy(int w, int h, const std::vector<uint8_t>& l, const std::vector<uint8_t>& m, bool heatmap) {
@@ -1823,6 +1839,22 @@ bool CGame::Draw() {
 			if (net > 0 || ctl > 0 || (iter % logStride) == 0) {
 				LOG_L(L_WARNING, "[Frame A/B] control(L<->L)=%ld px (max %d), signal(L<->M)=%ld / %d px (masked, max %d)",
 					ctl, ctlMaxDelta, net, w * h, maxDelta);
+			}
+			// On any nonzero compare, break the four captured passes down pairwise
+			// (unmasked). Under AB_FORCE_LEGACY every pass is legacy, so this says
+			// which pass is the outlier -- a fixed one implicates once-per-frame work
+			// leaking into a pass, a varying one implicates per-draw state.
+			if (net > 0 || ctl > 0) {
+				static const char* pairName[6] = {"0v1", "0v2", "0v3", "1v2", "1v3", "2v3"};
+				static const int pairA[6] = {0, 0, 0, 1, 1, 2};
+				static const int pairB[6] = {1, 2, 3, 2, 3, 3};
+				std::string brk;
+				for (int k = 0; k < 6; ++k) {
+					int mx = 0;
+					const long n = ABRawDiff(abBuf[pairA[k]], abBuf[pairB[k]], mx);
+					brk += "  " + std::string(pairName[k]) + "=" + std::to_string(n) + "/" + std::to_string(mx);
+				}
+				LOG_L(L_WARNING, "[Frame A/B] pairwise (unmasked, px/maxDelta):%s", brk.c_str());
 			}
 			// capture the first several diverging frames as numbered triplets for
 			// inspection: a leaking control pair takes precedence over the signal pair
