@@ -59,6 +59,7 @@
 #include "Rendering/Env/WaterRendering.h"
 #include "Rendering/Env/MapRendering.h"
 #include "Rendering/GL/glExtra.h"
+#include "Rendering/GL/FFStateTracker.h"
 #include "Rendering/GL/TexBind.h"
 #include "Rendering/Models/3DModelMisc.hpp"
 #include "Rendering/Models/3DModelPiece.hpp"
@@ -653,7 +654,7 @@ static void CmdListEmitIntoCompile(const LuaCommandList& cl)
 			case Op::PolygonOffset:     glPolygonOffset(c.f[0], c.f[1]); break;
 			case Op::ColorMask:         glColorMask((GLboolean)c.u0, (GLboolean)c.u1, (GLboolean)c.u2, (GLboolean)c.u3); break;
 			case Op::Scissor:           glScissor((GLint)c.u0, (GLint)c.u1, (GLsizei)c.u2, (GLsizei)c.u3); break;
-			case Op::ShadeModel:        glShadeModel(c.u0); break;
+			case Op::ShadeModel:        glShadeModel(c.u0); GL::ffResetState.NoteShadeModel(c.u0); break;
 			case Op::Fogf:              glFogf(c.u0, c.f[0]); break;
 			case Op::Fogi:              glFogi(c.u0, (GLint)c.u1); break;
 			case Op::Fogfv:             glFogfv(c.u0, c.f); break;
@@ -858,7 +859,7 @@ static void CmdListReplayLive(const LuaCommandList& cl)
 			case Op::PolygonOffset:     glPolygonOffset(c.f[0], c.f[1]); break;
 			case Op::ColorMask:         glColorMask((GLboolean)c.u0, (GLboolean)c.u1, (GLboolean)c.u2, (GLboolean)c.u3); break;
 			case Op::Scissor:           glScissor((GLint)c.u0, (GLint)c.u1, (GLsizei)c.u2, (GLsizei)c.u3); break;
-			case Op::ShadeModel:        glShadeModel(c.u0); break;
+			case Op::ShadeModel:        glShadeModel(c.u0); GL::ffResetState.NoteShadeModel(c.u0); break;
 			case Op::Fogf:              glFogf(c.u0, c.f[0]); break;
 			case Op::Fogi:              glFogi(c.u0, (GLint)c.u1); break;
 			case Op::Fogfv:             glFogfv(c.u0, c.f); break;
@@ -1422,7 +1423,10 @@ void LuaOpenGL::ResetGLState()
 
 	glDisable(GL_LIGHTING);
 
-	glShadeModel(GL_SMOOTH);
+	if (!GL::ffResetState.shadeModelIsSmooth) {
+		glShadeModel(GL_SMOOTH);
+		GL::ffResetState.NoteShadeModel(GL_SMOOTH);
+	}
 
 	glDisable(GL_COLOR_LOGIC_OP);
 	glLogicOp(GL_INVERT);
@@ -1447,7 +1451,8 @@ void LuaOpenGL::ResetGLState()
 	glDisable(GL_TEXTURE_GEN_T);
 	glDisable(GL_TEXTURE_GEN_R);
 	glDisable(GL_TEXTURE_GEN_Q);
-	glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+	if (GL::ffResetState.texEnvTouched)
+		glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
 
 	glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 	glDisable(GL_POLYGON_OFFSET_FILL);
@@ -1471,14 +1476,18 @@ void LuaOpenGL::ResetGLState()
 	glPointParameterf(GL_POINT_FADE_THRESHOLD_SIZE, 1.0f);
 
 	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
-	const float ambient[4] = { 0.2f, 0.2f, 0.2f, 1.0f };
-	const float diffuse[4] = { 0.8f, 0.8f, 0.8f, 1.0f };
-	const float black[4]   = { 0.0f, 0.0f, 0.0f, 1.0f };
-	glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, ambient);
-	glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, diffuse);
-	glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, black);
-	glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, black);
-	glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, 0.0f);
+	if (GL::ffResetState.materialTouched) {
+		const float ambient[4] = { 0.2f, 0.2f, 0.2f, 1.0f };
+		const float diffuse[4] = { 0.8f, 0.8f, 0.8f, 1.0f };
+		const float black[4]   = { 0.0f, 0.0f, 0.0f, 1.0f };
+		glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, ambient);
+		glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, diffuse);
+		glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, black);
+		glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, black);
+		glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, 0.0f);
+	}
+
+	GL::ffResetState.Verify(__func__);
 
 	if (IS_GL_FUNCTION_AVAILABLE(glUseProgram)) {
 		glUseProgram(0);
@@ -1509,6 +1518,7 @@ void LuaOpenGL::EnableCommon(DrawMode mode)
 	drawMode = mode;
 	if (safeMode) {
 		glPushAttrib(AttribBits);
+		GL::ffResetState.NotePushAttrib(AttribBits);
 		ResetGLState();
 	}
 	// FIXME  --  not needed by shadow or minimap   (use a WorldCommon ? )
@@ -1525,6 +1535,7 @@ void LuaOpenGL::DisableCommon(DrawMode mode)
 	drawMode = DRAW_NONE;
 	if (safeMode) {
 		glPopAttrib();
+		GL::ffResetState.NotePopAttrib();
 	}
 	if (IS_GL_FUNCTION_AVAILABLE(glUseProgram)) {
 		glUseProgram(0);
@@ -4136,6 +4147,8 @@ int LuaOpenGL::Material(lua_State* L)
 	CheckDrawingEnabled(L, __func__);
 	CondWarnDeprecatedGL(L, __func__);
 
+	GL::ffResetState.NoteMaterial();
+
 	const int args = lua_gettop(L); // number of arguments
 	if ((args != 1) || !lua_istable(L, 1)) {
 		luaL_error(L, "Incorrect arguments to gl.Material(table)");
@@ -4254,7 +4267,9 @@ int LuaOpenGL::ShadeModel(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
 	CondWarnDeprecatedGL(L, __func__);
-	glShadeModel((GLenum)luaL_checkint(L, 1));
+	const GLenum mode = (GLenum)luaL_checkint(L, 1);
+	glShadeModel(mode);
+	GL::ffResetState.NoteShadeModel(mode);
 	return 0;
 }
 
@@ -5622,6 +5637,8 @@ int LuaOpenGL::TexEnv(lua_State* L)
 	CheckDrawingEnabled(L, __func__);
 	CondWarnDeprecatedGL(L, __func__);
 
+	GL::ffResetState.NoteTexEnv();
+
 	const GLenum target = (GLenum)luaL_checknumber(L, 1);
 	const GLenum pname  = (GLenum)luaL_checknumber(L, 2);
 
@@ -5667,6 +5684,8 @@ int LuaOpenGL::MultiTexEnv(lua_State* L)
 {
 	CheckDrawingEnabled(L, __func__);
 	CondWarnDeprecatedGL(L, __func__);
+
+	GL::ffResetState.NoteTexEnv();
 
 	const int texNum    =    luaL_checkint(L, 1);
 	const GLenum target = (GLenum)luaL_checknumber(L, 2);
@@ -6959,6 +6978,7 @@ int LuaOpenGL::PushAttrib(lua_State* L)
 		mask |= GL_ALL_ATTRIB_BITS;
 	}
 	glPushAttrib((GLbitfield)mask);
+	GL::ffResetState.NotePushAttrib((GLbitfield)mask);
 	return 0;
 }
 
@@ -6971,6 +6991,7 @@ int LuaOpenGL::PopAttrib(lua_State* L)
 	CheckDrawingEnabled(L, __func__);
 	CondWarnDeprecatedGL(L, __func__);
 	glPopAttrib();
+	GL::ffResetState.NotePopAttrib();
 	return 0;
 }
 

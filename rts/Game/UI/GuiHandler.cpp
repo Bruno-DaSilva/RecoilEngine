@@ -27,6 +27,7 @@
 #include "Rendering/IconHandler.h"
 #include "Rendering/Units/UnitDrawer.h"
 #include "Rendering/GL/glExtra.h"
+#include "Rendering/GL/FFStateTracker.h"
 #include "Rendering/Map/InfoTexture/IInfoTextureHandler.h"
 #include "Rendering/Textures/Bitmap.h"
 #include "Rendering/Textures/NamedTextures.h"
@@ -3971,6 +3972,7 @@ void CGuiHandler::DrawMiniMapMarker(const float3& cameraPos)
 
 	glEnable(GL_BLEND);
 	glShadeModel(GL_FLAT);
+	GL::ffResetState.NoteShadeModel(GL_FLAT);
 	glBlendFunc(GL_SRC_ALPHA, GL_ONE);
 	glBegin(GL_TRIANGLE_FAN);
 		                       glVertex3f(0.0f, 0.0f, 0.0f);
@@ -3990,6 +3992,7 @@ void CGuiHandler::DrawMiniMapMarker(const float3& cameraPos)
 	glEnd();
 	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 	glShadeModel(GL_SMOOTH);
+	GL::ffResetState.NoteShadeModel(GL_SMOOTH);
 	glPopMatrix();
 }
 

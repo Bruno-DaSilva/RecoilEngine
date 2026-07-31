@@ -4,6 +4,7 @@
 
 #include "Lua/LuaOpenGL.h"
 #include "Rendering/GL/myGL.h"
+#include "Rendering/GL/FFStateTracker.h"
 #include "Rendering/GlobalRendering.h"
 #include "Rendering/Shaders/ShaderHandler.h"
 #include "Rendering/Shaders/Shader.h"
@@ -382,10 +383,17 @@ namespace {
 		    glIsEnabled(GL_TEXTURE_GEN_R) == GL_TRUE || glIsEnabled(GL_TEXTURE_GEN_Q) == GL_TRUE)
 			return REASON_TEX_TEXGEN;
 
-		GLint envMode = 0;
-		glGetTexEnviv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, &envMode);
-		if (envMode != GL_MODULATE)
-			return REASON_TEX_ENV_MODE;
+		// glGetTexEnviv is itself on RenderDoc's unsupported list, so this gate
+		// was a capture blocker in its own right. While nothing has written a
+		// texture env every unit still holds the GL default, GL_MODULATE, and the
+		// query can be skipped entirely -- which is the whole of BAR, since the
+		// game has no gl.TexEnv call sites.
+		if (!GL::ffResetState.TexEnvIsKnownModulate()) {
+			GLint envMode = 0;
+			glGetTexEnviv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, &envMode);
+			if (envMode != GL_MODULATE)
+				return REASON_TEX_ENV_MODE;
+		}
 
 		// FF transforms texcoords by the texture matrix; the shader does not
 		static const CMatrix44f identity;

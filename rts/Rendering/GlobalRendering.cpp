@@ -1731,7 +1731,9 @@ void CGlobalRendering::InitGLState()
 {
 	LOG("[GR::%s]", __func__);
 
-	glShadeModel(GL_SMOOTH);
+	// GL_SMOOTH is already the initial shade model, so this was a no-op that cost
+	// the process its RenderDoc capture: it was the very first unsupported call
+	// of the run, before any frame existed to capture.
 
 	glClearDepth(1.0f);
 	glDepthRange(0.0f, 1.0f);
