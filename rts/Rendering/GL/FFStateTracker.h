@@ -112,7 +112,8 @@ namespace GL {
 	// VA_TYPE_C4 RenderBuffer (788 frames, 0 px); 3 = S3DModelVAO's legacy bind
 	// dropping tex units 1/5/6 (688 frames, 0 px -- but only once
 	// ab_unitshape_driver.lua raised the path from ~31 binds/run to 6845; the
-	// same experiment on stock content was a vacuous zero).
+	// same experiment on stock content was a vacuous zero); 4 = LuaOpenGL's
+	// fixed-function light setup (746 frames, 0 px).
 	enum class FFExperiment : int {
 		None = 0,
 	};

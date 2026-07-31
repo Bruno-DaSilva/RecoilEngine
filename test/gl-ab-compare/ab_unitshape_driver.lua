@@ -68,7 +68,11 @@ function widget:DrawScreen()
 			gl.Scale(size, size, size)
 			gl.Rotate(25, 1, 0, 0)
 			gl.Rotate(180 + i * 15, 0, 1, 0)
-			gl.UnitShape(shapes[i], myTeam, false, true, false)
+			-- alternate useLuaMat: odd i uses BAR's material shader, even i uses
+			-- the ENGINE's ModelVertProg/ModelFragProg -- the only shaders that
+			-- read gl_LightSource/gl_FrontMaterial, so an FF-lighting experiment
+			-- can only be trusted if this path is covered too.
+			gl.UnitShape(shapes[i], myTeam, false, (i % 2) == 1, false)
 		gl.PopMatrix()
 	end
 end

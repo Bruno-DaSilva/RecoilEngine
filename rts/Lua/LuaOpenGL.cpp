@@ -96,6 +96,13 @@ CONFIG(bool, LuaModernGLBackend).defaultValue(false).headlessValue(false).safemo
 	.description("Draw self-contained Lua immediate-mode primitives (gl.Rect/gl.TexRect) via the modern LuaImmediateBuffer backend (no glBegin/glRectf). Experimental; off => legacy path unchanged.");
 CONFIG(bool, LuaGLCompareMode).defaultValue(false).headlessValue(false).safemodeValue(false)
 	.description("Validation: draw wired Lua primitives (gl.Rect/gl.TexRect) both ways (legacy + modern) into offscreen FBOs and log per-caller pixel deltas. Debug only; the frame still renders normally.");
+CONFIG(bool, SetupLegacyFFLighting).defaultValue(false)
+	.description("Set fixed-function light state (glLightfv/glLightModeli) around Lua draw callins. "
+	             "Off by default: GL_LIGHTING is never enabled for BAR and no BAR shader reads the "
+	             "gl_LightSource/gl_LightModel builtins, while making these calls costs the process "
+	             "its RenderDoc capture. Enable for games whose model shaders light through the "
+	             "engine's legacy ModelFragProg.");
+
 CONFIG(bool, LuaCommandLists).defaultValue(false).headlessValue(false).safemodeValue(false)
 	.description("Capture gl.CreateList bodies as replayable command lists instead of compiling GL display lists, so list content renders through the live (optionally modern) backend at gl.CallList. Phase 2 of the modern-GL migration; off => legacy display lists unchanged.");
 
@@ -1402,6 +1409,40 @@ bool LuaOpenGL::PushEntries(lua_State* L)
 /******************************************************************************/
 /******************************************************************************/
 
+// Fixed-function light state, skipped by default.
+//
+// GL_LIGHTING is enabled at exactly one site in the whole engine (gl.Lighting),
+// which BAR never calls, and no BAR shader reads gl_LightSource, gl_LightModel
+// or gl_FrontMaterial. That is not sufficient on its own -- compatibility
+// shaders can read the light builtins with lighting disabled -- so it was
+// measured: GLFFRemovalExperiment 4, 746 compared frames, 0 pixels, with
+// ab_unitshape_driver.lua driving gl.UnitShape through BOTH the Lua-material and
+// engine-shader paths.
+//
+// The engine's own legacy ModelFragProg DOES read those builtins, and BAR never
+// compiles it (its model drawing is GL4). A game that does use the legacy model
+// drawer would light its units from this state, hence the config.
+static bool SetupFFLighting()
+{
+	// Function-local: configHandler does not exist during static init.
+	static const bool b = configHandler->GetBool("SetupLegacyFFLighting");
+	return b;
+}
+
+static inline void FFLightModeli(GLenum pname, GLint param)
+{
+	if (!SetupFFLighting())
+		return;
+	glLightModeli(pname, param);
+}
+
+static inline void FFLightfv(GLenum light, GLenum pname, const GLfloat* params)
+{
+	if (!SetupFFLighting())
+		return;
+	glLightfv(light, pname, params);
+}
+
 void LuaOpenGL::ResetGLState()
 {
 	glDisable(GL_DEPTH_TEST);
@@ -1523,7 +1564,7 @@ void LuaOpenGL::EnableCommon(DrawMode mode)
 	}
 	// FIXME  --  not needed by shadow or minimap   (use a WorldCommon ? )
 	//glEnable(GL_NORMALIZE);
-	glLightModeli(GL_LIGHT_MODEL_COLOR_CONTROL, GL_SEPARATE_SPECULAR_COLOR);
+	FFLightModeli(GL_LIGHT_MODEL_COLOR_CONTROL, GL_SEPARATE_SPECULAR_COLOR);
 }
 
 
@@ -1531,7 +1572,7 @@ void LuaOpenGL::DisableCommon(DrawMode mode)
 {
 	assert(drawMode == mode);
 	// FIXME  --  not needed by shadow or minimap
-	glLightModeli(GL_LIGHT_MODEL_COLOR_CONTROL, GL_SINGLE_COLOR);
+	FFLightModeli(GL_LIGHT_MODEL_COLOR_CONTROL, GL_SINGLE_COLOR);
 	drawMode = DRAW_NONE;
 	if (safeMode) {
 		glPopAttrib();
@@ -1883,21 +1924,21 @@ void LuaOpenGL::SetupWorldLighting()
 	if (sky == nullptr)
 		return;
 
-	glLightModeli(GL_LIGHT_MODEL_LOCAL_VIEWER, GL_TRUE);
-	glLightfv(GL_LIGHT1, GL_POSITION, sky->GetLight()->GetLightDir());
+	FFLightModeli(GL_LIGHT_MODEL_LOCAL_VIEWER, GL_TRUE);
+	FFLightfv(GL_LIGHT1, GL_POSITION, sky->GetLight()->GetLightDir());
 	glEnable(GL_LIGHT1);
 }
 
 void LuaOpenGL::RevertWorldLighting()
 {
 	glDisable(GL_LIGHT1);
-	glLightModeli(GL_LIGHT_MODEL_LOCAL_VIEWER, GL_FALSE);
+	FFLightModeli(GL_LIGHT_MODEL_LOCAL_VIEWER, GL_FALSE);
 }
 
 
 void LuaOpenGL::SetupScreenMatrices()
 {
-	glLightModeli(GL_LIGHT_MODEL_LOCAL_VIEWER, GL_TRUE);
+	FFLightModeli(GL_LIGHT_MODEL_LOCAL_VIEWER, GL_TRUE);
 
 	glMatrixMode(GL_PROJECTION);
 	glLoadMatrixf(&globalRendering->screenProjMatrix.m[0]);
@@ -1935,16 +1976,16 @@ void LuaOpenGL::SetupScreenLighting()
 	const float backLightDiff[4] = { 0.5f, 0.5f, 0.5f, 1.0f };
 	const float backLightSpec[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
 
-	glLightfv(GL_LIGHT0, GL_POSITION, backLightPos);
-	glLightfv(GL_LIGHT0, GL_AMBIENT,  backLightAmbt);
-	glLightfv(GL_LIGHT0, GL_DIFFUSE,  backLightDiff);
-	glLightfv(GL_LIGHT0, GL_SPECULAR, backLightSpec);
+	FFLightfv(GL_LIGHT0, GL_POSITION, backLightPos);
+	FFLightfv(GL_LIGHT0, GL_AMBIENT,  backLightAmbt);
+	FFLightfv(GL_LIGHT0, GL_DIFFUSE,  backLightDiff);
+	FFLightfv(GL_LIGHT0, GL_SPECULAR, backLightSpec);
 
 	// sun light -- needs the camera transformation
 	// FIXME: nobody needs FFP crap anymore, but EventHandler forces it
 	glPushMatrix();
 	glLoadMatrixf(camera->GetViewMatrix());
-	glLightfv(GL_LIGHT1, GL_POSITION, sky->GetLight()->GetLightDir());
+	FFLightfv(GL_LIGHT1, GL_POSITION, sky->GetLight()->GetLightDir());
 
 	const float sunFactor = 1.0f;
 	const float sf = sunFactor;
@@ -1955,21 +1996,21 @@ void LuaOpenGL::SetupScreenLighting()
 	const float sunLightDiff[4] = { ld[0]*sf, ld[1]*sf, ld[2]*sf, ld[3]*sf };
 	const float sunLightSpec[4] = { la[0]*sf, la[1]*sf, la[2]*sf, la[3]*sf };
 
-	glLightfv(GL_LIGHT1, GL_AMBIENT,  sunLightAmbt);
-	glLightfv(GL_LIGHT1, GL_DIFFUSE,  sunLightDiff);
-	glLightfv(GL_LIGHT1, GL_SPECULAR, sunLightSpec);
-	glLightModeli(GL_LIGHT_MODEL_TWO_SIDE, 0);
+	FFLightfv(GL_LIGHT1, GL_AMBIENT,  sunLightAmbt);
+	FFLightfv(GL_LIGHT1, GL_DIFFUSE,  sunLightDiff);
+	FFLightfv(GL_LIGHT1, GL_SPECULAR, sunLightSpec);
+	FFLightModeli(GL_LIGHT_MODEL_TWO_SIDE, 0);
 	glPopMatrix();
 
 	// Enable the GL lights
 	glEnable(GL_LIGHT0);
 	glEnable(GL_LIGHT1);
-	glLightModeli(GL_LIGHT_MODEL_LOCAL_VIEWER, GL_TRUE);
+	FFLightModeli(GL_LIGHT_MODEL_LOCAL_VIEWER, GL_TRUE);
 }
 
 void LuaOpenGL::RevertScreenLighting()
 {
-	glLightModeli(GL_LIGHT_MODEL_LOCAL_VIEWER, GL_FALSE);
+	FFLightModeli(GL_LIGHT_MODEL_LOCAL_VIEWER, GL_FALSE);
 	glDisable(GL_LIGHT1);
 	glDisable(GL_LIGHT0);
 }
@@ -6468,7 +6509,7 @@ int LuaOpenGL::Light(lua_State* L)
 		array[0] = (GLfloat)luaL_checknumber(L, 3);
 		array[1] = (GLfloat)luaL_checknumber(L, 4);
 		array[2] = (GLfloat)luaL_checknumber(L, 5);
-		glLightfv(light, pname, array);
+		FFLightfv(light, pname, array);
 	}
 	else if (args == 6) {
 		GLfloat array[4];
@@ -6477,7 +6518,7 @@ int LuaOpenGL::Light(lua_State* L)
 		array[1] = (GLfloat)luaL_checknumber(L, 4);
 		array[2] = (GLfloat)luaL_checknumber(L, 5);
 		array[3] = (GLfloat)luaL_checknumber(L, 6);
-		glLightfv(light, pname, array);
+		FFLightfv(light, pname, array);
 	}
 	else {
 		luaL_error(L, "Incorrect arguments to gl.Light");
