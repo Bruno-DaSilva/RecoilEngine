@@ -126,6 +126,12 @@ struct LuaCommandList {
 	std::vector<ImmStreamData> streams;
 	std::vector<FontCmd> fontCmds;
 
+	// "file:line" of the gl.CreateList that captured this, for the fallback
+	// census only (empty unless LuaImmediateFallbackStats). A replayed stream
+	// reaches the flush with no Lua stack of its own, so without this its
+	// fallbacks are attributed to whichever live draw ran last.
+	std::string createSite;
+
 	bool Empty() const { return cmds.empty(); }
 };
 

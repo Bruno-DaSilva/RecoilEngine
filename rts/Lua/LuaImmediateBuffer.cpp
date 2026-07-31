@@ -9,6 +9,7 @@
 #include "Rendering/Shaders/Shader.h"
 #include "System/Config/ConfigHandler.h"
 #include "System/Log/ILog.h"
+#include "System/UnorderedMap.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -417,6 +418,7 @@ CONFIG(bool, LuaImmediateFallbackStats).defaultValue(false).safemodeValue(false)
 namespace LuaImmFallback {
 	// [reason][drawMode]; drawMode indexes LuaOpenGL::DrawMode (0..DRAW_LAST_MODE)
 	static constexpr int NUM_DRAW_MODES = 9;
+	static constexpr int SITE_RANK_LIMIT = 15;
 	static uint64_t flushCount[REASON_COUNT][NUM_DRAW_MODES] = {{0}};
 	static uint64_t vertCount [REASON_COUNT][NUM_DRAW_MODES] = {{0}};
 
@@ -436,6 +438,13 @@ namespace LuaImmFallback {
 		return enabled;
 	}
 
+	// [reason][call site]; the site is whatever the gl.* dispatch last tagged
+	struct SiteTally { uint64_t flushes = 0; uint64_t verts = 0; };
+	static std::string curSite = "<untagged>";
+	static spring::unordered_map<std::string, SiteTally> siteTally[REASON_COUNT];
+
+	void SetCallSite(const char* site) { curSite = site; }
+
 	void Count(Reason r, int drawMode, size_t numVerts)
 	{
 		if (r >= REASON_COUNT || drawMode < 0 || drawMode >= NUM_DRAW_MODES)
@@ -443,6 +452,10 @@ namespace LuaImmFallback {
 
 		flushCount[r][drawMode] += 1;
 		vertCount [r][drawMode] += numVerts;
+
+		SiteTally& t = siteTally[r][curSite];
+		t.flushes += 1;
+		t.verts   += numVerts;
 	}
 
 	void Dump()
@@ -487,6 +500,28 @@ namespace LuaImmFallback {
 		LOG_L(L_WARNING, "[LuaImmFallback]   %-20s %8llu / %llu", "TOTAL",
 		      static_cast<unsigned long long>(grandFlushes),
 		      static_cast<unsigned long long>(grandVerts));
+
+		// per-reason call-site ranking, by VERTICES: converting content is paid
+		// for per draw site, and one site emitting 400 verts a flush is worth
+		// far more than a hundred sites emitting four
+		for (int r = 0; r < REASON_COUNT; ++r) {
+			if (siteTally[r].empty())
+				continue;
+
+			std::vector<std::pair<std::string, SiteTally>> sites(siteTally[r].begin(), siteTally[r].end());
+			std::sort(sites.begin(), sites.end(), [](const auto& a, const auto& b) {
+				return a.second.verts > b.second.verts;
+			});
+
+			LOG_L(L_WARNING, "[LuaImmFallback] %s by call site (flushes / vertices), top %d of %d:",
+			      reasonNames[r], std::min(SITE_RANK_LIMIT, int(sites.size())), int(sites.size()));
+			for (int i = 0; i < int(sites.size()) && i < SITE_RANK_LIMIT; ++i) {
+				LOG_L(L_WARNING, "[LuaImmFallback]   %8llu / %-12llu %s",
+				      static_cast<unsigned long long>(sites[i].second.flushes),
+				      static_cast<unsigned long long>(sites[i].second.verts),
+				      sites[i].first.c_str());
+			}
+		}
 	}
 }
 

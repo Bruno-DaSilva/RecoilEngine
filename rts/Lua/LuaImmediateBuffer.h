@@ -60,6 +60,11 @@ namespace LuaImmFallback {
 	// drawMode is a LuaOpenGL::DrawMode; taken as int to keep this header free
 	// of the LuaOpenGL dependency
 	void Count(Reason r, int drawMode, size_t numVerts);
+	// "file:line" of the Lua draw whose flushes are counted from here on, set by
+	// the gl.* dispatch. A reason alone says which GATE rejected a stream, never
+	// whose content produced it -- and the dominant reason (DENSE_MV) is fixed
+	// content-side, so ranking the call sites is what picks the work.
+	void SetCallSite(const char* site);
 	void Dump();
 }
 

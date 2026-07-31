@@ -832,6 +832,11 @@ static void CmdListReplayLive(const LuaCommandList& cl)
 	using Op = LuaCommandList::Op;
 	GLMatrixStateTracker* mirror = FFMirrorOps(); // non-null: replay never runs while compiling
 
+	// the streams below flush with no Lua stack of their own; credit them to
+	// the gl.CreateList that captured them, not to the last live draw
+	if (LuaImmFallback::Enabled())
+		LuaImmFallback::SetCallSite(fmt::format("list@{}", cl.createSite).c_str());
+
 	for (const LuaCommandList::Cmd& c : cl.cmds) {
 		switch (c.op) {
 			case Op::Enable:            glEnable(c.u0); break;
@@ -932,6 +937,23 @@ static void CmdListReplayLive(const LuaCommandList& cl)
 				CmdListExecFontCmd(cl.fontCmds[c.u0]);
 				break;
 		}
+	}
+}
+
+// Tag the fallback census with the Lua source location of the draw about to be
+// flushed. A fallback reason says which GATE rejected a stream but never whose
+// content produced it, and the dominant reason is fixed content-side, so the
+// ranking is what picks the conversion work. Only formats when the census is on.
+static void SetImmFallbackCallSite(lua_State* L)
+{
+	if (!LuaImmFallback::Enabled())
+		return;
+
+	lua_Debug info;
+	if (lua_getstack(L, 1, &info) && lua_getinfo(L, "Sl", &info)) {
+		LuaImmFallback::SetCallSite(fmt::format("{}:{}", info.short_src, info.currentline).c_str());
+	} else {
+		LuaImmFallback::SetCallSite("<unknown>");
 	}
 }
 
@@ -3397,6 +3419,9 @@ int LuaOpenGL::BeginEnd(lua_State* L)
 		lua_error(L);
 	}
 
+	// after the body ran: a nested gl.* draw inside it would have retagged
+	SetImmFallbackCallSite(L);
+
 	if (glCompareMode) {
 		GLint vp[4]; glGetIntegerv(GL_VIEWPORT, vp);
 		LogGLCompare(L, __func__, LuaGLCompare::CompareDraws(vp[2], vp[3],
@@ -3851,7 +3876,7 @@ int LuaOpenGL::Rect(lua_State* L)
 	// move without gl.Color) and leaves it untouched; DrawRectModern's
 	// seed-not-Color gives the flush the same fill and the same (unchanged)
 	// end-state, emitting the quad as two CCW triangles
-	const auto drawModern = [&]() { DrawRectModern(x1, y1, x2, y2); };
+	const auto drawModern = [&]() { SetImmFallbackCallSite(L); DrawRectModern(x1, y1, x2, y2); };
 
 	// inside a display-list compile the modern flush is not list-safe (the recorded
 	// glDrawElements aliases the stream VBO, glUseProgram/glUniform get recorded and
@@ -3949,6 +3974,7 @@ int LuaOpenGL::TexRect(lua_State* L)
 		GLfloat cc[4];
 		glGetFloatv(GL_CURRENT_COLOR, cc);
 		SetImmBufferFixedFunctionMatrices();
+		SetImmFallbackCallSite(L);
 		luaImmBuffer.SetTexRect(x1, y1, x2, y2, s1, t1, s2, t2, cc);
 		luaImmBuffer.FlushTexRectModern();
 	};
@@ -7345,6 +7371,12 @@ int LuaOpenGL::CreateList(lua_State* L)
 		// creation: identical legacy rendering, driver-side replay. UI-scale
 		// lists (the modern-flushable content) stay far below the threshold.
 		constexpr size_t CMDLIST_MAX_CAPTURED_VERTS = 4096;
+		if (cl != nullptr && LuaImmFallback::Enabled()) {
+			lua_Debug info;
+			cl->createSite = (lua_getstack(L, 1, &info) && lua_getinfo(L, "Sl", &info))
+					? fmt::format("{}:{}", info.short_src, info.currentline)
+					: "<unknown>";
+		}
 		if (cl != nullptr) {
 			size_t totalVerts = 0;
 			for (const auto& s : cl->streams)
