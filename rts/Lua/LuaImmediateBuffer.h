@@ -70,16 +70,17 @@ public:
 	void SetBackend(Backend b) { backend = b; }
 	Backend GetBackend() const { return backend; }
 
-	// Projection and modelview for the modern backend's uP/uMV uniforms
-	// (ignored by the legacy backend, which reads the fixed-function matrix).
-	// Kept SEPARATE: the fixed-function pipeline transforms P * (MV * v) in two
-	// steps, which differs from a CPU-precomposed (P*MV) * v by final-bit ULPs
-	// on world-scale coordinates -- enough to flip pixels on thin primitives
-	// and polygon edges (apitrace-verified on the whole-frame A/B gate). The
-	// shaders replicate the exact FF operation order.
+	// Projection and modelview for the modern backend (ignored by the legacy
+	// backend, which reads the fixed-function matrix). Kept SEPARATE because
+	// each is inspected on its own -- ScreenAlignedMV and OrthoProjection gate
+	// on them, and the fogged shader variant needs eye space for the fog
+	// coordinate. The position transform itself goes through a single
+	// CPU-composed uMVP: a two-step P*(MV*v) shader was measured and does not
+	// match the driver's composition any better, which is why the gates exist
+	// (see the uMVP comment on the vertex source).
 	void SetMatrices(const CMatrix44f& p, const CMatrix44f& mv) { projMat = p; mvMat = mv; }
 	// single-matrix convenience (tests, callers with a premade transform):
-	// uP*(uMV*v) with MV=identity == m*v exactly
+	// composing against an identity MV leaves m exactly
 	void SetMVP(const CMatrix44f& m) { projMat = m; mvMat = CMatrix44f{}; }
 
 	void Begin(uint32_t glMode) {
