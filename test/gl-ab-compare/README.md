@@ -4,20 +4,26 @@ Harness content for the `GLFrameABCompare` whole-frame pixel gate (see `doc/bar-
 
 ## Running
 
-Enable in the write-dir config before every run (the engine rewrites the file on exit):
+`run_gate.sh` is the whole recipe, and it fails loudly instead of reading clean:
+
+```
+AB_WRITE_DIR=<write-dir> ./run_gate.sh watertest      # or: idletest, or a path to any startscript/replay
+```
+
+It re-applies the config keys (the engine **strips `GLFrameABCompare` on exit**, so a second run without them compares nothing), truncates the infolog, runs the engine by absolute path under a timeout, and then asserts — a run that compared no frames reads exactly like a clean one otherwise:
+
+- the engine exited 0 (a timeout or a 127 leaves a plausible-looking log behind),
+- at least `--min-compares` frames were actually compared (default 400),
+- control(L↔L) = 0 and signal(L↔M) = 0 on every one of them.
+
+Options: `--write-dir`, `--spring`, `--min-compares`, `--timeout`, `--force-legacy` (the `[L,L,L,L]` null test — control *and* signal must be 0). Doing it by hand instead:
 
 ```
 printf "GLFrameABCompare = 1\nGLFrameABCompareDump = 1\n" >> <write-dir>/springsettings.cfg
-```
-
-then
-
-```
 DISPLAY=:0 SDL_VIDEODRIVER=x11 SDL_AUDIODRIVER=dummy ALSOFT_DRIVERS=null \
   ./spring --isolation --write-dir <write-dir> <startscript-or-replay.sdfz>
 ```
 
-- `AB_FORCE_LEGACY=1` → `[L,L,L,L]` null test (control AND signal must be 0).
 - `AB_DUMP_MIN_FRAME=<simframe>` → only save dump triplets at/after that sim frame (keeps the 8-dump budget for in-game frames on replays with leaky pregames).
 - Results: `grep "Frame A/B" <write-dir>/infolog.txt`; dump PNGs land as `<write-dir>/frameab_NN_{legacy,modern,diff}.png`.
 
