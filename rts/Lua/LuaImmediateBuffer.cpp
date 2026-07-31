@@ -291,6 +291,29 @@ namespace {
 		return (maxLevel != 0) && (w0 > 1 || h0 > 1) && (w1 == 0);
 	}
 
+	// Any FF texture unit above 0 with an enabled target: that engages FF
+	// multitexture combining the single-sampler shader does not implement.
+	// (GL_MAX_TEXTURE_UNITS is the FF unit count, typically 4.)
+	bool AnyOtherFFUnitEnabled()
+	{
+		GLint maxFFUnits = 0;
+		glGetIntegerv(GL_MAX_TEXTURE_UNITS, &maxFFUnits);
+		maxFFUnits = std::min(maxFFUnits, GLint(8));
+
+		bool enabled = false;
+		for (GLint u = 1; u < maxFFUnits; ++u) {
+			glActiveTexture(GL_TEXTURE0 + u);
+			enabled = enabled ||
+				(glIsEnabled(GL_TEXTURE_2D) == GL_TRUE) ||
+				(glIsEnabled(GL_TEXTURE_1D) == GL_TRUE) ||
+				(glIsEnabled(GL_TEXTURE_3D) == GL_TRUE) ||
+				(glIsEnabled(GL_TEXTURE_CUBE_MAP) == GL_TRUE) ||
+				(glIsEnabled(GL_TEXTURE_RECTANGLE) == GL_TRUE);
+		}
+		glActiveTexture(GL_TEXTURE0);
+		return enabled;
+	}
+
 	// The FF texturing configurations the modern textured shader reproduces
 	// EXACTLY: active unit 0 with plain GL_TEXTURE_2D sampling (no
 	// higher-priority target enabled, no texgen, no other enabled units),
@@ -310,8 +333,21 @@ namespace {
 		if (activeUnit != GL_TEXTURE0)
 			return REASON_TEX_ACTIVE_UNIT;
 
-		if (glIsEnabled(GL_TEXTURE_2D) != GL_TRUE)
-			return REASON_TEX_2D_DISABLED;
+		// No 2D sampling. If nothing else can texture this fragment either --
+		// no other FF target on unit 0, no other enabled unit -- then texturing
+		// is simply OFF and FF rasterizes the plain interpolated vertex color,
+		// which is what the (parity-proven) UNTEXTURED program already does; the
+		// caller converts rather than falling back. Otherwise FF samples that
+		// other target/unit and only the legacy replay is exact.
+		if (glIsEnabled(GL_TEXTURE_2D) != GL_TRUE) {
+			if (glIsEnabled(GL_TEXTURE_1D) == GL_TRUE ||
+			    glIsEnabled(GL_TEXTURE_3D) == GL_TRUE ||
+			    glIsEnabled(GL_TEXTURE_CUBE_MAP) == GL_TRUE ||
+			    glIsEnabled(GL_TEXTURE_RECTANGLE) == GL_TRUE)
+				return REASON_TEX_TARGET_PRIORITY;
+
+			return AnyOtherFFUnitEnabled() ? REASON_TEX_MULTI_UNIT : REASON_TEX_2D_DISABLED;
+		}
 
 		// FF target priority: an enabled cube/rect/3D target overrides 2D
 		// (1D is BELOW 2D, so an enabled 1D loses and is fine)
@@ -359,26 +395,7 @@ namespace {
 				break;
 		}
 
-		// any other enabled unit engages FF multitexture combining that the
-		// single-sampler shader does not implement (GL_MAX_TEXTURE_UNITS is the
-		// FF unit count, typically 4)
-		GLint maxFFUnits = 0;
-		glGetIntegerv(GL_MAX_TEXTURE_UNITS, &maxFFUnits);
-		maxFFUnits = std::min(maxFFUnits, GLint(8));
-
-		bool otherUnitEnabled = false;
-		for (GLint u = 1; u < maxFFUnits; ++u) {
-			glActiveTexture(GL_TEXTURE0 + u);
-			otherUnitEnabled = otherUnitEnabled ||
-				(glIsEnabled(GL_TEXTURE_2D) == GL_TRUE) ||
-				(glIsEnabled(GL_TEXTURE_1D) == GL_TRUE) ||
-				(glIsEnabled(GL_TEXTURE_3D) == GL_TRUE) ||
-				(glIsEnabled(GL_TEXTURE_CUBE_MAP) == GL_TRUE) ||
-				(glIsEnabled(GL_TEXTURE_RECTANGLE) == GL_TRUE);
-		}
-		glActiveTexture(GL_TEXTURE0);
-
-		return otherUnitEnabled ? REASON_TEX_MULTI_UNIT : REASON_NONE;
+		return AnyOtherFFUnitEnabled() ? REASON_TEX_MULTI_UNIT : REASON_NONE;
 	}
 }
 
@@ -513,9 +530,18 @@ void LuaImmediateBuffer::FlushModern() const
 	// state is one it reproduces exactly (see PlainModulateTexturing); any
 	// other texture-unit/texenv setup falls back to the exact legacy replay
 	// (which carries the texcoords).
+	// A stream can carry texcoords while FF texturing is OFF, in which case FF
+	// ignores them and rasterizes the plain vertex color -- the untextured
+	// program reproduces that exactly, so sample nothing instead of falling
+	// back (see PlainModulateTexturing's GL_TEXTURE_2D branch). The FF
+	// current-texcoord end state below still follows `textured`, because the
+	// legacy replay would have issued the coords either way.
+	bool sampleTexture = textured;
 	if (textured) {
 		const LuaImmFallback::Reason texReason = PlainModulateTexturing();
-		if (texReason != LuaImmFallback::REASON_NONE) {
+		if (texReason == LuaImmFallback::REASON_TEX_2D_DISABLED) {
+			sampleTexture = false;
+		} else if (texReason != LuaImmFallback::REASON_NONE) {
 			CountFallback(texReason, verts.size());
 			FlushLegacy();
 			return;
@@ -562,12 +588,12 @@ void LuaImmediateBuffer::FlushModern() const
 
 	const CMatrix44f mvp = projMat * mvMat;
 
-	Shader::IProgramObject* shader = textured ? GetModernTexShader(fogged) : GetModernShader(fogged);
+	Shader::IProgramObject* shader = sampleTexture ? GetModernTexShader(fogged) : GetModernShader(fogged);
 	shader->Enable();
 	shader->SetUniformMatrix4x4("uMVP", false, static_cast<const float*>(mvp));
 	if (fogged)
 		shader->SetUniformMatrix4x4("uMV", false, static_cast<const float*>(mvMat));
-	if (textured)
+	if (sampleTexture)
 		shader->SetUniform("tex", 0);
 	immStream.Draw(drawMode, data);
 	shader->Disable();
