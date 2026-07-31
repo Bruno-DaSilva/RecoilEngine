@@ -560,7 +560,16 @@ void ClearScreen()
 	glEnable(GL_BLEND);
 	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 	glEnable(GL_TEXTURE_2D);
-	glColor3f(1, 1, 1);
+	// No caller reads the fixed-function current colour, so the glColor3f(1,1,1)
+	// that used to close this function only cost the process its RenderDoc
+	// capture. CPreGame::Draw draws nothing but font text and sets its own colour
+	// via SetTextColor (the font emits per-vertex colours); CLoadScreen::Draw and
+	// CLuaMenuController::Draw hand straight to a Lua draw callin, whose
+	// ResetGLState sets the colour absolutely; SelectMenu::Draw hands to aGui,
+	// whose widgets carry their own `ucolor`; and SpringApp::Init draws nothing
+	// before the next full setup. Note the matrix setup above is NOT dead the same
+	// way -- pregame text position depends on it, because the font renderer reads
+	// its MVP off the fixed-function stack instead of setting one.
 }
 
 
