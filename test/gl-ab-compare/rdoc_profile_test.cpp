@@ -94,6 +94,10 @@ int main(int argc, char** argv)
 	}
 	fflush(stdout);
 
+	// argv[5] == "ff": issue ONE fixed-function call, the hypothesis under test
+	void (*glMatrixMode)(unsigned int) = (void(*)(unsigned int))SDL_GL_GetProcAddress("glMatrixMode");
+	const int useFF = (argc > 5 && strcmp(argv[5], "ff") == 0);
+
 	void (*glClearColor)(float, float, float, float) = (void(*)(float,float,float,float))SDL_GL_GetProcAddress("glClearColor");
 	void (*glClear)(unsigned int) = (void(*)(unsigned int))SDL_GL_GetProcAddress("glClear");
 
@@ -103,6 +107,7 @@ int main(int argc, char** argv)
 			fflush(stdout);
 			rdoc->TriggerCapture();
 		}
+		if (useFF && f == 10) { glMatrixMode(0x1700 /*GL_MODELVIEW*/); printf("[test] issued glMatrixMode at frame 10\n"); fflush(stdout); }
 		glClearColor((f % 60) / 60.0f, 0.2f, 0.4f, 1.0f);
 		glClear(0x00004000); // GL_COLOR_BUFFER_BIT
 		SDL_GL_SwapWindow(win);
