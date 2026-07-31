@@ -17,6 +17,7 @@ springBin=$root/build/spring
 minCompares=400
 runTimeout=420
 forceLegacy=0
+ffExperiment=0
 content=
 
 die() { printf '\n[gate] FAIL: %s\n' "$*" >&2; exit 1; }
@@ -28,6 +29,9 @@ usage: run_gate.sh [options] <startscript|replay|watertest|idletest>
   --min-compares N   fail if fewer frames were compared (default: 400)
   --timeout SEC      wall-clock limit for the run (default: 420)
   --force-legacy     [L,L,L,L] null test: control AND signal must both be 0
+  --ff-experiment N  render the last pass with candidate FF removal N dropped
+                     (GL::FFExperiment); implies --force-legacy so the removal is
+                     the only variable. control AND signal must both be 0.
 EOF
 }
 
@@ -38,6 +42,7 @@ while (( $# )); do
 		--min-compares) minCompares=$2; shift 2 ;;
 		--timeout)      runTimeout=$2; shift 2 ;;
 		--force-legacy) forceLegacy=1; shift ;;
+		--ff-experiment) ffExperiment=$2; forceLegacy=1; shift 2 ;;
 		-h|--help)      usage; exit 0 ;;
 		-*)             die "unknown option $1" ;;
 		*)              content=$1; shift ;;
@@ -62,7 +67,7 @@ infolog=$writeDir/infolog.txt
 # these are re-applied per run rather than once. Interval is pinned to 1 so the
 # compare count below equals the number of compared frames.
 touch "$cfg"
-for kv in "GLFrameABCompare = 1" "GLFrameABCompareDump = 1" "GLFrameABCompareInterval = 1"; do
+for kv in "GLFrameABCompare = 1" "GLFrameABCompareDump = 1" "GLFrameABCompareInterval = 1" "GLFFRemovalExperiment = $ffExperiment"; do
 	k=${kv%% =*}
 	if grep -q "^$k = " "$cfg"; then
 		sed -i "s|^$k = .*|$kv|" "$cfg"
@@ -77,6 +82,12 @@ printf '[gate] %s\n' "$(basename -- "$content")"
 printf '[gate] engine   %s\n' "$springBin"
 printf '[gate] writedir %s\n' "$writeDir"
 (( forceLegacy )) && printf '[gate] AB_FORCE_LEGACY=1 (null test)\n'
+if (( ffExperiment )); then
+	printf '[gate] GLFFRemovalExperiment=%s (FF removal on the last pass)\n' "$ffExperiment"
+	# Without --force-legacy the last pass would differ in BOTH the Lua backend and
+	# the removal, so a clean signal would not attribute to either.
+	(( forceLegacy )) || die "--ff-experiment requires --force-legacy"
+fi
 
 # the engine tests AB_FORCE_LEGACY for PRESENCE, so it must be absent (not 0)
 # for a normal run

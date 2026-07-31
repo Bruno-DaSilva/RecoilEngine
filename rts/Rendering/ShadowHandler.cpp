@@ -16,7 +16,6 @@
 #include "Rendering/Env/GrassDrawer.h"
 #include "Rendering/Env/ISky.h"
 #include "Rendering/GL/FBO.h"
-#include "Rendering/GL/FFStateTracker.h"
 #include "Rendering/GL/myGL.h"
 #include "Rendering/Shaders/ShaderHandler.h"
 #include "Rendering/Shaders/Shader.h"
@@ -638,8 +637,11 @@ void CShadowHandler::CreateShadows()
 	glDisable(GL_ALPHA_TEST);
 	glDisable(GL_TEXTURE_2D);
 
-	glShadeModel(GL_FLAT);
-	GL::ffResetState.NoteShadeModel(GL_FLAT);
+	// The GL_FLAT/GL_SMOOTH bracket that used to wrap this pass is gone: the
+	// shadow passes are depth-only and shader-driven, so the shade model -- which
+	// only governs interpolation of the fixed-function gl_Color -- never reached a
+	// fragment. Measured, not reasoned: GLFFRemovalExperiment 1 rendered the pass
+	// both ways in the same frame, 785 frames, 0 pixels different.
 	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
 	glDepthMask(GL_TRUE);
 	glEnable(GL_DEPTH_TEST);
@@ -657,9 +659,6 @@ void CShadowHandler::CreateShadows()
 	CCameraHandler::SetActiveCamera(prvCam->GetCamType());
 	prvCam->Update();
 
-
-	glShadeModel(GL_SMOOTH);
-	GL::ffResetState.NoteShadeModel(GL_SMOOTH);
 
 	//revert to default, EnableColorOutput(true) is not enough
 	glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);

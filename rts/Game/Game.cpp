@@ -2,6 +2,7 @@
 
 #include "Rendering/GL/myGL.h"
 #include "Rendering/GL/MatrixStateTracker.h" // GL::ffMirror (A/B shadow-compare toggle)
+#include "Rendering/GL/FFStateTracker.h"     // GL::ffExperiment (A/B FF-removal gate)
 #include "Rendering/GL/RenderBuffers.h" // RenderBuffer::SetUseMVPUniform (A/B pass toggle)
 
 #include <cstdlib> // getenv (AB_FORCE_LEGACY diagnostic)
@@ -168,6 +169,11 @@ CONFIG(bool, GLFrameABCompareHeatmap).defaultValue(false).headlessValue(false).s
 CONFIG(bool, GLFrameABCompareDump).defaultValue(false).headlessValue(false).safemodeValue(false)
 	.description("With GLFrameABCompare, when modern diverges from legacy, periodically save "
 	             "frameab_{legacy,modern,diff}.png to the write-dir.");
+CONFIG(int, GLFFRemovalExperiment).defaultValue(0).minimumValue(0)
+	.description("With GLFrameABCompare, render the LAST pass with one candidate fixed-function "
+	             "call removed (see GL::FFExperiment) so a same-frame pixel compare can prove the "
+	             "removal inert. Combine with AB_FORCE_LEGACY so the Lua backend stays constant "
+	             "and the removal is the only variable. 0 = off.");
 
 CONFIG(bool, ShowFPS).defaultValue(false).description("Displays current framerate.");
 CONFIG(bool, ShowClock).defaultValue(true).headlessValue(false).description("Displays a clock on the top-right corner of the screen showing the elapsed time of the current game.");
@@ -1792,6 +1798,13 @@ bool CGame::Draw() {
 			RenderBuffer::SetUseMVPUniform(on);
 		};
 
+		// Same-frame gate for engine-side fixed-function removals: the last pass
+		// drops one candidate call, everything else is held identical. Only
+		// meaningful under AB_FORCE_LEGACY, where the Lua backend no longer varies
+		// between passes and the removal is the only difference left.
+		static const int ffExpCfg = configHandler->GetInt("GLFFRemovalExperiment");
+		GL::ffExperiment.selected = static_cast<GL::FFExperiment>(ffExpCfg);
+
 		for (int pass = 0; pass < 4; ++pass) {
 			LuaUnsyncedRead::SetABPassIndex(pass);
 			if (pass == 0) {
@@ -1809,6 +1822,7 @@ bool CGame::Draw() {
 
 			// [L, L, L, M]; AB_FORCE_LEGACY (env) => [L, L, L, L], the null test
 			setModern(pass == 3 && !abForceLegacy);
+			GL::ffExperiment.candidatePass = (pass == 3);
 			drawOnePass();
 
 			if (w > 0 && h > 0)
@@ -1817,6 +1831,7 @@ bool CGame::Draw() {
 
 		// leave the engine in the legacy default and the live clock unpinned
 		setModern(false);
+		GL::ffExperiment.candidatePass = false;
 		LuaUnsyncedRead::SetABPassIndex(0);
 		LuaUnsyncedRead::UnpinDrawTime();
 

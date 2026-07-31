@@ -101,4 +101,42 @@ namespace GL {
 	};
 
 	inline FFResetState ffResetState;
+
+	// Which fixed-function call the removal experiment is testing this run. Add an
+	// enumerator plus its Skip() call site for a candidate, prove it inert, then
+	// delete the call outright and retire the enumerator -- so an empty list here
+	// is the correct steady state, not an unused mechanism.
+	//
+	// Retired so far: 1 = CShadowHandler::CreateShadows' GL_FLAT/GL_SMOOTH bracket
+	// (785 frames, 0 px).
+	enum class FFExperiment : int {
+		None = 0,
+	};
+
+	// Proving that deleting a fixed-function call changes no pixel needs a
+	// this-build-vs-previous-build comparison, which run_gate.sh cannot do: it
+	// compares the modern and legacy Lua backends WITHIN one build, so an
+	// engine-side change moves both passes together and reads a clean 0/0 while
+	// pixels moved.
+	//
+	// Rather than compare across processes -- where a pinned clock and RNG would
+	// have to be reproduced from scratch, and wall-clock-driven visuals still
+	// differ -- reuse the whole-frame harness, which already re-renders one frame
+	// four times with the draw clock and draw RNG pinned. Make the toggled
+	// variable the fixed-function call instead of the Lua backend and the
+	// comparison becomes same-frame and exact.
+	//
+	// Drive it with --force-legacy so the Lua backend is constant across all four
+	// passes and the candidate removal is the only thing that varies:
+	//   GLFFRemovalExperiment=<n> + run_gate.sh --force-legacy
+	//   => [L, L, L, L+removal]; control (pass1<->pass2) and signal
+	//      (pass2<->pass3) must BOTH be 0 for the removal to be inert.
+	struct FFRemovalExperiment {
+		FFExperiment selected = FFExperiment::None; // config, fixed for the run
+		bool candidatePass = false;                 // set per pass by the A/B harness
+
+		bool Skip(FFExperiment e) const { return candidatePass && selected == e; }
+	};
+
+	inline FFRemovalExperiment ffExperiment;
 }
