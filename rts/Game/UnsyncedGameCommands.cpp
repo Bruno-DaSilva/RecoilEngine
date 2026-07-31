@@ -49,6 +49,7 @@
 #include "Game/UI/PlayerRoster.h"
 
 #include "Lua/LuaImmediateBuffer.h"
+#include "Rendering/GL/RenderDocCapture.h"
 #include "Lua/LuaOpenGL.h"
 #include "Lua/LuaUI.h"
 #include "Lua/LuaMenu.h"
@@ -3696,6 +3697,18 @@ public:
 	}
 };
 
+class RenderDocCaptureActionExecutor : public IUnsyncedActionExecutor {
+public:
+	RenderDocCaptureActionExecutor() : IUnsyncedActionExecutor("RenderDocCapture",
+			"capture the next frame with RenderDoc (only when hosted by it)") {
+	}
+
+	bool Execute(const UnsyncedAction& action) const final {
+		RenderDocCapture::TriggerNextFrame();
+		return true;
+	}
+};
+
 class DumpStateActionExecutor : public IUnsyncedActionExecutor {
 public:
 	DumpStateActionExecutor() : IUnsyncedActionExecutor("DumpState", "dump game-state to file") {
@@ -4235,6 +4248,7 @@ void UnsyncedGameCommands::AddDefaultActionExecutors()
 	AddActionExecutor(AllocActionExecutor<RemoveActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<SendActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<LuaImmFallbackActionExecutor>());
+	AddActionExecutor(AllocActionExecutor<RenderDocCaptureActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<DumpStateActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<DumpRNGActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<SaveActionExecutor>(true));
