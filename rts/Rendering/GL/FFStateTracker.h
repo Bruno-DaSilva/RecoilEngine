@@ -109,10 +109,12 @@ namespace GL {
 	//
 	// Retired so far: 1 = CShadowHandler::CreateShadows' GL_FLAT/GL_SMOOTH bracket
 	// (785 frames, 0 px); 2 = CLineDrawer::DrawAll off client arrays onto a
-	// VA_TYPE_C4 RenderBuffer (788 frames, 0 px).
+	// VA_TYPE_C4 RenderBuffer (788 frames, 0 px); 3 = S3DModelVAO's legacy bind
+	// dropping tex units 1/5/6 (688 frames, 0 px -- but only once
+	// ab_unitshape_driver.lua raised the path from ~31 binds/run to 6845; the
+	// same experiment on stock content was a vacuous zero).
 	enum class FFExperiment : int {
 		None = 0,
-		ModelLegacyTexUnits = 3, // S3DModelVAO legacy bind: units 1/5/6 + glClientActiveTexture
 	};
 
 	// Proving that deleting a fixed-function call changes no pixel needs a

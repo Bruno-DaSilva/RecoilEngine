@@ -1,7 +1,6 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "3DModelVAO.hpp"
-#include "Rendering/GL/FFStateTracker.h"
 
 #include <algorithm>
 #include <iterator>
@@ -11,11 +10,28 @@
 #include "IModelParser.h"
 #include "Rendering/ModelsDataUploader.h"
 #include "Sim/Units/Unit.h"
+#include "System/Config/ConfigHandler.h"
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Features/Feature.h"
 
 #include "System/Misc/TracyDefs.h"
 
+
+CONFIG(bool, BindLegacyModelTexUnits).defaultValue(false)
+	.description("Bind fixed-function texture-coordinate units 1/5/6 (uv1, tangent, bitangent) "
+	             "on the legacy model draw path (gl.UnitShape, ghosted buildings, AI units, model "
+	             "projectiles). Off by default: BAR does not read those channels there, and binding "
+	             "them costs the process its RenderDoc capture. Enable if a game's model shaders "
+	             "read gl_MultiTexCoord1/5/6 on that path without guarding for absent tangents.");
+
+// Function-local so the read happens on first draw, not during static init --
+// configHandler does not exist yet at namespace-scope initialisation time, and
+// reading it there segfaults before the window is even up.
+static bool BindLegacyTexUnits()
+{
+	static const bool b = configHandler->GetBool("BindLegacyModelTexUnits");
+	return b;
+}
 
 void S3DModelVAO::EnableAttribs(bool inst) const
 {
@@ -242,21 +258,29 @@ void S3DModelVAO::BindLegacyVertexAttribsAndVBOs() const
 	glEnableClientState(GL_NORMAL_ARRAY);
 	glNormalPointer(GL_FLOAT, sizeof(SVertexData), vertVBO.GetPtr(offsetof(SVertexData, normal)));
 
-	// Candidate: bind ONLY unit 0. GL_TEXTURE0 is the default active client
+	// Only unit 0 is bound by default. GL_TEXTURE0 is the default active client
 	// texture, so dropping units 1/5/6 drops every glClientActiveTexture with
-	// them. Whether uv1 and the sTangent/tTangent channels are actually read on
-	// this path is a question about the shaders bound during it, which is
-	// measured rather than argued -- BAR's default material template does read
-	// gl_MultiTexCoord5/6, but guards them (`if (dot(T,T) < 0.1) T = ...`) and
-	// the main unit paths bind the MODERN VAO, not this.
-	const bool onlyUnit0 = GL::ffExperiment.Active(GL::FFExperiment::ModelLegacyTexUnits);
-
-	if (!onlyUnit0)
+	// them -- and glClientActiveTexture was reachable ONLY here, so this is what
+	// retires it.
+	//
+	// Whether uv1 and the sTangent/tTangent channels are read on this path is a
+	// question about the shaders bound during it, so it was measured rather than
+	// argued. gl.UnitShape is the only thing in BAR that reaches this path, and
+	// driving it every frame (test/gl-ab-compare/ab_unitshape_driver.lua, 6845
+	// binds/run vs ~31 without) gave 688 compared frames at 0 pixels difference,
+	// with useLuaMat=true so BAR's own material shaders were bound -- the very
+	// ones that read gl_MultiTexCoord5/6. They guard it
+	// (`if (dot(T,T) < 0.1) T = vec3(1,0,0)`), and BAR's main unit paths bind the
+	// MODERN VAO rather than this one.
+	//
+	// A game whose model shaders read those channels here WITHOUT such a guard
+	// would lose its tangent frame, hence the config escape hatch.
+	if (BindLegacyTexUnits())
 		glClientActiveTexture(GL_TEXTURE0);
 	glEnableClientState(GL_TEXTURE_COORD_ARRAY);
 	glTexCoordPointer(2, GL_FLOAT, sizeof(SVertexData), vertVBO.GetPtr(offsetof(SVertexData, texCoords[0])));
 
-	if (onlyUnit0)
+	if (!BindLegacyTexUnits())
 		return;
 
 	glClientActiveTexture(GL_TEXTURE1);
@@ -275,7 +299,7 @@ void S3DModelVAO::BindLegacyVertexAttribsAndVBOs() const
 void S3DModelVAO::UnbindLegacyVertexAttribsAndVBOs() const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	if (!GL::ffExperiment.Active(GL::FFExperiment::ModelLegacyTexUnits)) {
+	if (BindLegacyTexUnits()) {
 		glClientActiveTexture(GL_TEXTURE6);
 		glDisableClientState(GL_TEXTURE_COORD_ARRAY);
 
