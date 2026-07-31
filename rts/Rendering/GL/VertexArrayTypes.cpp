@@ -19,6 +19,11 @@ std::array<AttributeDef, 2> VA_TYPE_C::attributeDefs = {
 	VA_ATTR_DEF(VA_TYPE_C, 1, 4, GL_UNSIGNED_BYTE, c, true, "color")
 };
 
+std::array<AttributeDef, 2> VA_TYPE_C4::attributeDefs = {
+	VA_ATTR_DEF(VA_TYPE_C4, 0, 3, GL_FLOAT, pos, false, "pos"),
+	VA_ATTR_DEF(VA_TYPE_C4, 1, 4, GL_FLOAT, c, false, "color")
+};
+
 std::array<AttributeDef, 2> VA_TYPE_T::attributeDefs = {
 	VA_ATTR_DEF(VA_TYPE_T, 0, 3, GL_FLOAT, pos, false, "pos"),
 	VA_ATTR_DEF(VA_TYPE_T, 1, 2, GL_FLOAT, s, false, "uv")

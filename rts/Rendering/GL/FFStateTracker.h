@@ -103,12 +103,13 @@ namespace GL {
 	inline FFResetState ffResetState;
 
 	// Which fixed-function call the removal experiment is testing this run. Add an
-	// enumerator plus its Skip() call site for a candidate, prove it inert, then
+	// enumerator plus its Active() call site for a candidate, prove it inert, then
 	// delete the call outright and retire the enumerator -- so an empty list here
 	// is the correct steady state, not an unused mechanism.
 	//
 	// Retired so far: 1 = CShadowHandler::CreateShadows' GL_FLAT/GL_SMOOTH bracket
-	// (785 frames, 0 px).
+	// (785 frames, 0 px); 2 = CLineDrawer::DrawAll off client arrays onto a
+	// VA_TYPE_C4 RenderBuffer (788 frames, 0 px).
 	enum class FFExperiment : int {
 		None = 0,
 	};
@@ -135,7 +136,10 @@ namespace GL {
 		FFExperiment selected = FFExperiment::None; // config, fixed for the run
 		bool candidatePass = false;                 // set per pass by the A/B harness
 
-		bool Skip(FFExperiment e) const { return candidatePass && selected == e; }
+		// True on the candidate pass when e is the experiment under test. The
+		// caller may drop a call or take an alternative path -- both are valid
+		// candidates, and both are proven the same way.
+		bool Active(FFExperiment e) const { return candidatePass && selected == e; }
 	};
 
 	inline FFRemovalExperiment ffExperiment;

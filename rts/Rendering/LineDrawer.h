@@ -34,6 +34,11 @@ class CLineDrawer {
 		void DrawAll();
 
 	private:
+		void DrawAllBuffered();
+
+	public:
+
+	private:
 		bool lineStipple;
 		bool useColorRestarts;
 		bool useRestartColor;

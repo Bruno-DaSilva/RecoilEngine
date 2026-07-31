@@ -3,6 +3,7 @@
 struct VA_TYPE_0;
 struct VA_TYPE_N;
 struct VA_TYPE_C;
+struct VA_TYPE_C4;
 struct VA_TYPE_T;
 struct VA_TYPE_TN;
 struct VA_TYPE_TC;

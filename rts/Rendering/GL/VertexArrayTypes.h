@@ -113,6 +113,36 @@ struct VA_TYPE_C {
 
 	static std::array<AttributeDef, 2> attributeDefs;
 };
+// Float-colour sibling of VA_TYPE_C. VA_TYPE_C's 8-bit SColor rounds each
+// component by up to 0.5 LSB, which is visible where a legacy glColorPointer
+// stream fed the float pipeline directly, so draws converted off client arrays
+// need to keep their colours in float to stay pixel-identical.
+struct VA_TYPE_C4 {
+	using MY_VA_TYPE = VA_TYPE_C4;
+	float3 pos;
+	float4 c;
+
+	auto operator+(MY_VA_TYPE const& o) const {
+		auto v = *this;
+		v.pos += o.pos;
+		v.c += o.c;
+		return v;
+	}
+	auto operator-(MY_VA_TYPE const& o) const {
+		auto v = *this;
+		v.pos -= o.pos;
+		v.c -= o.c;
+		return v;
+	}
+	auto operator* (float t) const {
+		auto v = *this;
+		v.pos *= t;
+		v.c *= t;
+		return v;
+	}
+
+	static std::array<AttributeDef, 2> attributeDefs;
+};
 struct VA_TYPE_T {
 	using MY_VA_TYPE = VA_TYPE_T;
 	float3 pos;

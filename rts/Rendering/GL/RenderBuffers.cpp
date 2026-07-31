@@ -29,7 +29,8 @@ void RenderBuffer::InitStatic()
 		std::make_unique<TypedRenderBuffer<VA_TYPE_2DC  >>(1 << 16, 1 << 17),
 		std::make_unique<TypedRenderBuffer<VA_TYPE_2DT  >>(1 << 20, 1 << 21),
 		std::make_unique<TypedRenderBuffer<VA_TYPE_2DTC >>(1 << 16, 1 << 17),
-		std::make_unique<TypedRenderBuffer<VA_TYPE_2DTC3>>(1 << 10, 1 << 11)
+		std::make_unique<TypedRenderBuffer<VA_TYPE_2DTC3>>(1 << 10, 1 << 11),
+		std::make_unique<TypedRenderBuffer<VA_TYPE_C4   >>(1 << 16, 1 << 17)
 	};
 }
 

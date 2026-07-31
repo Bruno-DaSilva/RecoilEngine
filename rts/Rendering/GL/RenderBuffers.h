@@ -91,7 +91,7 @@ protected:
 private:
 	static inline bool useMVPUniform = false;
 	static inline std::vector<RenderBuffer*> allRenderBuffers;
-	static std::array<std::unique_ptr<RenderBuffer>, 15> typedRenderBuffers;
+	static std::array<std::unique_ptr<RenderBuffer>, 16> typedRenderBuffers;
 public:
 	static auto GetAllStandardRenderBuffers() -> const decltype(typedRenderBuffers)& { return typedRenderBuffers; };
 };
@@ -291,6 +291,12 @@ inline const std::string RenderBufferShader<VA_TYPE_0>::GetFragOutput()
 
 template<>
 inline const std::string RenderBufferShader<VA_TYPE_C>::GetFragOutput()
+{
+	return "\toutColor = vcolor;";
+}
+
+template<>
+inline const std::string RenderBufferShader<VA_TYPE_C4>::GetFragOutput()
 {
 	return "\toutColor = vcolor;";
 }
@@ -1138,5 +1144,6 @@ GET_TYPED_RENDER_BUFFER(VA_TYPE_2DC  , 11)
 GET_TYPED_RENDER_BUFFER(VA_TYPE_2DT  , 12)
 GET_TYPED_RENDER_BUFFER(VA_TYPE_2DTC , 13)
 GET_TYPED_RENDER_BUFFER(VA_TYPE_2DTC3, 14)
+GET_TYPED_RENDER_BUFFER(VA_TYPE_C4   , 15)
 
 #undef GET_TYPED_RENDER_BUFFER
