@@ -48,6 +48,7 @@
 #include "Game/UI/Groups/GroupHandler.h"
 #include "Game/UI/PlayerRoster.h"
 
+#include "Lua/LuaImmediateBuffer.h"
 #include "Lua/LuaOpenGL.h"
 #include "Lua/LuaUI.h"
 #include "Lua/LuaMenu.h"
@@ -3683,6 +3684,18 @@ public:
 
 
 
+class LuaImmFallbackActionExecutor : public IUnsyncedActionExecutor {
+public:
+	LuaImmFallbackActionExecutor() : IUnsyncedActionExecutor("LuaImmFallback",
+			"dump why modern Lua immediate-mode flushes fell back to the legacy replay") {
+	}
+
+	bool Execute(const UnsyncedAction& action) const final {
+		LuaImmFallback::Dump();
+		return true;
+	}
+};
+
 class DumpStateActionExecutor : public IUnsyncedActionExecutor {
 public:
 	DumpStateActionExecutor() : IUnsyncedActionExecutor("DumpState", "dump game-state to file") {
@@ -4221,6 +4234,7 @@ void UnsyncedGameCommands::AddDefaultActionExecutors()
 	AddActionExecutor(AllocActionExecutor<DestroyActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<RemoveActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<SendActionExecutor>());
+	AddActionExecutor(AllocActionExecutor<LuaImmFallbackActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<DumpStateActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<DumpRNGActionExecutor>());
 	AddActionExecutor(AllocActionExecutor<SaveActionExecutor>(true));

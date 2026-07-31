@@ -31,6 +31,35 @@
 // This first iteration handles pos+color (VA_TYPE_C) and the core primitive
 // modes that map straight to the core profile; QUADS/POLYGON triangulation,
 // textures (TexRect), normals, and the lua-side wiring come in later iterations.
+// Why a modern flush took the exact-legacy replay instead, tallied per Lua draw
+// mode (config LuaImmediateFallbackStats, dumped by "/luaimmfallback"). The
+// census in doc/bar-gl4-immediate-mode-inventory.md counts the residual legacy
+// calls but cannot say WHICH gate rejected a stream; these do.
+namespace LuaImmFallback {
+	enum Reason {
+		REASON_DENSE_MV = 0,        // modelview has rotation/shear terms
+		REASON_PERSPECTIVE_P,       // projection is not ortho-like
+		REASON_TEX_ACTIVE_UNIT,     // active texture unit is not unit 0
+		REASON_TEX_2D_DISABLED,     // GL_TEXTURE_2D not enabled
+		REASON_TEX_TARGET_PRIORITY, // cube/rect/3D target outranks 2D
+		REASON_TEX_TEXGEN,          // texgen replaces the captured texcoords
+		REASON_TEX_ENV_MODE,        // texenv mode is not MODULATE
+		REASON_TEX_MATRIX,          // non-identity texture matrix
+		REASON_TEX_MIP_INCOMPLETE,  // mip-filtered texture with no mip chain
+		REASON_TEX_ALPHA_FORMAT,    // GL_ALPHA internal format
+		REASON_TEX_MULTI_UNIT,      // another FF texture unit is enabled
+		REASON_FOG_MODE,            // fog mode is not LINEAR
+		REASON_NONE,                // gate passed (not counted)
+		REASON_COUNT = REASON_NONE
+	};
+
+	bool Enabled();
+	// drawMode is a LuaOpenGL::DrawMode; taken as int to keep this header free
+	// of the LuaOpenGL dependency
+	void Count(Reason r, int drawMode, size_t numVerts);
+	void Dump();
+}
+
 class LuaImmediateBuffer {
 public:
 	enum class Backend { Legacy, Modern };
@@ -95,6 +124,9 @@ public:
 	void Flush(Backend b) const { (b == Backend::Legacy) ? FlushLegacy() : FlushModern(); }
 	void FlushLegacy() const;
 	void FlushModern() const;
+
+	// tally one modern->legacy fallback against the current Lua draw mode
+	void CountFallback(LuaImmFallback::Reason r, size_t numVerts) const;
 
 	// textured quad (gl.TexRect). The texture is bound by the caller (as in
 	// gl.Texture); the shading is MODULATE = texture * color (exact float via

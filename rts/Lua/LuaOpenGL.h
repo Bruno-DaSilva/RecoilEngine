@@ -39,6 +39,8 @@ class LuaOpenGL {
 
 		static bool CanUseShaders() { return canUseShaders; }
 
+		static DrawMode GetDrawMode() { return drawMode; }
+
 		static bool GetSafeMode() { return safeMode; }
 		static void SetSafeMode(bool value) { safeMode = value; }
 

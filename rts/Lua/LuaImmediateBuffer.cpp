@@ -2,10 +2,13 @@
 
 #include "Lua/LuaImmediateBuffer.h"
 
+#include "Lua/LuaOpenGL.h"
 #include "Rendering/GL/myGL.h"
 #include "Rendering/GlobalRendering.h"
 #include "Rendering/Shaders/ShaderHandler.h"
 #include "Rendering/Shaders/Shader.h"
+#include "System/Config/ConfigHandler.h"
+#include "System/Log/ILog.h"
 
 #include <algorithm>
 #include <cmath>
@@ -296,32 +299,36 @@ namespace {
 	// legacy replay: legacy is the parity oracle, so unsupported state costs
 	// only modern coverage, never correctness. This gate is why the earlier
 	// ungated attempt diverged on gui_pip's textured overlays (255-class).
-	bool PlainModulateTexturing()
+	// Returns the rejecting sub-gate, or REASON_NONE when the state is
+	// reproducible.
+	LuaImmFallback::Reason PlainModulateTexturing()
 	{
+		using namespace LuaImmFallback;
+
 		GLint activeUnit = 0;
 		glGetIntegerv(GL_ACTIVE_TEXTURE, &activeUnit);
 		if (activeUnit != GL_TEXTURE0)
-			return false;
+			return REASON_TEX_ACTIVE_UNIT;
 
 		if (glIsEnabled(GL_TEXTURE_2D) != GL_TRUE)
-			return false;
+			return REASON_TEX_2D_DISABLED;
 
 		// FF target priority: an enabled cube/rect/3D target overrides 2D
 		// (1D is BELOW 2D, so an enabled 1D loses and is fine)
 		if (glIsEnabled(GL_TEXTURE_CUBE_MAP) == GL_TRUE ||
 		    glIsEnabled(GL_TEXTURE_RECTANGLE) == GL_TRUE ||
 		    glIsEnabled(GL_TEXTURE_3D) == GL_TRUE)
-			return false;
+			return REASON_TEX_TARGET_PRIORITY;
 
 		// texgen replaces the captured per-vertex texcoords
 		if (glIsEnabled(GL_TEXTURE_GEN_S) == GL_TRUE || glIsEnabled(GL_TEXTURE_GEN_T) == GL_TRUE ||
 		    glIsEnabled(GL_TEXTURE_GEN_R) == GL_TRUE || glIsEnabled(GL_TEXTURE_GEN_Q) == GL_TRUE)
-			return false;
+			return REASON_TEX_TEXGEN;
 
 		GLint envMode = 0;
 		glGetTexEnviv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, &envMode);
 		if (envMode != GL_MODULATE)
-			return false;
+			return REASON_TEX_ENV_MODE;
 
 		// FF transforms texcoords by the texture matrix; the shader does not
 		static const CMatrix44f identity;
@@ -329,7 +336,7 @@ namespace {
 		glGetFloatv(GL_TEXTURE_MATRIX, static_cast<float*>(texMat));
 		for (int i = 0; i < 16; ++i) {
 			if (texMat.m[i] != identity.m[i])
-				return false;
+				return REASON_TEX_MATRIX;
 		}
 
 		// FF treats an INCOMPLETE texture as texturing DISABLED (fragment =
@@ -338,7 +345,7 @@ namespace {
 		// with a mipmapping min filter but no mip chain, so legacy drew white
 		// fills and the modern shader drew black.
 		if (MipIncompleteTexture2D())
-			return false;
+			return REASON_TEX_MIP_INCOMPLETE;
 
 		// GL_ALPHA-format MODULATE passes the fragment RGB through untouched,
 		// while GLSL texture() samples (0,0,0,A) and would zero it
@@ -347,7 +354,7 @@ namespace {
 		switch (intFormat) {
 			case GL_ALPHA: case GL_ALPHA4: case GL_ALPHA8:
 			case GL_ALPHA12: case GL_ALPHA16: case GL_COMPRESSED_ALPHA:
-				return false;
+				return REASON_TEX_ALPHA_FORMAT;
 			default:
 				break;
 		}
@@ -371,8 +378,93 @@ namespace {
 		}
 		glActiveTexture(GL_TEXTURE0);
 
-		return !otherUnitEnabled;
+		return otherUnitEnabled ? REASON_TEX_MULTI_UNIT : REASON_NONE;
 	}
+}
+
+CONFIG(bool, LuaImmediateFallbackStats).defaultValue(false).safemodeValue(false)
+	.description("Tally why modern Lua immediate-mode flushes fall back to the legacy replay; dump with \"/luaimmfallback\".");
+
+namespace LuaImmFallback {
+	// [reason][drawMode]; drawMode indexes LuaOpenGL::DrawMode (0..DRAW_LAST_MODE)
+	static constexpr int NUM_DRAW_MODES = 9;
+	static uint64_t flushCount[REASON_COUNT][NUM_DRAW_MODES] = {{0}};
+	static uint64_t vertCount [REASON_COUNT][NUM_DRAW_MODES] = {{0}};
+
+	static const char* reasonNames[REASON_COUNT] = {
+		"DENSE_MV", "PERSPECTIVE_P", "TEX_ACTIVE_UNIT", "TEX_2D_DISABLED",
+		"TEX_TARGET_PRIORITY", "TEX_TEXGEN", "TEX_ENV_MODE", "TEX_MATRIX",
+		"TEX_MIP_INCOMPLETE", "TEX_ALPHA_FORMAT", "TEX_MULTI_UNIT", "FOG_MODE",
+	};
+	static const char* drawModeNames[NUM_DRAW_MODES] = {
+		"NONE", "GENESIS", "WORLD", "WORLD_SHADOW", "WORLD_REFLECTION",
+		"WORLD_REFRACTION", "SCREEN", "MINIMAP", "MINIMAP_BACKGROUND",
+	};
+
+	bool Enabled()
+	{
+		static const bool enabled = configHandler->GetBool("LuaImmediateFallbackStats");
+		return enabled;
+	}
+
+	void Count(Reason r, int drawMode, size_t numVerts)
+	{
+		if (r >= REASON_COUNT || drawMode < 0 || drawMode >= NUM_DRAW_MODES)
+			return;
+
+		flushCount[r][drawMode] += 1;
+		vertCount [r][drawMode] += numVerts;
+	}
+
+	void Dump()
+	{
+		if (!Enabled()) {
+			LOG_L(L_WARNING, "[LuaImmFallback] disabled -- set LuaImmediateFallbackStats=1");
+			return;
+		}
+
+		LOG_L(L_WARNING, "[LuaImmFallback] modern->legacy fallbacks by reason x draw mode (flushes / vertices)");
+
+		uint64_t grandFlushes = 0;
+		uint64_t grandVerts = 0;
+
+		for (int r = 0; r < REASON_COUNT; ++r) {
+			uint64_t rowFlushes = 0;
+			uint64_t rowVerts = 0;
+			for (int d = 0; d < NUM_DRAW_MODES; ++d) {
+				rowFlushes += flushCount[r][d];
+				rowVerts   += vertCount [r][d];
+			}
+			if (rowFlushes == 0)
+				continue;
+
+			grandFlushes += rowFlushes;
+			grandVerts   += rowVerts;
+
+			std::string perMode;
+			for (int d = 0; d < NUM_DRAW_MODES; ++d) {
+				if (flushCount[r][d] == 0)
+					continue;
+				perMode += "  " + std::string(drawModeNames[d]) + "=" +
+				           std::to_string(flushCount[r][d]) + "/" + std::to_string(vertCount[r][d]);
+			}
+			LOG_L(L_WARNING, "[LuaImmFallback]   %-20s %8llu / %-10llu %s",
+			      reasonNames[r],
+			      static_cast<unsigned long long>(rowFlushes),
+			      static_cast<unsigned long long>(rowVerts),
+			      perMode.c_str());
+		}
+
+		LOG_L(L_WARNING, "[LuaImmFallback]   %-20s %8llu / %llu", "TOTAL",
+		      static_cast<unsigned long long>(grandFlushes),
+		      static_cast<unsigned long long>(grandVerts));
+	}
+}
+
+void LuaImmediateBuffer::CountFallback(LuaImmFallback::Reason r, size_t numVerts) const
+{
+	if (LuaImmFallback::Enabled())
+		LuaImmFallback::Count(r, LuaOpenGL::GetDrawMode(), numVerts);
 }
 
 void LuaImmediateBuffer::FlushLegacy() const
@@ -409,7 +501,10 @@ void LuaImmediateBuffer::FlushModern() const
 
 	// dense (rotated/world) modelview or perspective projection -> exact legacy
 	// replay, see ScreenAlignedMV / OrthoProjection
-	if (!ScreenAlignedMV(mvMat) || !OrthoProjection(projMat)) {
+	const bool screenAligned = ScreenAlignedMV(mvMat);
+	if (!screenAligned || !OrthoProjection(projMat)) {
+		CountFallback(screenAligned ? LuaImmFallback::REASON_PERSPECTIVE_P
+		                            : LuaImmFallback::REASON_DENSE_MV, verts.size());
 		FlushLegacy();
 		return;
 	}
@@ -418,9 +513,13 @@ void LuaImmediateBuffer::FlushModern() const
 	// state is one it reproduces exactly (see PlainModulateTexturing); any
 	// other texture-unit/texenv setup falls back to the exact legacy replay
 	// (which carries the texcoords).
-	if (textured && !PlainModulateTexturing()) {
-		FlushLegacy();
-		return;
+	if (textured) {
+		const LuaImmFallback::Reason texReason = PlainModulateTexturing();
+		if (texReason != LuaImmFallback::REASON_NONE) {
+			CountFallback(texReason, verts.size());
+			FlushLegacy();
+			return;
+		}
 	}
 
 	// the fogged shader variant replicates LINEAR fog only (the engine's map
@@ -432,6 +531,7 @@ void LuaImmediateBuffer::FlushModern() const
 		GLint fogMode = GL_LINEAR;
 		glGetIntegerv(GL_FOG_MODE, &fogMode);
 		if (fogMode != GL_LINEAR) {
+			CountFallback(LuaImmFallback::REASON_FOG_MODE, verts.size());
 			FlushLegacy();
 			return;
 		}
@@ -510,9 +610,15 @@ void LuaImmediateBuffer::FlushTexRectModern() const
 	if (!texRect.set)
 		return;
 
+	// a TexRect carries no accumulated stream; it is always the one quad
+	static constexpr size_t TEX_RECT_VERTS = 4;
+
 	// dense (rotated/world) modelview or perspective projection -> exact legacy
 	// quad, see ScreenAlignedMV / OrthoProjection
-	if (!ScreenAlignedMV(mvMat) || !OrthoProjection(projMat)) {
+	const bool screenAligned = ScreenAlignedMV(mvMat);
+	if (!screenAligned || !OrthoProjection(projMat)) {
+		CountFallback(screenAligned ? LuaImmFallback::REASON_PERSPECTIVE_P
+		                            : LuaImmFallback::REASON_DENSE_MV, TEX_RECT_VERTS);
 		FlushTexRectLegacy();
 		return;
 	}
@@ -520,6 +626,7 @@ void LuaImmediateBuffer::FlushTexRectModern() const
 	// incomplete texture: FF draws the flat current color, the shader would
 	// sample black -- see MipIncompleteTexture2D
 	if (MipIncompleteTexture2D()) {
+		CountFallback(LuaImmFallback::REASON_TEX_MIP_INCOMPLETE, TEX_RECT_VERTS);
 		FlushTexRectLegacy();
 		return;
 	}
@@ -531,6 +638,7 @@ void LuaImmediateBuffer::FlushTexRectModern() const
 		GLint fogMode = GL_LINEAR;
 		glGetIntegerv(GL_FOG_MODE, &fogMode);
 		if (fogMode != GL_LINEAR) {
+			CountFallback(LuaImmFallback::REASON_FOG_MODE, TEX_RECT_VERTS);
 			FlushTexRectLegacy();
 			return;
 		}
