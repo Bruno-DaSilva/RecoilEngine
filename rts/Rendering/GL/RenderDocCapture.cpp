@@ -2,7 +2,10 @@
 
 #include "RenderDocCapture.h"
 
+#include "Rendering/GlobalRendering.h"
 #include "System/Log/ILog.h"
+
+#include <SDL_syswm.h>
 
 #ifndef _WIN32
 	#include <dlfcn.h>
@@ -79,6 +82,29 @@ bool RenderDocCapture::TriggerNextFrame()
 	return true;
 }
 
+namespace {
+	// RenderDoc's "device pointer" for GLX is the Display*, and the window
+	// handle the X11 Window. Naming them explicitly removes any dependence on
+	// RenderDoc having tracked an active window of its own.
+	void GetGLXHandles(void*& device, void*& window)
+	{
+		device = nullptr;
+		window = nullptr;
+
+		SDL_Window* sdlWindow = (globalRendering != nullptr) ? globalRendering->GetWindow() : nullptr;
+		if (sdlWindow == nullptr)
+			return;
+
+		SDL_SysWMinfo info;
+		SDL_VERSION(&info.version);
+		if (!SDL_GetWindowWMInfo(sdlWindow, &info) || info.subsystem != SDL_SYSWM_X11)
+			return;
+
+		device = info.info.x11.display;
+		window = reinterpret_cast<void*>(static_cast<uintptr_t>(info.info.x11.window));
+	}
+}
+
 bool RenderDocCapture::BeginExplicit()
 {
 	RENDERDOC_API_1_4_0* api = GetAPI();
@@ -88,10 +114,16 @@ bool RenderDocCapture::BeginExplicit()
 		return false;
 	}
 
-	// nullptr device/window = "whatever is current", which is what an engine
-	// with a single GL context wants
-	api->StartFrameCapture(nullptr, nullptr);
-	LOG_L(L_WARNING, "[RenderDoc] explicit capture STARTED (capturing=%d)", api->IsFrameCapturing());
+	void* device = nullptr;
+	void* window = nullptr;
+	GetGLXHandles(device, window);
+
+	if (device != nullptr)
+		api->SetActiveWindow(device, window);
+
+	api->StartFrameCapture(device, window);
+	LOG_L(L_WARNING, "[RenderDoc] explicit capture STARTED (device=%p window=%p capturing=%d)",
+	      device, window, api->IsFrameCapturing());
 	return true;
 }
 
@@ -104,7 +136,11 @@ bool RenderDocCapture::EndExplicit()
 		return false;
 	}
 
-	const uint32_t ok = api->EndFrameCapture(nullptr, nullptr);
+	void* device = nullptr;
+	void* window = nullptr;
+	GetGLXHandles(device, window);
+
+	const uint32_t ok = api->EndFrameCapture(device, window);
 	const uint32_t num = api->GetNumCaptures();
 
 	char pathBuf[1024] = {0};

@@ -23,7 +23,20 @@ Working document for moving Beyond-All-Reason (`/www/projects/Beyond-All-Reason`
     - *Not the context version.* Requesting compat **4.5** instead of 3.0 changes nothing — still no capture.
     - *Not the compatibility profile.* A **minimal 60-line SDL2 app** (same SDL2, same Mesa, same `librenderdoc` trigger path, 3.0 compat + DEBUG flag — i.e. the engine's exact request) **captures fine**: `rdtest_compat_frame31.rdc`. Core captures too. So RenderDoc supports compat contexts on this machine, and the ~2,036 remaining rejected calls are *not* what is blocking a capture — RenderDoc never gets far enough to look at them.
     - *Not RenderDoc's frame-boundary detection either.* Explicit `StartFrameCapture(nullptr, nullptr)` from inside the engine (`/renderdoccapture start`) is refused outright: `IsFrameCapturing()` reads 0 immediately after the call, and `EndFrameCapture` returns 0 with no file.
-  - **So the blocker is something about the engine PROCESS, not its GL.** This matters for planning: converting more content cannot, on its own, produce a capture. Known engine-vs-minimal-app differences, untested and roughly in suspicion order: the global allocator override (mimalloc is statically linked and replaces malloc), the glad loader's function-pointer resolution, threading, and SDL window re-creation during startup. Bisecting the minimal app *towards* the engine is the cheap way in — it already reproduces everything except the refusal.
+  - **So the blocker is something about the engine PROCESS, not its GL.** This matters for planning: converting more content cannot, on its own, produce a capture.
+  - **Bisection so far — six hypotheses eliminated, each with a clean experiment:**
+
+    | # | hypothesis | experiment | verdict |
+    |---|---|---|---|
+    | 1 | legacy `glXCreateContext` context | trace: it is SDL's probe, destroyed at call 49; real context is `glXCreateContextAttribsARB` | not it |
+    | 2 | context version too low | request compat 4.5 instead of 3.0 | not it |
+    | 3 | compatibility profile unsupported | minimal app, engine's exact request, captures | not it |
+    | 4 | RenderDoc's frame-boundary detection | explicit `StartFrameCapture(nullptr,nullptr)` | refused too |
+    | 5 | RenderDoc's active-window tracking | explicit GLX `Display*` + `Window` handles, plus `SetActiveWindow` | refused too |
+    | 6 | mimalloc `operator new/delete` override | minimal app linked against the engine's mimalloc | captures fine |
+
+    RenderDoc refuses even when the device and window are named explicitly, so it has not registered the engine's context as capturable **at all**. Note `RENDERDOC_DEBUG_LOG_FILE` produces no file even for the app that captures successfully, so RenderDoc's own log is not available as a diagnostic in this build.
+  - **Still untested, in suspicion order:** the glad loader's function-pointer resolution (though `GL_EXT_debug_tool` reads back true, so *some* calls are hooked), threading, SDL window flags / window re-creation during startup. Keep bisecting the minimal app *towards* the engine — it reproduces everything except the refusal, and `test/gl-ab-compare/rdoc_profile_test.c` is the scaffold.
   - **`ForceCoreContext=1` is a silent no-op on its own** (unrelated engine finding, worth fixing independently): `CreateGLContext` requests `GLContextMajorVersion`/`MinorVersion`, which default to **3.0**, and a core profile needs ≥3.2 — so the driver hands back a compatibility context and the log still says `(Compat)`. Getting core requires raising those two knobs as well (4.5 works, and then the engine crashes at 0.4 s in Mesa because startup is still fixed-function — which is the honest state of the port).
 
 - 2026-07-31 — **DENSE_MV is gone from the world: the reclaim-field hulls are converted, BAR-side. Total immediate-mode fallback vertices 68.3M → 0.85M per 880 frames (-98.8%).**
