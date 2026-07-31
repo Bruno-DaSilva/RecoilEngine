@@ -64,7 +64,7 @@ namespace {
 		return s;
 	}
 
-	std::string MakeVertexSrc(bool explicitAttribLoc, bool textured, bool fogged)
+	std::string MakeVertexSrc(bool explicitAttribLoc, bool textured, bool fogged, bool builtinMVP)
 	{
 		std::string s = "#version 150 compatibility\n";
 		if (explicitAttribLoc) {
@@ -84,7 +84,15 @@ namespace {
 		// so the flushes only go modern under screen-aligned MV, where the
 		// composition is measured exact across all gate content. uMV (fog
 		// variant only) feeds the eye-space fog coordinate.
-		s += "uniform mat4 uMVP;\n";
+		// builtinMVP: transform by the compatibility gl_ModelViewProjectionMatrix
+		// instead of a CPU-composed uniform. The driver composes P*MV itself, so
+		// the result is exact for ANY matrices -- which is what lets dense-MV and
+		// perspective-projection streams go modern at all (see the gates in
+		// FlushModern). Reading a builtin is not a GL call, so it costs nothing at
+		// the capture gate; only the FF matrix SET-calls do, and those are a
+		// separate group.
+		if (!builtinMVP)
+			s += "uniform mat4 uMVP;\n";
 		if (fogged)
 			s += "uniform mat4 uMV;\n";
 		if (textured)
@@ -98,11 +106,12 @@ namespace {
 		s += "vcolor = acolor; ";
 		if (fogged)
 			s += "vFogF = (gl_Fog.end - abs((uMV * vec4(apos, 1.0)).z)) * gl_Fog.scale; ";
-		s += "gl_Position = uMVP * vec4(apos, 1.0); }\n";
+		s += builtinMVP ? "gl_Position = gl_ModelViewProjectionMatrix * vec4(apos, 1.0); }\n"
+		                : "gl_Position = uMVP * vec4(apos, 1.0); }\n";
 		return s;
 	}
 
-	Shader::IProgramObject* GetModernShaderImpl(const char* poName, bool textured, bool fogged)
+	Shader::IProgramObject* GetModernShaderImpl(const char* poName, bool textured, bool fogged, bool builtinMVP)
 	{
 		Shader::IProgramObject* shader = shaderHandler->GetProgramObject("[LuaImmediateBuffer]", poName);
 		if (shader != nullptr && shader->IsValid())
@@ -111,7 +120,7 @@ namespace {
 		const bool eal = globalRendering->supportExplicitAttribLoc;
 
 		shader = shaderHandler->CreateProgramObject("[LuaImmediateBuffer]", poName);
-		shader->AttachShaderObject(shaderHandler->CreateShaderObject(MakeVertexSrc(eal, textured, fogged), "", GL_VERTEX_SHADER));
+		shader->AttachShaderObject(shaderHandler->CreateShaderObject(MakeVertexSrc(eal, textured, fogged, builtinMVP), "", GL_VERTEX_SHADER));
 		shader->AttachShaderObject(shaderHandler->CreateShaderObject(MakeFragmentSrc(textured, fogged), "", GL_FRAGMENT_SHADER));
 
 		if (!eal) {
@@ -124,13 +133,24 @@ namespace {
 		return shader;
 	}
 
-	Shader::IProgramObject* GetModernShader(bool fogged = false) {
-		return fogged ? GetModernShaderImpl("IMM_F_FOG", false, true)
-		              : GetModernShaderImpl("IMM_F", false, false);
+	// EIGHT variants: {untextured, textured} x {fogless, fogged} x {uniform MVP,
+	// builtin MVP}. Separate programs rather than a uniform branch, because
+	// touching the parity-proven shader source perturbs the compiled gl_Position
+	// math enough to shift thin-primitive edge pixels (the same reason fog is a
+	// variant).
+	Shader::IProgramObject* GetModernShader(bool fogged, bool builtinMVP) {
+		if (builtinMVP)
+			return fogged ? GetModernShaderImpl("IMM_F_FOG_BMVP", false, true, true)
+			              : GetModernShaderImpl("IMM_F_BMVP", false, false, true);
+		return fogged ? GetModernShaderImpl("IMM_F_FOG", false, true, false)
+		              : GetModernShaderImpl("IMM_F", false, false, false);
 	}
-	Shader::IProgramObject* GetModernTexShader(bool fogged = false) {
-		return fogged ? GetModernShaderImpl("IMM_TEX_F_FOG", true, true)
-		              : GetModernShaderImpl("IMM_TEX_F", true, false);
+	Shader::IProgramObject* GetModernTexShader(bool fogged, bool builtinMVP) {
+		if (builtinMVP)
+			return fogged ? GetModernShaderImpl("IMM_TEX_F_FOG_BMVP", true, true, true)
+			              : GetModernShaderImpl("IMM_TEX_F_BMVP", true, false, true);
+		return fogged ? GetModernShaderImpl("IMM_TEX_F_FOG", true, true, false)
+		              : GetModernShaderImpl("IMM_TEX_F", true, false, false);
 	}
 
 	// True when the modelview has NO rotation/shear terms: a screen-aligned
@@ -571,12 +591,12 @@ void LuaImmediateBuffer::FlushModern() const
 	if (verts.empty())
 		return;
 
-	// dense (rotated/world) modelview -> exact legacy replay, see ScreenAlignedMV
-	if (!ScreenAlignedMV(mvMat)) {
-		CountFallback(LuaImmFallback::REASON_DENSE_MV, verts.size());
-		FlushLegacy();
-		return;
-	}
+	// A CPU-composed P*MV can ULP-differ from the driver's own on dense or
+	// perspective matrices, which used to force these streams down the exact
+	// legacy replay. They now take the builtin-MVP shader variant instead: the
+	// driver composes the matrix, so the transform is exact for any matrices and
+	// no legacy fixed-function replay is needed.
+	const bool builtinMVP = !ScreenAlignedMV(mvMat) || !OrthoProjection(projMat);
 
 	// Textured streams flush through the MODULATE shader when the FF texture
 	// state is one it reproduces exactly (see PlainModulateTexturing); any
@@ -612,11 +632,6 @@ void LuaImmediateBuffer::FlushModern() const
 	// This is checked after the texture gate because it needs sampleTexture,
 	// so a stream that is both perspective and texenv-rejected now reports the
 	// texenv reason rather than PERSPECTIVE_P.
-	if (sampleTexture && !OrthoProjection(projMat)) {
-		CountFallback(LuaImmFallback::REASON_PERSPECTIVE_P, verts.size());
-		FlushLegacy();
-		return;
-	}
 
 	// the fogged shader variant replicates LINEAR fog only (the engine's map
 	// fog); other modes keep the exact legacy replay. Fog that saturates at
@@ -658,9 +673,11 @@ void LuaImmediateBuffer::FlushModern() const
 
 	const CMatrix44f mvp = projMat * mvMat;
 
-	Shader::IProgramObject* shader = sampleTexture ? GetModernTexShader(fogged) : GetModernShader(fogged);
+	Shader::IProgramObject* shader = sampleTexture ? GetModernTexShader(fogged, builtinMVP)
+	                                               : GetModernShader(fogged, builtinMVP);
 	shader->Enable();
-	shader->SetUniformMatrix4x4("uMVP", false, static_cast<const float*>(mvp));
+	if (!builtinMVP)
+		shader->SetUniformMatrix4x4("uMVP", false, static_cast<const float*>(mvp));
 	if (fogged)
 		shader->SetUniformMatrix4x4("uMV", false, static_cast<const float*>(mvMat));
 	if (sampleTexture)
@@ -709,15 +726,10 @@ void LuaImmediateBuffer::FlushTexRectModern() const
 	// a TexRect carries no accumulated stream; it is always the one quad
 	static constexpr size_t TEX_RECT_VERTS = 4;
 
-	// dense (rotated/world) modelview or perspective projection -> exact legacy
-	// quad, see ScreenAlignedMV / OrthoProjection
-	const bool screenAligned = ScreenAlignedMV(mvMat);
-	if (!screenAligned || !OrthoProjection(projMat)) {
-		CountFallback(screenAligned ? LuaImmFallback::REASON_PERSPECTIVE_P
-		                            : LuaImmFallback::REASON_DENSE_MV, TEX_RECT_VERTS);
-		FlushTexRectLegacy();
-		return;
-	}
+	// Dense modelview or perspective projection takes the builtin-MVP variant,
+	// where the driver composes P*MV, rather than the exact legacy quad -- see
+	// the same switch in FlushModern.
+	const bool builtinMVP = !ScreenAlignedMV(mvMat) || !OrthoProjection(projMat);
 
 	// incomplete texture: FF draws the flat current color, the shader would
 	// sample black -- see MipIncompleteTexture2D
@@ -767,9 +779,10 @@ void LuaImmediateBuffer::FlushTexRectModern() const
 
 	const CMatrix44f mvp = projMat * mvMat;
 
-	Shader::IProgramObject* shader = GetModernTexShader(fogged);
+	Shader::IProgramObject* shader = GetModernTexShader(fogged, builtinMVP);
 	shader->Enable();
-	shader->SetUniformMatrix4x4("uMVP", false, static_cast<const float*>(mvp));
+	if (!builtinMVP)
+		shader->SetUniformMatrix4x4("uMVP", false, static_cast<const float*>(mvp));
 	if (fogged)
 		shader->SetUniformMatrix4x4("uMV", false, static_cast<const float*>(mvMat));
 	shader->SetUniform("tex", 0);
