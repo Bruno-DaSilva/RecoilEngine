@@ -125,6 +125,17 @@ if (( ctlFrames || sigFrames )); then
 	printf '\n'
 	grep -E '\[Frame A/B\] (control|pairwise)' "$infolog" |
 		grep -A1 -E 'control\(L<->L\)=[1-9]|signal\(L<->M\)=[1-9]' | head -n 20
+	# The documented async flake perturbs ONE random pass of the four. On pass 1
+	# or 2 it shows up as control and its pixels are masked out of the signal; on
+	# pass 3 -- the modern pass -- there is nothing to mask it against, so it
+	# reads as pure signal on a single frame. A real backend divergence is
+	# deterministic, so re-running separates them.
+	if (( sigFrames > 0 && sigFrames <= 2 && ctlFrames == 0 )); then
+		printf '\n[gate] NOTE: a signal this small with a clean control can also be the async\n'
+		printf '[gate]       flake landing on the modern pass (see doc/bar-gl4-immediate-mode-inventory.md).\n'
+		printf '[gate]       Re-run: a real divergence repeats, the flake does not.\n'
+	fi
+
 	(( sigFrames == 0 )) || die "signal(L<->M) nonzero on $sigFrames/$compares frames -- modern backend diverges"
 	die "control(L<->L) nonzero on $ctlFrames/$compares frames -- content leaks across passes (see the flake note in doc/bar-gl4-immediate-mode-inventory.md)"
 fi
