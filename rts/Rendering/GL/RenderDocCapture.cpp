@@ -78,3 +78,40 @@ bool RenderDocCapture::TriggerNextFrame()
 	LOG_L(L_WARNING, "[RenderDoc] triggered: capturing the next frame");
 	return true;
 }
+
+bool RenderDocCapture::BeginExplicit()
+{
+	RENDERDOC_API_1_4_0* api = GetAPI();
+
+	if (api == nullptr) {
+		LOG_L(L_WARNING, "[RenderDoc] not hosting this process");
+		return false;
+	}
+
+	// nullptr device/window = "whatever is current", which is what an engine
+	// with a single GL context wants
+	api->StartFrameCapture(nullptr, nullptr);
+	LOG_L(L_WARNING, "[RenderDoc] explicit capture STARTED (capturing=%d)", api->IsFrameCapturing());
+	return true;
+}
+
+bool RenderDocCapture::EndExplicit()
+{
+	RENDERDOC_API_1_4_0* api = GetAPI();
+
+	if (api == nullptr) {
+		LOG_L(L_WARNING, "[RenderDoc] not hosting this process");
+		return false;
+	}
+
+	const uint32_t ok = api->EndFrameCapture(nullptr, nullptr);
+	const uint32_t num = api->GetNumCaptures();
+
+	char pathBuf[1024] = {0};
+	uint32_t pathLen = sizeof(pathBuf);
+	const uint32_t got = (num > 0) ? api->GetCapture(num - 1, pathBuf, &pathLen, nullptr) : 0;
+
+	LOG_L(L_WARNING, "[RenderDoc] explicit capture ENDED ok=%u, captures=%u%s%s",
+	      ok, num, (got != 0) ? ", file=" : "", (got != 0) ? pathBuf : "");
+	return ok != 0;
+}

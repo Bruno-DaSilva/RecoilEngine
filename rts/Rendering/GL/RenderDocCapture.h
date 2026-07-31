@@ -15,4 +15,12 @@
 namespace RenderDocCapture {
 	// capture the NEXT frame; false if RenderDoc is not hosting this process
 	bool TriggerNextFrame();
+
+	// Explicitly bracket a capture instead of asking RenderDoc to pick the next
+	// frame itself. TriggerNextFrame depends on RenderDoc recognising this
+	// process's swap/window as capturable; when it silently does not (measured:
+	// it accepts the trigger and then never starts), the explicit form still
+	// works and says so. Everything drawn between the two is one capture.
+	bool BeginExplicit();
+	bool EndExplicit();
 }

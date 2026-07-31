@@ -3700,11 +3700,20 @@ public:
 class RenderDocCaptureActionExecutor : public IUnsyncedActionExecutor {
 public:
 	RenderDocCaptureActionExecutor() : IUnsyncedActionExecutor("RenderDocCapture",
-			"capture the next frame with RenderDoc (only when hosted by it)") {
+			"capture a frame with RenderDoc (only when hosted by it); "
+			"\"start\"/\"stop\" bracket a capture explicitly, no argument captures the next frame") {
 	}
 
 	bool Execute(const UnsyncedAction& action) const final {
-		RenderDocCapture::TriggerNextFrame();
+		const std::string& arg = action.GetArgs();
+
+		if (arg == "start")
+			RenderDocCapture::BeginExplicit();
+		else if (arg == "stop")
+			RenderDocCapture::EndExplicit();
+		else
+			RenderDocCapture::TriggerNextFrame();
+
 		return true;
 	}
 };
