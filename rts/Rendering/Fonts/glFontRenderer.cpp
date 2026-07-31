@@ -289,7 +289,27 @@ static CMatrix44f GetCurrentFixedFunctionFontMVP()
 void CglShaderFontRenderer::PushGLState(const CglFont& fnt)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT);
+	// Explicit save/restore instead of glPushAttrib(GL_ENABLE_BIT |
+	// GL_COLOR_BUFFER_BIT): the attrib stack is on RenderDoc's unsupported list
+	// and this bracket was its single busiest user (~66k pairs/run). The
+	// queries below are not on that list, so reading the state costs nothing.
+	//
+	// Saving only what the bracket writes is equivalent to the wide push only if
+	// nothing between here and PopGLState leaves another enable or colour-buffer
+	// state changed. GL_TEXTURE_2D is exactly such a case and cost a gate
+	// failure: DrawTraingleElementsRecordable enables it and ends by DISABLING
+	// it, so the wide pop used to put back whatever the caller had, while a
+	// narrower save left texturing off for the next draw (1 frame per run, max
+	// delta 73 -- intermittent because it needs a display-list compile).
+	savedState.depthTest = glIsEnabled(GL_DEPTH_TEST);
+	savedState.texture2D = glIsEnabled(GL_TEXTURE_2D);
+	savedState.alphaTest = glIsEnabled(GL_ALPHA_TEST);
+	savedState.blend     = glIsEnabled(GL_BLEND);
+	glGetIntegerv(GL_BLEND_SRC_RGB,   &savedState.blendSrcRGB);
+	glGetIntegerv(GL_BLEND_DST_RGB,   &savedState.blendDstRGB);
+	glGetIntegerv(GL_BLEND_SRC_ALPHA, &savedState.blendSrcAlpha);
+	glGetIntegerv(GL_BLEND_DST_ALPHA, &savedState.blendDstAlpha);
+
 	glDisable(GL_DEPTH_TEST);
 	glDisable(GL_ALPHA_TEST); //just in case
 	glEnable(GL_BLEND);
@@ -343,7 +363,13 @@ void CglShaderFontRenderer::PopGLState(const CglFont& fnt)
 
 	glBindTexture(GL_TEXTURE_2D, 0);
 
-	glPopAttrib();
+	// mirror of the save in PushGLState
+	if (savedState.depthTest) glEnable(GL_DEPTH_TEST); else glDisable(GL_DEPTH_TEST);
+	if (savedState.texture2D) glEnable(GL_TEXTURE_2D); else glDisable(GL_TEXTURE_2D);
+	if (savedState.alphaTest) glEnable(GL_ALPHA_TEST); else glDisable(GL_ALPHA_TEST);
+	if (savedState.blend)     glEnable(GL_BLEND);      else glDisable(GL_BLEND);
+	glBlendFuncSeparate(savedState.blendSrcRGB, savedState.blendDstRGB,
+	                    savedState.blendSrcAlpha, savedState.blendDstAlpha);
 }
 
 void CglShaderFontRenderer::GetStats(std::array<size_t, 8>& stats) const

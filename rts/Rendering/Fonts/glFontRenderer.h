@@ -30,6 +30,19 @@ protected:
 	GLint currProgID = 0;
 	bool userDefinedBlending = false;
 
+	// Saved by PushGLState in place of glPushAttrib(GL_ENABLE_BIT |
+	// GL_COLOR_BUFFER_BIT), which RenderDoc rejects. Only the states the bracket
+	// actually modifies need saving; the queries that read them
+	// (glIsEnabled/glGetIntegerv) are not on the unsupported list.
+	struct SavedGLState {
+		GLboolean depthTest = GL_FALSE;
+		GLboolean texture2D = GL_FALSE;
+		GLboolean alphaTest = GL_FALSE;
+		GLboolean blend = GL_FALSE;
+		GLint blendSrcRGB = GL_ONE, blendDstRGB = GL_ZERO;
+		GLint blendSrcAlpha = GL_ONE, blendDstAlpha = GL_ZERO;
+	} savedState;
+
 	// should be enough to hold all data for a given frame
 	static constexpr size_t NUM_BUFFER_ELEMS = (1 << 14);
 	static constexpr size_t NUM_TRI_BUFFER_VERTS = (4 * NUM_BUFFER_ELEMS);
