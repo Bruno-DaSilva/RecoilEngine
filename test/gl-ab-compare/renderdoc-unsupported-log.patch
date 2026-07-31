@@ -1,0 +1,16 @@
+diff --git a/renderdoc/driver/gl/gl_driver.cpp b/renderdoc/driver/gl/gl_driver.cpp
+index 96c2b64ac..9821e5e15 100644
+--- a/renderdoc/driver/gl/gl_driver.cpp
++++ b/renderdoc/driver/gl/gl_driver.cpp
+@@ -1057,6 +1057,11 @@ void WrappedOpenGL::UseUnusedSupportedFunction(const char *name)
+ 
+   if(sz != m_UnsupportedFunctions.size())
+   {
++    // RECOIL PATCH: name every offending function on stderr. RenderDoc's own
++    // report goes to SetDriverUnsupportedMessage (UI only), so a headless run
++    // has no way to learn WHICH call disabled its capture.
++    fprintf(stderr, "[RDOC-UNSUPPORTED] %s\n", name);
++    fflush(stderr);
+     RDCERR("Unsupported function %s used", name);
+ 
+     rdcstr unsupportedStatus = StringFormat::Fmt(
