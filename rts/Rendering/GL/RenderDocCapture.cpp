@@ -121,9 +121,31 @@ bool RenderDocCapture::BeginExplicit()
 	if (device != nullptr)
 		api->SetActiveWindow(device, window);
 
+	// RenderDoc looks for a GL context current on the CALLING thread; an action
+	// dispatched off the render thread finds none and the capture silently
+	// never starts, which looks identical to "RenderDoc refused"
+	SDL_GLContext curCtx = SDL_GL_GetCurrentContext();
+
+	// Which library actually owns the GL entry points? RenderDoc answers
+	// glIsEnabled(GL_DEBUG_TOOL_EXT) from an early-out needing no wrapped
+	// context, so its presence proves nothing about hooking; the owner of a
+	// real entry point does. Logged once -- it is a property of the process.
+	static bool loggedOwners = false;
+	if (!loggedOwners) {
+		loggedOwners = true;
+		for (const char* fn: {"glXMakeCurrent", "glXSwapBuffers", "glXCreateContextAttribsARB"}) {
+			void* p = reinterpret_cast<void*>(SDL_GL_GetProcAddress(fn));
+			Dl_info info;
+			if (p != nullptr && dladdr(p, &info) != 0 && info.dli_fname != nullptr)
+				LOG_L(L_WARNING, "[RenderDoc] %-28s -> %s", fn, info.dli_fname);
+			else
+				LOG_L(L_WARNING, "[RenderDoc] %-28s -> %p (unresolved)", fn, p);
+		}
+	}
+
 	api->StartFrameCapture(device, window);
-	LOG_L(L_WARNING, "[RenderDoc] explicit capture STARTED (device=%p window=%p capturing=%d)",
-	      device, window, api->IsFrameCapturing());
+	LOG_L(L_WARNING, "[RenderDoc] explicit capture STARTED (device=%p window=%p curGLContext=%p capturing=%d)",
+	      device, window, curCtx, api->IsFrameCapturing());
 	return true;
 }
 

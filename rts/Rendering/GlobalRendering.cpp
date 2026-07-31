@@ -18,6 +18,7 @@
 #include "Rendering/UniformConstants.h"
 #include "Rendering/Fonts/glFont.h"
 #include "Rendering/Models/ModelsMemStorage.h"
+#include "Rendering/GL/RenderDocCapture.h"
 #include "System/EventHandler.h"
 #include "System/type2.h"
 #include "System/TimeProfiler.h"
@@ -605,6 +606,19 @@ bool CGlobalRendering::CreateWindowAndContext(const char* title)
 
 	MakeCurrentContext(false);
 	SDL_DisableScreenSaver();
+
+	// SPRING_RDOC_PROBE=0: the earliest possible probe -- context just made
+	// current, nothing else has touched GL yet. StartFrameCapture does not need
+	// a swap, so this brackets nothing and only answers "can RenderDoc capture
+	// this context at all, before the engine has done anything to it".
+	{
+		const char* probeEnv = getenv("SPRING_RDOC_PROBE");
+		if (probeEnv != nullptr && std::atol(probeEnv) == 0) {
+			RenderDocCapture::BeginExplicit();
+			RenderDocCapture::EndExplicit();
+		}
+	}
+
 	return true;
 }
 
@@ -700,7 +714,22 @@ void CGlobalRendering::SwapBuffers(bool allowSwapBuffers, bool clearErrors)
 			}
 		#endif
 		
-		SDL_GL_SwapWindow(sdlWindow);
+		// SPRING_RDOC_PROBE=<n>: bracket swap n with an explicit RenderDoc
+		// capture, to bisect WHEN capturing stops being possible (n=1 is the
+		// first swap, long before any game content exists)
+		{
+			static const char* probeEnv = getenv("SPRING_RDOC_PROBE");
+			static const long probeSwap = (probeEnv != nullptr) ? std::atol(probeEnv) : -1;
+			static long swapNum = 0;
+
+			if (++swapNum == probeSwap)
+				RenderDocCapture::BeginExplicit();
+
+			SDL_GL_SwapWindow(sdlWindow);
+
+			if (swapNum == probeSwap)
+				RenderDocCapture::EndExplicit();
+		}
 
 		#ifdef _WIN32
 			if (forceDWMFlush == 2){ 
