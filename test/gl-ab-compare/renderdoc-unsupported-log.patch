@@ -1,8 +1,117 @@
 diff --git a/renderdoc/driver/gl/gl_driver.cpp b/renderdoc/driver/gl/gl_driver.cpp
-index 96c2b64ac..9821e5e15 100644
+index 96c2b64ac..967d530b2 100644
 --- a/renderdoc/driver/gl/gl_driver.cpp
 +++ b/renderdoc/driver/gl/gl_driver.cpp
-@@ -1057,6 +1057,11 @@ void WrappedOpenGL::UseUnusedSupportedFunction(const char *name)
+@@ -25,6 +25,13 @@
+ 
+ #include "gl_driver.h"
+ #include <algorithm>
++// RECOIL PATCH: backtrace of each unsupported function's first use, plus the
++// opt-in per-call-site census
++#include <dlfcn.h>
++#include <execinfo.h>
++#include <mutex>
++#include <unordered_map>
++#include <vector>
+ #include "common/common.h"
+ #include "core/settings.h"
+ #include "driver/shaders/spirv/spirv_compile.h"
+@@ -1032,8 +1039,94 @@ GLResourceRecord *WrappedOpenGL::GetContextRecord()
+   }
+ }
+ 
++// RECOIL PATCH: per-call-site census of unsupported-function use.
++//
++// The first-use backtrace below names the head of the burn-down list; this names
++// EVERY reachable site with a call count, which is the actual work list. Static
++// grep cannot do it -- most legacy call sites in the engine are unreachable for
++// any given game, and only the reached ones block capture. Opt-in via
++// RDOC_SITE_CENSUS=1 because it backtraces on every offending call.
++namespace
++{
++struct RecoilSiteKey
++{
++  const char *name;
++  uintptr_t addr;
++  bool operator==(const RecoilSiteKey &o) const { return name == o.name && addr == o.addr; }
++};
++struct RecoilSiteHash
++{
++  size_t operator()(const RecoilSiteKey &k) const
++  {
++    return std::hash<const void *>()(k.name) * 1099511628211u ^ std::hash<uintptr_t>()(k.addr);
++  }
++};
++
++std::mutex recoilSiteLock;
++std::unordered_map<RecoilSiteKey, uint64_t, RecoilSiteHash> recoilSiteCounts;
++bool recoilSiteCensus = false, recoilSiteCensusChecked = false, recoilSiteDumpArmed = false;
++
++void RecoilDumpSiteCensus()
++{
++  std::lock_guard<std::mutex> lock(recoilSiteLock);
++  // sorted by call count so the expensive sites lead
++  std::vector<std::pair<RecoilSiteKey, uint64_t> > sorted(recoilSiteCounts.begin(),
++                                                          recoilSiteCounts.end());
++  std::sort(sorted.begin(), sorted.end(),
++            [](const std::pair<RecoilSiteKey, uint64_t> &a,
++               const std::pair<RecoilSiteKey, uint64_t> &b) { return a.second > b.second; });
++
++  fprintf(stderr, "[RDOC-SITE-CENSUS] %zu distinct call sites\n", sorted.size());
++  for(size_t i = 0; i < sorted.size(); i++)
++  {
++    Dl_info info;
++    if(dladdr((void *)sorted[i].first.addr, &info) && info.dli_fbase)
++      fprintf(stderr, "[RDOC-SITE] %10llu %s %s+0x%zx\n", (unsigned long long)sorted[i].second,
++              sorted[i].first.name, info.dli_fname ? info.dli_fname : "?",
++              (size_t)(sorted[i].first.addr - (uintptr_t)info.dli_fbase));
++  }
++  fflush(stderr);
++}
++
++// Returns the first return address outside librenderdoc itself -- i.e. the
++// application code that made the call, not the interception wrapper.
++uintptr_t RecoilCallerAddr()
++{
++  void *bt[8];
++  int n = backtrace(bt, 8);
++  Dl_info self;
++  if(!dladdr((void *)&RecoilCallerAddr, &self))
++    return 0;
++  for(int i = 0; i < n; i++)
++  {
++    Dl_info info;
++    if(dladdr(bt[i], &info) && info.dli_fbase != self.dli_fbase)
++      return (uintptr_t)bt[i];
++  }
++  return 0;
++}
++}    // anonymous namespace
++
+ void WrappedOpenGL::UseUnusedSupportedFunction(const char *name)
+ {
++  if(!recoilSiteCensusChecked)
++  {
++    recoilSiteCensusChecked = true;
++    const char *env = getenv("RDOC_SITE_CENSUS");
++    recoilSiteCensus = (env && env[0] && env[0] != '0');
++  }
++  if(recoilSiteCensus)
++  {
++    const uintptr_t caller = RecoilCallerAddr();
++    std::lock_guard<std::mutex> lock(recoilSiteLock);
++    recoilSiteCounts[{name, caller}]++;
++    if(!recoilSiteDumpArmed)
++    {
++      recoilSiteDumpArmed = true;
++      atexit(&RecoilDumpSiteCensus);
++    }
++  }
++
+   // if this is the first time an unused function is called, remove all frame capturers immediately
+   if(m_UnsupportedFunctions.empty())
+   {
+@@ -1057,6 +1150,28 @@ void WrappedOpenGL::UseUnusedSupportedFunction(const char *name)
  
    if(sz != m_UnsupportedFunctions.size())
    {
@@ -10,6 +119,23 @@ index 96c2b64ac..9821e5e15 100644
 +    // report goes to SetDriverUnsupportedMessage (UI only), so a headless run
 +    // has no way to learn WHICH call disabled its capture.
 +    fprintf(stderr, "[RDOC-UNSUPPORTED] %s\n", name);
++    // ...and the return addresses of its FIRST use, so the offender can be
++    // resolved to a source line (addr2line) instead of grepped for. Only ever
++    // runs once per distinct function, so the cost is bounded by the list size.
++    {
++      void *bt[24];
++      int n = backtrace(bt, 24);
++      Dl_info info;
++      for(int i = 0; i < n; i++)
++      {
++        if(dladdr(bt[i], &info) && info.dli_fbase)
++          fprintf(stderr, "[RDOC-UNSUPPORTED-BT] %s %s+0x%zx\n", name,
++                  info.dli_fname ? info.dli_fname : "?",
++                  (size_t)((char *)bt[i] - (char *)info.dli_fbase));
++        else
++          fprintf(stderr, "[RDOC-UNSUPPORTED-BT] %s ? %p\n", name, bt[i]);
++      }
++    }
 +    fflush(stderr);
      RDCERR("Unsupported function %s used", name);
  

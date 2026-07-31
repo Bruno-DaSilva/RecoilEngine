@@ -17,6 +17,13 @@
 #
 # (XCB off avoids needing libxcb-keysyms1-dev; xlib/GLX is what the engine uses.)
 #
+# Companions, both reading the log this leaves in the write-dir:
+#   rdoc_offender_sites.sh  resolves each function's FIRST-USE backtrace to source
+#   rdoc_site_census.sh     with RDOC_SITE_CENSUS=1 set here, resolves EVERY
+#                           reachable call site with a call count -- the actual
+#                           burn-down work list, and the 1-minute replacement for
+#                           the ~20-minute apitrace census
+#
 # usage: run_rdoc_offenders.sh [--write-dir DIR] [--spring BIN] [--rdoc LIB]
 #                              [--timeout SEC] [<startscript>]
 set -uo pipefail
@@ -54,6 +61,16 @@ grep -q "RDOC-UNSUPPORTED" "$rdocLib" \
 content=$(cd -- "$(dirname -- "$content")" && pwd)/$(basename -- "$content")
 log=$writeDir/rdoc_offenders.log
 capture=$writeDir/rdoc_capture
+
+# The A/B compare harness renders a deliberate LEGACY pass every frame and blits
+# it with glWindowPos2i/glDrawPixels, so leaving it on inflates the offender list
+# with functions no shipping frame uses (measured: 49 vs 47). The meter has to own
+# this setting rather than inherit whatever the last gate run left behind.
+cfg=$writeDir/springsettings.cfg
+if [[ -f $cfg ]] && grep -qE '^GLFrameABCompare(Dump)? *= *[^0]' "$cfg"; then
+	printf '[rdoc] forcing GLFrameABCompare=0 for this run (was on)\n'
+	sed -i -E 's/^(GLFrameABCompare(Dump)?) *= *.*/\1 = 0/' "$cfg"
+fi
 
 rm -f "$capture"*.rdc
 : > "$writeDir/infolog.txt"
