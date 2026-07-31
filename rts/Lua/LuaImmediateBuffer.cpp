@@ -516,12 +516,9 @@ void LuaImmediateBuffer::FlushModern() const
 	if (verts.empty())
 		return;
 
-	// dense (rotated/world) modelview or perspective projection -> exact legacy
-	// replay, see ScreenAlignedMV / OrthoProjection
-	const bool screenAligned = ScreenAlignedMV(mvMat);
-	if (!screenAligned || !OrthoProjection(projMat)) {
-		CountFallback(screenAligned ? LuaImmFallback::REASON_PERSPECTIVE_P
-		                            : LuaImmFallback::REASON_DENSE_MV, verts.size());
+	// dense (rotated/world) modelview -> exact legacy replay, see ScreenAlignedMV
+	if (!ScreenAlignedMV(mvMat)) {
+		CountFallback(LuaImmFallback::REASON_DENSE_MV, verts.size());
 		FlushLegacy();
 		return;
 	}
@@ -546,6 +543,21 @@ void LuaImmediateBuffer::FlushModern() const
 			FlushLegacy();
 			return;
 		}
+	}
+
+	// Perspective projection: the divide amplifies CPU-vs-driver P*MV
+	// composition ULPs into subpixel vertex shifts. Measured (command-list
+	// gate, 2026-07-04) those shifts are invisible on flat fills but LINEAR
+	// -sampled high-frequency textures (glyph caches, icons) turn them into
+	// whole-shade deltas -- so the gate is on SAMPLING, not on the projection
+	// alone: a stream that samples nothing may go modern under perspective.
+	// This is checked after the texture gate because it needs sampleTexture,
+	// so a stream that is both perspective and texenv-rejected now reports the
+	// texenv reason rather than PERSPECTIVE_P.
+	if (sampleTexture && !OrthoProjection(projMat)) {
+		CountFallback(LuaImmFallback::REASON_PERSPECTIVE_P, verts.size());
+		FlushLegacy();
+		return;
 	}
 
 	// the fogged shader variant replicates LINEAR fog only (the engine's map
