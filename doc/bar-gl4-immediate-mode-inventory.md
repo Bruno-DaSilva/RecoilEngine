@@ -14,6 +14,15 @@ Working document for moving Beyond-All-Reason (`/www/projects/Beyond-All-Reason`
 
 ## Status / changelog
 
+- 2026-07-31 — **Residual A/B control flake characterised: an async single-pass perturbation, NOT the modern backend.** The gate had a rare nonzero control (~1 frame in 750, roughly 1 run in 3). Findings, in the order they settled it:
+  - **Null test (`AB_FORCE_LEGACY=1`, all four passes legacy) reproduces it**, so it is content/engine/driver nondeterminism with no modern-path involvement — every `signal=0` result stands.
+  - **Frames are bit-identical apart from a handful of pixels**: 4-17 px, always on thin lines/edges (dashed command lines, metal-spot rings, LOS-boundary arcs), with *zero* sub-threshold (1 LSB) differences anywhere else in the 3.7M-px frame. Symptoms split into position shifts and blend-strength changes in both directions.
+  - **`gui_metalspots` eliminated by controlled experiment** (write-dir stub shadowing BAR.sdd): identical rate with the widget removed, 3 flake frames per 10 runs either way. An apparent "all samples are on metal spots" fingerprint was a false lead.
+  - **The pairwise breakdown is decisive** (`f05c3df581`, logged on any nonzero compare): exactly ONE pass of four differs and the other three are bit-identical — and *which* pass varies randomly across catches (pass 1 x3, pass 2 x2, pass 3 x1). That rules out warmup (isolates pass 0), per-pass state advance (monotonic 0!=1!=2!=3), accumulation (progressive), and differing depth/z-fighting (three passes would not agree bit-exactly). The per-pass snapshot/restore of the unsynced RNG, `guRNG` and the draw clock is confirmed working by the same result.
+  - `ABCapture` is `glFinish()` + synchronous `glReadPixels` — no PBO ring — so the perturbed pass genuinely *rendered* differently rather than being read back wrong.
+  - **Remaining explanation: an asynchronous event landing inside one render** (driver-side residency/recompile, or a worker thread mutating data the draw reads). Deterministic logic cannot produce a random outlier pass.
+  - **Practical status: tolerated by design, not a blocker.** `ABBuildNoiseMask` already marks control-differing pixels and `ABMaskedDiff` excludes them, so a flake cannot manufacture a false signal; it costs one frame of control validity per ~750. Pass 0 legitimately differs (lazy once-per-frame work) and is not compared.
+
 - 2026-07-31 — **Task #8 done: apitrace census of a pure-modern frame, plus a per-reason fallback census.** Traced a `LuaModernGLBackend`+`LuaCommandLists`+`FontUseMVPUniform`+`RenderBufferUseMVPUniform` frame with `GLFrameABCompare=0` (the 4-pass gate would have put its two LEGACY passes in the trace). One settled in-game frame = 66,794 GL calls, **84.8% RenderDoc-rejected**, attributed by walking the engine's `glPushDebugGroup` stack:
   - **Display lists are dead, measured**: `glNewList` = **0**, a single `glCallList`. Phase 2 validated against a real frame.
   - By class: immediate 55,399 (82.9%), FF matrix 697, attrib stack 194, FF lighting 149, texenv/logicop/clipplane 57, point sprite 56, alpha test 18, client arrays 6, line stipple 1.
