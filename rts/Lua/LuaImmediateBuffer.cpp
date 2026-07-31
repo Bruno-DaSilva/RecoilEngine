@@ -266,10 +266,10 @@ namespace {
 	}
 
 	// FF samples an INCOMPLETE texture as if texturing were disabled while a
-	// GLSL sampler2D returns (0,0,0,1); any modern textured draw must fall
-	// back to legacy for such textures. Detects the practical case on the
-	// unit-0 GL_TEXTURE_2D binding: mipmapping min filter, MAX_LEVEL not
-	// clamped to 0, and no level-1 image (or no base image at all).
+	// GLSL sampler2D returns (0,0,0,1), so no modern draw may SAMPLE such a
+	// texture. Detects the practical case on the unit-0 GL_TEXTURE_2D binding:
+	// mipmapping min filter, MAX_LEVEL not clamped to 0, and no level-1 image
+	// (or no base image at all).
 	bool MipIncompleteTexture2D()
 	{
 		GLint minFilter = 0;
@@ -323,7 +323,11 @@ namespace {
 	// only modern coverage, never correctness. This gate is why the earlier
 	// ungated attempt diverged on gui_pip's textured overlays (255-class).
 	// Returns the rejecting sub-gate, or REASON_NONE when the state is
-	// reproducible.
+	// reproducible. Two of those sub-gates -- TEX_2D_DISABLED and
+	// TEX_MIP_INCOMPLETE -- report that FF samples NOTHING, which the
+	// untextured program reproduces exactly; both are checked with the "and
+	// nothing else textures this fragment" guards the caller needs to convert
+	// rather than fall back.
 	LuaImmFallback::Reason PlainModulateTexturing()
 	{
 		using namespace LuaImmFallback;
@@ -356,6 +360,22 @@ namespace {
 		    glIsEnabled(GL_TEXTURE_3D) == GL_TRUE)
 			return REASON_TEX_TARGET_PRIORITY;
 
+		// An INCOMPLETE texture disables the whole unit (GL 2.1 3.8.15), so FF
+		// rasterizes the plain vertex color and every sampling gate below is
+		// moot: this is the "texturing is off" case reached by a second route,
+		// and the caller converts it the same way -- provided nothing else
+		// textures the fragment. The draft-spot octagons in the Supreme Isthmus
+		// replay bind a mip-filtered texture with no mip chain, so legacy drew
+		// white fills while a sampling shader drew black. An enabled 1D target
+		// goes down with the unit per that spec rule, but the corner is
+		// untestable on BAR content and refusing it costs no coverage.
+		if (MipIncompleteTexture2D()) {
+			if (glIsEnabled(GL_TEXTURE_1D) == GL_TRUE)
+				return REASON_TEX_TARGET_PRIORITY;
+
+			return AnyOtherFFUnitEnabled() ? REASON_TEX_MULTI_UNIT : REASON_TEX_MIP_INCOMPLETE;
+		}
+
 		// texgen replaces the captured per-vertex texcoords
 		if (glIsEnabled(GL_TEXTURE_GEN_S) == GL_TRUE || glIsEnabled(GL_TEXTURE_GEN_T) == GL_TRUE ||
 		    glIsEnabled(GL_TEXTURE_GEN_R) == GL_TRUE || glIsEnabled(GL_TEXTURE_GEN_Q) == GL_TRUE)
@@ -374,14 +394,6 @@ namespace {
 			if (texMat.m[i] != identity.m[i])
 				return REASON_TEX_MATRIX;
 		}
-
-		// FF treats an INCOMPLETE texture as texturing DISABLED (fragment =
-		// plain vertex color) while GLSL texture() returns (0,0,0,1) -- the
-		// draft-spot octagons in the Supreme Isthmus replay bind a texture
-		// with a mipmapping min filter but no mip chain, so legacy drew white
-		// fills and the modern shader drew black.
-		if (MipIncompleteTexture2D())
-			return REASON_TEX_MIP_INCOMPLETE;
 
 		// GL_ALPHA-format MODULATE passes the fragment RGB through untouched,
 		// while GLSL texture() samples (0,0,0,A) and would zero it
@@ -527,16 +539,19 @@ void LuaImmediateBuffer::FlushModern() const
 	// state is one it reproduces exactly (see PlainModulateTexturing); any
 	// other texture-unit/texenv setup falls back to the exact legacy replay
 	// (which carries the texcoords).
-	// A stream can carry texcoords while FF texturing is OFF, in which case FF
-	// ignores them and rasterizes the plain vertex color -- the untextured
-	// program reproduces that exactly, so sample nothing instead of falling
-	// back (see PlainModulateTexturing's GL_TEXTURE_2D branch). The FF
-	// current-texcoord end state below still follows `textured`, because the
-	// legacy replay would have issued the coords either way.
+	// A stream can carry texcoords while FF texturing is OFF -- no enabled 2D
+	// target, or one bound to an INCOMPLETE texture -- in which case FF ignores
+	// them and rasterizes the plain vertex color. The untextured program
+	// reproduces that exactly, so sample nothing instead of falling back (see
+	// PlainModulateTexturing, which has already established that nothing else
+	// textures the fragment). The FF current-texcoord end state below still
+	// follows `textured`, because the legacy replay would have issued the
+	// coords either way.
 	bool sampleTexture = textured;
 	if (textured) {
 		const LuaImmFallback::Reason texReason = PlainModulateTexturing();
-		if (texReason == LuaImmFallback::REASON_TEX_2D_DISABLED) {
+		if (texReason == LuaImmFallback::REASON_TEX_2D_DISABLED ||
+		    texReason == LuaImmFallback::REASON_TEX_MIP_INCOMPLETE) {
 			sampleTexture = false;
 		} else if (texReason != LuaImmFallback::REASON_NONE) {
 			CountFallback(texReason, verts.size());
