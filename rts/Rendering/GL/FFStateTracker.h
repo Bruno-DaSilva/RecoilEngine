@@ -112,6 +112,7 @@ namespace GL {
 	// VA_TYPE_C4 RenderBuffer (788 frames, 0 px).
 	enum class FFExperiment : int {
 		None = 0,
+		ModelLegacyTexUnits = 3, // S3DModelVAO legacy bind: units 1/5/6 + glClientActiveTexture
 	};
 
 	// Proving that deleting a fixed-function call changes no pixel needs a

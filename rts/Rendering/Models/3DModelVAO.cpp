@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "3DModelVAO.hpp"
+#include "Rendering/GL/FFStateTracker.h"
 
 #include <algorithm>
 #include <iterator>
@@ -241,9 +242,22 @@ void S3DModelVAO::BindLegacyVertexAttribsAndVBOs() const
 	glEnableClientState(GL_NORMAL_ARRAY);
 	glNormalPointer(GL_FLOAT, sizeof(SVertexData), vertVBO.GetPtr(offsetof(SVertexData, normal)));
 
-	glClientActiveTexture(GL_TEXTURE0);
+	// Candidate: bind ONLY unit 0. GL_TEXTURE0 is the default active client
+	// texture, so dropping units 1/5/6 drops every glClientActiveTexture with
+	// them. Whether uv1 and the sTangent/tTangent channels are actually read on
+	// this path is a question about the shaders bound during it, which is
+	// measured rather than argued -- BAR's default material template does read
+	// gl_MultiTexCoord5/6, but guards them (`if (dot(T,T) < 0.1) T = ...`) and
+	// the main unit paths bind the MODERN VAO, not this.
+	const bool onlyUnit0 = GL::ffExperiment.Active(GL::FFExperiment::ModelLegacyTexUnits);
+
+	if (!onlyUnit0)
+		glClientActiveTexture(GL_TEXTURE0);
 	glEnableClientState(GL_TEXTURE_COORD_ARRAY);
 	glTexCoordPointer(2, GL_FLOAT, sizeof(SVertexData), vertVBO.GetPtr(offsetof(SVertexData, texCoords[0])));
+
+	if (onlyUnit0)
+		return;
 
 	glClientActiveTexture(GL_TEXTURE1);
 	glEnableClientState(GL_TEXTURE_COORD_ARRAY);
@@ -261,16 +275,18 @@ void S3DModelVAO::BindLegacyVertexAttribsAndVBOs() const
 void S3DModelVAO::UnbindLegacyVertexAttribsAndVBOs() const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	glClientActiveTexture(GL_TEXTURE6);
-	glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+	if (!GL::ffExperiment.Active(GL::FFExperiment::ModelLegacyTexUnits)) {
+		glClientActiveTexture(GL_TEXTURE6);
+		glDisableClientState(GL_TEXTURE_COORD_ARRAY);
 
-	glClientActiveTexture(GL_TEXTURE5);
-	glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+		glClientActiveTexture(GL_TEXTURE5);
+		glDisableClientState(GL_TEXTURE_COORD_ARRAY);
 
-	glClientActiveTexture(GL_TEXTURE1);
-	glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+		glClientActiveTexture(GL_TEXTURE1);
+		glDisableClientState(GL_TEXTURE_COORD_ARRAY);
 
-	glClientActiveTexture(GL_TEXTURE0);
+		glClientActiveTexture(GL_TEXTURE0);
+	}
 	glDisableClientState(GL_TEXTURE_COORD_ARRAY);
 
 	glDisableClientState(GL_VERTEX_ARRAY);
