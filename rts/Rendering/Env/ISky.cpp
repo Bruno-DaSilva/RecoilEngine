@@ -12,7 +12,6 @@
 #include "Rendering/GlobalRendering.h"
 #include "Rendering/Env/DebugCubeMapTexture.h"
 #include "Rendering/GL/myGL.h"
-#include "Rendering/GL/FFStateTracker.h"
 #include "System/Config/ConfigHandler.h"
 #include "System/Exceptions.h"
 #include "System/SafeUtil.h"
@@ -76,14 +75,14 @@ void ISky::SetupFog() {
 
 	if (!std::equal(curFogColor, curFogColor + 4, static_cast<const float*>(fogColor)))
 		glFogfv(GL_FOG_COLOR, fogColor);
-	// The candidate pass has to hold GL_EXP -- the value a deleted call would
-	// leave behind -- not merely skip the write. GL_FOG_MODE is sticky, so with
-	// the write skipped the pass would inherit the GL_LINEAR an earlier pass
-	// already set and the experiment would report a vacuous zero. The guard
-	// above restores GL_LINEAR on the next pass, so this needs no teardown.
-	const GLint wantFogMode = GL::ffExperiment.Active(GL::FFExperiment::FogMode) ? GL_EXP : GL_LINEAR;
-	if (curFogMode != wantFogMode)
-		glFogi(GL_FOG_MODE, wantFogMode);
+	// Fires once a run -- the transition off the GL_EXP default -- and is NOT
+	// removable despite nothing reading gl_Fog.mode: measured as FFExperiment 5,
+	// holding GL_EXP on the candidate pass diverged 2/747 frames at up to 46
+	// levels, in the shipped configuration as well as under forced legacy. So
+	// something in a BAR frame still rasterizes through the fixed-function fog
+	// mode, and glFogi can only go when the whole fog family does.
+	if (curFogMode != GL_LINEAR)
+		glFogi(GL_FOG_MODE, GL_LINEAR);
 	if (curFogStart != fogStartDist)
 		glFogf(GL_FOG_START, fogStartDist);
 	if (curFogEnd != fogEndDist)

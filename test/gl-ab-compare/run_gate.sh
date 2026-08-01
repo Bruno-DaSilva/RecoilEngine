@@ -18,6 +18,7 @@ minCompares=400
 runTimeout=420
 forceLegacy=0
 ffExperiment=0
+mixedOK=0
 content=
 
 die() { printf '\n[gate] FAIL: %s\n' "$*" >&2; exit 1; }
@@ -32,6 +33,12 @@ usage: run_gate.sh [options] <startscript|replay|watertest|idletest>
   --ff-experiment N  render the last pass with candidate FF removal N dropped
                      (GL::FFExperiment); implies --force-legacy so the removal is
                      the only variable. control AND signal must both be 0.
+  --mixed-ok         allow --ff-experiment WITHOUT --force-legacy, so the last
+                     pass varies the Lua backend AND the removal together. Sound
+                     only when the backend's own signal has been measured at 0 on
+                     this same content, which makes any remaining signal the
+                     removal's. Answers whether a candidate is inert in the
+                     SHIPPED configuration rather than under forced legacy.
 EOF
 }
 
@@ -42,12 +49,17 @@ while (( $# )); do
 		--min-compares) minCompares=$2; shift 2 ;;
 		--timeout)      runTimeout=$2; shift 2 ;;
 		--force-legacy) forceLegacy=1; shift ;;
-		--ff-experiment) ffExperiment=$2; forceLegacy=1; shift 2 ;;
+		--mixed-ok)     mixedOK=1; shift ;;
+		--ff-experiment) ffExperiment=$2; shift 2 ;;
+		# --mixed-ok may be given either side of --ff-experiment, so the implied
+		# --force-legacy is applied after the whole line is parsed, not here.
 		-h|--help)      usage; exit 0 ;;
 		-*)             die "unknown option $1" ;;
 		*)              content=$1; shift ;;
 	esac
 done
+
+(( ffExperiment && !mixedOK )) && forceLegacy=1
 
 [[ -n $content ]]  || die "no startscript/replay given (try: $0 watertest)"
 [[ -n $writeDir ]] || die "no write-dir: pass --write-dir DIR or set AB_WRITE_DIR"
@@ -85,8 +97,12 @@ printf '[gate] writedir %s\n' "$writeDir"
 if (( ffExperiment )); then
 	printf '[gate] GLFFRemovalExperiment=%s (FF removal on the last pass)\n' "$ffExperiment"
 	# Without --force-legacy the last pass would differ in BOTH the Lua backend and
-	# the removal, so a clean signal would not attribute to either.
-	(( forceLegacy )) || die "--ff-experiment requires --force-legacy"
+	# the removal, so a signal would not attribute to either.
+	if (( !forceLegacy )); then
+		(( mixedOK )) || die "--ff-experiment requires --force-legacy (or --mixed-ok, see usage)"
+		printf '[gate] --mixed-ok: last pass varies the backend AND the removal.\n'
+		printf '[gate]   A signal only attributes to the removal if the backend measures 0 on this content.\n'
+	fi
 fi
 
 # the engine tests AB_FORCE_LEGACY for PRESENCE, so it must be absent (not 0)

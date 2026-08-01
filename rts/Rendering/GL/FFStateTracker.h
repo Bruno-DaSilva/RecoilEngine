@@ -114,20 +114,18 @@ namespace GL {
 	// ab_unitshape_driver.lua raised the path from ~31 binds/run to 6845; the
 	// same experiment on stock content was a vacuous zero); 4 = LuaOpenGL's
 	// fixed-function light setup (746 frames, 0 px).
+	//
+	// Refuted so far -- a candidate that measures NON-zero is settled too, and
+	// costs less to record than to re-derive: 5 = ISky::SetupFog's
+	// glFogi(GL_FOG_MODE, GL_LINEAR). It fires once a run and no shader reads
+	// gl_Fog.mode (they take .end/.scale, which derive from GL_FOG_START/END
+	// under either mode), so it looked dead; holding GL_EXP on the candidate
+	// pass instead diverged 2/747 frames at up to 46 levels, reproducibly, in
+	// the shipped configuration as well as under forced legacy. Something still
+	// rasterizes fog through fixed function, and glFogi goes only with the rest
+	// of the family.
 	enum class FFExperiment : int {
 		None = 0,
-		// 5: ISky::SetupFog's glFogi(GL_FOG_MODE, GL_LINEAR). Fog reaches a
-		// fragment two ways, and only one of them reads the mode. A shader-bound
-		// draw computes its own fog from gl_Fog.end/.scale (the engine's
-		// SMFFragProg/ModelFragProg/BumpWaterFS/GrassFragProg and BAR's material
-		// templates all do exactly that), and .scale is derived from
-		// GL_FOG_START/END whatever the mode is; only a FIXED-FUNCTION draw with
-		// GL_FOG enabled -- the Lua legacy immediate replay, in practice --
-		// rasterizes through the mode itself. Whether any such draw survives in a
-		// BAR frame is a measurement, not an argument, which is what this is for.
-		// The call fires ONCE a run (the transition off the GL_EXP default), so
-		// if it is unobserved then deleting it retires glFogi outright.
-		FogMode = 5,
 	};
 
 	// Proving that deleting a fixed-function call changes no pixel needs a
