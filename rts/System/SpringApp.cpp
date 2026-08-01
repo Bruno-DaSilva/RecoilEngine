@@ -52,6 +52,7 @@
 #include "Rendering/Fonts/FontHandler.h"
 #include "Rendering/Fonts/glFont.h"
 #include "Rendering/GL/FBO.h"
+#include "Rendering/GL/FFDrawCensus.h"
 #include "Rendering/Models/ModelsMemStorage.h"
 #include "Rendering/GL/RenderBuffers.h"
 #include "Rendering/Shaders/ShaderHandler.h"
@@ -270,6 +271,7 @@ bool SpringApp::Init()
 	globalRendering->UpdateGLConfigs();
 	globalRendering->UpdateGLGeometry();
 	globalRendering->InitGLState();
+	GL::FFDrawCensus::Install();
 
 	CCameraHandler::InitStatic();
 	CBitmap::InitPool(configHandler->GetInt("TextureMemPoolSize"));
@@ -994,6 +996,7 @@ void SpringApp::Kill(bool fromRun)
 	killedCount += 1;
 
 	LOG("[SpringApp::%s][1] fromRun=%d", __func__, fromRun);
+	GL::FFDrawCensus::Dump();
 	ThreadPool::SetThreadCount(0);
 	LOG("[SpringApp::%s][2]", __func__);
 	LuaVFSDownload::Free(true);
