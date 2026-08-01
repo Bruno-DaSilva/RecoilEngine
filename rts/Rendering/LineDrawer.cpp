@@ -94,7 +94,14 @@ void CLineDrawer::DrawAllBuffered()
 		}
 	};
 
-	glPushAttrib(GL_ENABLE_BIT);
+	// Explicit save of just the three enables this function touches, instead of
+	// glPushAttrib(GL_ENABLE_BIT) which saves every enable and is unsupported by
+	// RenderDoc. Exact here because the whole bracket is the drawGroup calls
+	// below, and the only enable they move is GL_LINE_STIPPLE.
+	const GLboolean savedTex2D   = glIsEnabled(GL_TEXTURE_2D);
+	const GLboolean savedDepth   = glIsEnabled(GL_DEPTH_TEST);
+	const GLboolean savedStipple = glIsEnabled(GL_LINE_STIPPLE);
+
 	glDisable(GL_TEXTURE_2D);
 	glDisable(GL_DEPTH_TEST);
 	glDisable(GL_LINE_STIPPLE);
@@ -107,7 +114,9 @@ void CLineDrawer::DrawAllBuffered()
 		glDisable(GL_LINE_STIPPLE);
 	}
 
-	glPopAttrib();
+	if (savedTex2D)   glEnable(GL_TEXTURE_2D);   else glDisable(GL_TEXTURE_2D);
+	if (savedDepth)   glEnable(GL_DEPTH_TEST);   else glDisable(GL_DEPTH_TEST);
+	if (savedStipple) glEnable(GL_LINE_STIPPLE); else glDisable(GL_LINE_STIPPLE);
 }
 
 void CLineDrawer::DrawAll()

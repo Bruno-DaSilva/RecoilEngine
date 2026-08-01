@@ -5568,7 +5568,15 @@ int LuaOpenGL::RenderToTexture(lua_State* L)
 
 	glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, tex->fbo);
 
-	glPushAttrib(GL_VIEWPORT_BIT);
+	// GL_VIEWPORT_BIT is exactly {viewport, depth range}, so saving both is an
+	// exact substitute for the attrib push -- which matters because the pcall
+	// below runs arbitrary Lua that may set either. glGetIntegerv/glGetFloatv are
+	// not on RenderDoc's unsupported list; glPushAttrib is.
+	GLint savedViewport[4] = { 0, 0, 0, 0 };
+	GLfloat savedDepthRange[2] = { 0.0f, 1.0f };
+	glGetIntegerv(GL_VIEWPORT, savedViewport);
+	glGetFloatv(GL_DEPTH_RANGE, savedDepthRange);
+
 	glViewport(0, 0, tex->xsize, tex->ysize);
 	glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity();
 	glMatrixMode(GL_MODELVIEW);  glPushMatrix(); glLoadIdentity();
@@ -5581,7 +5589,8 @@ int LuaOpenGL::RenderToTexture(lua_State* L)
 
 	glMatrixMode(GL_PROJECTION); glPopMatrix();
 	glMatrixMode(GL_MODELVIEW);  glPopMatrix();
-	glPopAttrib();
+	glViewport(savedViewport[0], savedViewport[1], savedViewport[2], savedViewport[3]);
+	glDepthRange(savedDepthRange[0], savedDepthRange[1]);
 	if (auto* mirror = FFMirrorOps()) {
 		mirror->SetMatrixMode(GL_PROJECTION); mirror->PopMatrix();
 		mirror->SetMatrixMode(GL_MODELVIEW);  mirror->PopMatrix();
