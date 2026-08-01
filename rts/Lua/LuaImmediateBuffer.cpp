@@ -251,8 +251,16 @@ namespace {
 	// modern path triangulates them (as an index remap into the captured
 	// stream); other modes pass through unchanged. For a planar convex
 	// quad/polygon the triangle union (hence coverage) is the same as the
-	// fixed-function decomposition, so flat-colored fills stay bit-exact; only
-	// smooth-shaded fills can differ by the diagonal choice.
+	// fixed-function decomposition, so flat-colored fills are bit-exact either
+	// way -- but a SMOOTH-shaded fill interpolates along the split, so the
+	// diagonal has to be the one the driver picks or the quad's interior differs.
+	//
+	// It is {0,1,3},{1,2,3}, not the {0,1,2},{0,2,3} this used to assume.
+	// Measured, not reasoned: with the wrong diagonal the whole-frame gate
+	// diverged on ~14% of frames by a few interior pixels at delta 16-29 (BAR's
+	// gradient-filled UI bars), and flipping it took the same gate to 0/722.
+	// That difference stayed hidden for as long as the gradient-heavy lists
+	// compiled into display lists, which rendered identically in both passes.
 	std::pair<std::vector<uint32_t>, uint32_t> TriangulateIndicesForModern(uint32_t mode, size_t n)
 	{
 		std::vector<uint32_t> out;
@@ -261,8 +269,8 @@ namespace {
 			case GL_QUADS: {
 				out.reserve((n / 4) * 6);
 				for (size_t i = 0; i + 3 < n; i += 4)
-					out.insert(out.end(), {uint32_t(i), uint32_t(i + 1), uint32_t(i + 2),
-					                       uint32_t(i), uint32_t(i + 2), uint32_t(i + 3)});
+					out.insert(out.end(), {uint32_t(i), uint32_t(i + 1), uint32_t(i + 3),
+					                       uint32_t(i + 1), uint32_t(i + 2), uint32_t(i + 3)});
 				return {std::move(out), GL_TRIANGLES};
 			}
 			case GL_QUAD_STRIP: {
