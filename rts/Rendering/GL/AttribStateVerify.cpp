@@ -8,11 +8,20 @@
 #include <cstring>
 
 constexpr GLenum GL::AttribSnapshot::CAPS[];
+constexpr GLenum GL::AttribSnapshot::UNIT_CAPS[];
 
 void GL::AttribSnapshot::Capture()
 {
 	for (int i = 0; i < NUM_CAPS; ++i)
 		caps[i] = glIsEnabled(CAPS[i]);
+
+	glGetIntegerv(GL_ACTIVE_TEXTURE, &activeUnit);
+	for (int u = 0; u < NUM_UNITS; ++u) {
+		glActiveTexture(GL_TEXTURE0 + u);
+		for (int i = 0; i < NUM_UNIT_CAPS; ++i)
+			unitCaps[u][i] = glIsEnabled(UNIT_CAPS[i]);
+	}
+	glActiveTexture(activeUnit);
 
 	glGetIntegerv(GL_BLEND_SRC_RGB, &blendSrcRGB);
 	glGetIntegerv(GL_BLEND_DST_RGB, &blendDstRGB);
@@ -44,6 +53,22 @@ void GL::AttribSnapshot::Restore(GLbitfield mask) const
 			else
 				glDisable(CAPS[i]);
 		}
+
+		for (int u = 0; u < NUM_UNITS; ++u) {
+			glActiveTexture(GL_TEXTURE0 + u);
+			for (int i = 0; i < NUM_UNIT_CAPS; ++i) {
+				if (unitCaps[u][i])
+					glEnable(UNIT_CAPS[i]);
+				else
+					glDisable(UNIT_CAPS[i]);
+			}
+		}
+		// glPushAttrib(GL_ENABLE_BIT) does not save the active unit -- that is
+		// GL_TEXTURE_BIT -- so put back whatever the caller had, not the captured
+		// one, and leave the selector otherwise untouched.
+		GLint nowActive = GL_TEXTURE0;
+		glGetIntegerv(GL_ACTIVE_TEXTURE, &nowActive);
+		glActiveTexture(nowActive);
 	}
 
 	if (mask & GL_COLOR_BUFFER_BIT) {
@@ -90,6 +115,16 @@ const char* GL::AttribSnapshot::FirstDifference(const AttribSnapshot& o) const
 			static char buf[64];
 			snprintf(buf, sizeof(buf), "enable 0x%04x", CAPS[i]);
 			return buf;
+		}
+	}
+
+	for (int u = 0; u < NUM_UNITS; ++u) {
+		for (int i = 0; i < NUM_UNIT_CAPS; ++i) {
+			if (unitCaps[u][i] != o.unitCaps[u][i]) {
+				static char buf[64];
+				snprintf(buf, sizeof(buf), "unit %d enable 0x%04x", u, UNIT_CAPS[i]);
+				return buf;
+			}
 		}
 	}
 

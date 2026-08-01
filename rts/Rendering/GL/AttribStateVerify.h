@@ -34,15 +34,29 @@ namespace GL {
 			GL_POINT_SMOOTH, GL_POINT_SPRITE, GL_POLYGON_OFFSET_FILL,
 			GL_POLYGON_OFFSET_LINE, GL_POLYGON_OFFSET_POINT, GL_POLYGON_SMOOTH,
 			GL_RESCALE_NORMAL, GL_SCISSOR_TEST, GL_STENCIL_TEST,
-			GL_TEXTURE_1D, GL_TEXTURE_2D, GL_TEXTURE_3D, GL_TEXTURE_CUBE_MAP,
-			GL_TEXTURE_GEN_S, GL_TEXTURE_GEN_T, GL_TEXTURE_GEN_R, GL_TEXTURE_GEN_Q,
 			GL_CLIP_PLANE0, GL_CLIP_PLANE1, GL_CLIP_PLANE2,
 			GL_CLIP_PLANE3, GL_CLIP_PLANE4, GL_CLIP_PLANE5,
 			GL_LIGHT0, GL_LIGHT1,
 		};
 		static constexpr int NUM_CAPS = sizeof(CAPS) / sizeof(CAPS[0]);
 
+		// PER TEXTURE UNIT. glIsEnabled/glEnable only ever address the active
+		// unit, so these have to be walked unit by unit or a restore writes one
+		// unit's value onto another -- which broke 456/456 frames when this helper
+		// first shipped without it.
+		static constexpr GLenum UNIT_CAPS[] = {
+			GL_TEXTURE_1D, GL_TEXTURE_2D, GL_TEXTURE_3D, GL_TEXTURE_CUBE_MAP,
+			GL_TEXTURE_GEN_S, GL_TEXTURE_GEN_T, GL_TEXTURE_GEN_R, GL_TEXTURE_GEN_Q,
+		};
+		static constexpr int NUM_UNIT_CAPS = sizeof(UNIT_CAPS) / sizeof(UNIT_CAPS[0]);
+
+		// The engine's legacy paths reach unit 6 at most (S3DModelVAO's tangent
+		// channels); 8 covers that with headroom without paying for 32.
+		static constexpr int NUM_UNITS = 8;
+
 		GLboolean caps[NUM_CAPS] = {};
+		GLboolean unitCaps[NUM_UNITS][NUM_UNIT_CAPS] = {};
+		GLint activeUnit = GL_TEXTURE0;
 
 		// non-enable state from the bits the engine's brackets actually push
 		GLint blendSrcRGB = 0, blendDstRGB = 0, blendSrcAlpha = 0, blendDstAlpha = 0;
@@ -73,19 +87,10 @@ namespace GL {
 		// pushes it has to be dealt with separately rather than silently
 		// half-restored.
 		//
-		// HARD LIMIT -- do not use this on a bracket that changes the active
-		// texture unit. GL_TEXTURE_2D, GL_TEXTURE_1D/3D/CUBE_MAP and
-		// GL_TEXTURE_GEN_* are PER-UNIT, and glIsEnabled/glEnable only ever see
-		// the active one, whereas glPushAttrib saves every unit. Converting
-		// IModelDrawerState's Setup/Reset pair this way broke rendering on 456 of
-		// 456 frames (max delta 253) because the model drawer switches units
-		// between Setup and Reset, so the restore wrote unit N's saved value onto
-		// whatever unit happened to be active.
-		//
-		// FirstDifference is blind to the same thing for the same reason, so it
-		// did NOT catch that -- the pixel gate did. Fixing this means iterating
-		// units in both Capture and Restore; until then, per-unit brackets are out
-		// of scope for this helper.
+		// Per-unit texture enables ARE handled (see UNIT_CAPS): the first version
+		// of this helper walked only the active unit and broke 456/456 frames when
+		// applied to a bracket that switches units. FirstDifference was blind to
+		// the same thing, so the pixel gate caught it, not the verifier.
 		void Restore(GLbitfield mask) const;
 
 		// Names the first differing state, or nullptr when identical.

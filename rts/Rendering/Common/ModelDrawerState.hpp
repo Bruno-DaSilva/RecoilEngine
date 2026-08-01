@@ -3,6 +3,7 @@
 #pragma once
 
 #include <array>
+#include "Rendering/GL/AttribStateVerify.h"
 #include <string>
 
 #include "System/type2.h"
@@ -129,6 +130,11 @@ public:
 	/// </summary>
 	inline static float4 alphaValues = {};
 protected:
+	// saved across the Setup/Reset pair in place of glPushAttrib/glPopAttrib
+	mutable GL::AttribSnapshot savedOpaqueAttribs;
+	mutable GL::AttribSnapshot savedAlphaAttribs;
+	mutable GLbitfield savedAlphaMask = 0;
+
 	mutable ShaderCameraModes  scm = ShaderCameraModes::NORMAL_CAMERA;
 	mutable ShaderShadingModes ssm = ShaderShadingModes::NORMAL_SHADING;
 	mutable ShaderMatrixModes  smm = ShaderMatrixModes::NORMAL_MATMODE;

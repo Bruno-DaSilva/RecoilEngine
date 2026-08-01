@@ -43,7 +43,9 @@ bool IModelDrawerState::SetTeamColor(int team, float alpha) const
 void IModelDrawerState::SetupOpaqueDrawing(bool deferredPass) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	glPushAttrib(GL_ENABLE_BIT | GL_POLYGON_BIT);
+	GL::ShadowPushAttrib(GL_ENABLE_BIT | GL_POLYGON_BIT);
+	savedOpaqueAttribs.Capture();
+
 	glPolygonMode(GL_FRONT_AND_BACK, GL_LINE * CModelDrawerConcept::WireFrameModeRef() + GL_FILL * (1 - CModelDrawerConcept::WireFrameModeRef()));
 
 	glCullFace(GL_BACK);
@@ -65,13 +67,17 @@ void IModelDrawerState::ResetOpaqueDrawing(bool deferredPass) const
 	if (IsLegacy())
 		glDisable(GL_ALPHA_TEST);
 
-	glPopAttrib();
+	savedOpaqueAttribs.Restore(GL_ENABLE_BIT | GL_POLYGON_BIT);
+	GL::VerifyAttribRestore("IModelDrawerState::ResetOpaqueDrawing");
 }
 
 void IModelDrawerState::SetupAlphaDrawing(bool deferredPass) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	glPushAttrib(GL_ENABLE_BIT | GL_DEPTH_BUFFER_BIT | GL_POLYGON_BIT | (GL_COLOR_BUFFER_BIT * IsLegacy()));
+	savedAlphaMask = GL_ENABLE_BIT | GL_DEPTH_BUFFER_BIT | GL_POLYGON_BIT | (GL_COLOR_BUFFER_BIT * IsLegacy());
+	GL::ShadowPushAttrib(savedAlphaMask);
+	savedAlphaAttribs.Capture();
+
 	glPolygonMode(GL_FRONT_AND_BACK, GL_LINE * CModelDrawerConcept::WireFrameModeRef() + GL_FILL * (1 - CModelDrawerConcept::WireFrameModeRef()));
 
 	Enable(/*deferredPass always false*/ false, true);
@@ -92,7 +98,8 @@ void IModelDrawerState::ResetAlphaDrawing(bool deferredPass) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	Disable(/*deferredPass*/ false);
-	glPopAttrib();
+	savedAlphaAttribs.Restore(savedAlphaMask);
+	GL::VerifyAttribRestore("IModelDrawerState::ResetAlphaDrawing");
 }
 
 
