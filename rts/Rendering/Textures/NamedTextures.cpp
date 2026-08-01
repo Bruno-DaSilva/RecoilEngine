@@ -335,7 +335,22 @@ namespace CNamedTextures {
 			return true;
 		}
 
-		return (GenLoadTex(texName));
+		if (!GenLoadTex(texName))
+			return false;
+
+		// Load() leaves NOTHING bound (its last act is glBindTexture(.., 0)), so
+		// without this a first gl.Texture of a name binds no texture at all while
+		// every later one binds it from the cache above. Bind it here, where the
+		// call is outside Load()'s construction scope and so is recorded normally
+		// by a gl.CreateList capture -- inside that scope it would be swallowed,
+		// and the replayed list would draw with whatever was bound at CallList.
+		const auto loaded = texInfoMap.find(texName);
+		if (loaded == texInfoMap.end())
+			return false;
+
+		const GLuint texID = texInfoVec[loaded->second].id;
+		glBindTexture(GL_TEXTURE_2D, texID);
+		return (texID != 0);
 	}
 
 
