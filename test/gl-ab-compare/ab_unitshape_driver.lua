@@ -27,6 +27,12 @@ local enabled = (Spring.GetConfigInt("ABUnitShapeDriver", 0) == 1)
 local shapes = {}
 local myTeam = 0
 
+-- Band geometry is FIXED, not derived from the viewport: the hash has to describe
+-- the same pixels on every run, and a viewport-relative band would silently
+-- compare different regions if the window size ever differed.
+local bandW, bandH = 640, 160
+local hashFrame = Spring.GetConfigInt("ABUnitShapeHashFrame", 0)
+
 function widget:Initialize()
 	if not enabled then
 		widgetHandler:RemoveWidget()
@@ -59,6 +65,13 @@ function widget:DrawScreen()
 	local vsx, vsy = Spring.GetViewGeometry()
 	local size = math.min(vsx, vsy) * 0.06
 
+	-- Opaque backing so the band contains ONLY these shapes. Without it the world
+	-- shows through between them, and the world is not reproducible across
+	-- processes -- which would make the cross-build hash below worthless.
+	gl.Color(0, 0, 0, 1)
+	gl.Rect(0, 0, bandW, bandH)
+	gl.Color(1, 1, 1, 1)
+
 	-- Bottom strip, away from the build menu, so this adds draws rather than
 	-- overlapping existing UI (overlap would still compare fine, but a clean
 	-- band makes a real divergence easy to localise in the diff dump).
@@ -74,5 +87,46 @@ function widget:DrawScreen()
 			-- can only be trusted if this path is covered too.
 			gl.UnitShape(shapes[i], myTeam, false, (i % 2) == 1, false)
 		gl.PopMatrix()
+	end
+
+	-- CROSS-BUILD GATE.
+	--
+	-- The whole-frame A/B harness compares two passes of one frame, so it can only
+	-- vary something the engine can switch per pass. A change that moves the engine
+	-- AND a shader together -- the attribute contract, say -- is invisible to it:
+	-- both passes move, and it reports a clean 0/0 over broken output.
+	--
+	-- This is the missing half. The band above is deterministic across PROCESSES:
+	-- fixed unit defs sorted by id, fixed screen positions, fixed rotations, opaque
+	-- backing, no sim or clock input. So its pixels can be hashed and the hash
+	-- compared between two builds. Run the same content on each and diff one log
+	-- line; no engine support and no file I/O needed, since gl.ReadPixels is already
+	-- exposed.
+	if hashFrame > 0 and Spring.GetDrawFrame() == hashFrame then
+		local px = gl.ReadPixels(0, 0, bandW, bandH)
+		-- Rolling multiply-add over the returned components; order is fixed, so any
+		-- pixel difference moves the digest. Deliberately NO bitwise operators:
+		-- this is Lua 5.1, where `~` is not xor and `&` does not parse at all, and
+		-- a syntax error here silently stops the whole widget from loading.
+		local h = 2166136261
+		local function mix(v)
+			local b = math.floor((v or 0) * 255 + 0.5) % 256
+			h = (h * 31 + b) % 4294967296
+		end
+		for _, row in ipairs(px) do
+			if type(row) == "table" then
+				for _, c in ipairs(row) do
+					if type(c) == "table" then
+						for _, v in ipairs(c) do mix(v) end
+					else
+						mix(c)
+					end
+				end
+			else
+				mix(row)
+			end
+		end
+		Spring.Echo(("[AB UnitShape Driver] BANDHASH frame=%d %dx%d hash=%.0f")
+			:format(hashFrame, bandW, bandH, h))
 	end
 end
