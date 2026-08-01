@@ -2,6 +2,7 @@
 
 
 #include "BasicWater.h"
+#include "Rendering/GL/AttribStateVerify.h"
 #include "ISky.h"
 #include "WaterRendering.h"
 
@@ -89,7 +90,9 @@ void CBasicWater::Draw()
 	if (!waterRendering->forceRendering && !readMap->HasVisibleWater())
 		return;
 
-	glPushAttrib(GL_FOG_BIT | GL_POLYGON_BIT | GL_ENABLE_BIT);
+	GL::ShadowPushAttrib(GL_FOG_BIT | GL_POLYGON_BIT | GL_ENABLE_BIT);
+	GL::AttribSnapshot savedAttribs;
+	savedAttribs.Capture();
 
 	glDisable(GL_ALPHA_TEST);
 	glDepthMask(GL_FALSE);
@@ -110,5 +113,6 @@ void CBasicWater::Draw()
 
 	glBindTexture(GL_TEXTURE_2D,         0);
 
-	glPopAttrib();
+	savedAttribs.Restore(GL_FOG_BIT | GL_POLYGON_BIT | GL_ENABLE_BIT);
+	GL::VerifyAttribRestore("CBasicWater::Draw");
 }

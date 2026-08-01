@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "Game/Camera.h"
+#include "Rendering/GL/AttribStateVerify.h"
 #include "Game/CameraHandler.h"
 #include "Game/Game.h"
 #include "Map/BaseGroundDrawer.h"
@@ -186,7 +187,9 @@ void CubeMapHandler::CreateReflectionFace(unsigned int glFace, bool skyOnly)
 	RECOIL_DETAILED_TRACY_ZONE;
 	reflectionCubeFBO.AttachTexture((skyOnly? skyReflectionTexID: envReflectionTexID), glFace);
 
-	glPushAttrib(GL_FOG_BIT | GL_DEPTH_BUFFER_BIT);
+	GL::ShadowPushAttrib(GL_FOG_BIT | GL_DEPTH_BUFFER_BIT);
+	GL::AttribSnapshot savedAttribs;
+	savedAttribs.Capture();
 	const auto& sky = ISky::GetSky();
 	glClearColor(sky->fogColor.x, sky->fogColor.y, sky->fogColor.z, 1.0f);
 	glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
@@ -241,7 +244,8 @@ void CubeMapHandler::CreateReflectionFace(unsigned int glFace, bool skyOnly)
 		CCameraHandler::SetActiveCamera(prvCam->GetCamType());
 	}
 
-	glPopAttrib();
+	savedAttribs.Restore(GL_FOG_BIT | GL_DEPTH_BUFFER_BIT);
+	GL::VerifyAttribRestore("CubeMapHandler::UpdateReflectionFace");
 }
 
 

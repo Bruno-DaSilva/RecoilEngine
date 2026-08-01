@@ -1,5 +1,6 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 #include <cfloat>
+#include "Rendering/GL/AttribStateVerify.h"
 
 #include "ShadowHandler.h"
 #include "Game/Camera.h"
@@ -437,7 +438,9 @@ void CShadowHandler::DrawShadowPasses()
 {
 	inShadowPass = true;
 
-	glPushAttrib(GL_POLYGON_BIT | GL_ENABLE_BIT);
+	GL::ShadowPushAttrib(GL_POLYGON_BIT | GL_ENABLE_BIT);
+	GL::AttribSnapshot savedAttribs;
+	savedAttribs.Capture();
 	glEnable(GL_CULL_FACE);
 	glCullFace(GL_BACK);
 
@@ -485,7 +488,8 @@ void CShadowHandler::DrawShadowPasses()
 		eventHandler.DrawShadowPassTransparent();
 	}
 
-	glPopAttrib();
+	savedAttribs.Restore(GL_POLYGON_BIT | GL_ENABLE_BIT);
+	GL::VerifyAttribRestore("CShadowHandler::DrawShadowPasses");
 
 	inShadowPass = false;
 }

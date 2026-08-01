@@ -74,6 +74,10 @@ namespace GL {
 		GLfloat lineWidth = 0.0f;
 		GLfloat pointSize = 0.0f;
 		GLfloat currentColor[4] = {};
+		GLfloat fogColor[4] = {};
+		GLint fogMode = 0;
+		GLfloat fogDensity = 0.0f, fogStart = 0.0f, fogEnd = 0.0f;
+		GLint shadeModel = 0;
 
 		void Capture();
 
@@ -82,16 +86,30 @@ namespace GL {
 		// conversion exact without per-site analysis of the bracket's dynamic
 		// extent -- the failure mode that a narrow hand-picked save invites.
 		//
-		// GL_CURRENT_BIT is deliberately NOT handled: putting the current colour
-		// back needs glColor4fv, itself an unsupported function, so a bracket that
-		// pushes it has to be dealt with separately rather than silently
-		// half-restored.
+		// GL_CURRENT_BIT and GL_FOG_BIT ARE handled, but note what that costs:
+		// restoring them needs glColor4fv and glFog*, which are unsupported
+		// functions themselves. That is a deliberate trade -- both are already
+		// reachable elsewhere (gl.Color, ISky::SetupFog), so using them here does
+		// not keep any function alive that was not alive anyway, and it buys the
+		// retirement of the attrib pair. When those families are eventually
+		// retired, these restores become blockers and have to go with them.
+		//
+		// GL_LIGHTING_BIT is NOT restored: shade model, materials and light
+		// parameters would need glShadeModel/glMaterial*/glLight*, all of which
+		// this programme has already retired, so restoring them would resurrect
+		// four dead functions. Nothing in the engine writes that state any more,
+		// so it cannot differ across a bracket -- and shadeModel is captured and
+		// diffed (never restored) precisely so the verifier says so if that
+		// assumption ever breaks.
 		//
 		// Per-unit texture enables ARE handled (see UNIT_CAPS): the first version
 		// of this helper walked only the active unit and broke 456/456 frames when
 		// applied to a bracket that switches units. FirstDifference was blind to
 		// the same thing, so the pixel gate caught it, not the verifier.
 		void Restore(GLbitfield mask) const;
+
+		// restores one cap from the snapshot; several attrib bits own enables
+		void RestoreCap(GLenum cap) const;
 
 		// Names the first differing state, or nullptr when identical.
 		const char* FirstDifference(const AttribSnapshot& o) const;

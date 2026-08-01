@@ -42,6 +42,29 @@ void GL::AttribSnapshot::Capture()
 	glGetFloatv(GL_LINE_WIDTH, &lineWidth);
 	glGetFloatv(GL_POINT_SIZE, &pointSize);
 	glGetFloatv(GL_CURRENT_COLOR, currentColor);
+	glGetFloatv(GL_FOG_COLOR, fogColor);
+	glGetIntegerv(GL_FOG_MODE, &fogMode);
+	glGetFloatv(GL_FOG_DENSITY, &fogDensity);
+	glGetFloatv(GL_FOG_START, &fogStart);
+	glGetFloatv(GL_FOG_END, &fogEnd);
+	glGetIntegerv(GL_SHADE_MODEL, &shadeModel);
+}
+
+// Several attrib bits own enables of their own, so restoring a bit means
+// restoring those too -- GL_FOG_BIT includes the GL_FOG enable, GL_DEPTH_BUFFER_BIT
+// the GL_DEPTH_TEST enable, and so on. Missing that is exactly what the verifier
+// reported as "differs from glPopAttrib at enable 0x0b60".
+void GL::AttribSnapshot::RestoreCap(GLenum cap) const
+{
+	for (int i = 0; i < NUM_CAPS; ++i) {
+		if (CAPS[i] != cap)
+			continue;
+		if (caps[i])
+			glEnable(cap);
+		else
+			glDisable(cap);
+		return;
+	}
 }
 
 void GL::AttribSnapshot::Restore(GLbitfield mask) const
@@ -79,11 +102,14 @@ void GL::AttribSnapshot::Restore(GLbitfield mask) const
 		glBlendEquationSeparate(blendEquationRGB, blendEquationAlpha);
 		glColorMask(colorMask[0], colorMask[1], colorMask[2], colorMask[3]);
 		glAlphaFunc(alphaTestFunc, alphaTestRef);
+		RestoreCap(GL_ALPHA_TEST); RestoreCap(GL_BLEND);
+		RestoreCap(GL_DITHER);     RestoreCap(GL_COLOR_LOGIC_OP);
 	}
 
 	if (mask & GL_DEPTH_BUFFER_BIT) {
 		glDepthMask(depthMask);
 		glDepthFunc(depthFunc);
+		RestoreCap(GL_DEPTH_TEST);
 	}
 
 	if (mask & GL_POLYGON_BIT) {
@@ -92,6 +118,9 @@ void GL::AttribSnapshot::Restore(GLbitfield mask) const
 		glPolygonMode(GL_FRONT_AND_BACK, polygonModeFB[0]);
 		glCullFace(cullFaceMode);
 		glFrontFace(frontFace);
+		RestoreCap(GL_CULL_FACE);           RestoreCap(GL_POLYGON_SMOOTH);
+		RestoreCap(GL_POLYGON_OFFSET_FILL); RestoreCap(GL_POLYGON_OFFSET_LINE);
+		RestoreCap(GL_POLYGON_OFFSET_POINT);
 	}
 
 	if (mask & GL_VIEWPORT_BIT) {
@@ -99,11 +128,33 @@ void GL::AttribSnapshot::Restore(GLbitfield mask) const
 		glDepthRange(depthRange[0], depthRange[1]);
 	}
 
-	if (mask & GL_LINE_BIT)
-		glLineWidth(lineWidth);
+	if (mask & GL_FOG_BIT) {
+		glFogfv(GL_FOG_COLOR, fogColor);
+		glFogi(GL_FOG_MODE, fogMode);
+		glFogf(GL_FOG_DENSITY, fogDensity);
+		glFogf(GL_FOG_START, fogStart);
+		glFogf(GL_FOG_END, fogEnd);
+		RestoreCap(GL_FOG);
+	}
 
-	if (mask & GL_POINT_BIT)
+	if (mask & GL_CURRENT_BIT)
+		glColor4fv(currentColor);
+
+	if (mask & GL_LINE_BIT) {
+		glLineWidth(lineWidth);
+		RestoreCap(GL_LINE_SMOOTH); RestoreCap(GL_LINE_STIPPLE);
+	}
+
+	if (mask & GL_POINT_BIT) {
 		glPointSize(pointSize);
+		RestoreCap(GL_POINT_SMOOTH); RestoreCap(GL_POINT_SPRITE);
+	}
+
+	if (mask & GL_SCISSOR_BIT)
+		RestoreCap(GL_SCISSOR_TEST);
+
+	if (mask & GL_STENCIL_BUFFER_BIT)
+		RestoreCap(GL_STENCIL_TEST);
 }
 
 const char* GL::AttribSnapshot::FirstDifference(const AttribSnapshot& o) const
@@ -142,6 +193,9 @@ const char* GL::AttribSnapshot::FirstDifference(const AttribSnapshot& o) const
 	DIFF_ARRAY(viewport, 4)    DIFF_ARRAY(depthRange, 2)
 	DIFF_SCALAR(lineWidth)     DIFF_SCALAR(pointSize)
 	DIFF_ARRAY(currentColor, 4)
+	DIFF_ARRAY(fogColor, 4)
+	DIFF_SCALAR(fogMode) DIFF_SCALAR(fogDensity) DIFF_SCALAR(fogStart) DIFF_SCALAR(fogEnd)
+	DIFF_SCALAR(shadeModel)
 
 	#undef DIFF_SCALAR
 	#undef DIFF_ARRAY

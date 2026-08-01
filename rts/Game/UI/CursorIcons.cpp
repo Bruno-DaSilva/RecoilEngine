@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include <algorithm>
+#include "Rendering/GL/AttribStateVerify.h"
 
 
 #include "CursorIcons.h"
@@ -54,7 +55,9 @@ void CCursorIcons::SetCustomType(int cmdID, const std::string& cursor)
 void CCursorIcons::Draw()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	glPushAttrib(GL_ENABLE_BIT | GL_DEPTH_BUFFER_BIT | GL_CURRENT_BIT);
+	GL::ShadowPushAttrib(GL_ENABLE_BIT | GL_DEPTH_BUFFER_BIT | GL_CURRENT_BIT);
+	GL::AttribSnapshot savedAttribs;
+	savedAttribs.Capture();
 	glEnable(GL_BLEND);
 	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 	glDepthMask(GL_FALSE);
@@ -66,7 +69,8 @@ void CCursorIcons::Draw()
 	Clear();
 
 	glBindTexture(GL_TEXTURE_2D, 0);
-	glPopAttrib();
+	savedAttribs.Restore(GL_ENABLE_BIT | GL_DEPTH_BUFFER_BIT | GL_CURRENT_BIT);
+	GL::VerifyAttribRestore("CCursorIcons::Draw");
 }
 
 
