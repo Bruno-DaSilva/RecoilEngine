@@ -1,0 +1,86 @@
+Part                                         |   Total Time|    Self Time|   0.5s|   Self|     Fills/s| SelfFills/s
+???                                                  0.00ms        0.00ms   0.00%   0.00%       0.000M       0.000M
+Draw                                            161370.41ms     3164.99ms  44.69%   0.89%       4.587M       0.057M
+  Draw::DrawGenesis                               1117.32ms      105.87ms   0.49%   0.00%       0.047M       0.001M
+  Draw::Screen                                   49932.95ms     5907.43ms  24.90%   2.66%       3.282M       0.166M
+    Draw::Screen::DrawScreen                     41594.35ms    29898.54ms  20.96%  15.16%       3.039M       2.753M
+      Lua::Callins::Unsynced                    172335.33ms   170498.72ms  36.52%  36.22%       2.402M       2.385M
+        Lua::CopyData                              661.31ms      661.31ms   0.30%   0.30%       0.017M       0.017M
+    Draw::Screen::InputReceivers                    17.07ms       17.07ms   0.00%   0.00%       0.000M       0.000M
+  Draw::World                                    32610.23ms      775.25ms  15.55%   0.39%       0.992M       0.018M
+    Draw::OpaqueObjects::Debug                     509.69ms      509.69ms   0.20%   0.20%       0.000M       0.000M
+    Draw::World::Decals                            316.32ms      316.32ms   0.10%   0.10%       0.025M       0.025M
+    Draw::World::DrawWorld                       13113.42ms      130.93ms   6.20%   0.00%       0.453M       0.003M
+    Draw::World::Foliage                            64.48ms       64.48ms   0.00%   0.00%       0.003M       0.003M
+    Draw::World::Models::Alpha                     153.64ms       14.73ms   0.00%   0.00%       0.001M       0.000M
+      CFeatureDrawer::DrawAlphaPass                 14.11ms       14.11ms   0.00%   0.00%       0.000M       0.000M
+      CUnitDrawer::DrawAlphaPass                   124.81ms      124.81ms   0.00%   0.00%       0.000M       0.000M
+    Draw::World::Models::Opaque                   2505.45ms      121.34ms   1.18%   0.00%       0.057M       0.003M
+      CFeatureDrawer::Draw                          72.04ms       10.49ms   0.00%   0.00%       0.002M       0.000M
+        CFeatureDrawer::DrawOpaquePass              61.55ms       61.55ms   0.00%   0.00%       0.001M       0.001M
+      CUnitDrawer::Draw                           2312.07ms       21.08ms   1.08%   0.00%       0.053M       0.000M
+        CUnitDrawer::DrawOpaquePass               2290.99ms      412.48ms   1.08%   0.10%       0.052M       0.005M
+    Draw::World::Models::Projectiles               353.89ms      353.89ms   0.10%   0.10%       0.002M       0.002M
+    Draw::World::Particles                        4466.45ms     4363.19ms   1.97%   1.97%       0.085M       0.081M
+    Draw::World::Terrain                          3827.25ms      599.87ms   1.77%   0.20%       0.114M       0.015M
+      Draw::World::Terrain::ROAM::Draw            2314.62ms     2314.62ms   1.08%   1.08%       0.102M       0.102M
+      Draw::World::Terrain::ROAM::DrawBorderMesh     1885.22ms     1885.22ms   0.89%   0.89%       0.055M       0.055M
+      Draw::World::Terrain::ROAM::Update           351.06ms      351.06ms   0.10%   0.10%       0.004M       0.004M
+  Draw::World::CreateShadows                      5601.74ms     2584.02ms   2.56%   1.08%       0.196M       0.069M
+    CFeatureDrawer::DrawShadowPass                  70.18ms       70.18ms   0.00%   0.00%       0.006M       0.006M
+    CUnitDrawer::DrawShadowPass                   1735.66ms      417.85ms   0.79%   0.20%       0.062M       0.023M
+  Draw::World::UpdateReflTex                       253.08ms      141.45ms   0.10%   0.00%       0.007M       0.003M
+Lua::Callins::Synced                             28463.05ms    21659.34ms   4.43%   3.44%       0.350M       0.297M
+Misc::InputHandler::PushEvents                     102.85ms       72.34ms   0.00%   0.00%       0.002M       0.002M
+Misc::Profiler::AddTime                         268731.59ms   268653.16ms 125.39% 125.39%       0.000M       0.000M
+Misc::SwapBuffers                                 1506.52ms     1506.52ms   0.69%   0.69%       0.026M       0.026M
+Sim                                             173640.50ms     8459.05ms  35.14%   1.77%       5.961M       0.255M
+  Sim::BasicMapDamage                              273.94ms       20.30ms   0.10%   0.00%       0.036M       0.001M
+    Sim::BasicMapDamage::Los                       352.55ms      352.55ms   0.10%   0.10%       0.034M       0.034M
+    Sim::BasicMapDamage::Path                        2.73ms        2.73ms   0.00%   0.00%       0.000M       0.000M
+  Sim::Features                                    200.43ms      157.17ms   0.00%   0.00%       0.007M       0.005M
+  Sim::Features::UpdatePreFrame                    996.21ms      996.21ms   0.49%   0.49%       0.086M       0.086M
+  Sim::GameFrame                                 13306.21ms       37.61ms   6.30%   0.00%       0.738M       0.001M
+    Lua::CollectGarbage::Synced                   2612.34ms     2612.34ms   0.39%   0.39%       0.088M       0.088M
+    Lua::CollectGarbage::Unsynced                 7317.61ms     7317.61ms   1.38%   1.38%       0.256M       0.256M
+  Sim::Los                                        2448.23ms        7.07ms   1.08%   0.00%       0.084M       0.000M
+  Sim::Path                                       1695.35ms      157.37ms   0.79%   0.00%       0.039M       0.004M
+    ECS::PathSpeedModInfoSystem::Update            128.06ms        9.70ms   0.00%   0.00%       0.002M       0.000M
+    ECS::RemoveDeadPathsSystem::Update              27.52ms       27.52ms   0.00%   0.00%       0.002M       0.002M
+    ECS::RequeuePathsSystem::Update                 18.76ms       18.76ms   0.00%   0.00%       0.002M       0.002M
+    ECS::SyncUpdatedPathsSystem::Update             52.55ms       49.27ms   0.00%   0.00%       0.001M       0.001M
+    Sim::Path::MapUpdates                         1144.45ms       14.82ms   0.59%   0.00%       0.025M       0.000M
+  Sim::Projectiles                                2786.96ms       46.60ms   0.89%   0.00%       0.180M       0.013M
+    Sim::Projectiles::Collisions                  1610.78ms      652.94ms   0.39%   0.20%       0.068M       0.053M
+    Sim::Projectiles::Update                      1129.58ms      315.05ms   0.39%   0.10%       0.100M       0.061M
+      Sim::Projectiles::UpdateSyncedST             421.47ms      392.76ms   0.20%   0.20%       0.029M       0.029M
+      Sim::Projectiles::UpdateUnsyncedMT           297.60ms       11.51ms   0.10%   0.00%       0.007M       0.000M
+  Sim::Script                                     9252.00ms       12.93ms   4.13%   0.00%       0.347M       0.000M
+    CUnitScriptEngine::Tick                       8744.45ms     4892.42ms   3.94%   2.17%       0.267M       0.122M
+    Sim::Unit::UpdatePostAnimation                 494.62ms      494.62ms   0.20%   0.20%       0.079M       0.079M
+  Sim::SmoothHeightMesh::UpdateSmoothMesh           88.66ms       88.66ms   0.00%   0.00%       0.005M       0.005M
+  Sim::Unit::MoveType                             9953.69ms      962.56ms   4.33%   0.39%       0.555M       0.017M
+    ECS::UnitTrapCheckSystem::Update                14.55ms        5.15ms   0.00%   0.00%       0.000M       0.000M
+    Sim::Unit::MoveType::1::UpdateTraversalPlan     1103.11ms       21.60ms   0.39%   0.00%       0.045M       0.000M
+    Sim::Unit::MoveType::2::UpdatePreCollisions     3087.41ms     3087.41ms   1.28%   1.28%       0.109M       0.109M
+    Sim::Unit::MoveType::3::CollisionDetection      842.28ms       25.57ms   0.30%   0.00%       0.012M       0.000M
+    Sim::Unit::MoveType::4::ProcessCollisionEvents       98.37ms       95.86ms   0.00%   0.00%       0.002M       0.002M
+    Sim::Unit::MoveType::5::Update                3120.14ms     3120.14ms   1.48%   1.48%       0.354M       0.354M
+  Sim::Unit::SlowUpdate                           4653.99ms     3362.91ms   2.46%   1.77%       0.356M       0.314M
+  Sim::Unit::Update                              10403.40ms     7357.40ms   5.12%   3.54%       1.179M       1.071M
+  Sim::Unit::UpdatePreFrame                       7145.33ms     7145.33ms   3.74%   3.74%       1.834M       1.834M
+  Sim::Unit::UpdateWeaponVectors                  1399.65ms        5.89ms   0.69%   0.00%       0.064M       0.000M
+  Sim::Unit::Weapon                               3981.09ms     2915.10ms   1.87%   1.28%       0.162M       0.118M
+ThreadPool::RunTask                             146947.56ms   145213.31ms  62.70%  62.40%       4.772M       4.758M
+  Sim::Path::Requests                             1295.43ms     1295.43ms   0.10%   0.10%       0.006M       0.006M
+Update                                           36834.47ms     2550.18ms  18.21%   1.18%       1.627M       0.102M
+  ModelUniformsUploader::Update                    606.40ms      606.40ms   0.30%   0.30%       0.048M       0.048M
+  TransformsUploader::Update                      2518.35ms     2518.35ms   1.57%   1.57%       0.482M       0.482M
+  Update::EventHandler                           24958.27ms       26.51ms  12.60%   0.00%       0.804M       0.001M
+  Update::WorldDrawer                             6067.01ms      156.80ms   2.46%   0.00%       0.187M       0.004M
+    CFeatureDrawerBase::Update                    1237.76ms       35.54ms   0.59%   0.00%       0.062M       0.000M
+    CUnitDrawerBase::Update                       3692.77ms       31.52ms   1.38%   0.00%       0.103M       0.001M
+    ThreadPool::AddTask                          17981.02ms     4693.61ms   7.78%   1.87%       0.571M       0.008M
+      ThreadPool::WaitFor                        12797.45ms    12739.27ms   5.61%   5.61%       0.563M       0.561M
+    Update::ReadMap::UHM                           132.21ms      129.82ms   0.00%   0.00%       0.005M       0.005M
+    Update::WorldDrawer::{Sky,Water}                15.43ms       15.43ms   0.00%   0.00%       0.001M       0.001M
