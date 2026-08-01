@@ -35,6 +35,52 @@ void GL::AttribSnapshot::Capture()
 	glGetFloatv(GL_CURRENT_COLOR, currentColor);
 }
 
+void GL::AttribSnapshot::Restore(GLbitfield mask) const
+{
+	if (mask & GL_ENABLE_BIT) {
+		for (int i = 0; i < NUM_CAPS; ++i) {
+			if (caps[i])
+				glEnable(CAPS[i]);
+			else
+				glDisable(CAPS[i]);
+		}
+	}
+
+	if (mask & GL_COLOR_BUFFER_BIT) {
+		// the enables in this bit are already covered above when both are asked
+		// for; when only COLOR_BUFFER is asked for, blend enable still belongs to
+		// ENABLE_BIT and is left alone, matching glPopAttrib
+		glBlendFuncSeparate(blendSrcRGB, blendDstRGB, blendSrcAlpha, blendDstAlpha);
+		glBlendEquationSeparate(blendEquationRGB, blendEquationAlpha);
+		glColorMask(colorMask[0], colorMask[1], colorMask[2], colorMask[3]);
+		glAlphaFunc(alphaTestFunc, alphaTestRef);
+	}
+
+	if (mask & GL_DEPTH_BUFFER_BIT) {
+		glDepthMask(depthMask);
+		glDepthFunc(depthFunc);
+	}
+
+	if (mask & GL_POLYGON_BIT) {
+		// GL_POLYGON_MODE reports {front, back}; the engine only ever sets them
+		// together via GL_FRONT_AND_BACK, so restoring the front value covers it
+		glPolygonMode(GL_FRONT_AND_BACK, polygonModeFB[0]);
+		glCullFace(cullFaceMode);
+		glFrontFace(frontFace);
+	}
+
+	if (mask & GL_VIEWPORT_BIT) {
+		glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+		glDepthRange(depthRange[0], depthRange[1]);
+	}
+
+	if (mask & GL_LINE_BIT)
+		glLineWidth(lineWidth);
+
+	if (mask & GL_POINT_BIT)
+		glPointSize(pointSize);
+}
+
 const char* GL::AttribSnapshot::FirstDifference(const AttribSnapshot& o) const
 {
 	// Enables first: they are what a narrow save most often misses, and naming

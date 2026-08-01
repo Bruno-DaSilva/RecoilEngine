@@ -62,6 +62,32 @@ namespace GL {
 		GLfloat currentColor[4] = {};
 
 		void Capture();
+
+		// Restores exactly the states covered by `mask`, mirroring glPopAttrib
+		// semantics. Capturing everything and restoring by mask is what makes a
+		// conversion exact without per-site analysis of the bracket's dynamic
+		// extent -- the failure mode that a narrow hand-picked save invites.
+		//
+		// GL_CURRENT_BIT is deliberately NOT handled: putting the current colour
+		// back needs glColor4fv, itself an unsupported function, so a bracket that
+		// pushes it has to be dealt with separately rather than silently
+		// half-restored.
+		//
+		// HARD LIMIT -- do not use this on a bracket that changes the active
+		// texture unit. GL_TEXTURE_2D, GL_TEXTURE_1D/3D/CUBE_MAP and
+		// GL_TEXTURE_GEN_* are PER-UNIT, and glIsEnabled/glEnable only ever see
+		// the active one, whereas glPushAttrib saves every unit. Converting
+		// IModelDrawerState's Setup/Reset pair this way broke rendering on 456 of
+		// 456 frames (max delta 253) because the model drawer switches units
+		// between Setup and Reset, so the restore wrote unit N's saved value onto
+		// whatever unit happened to be active.
+		//
+		// FirstDifference is blind to the same thing for the same reason, so it
+		// did NOT catch that -- the pixel gate did. Fixing this means iterating
+		// units in both Capture and Restore; until then, per-unit brackets are out
+		// of scope for this helper.
+		void Restore(GLbitfield mask) const;
+
 		// Names the first differing state, or nullptr when identical.
 		const char* FirstDifference(const AttribSnapshot& o) const;
 	};
