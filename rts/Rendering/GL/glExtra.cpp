@@ -3,6 +3,7 @@
 
 #include "glExtra.h"
 #include "FFStandIn.h"
+#include "FFStateTracker.h"
 #include "RenderBuffers.h"
 #include "VertexArray.h"
 
@@ -74,8 +75,10 @@ namespace {
 			LOG_L(L_INFO, "[glExtra] FF-equivalent circle shader REJECTED (%s); client arrays retained", reject);
 		}
 
-		if (reject != nullptr)
+		if (reject != nullptr) {
+			GL::MaterializeFFState(); // the caller's client-array draw reads it out of GL
 			return false;
+		}
 
 		// Textured is rejected above, so the sampler is never read; the circle is
 		// a flat line loop in the fixed-function current colour's place.

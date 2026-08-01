@@ -4,6 +4,7 @@
 
 #include <string>
 
+#include "Rendering/GL/FFFog.h"
 #include "Rendering/GL/myGL.h"
 #include "Rendering/GlobalRendering.h"
 #include "Rendering/Shaders/Shader.h"
@@ -105,11 +106,13 @@ const char* GL::FFStandIn::StateReproducible(bool& textured, bool& fogged)
 	fogged = (glIsEnabled(GL_FOG) == GL_TRUE);
 
 	if (fogged) {
-		GLint fogMode = 0, fogCoordSrc = 0;
-		glGetIntegerv(GL_FOG_MODE, &fogMode);
+		GLint fogCoordSrc = 0;
 		glGetIntegerv(GL_FOG_COORD_SRC, &fogCoordSrc);
 
-		if (fogMode != GL_LINEAR)
+		// the mode comes from the mirror, not from GL: with the rewrite on the
+		// parameters live there and GL's copy is only refreshed for a draw that
+		// actually falls back (see MaterializeFFState)
+		if (GL::ffFog.Mode() != GL_LINEAR)
 			return "fog mode is not GL_LINEAR";
 		if (fogCoordSrc != GL_FRAGMENT_DEPTH)
 			return "fog coordinate source is not GL_FRAGMENT_DEPTH";

@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <string>
 
-// Rewrites the fixed-function vertex-input builtins out of the GLSL the engine
+// Rewrites the fixed-function builtins out of the GLSL the engine
 // compiles, so a draw path with no fixed-function arrays to bind can still feed
 // a shader it did not author.
 //
@@ -35,13 +35,22 @@ namespace GL {
 	constexpr int FF_COLOR_ATTRIB_LOC = 15;
 	constexpr const char* FF_COLOR_ATTRIB_NAME = "recoil_ff_aColor";
 
+	// The struct instance gl_Fog is substituted with. A struct rather than an
+	// accessor so that member access carries over unchanged.
+	constexpr const char* FF_FOG_UNIFORM_NAME = "recoil_ff_FogU";
+	// selects the uniform over the builtin; see the declaration block for why
+	// both are compiled in
+	constexpr const char* FF_FOG_SELECT_NAME = "recoil_ff_useFogU";
+
 	// Pin FF_COLOR_ATTRIB_NAME in `prog` ahead of linking it. Binding a name the
 	// program does not declare is a no-op, so this is unconditional at each link
 	// site rather than conditional on the rewrite having fired.
 	void BindFFColorAttribLocation(uint32_t prog);
 
-	// Vertex shaders only: in a fragment shader gl_Color is the interpolated
-	// varying rather than the attribute, and gl_MultiTexCoord0 does not exist.
+	// `stage` is the GL shader type. The vertex-input channels are vertex-stage
+	// only -- in a fragment shader gl_Color is the interpolated varying rather
+	// than the attribute, and gl_MultiTexCoord0 does not exist -- while gl_Fog is
+	// fixed-function state read identically in both.
 	//
 	// Returns true when `src` was rewritten. The POSITION and TEXCOORD channels
 	// are declined -- left as the builtins -- when the shader reads a
@@ -53,7 +62,7 @@ namespace GL {
 	//
 	// glslVersion is the effective #version (0 when none was given, i.e. 110),
 	// which decides `attribute` vs `in`.
-	bool RewriteFFVertexBuiltins(std::string& src, int glslVersion);
+	bool RewriteFFBuiltins(std::string& src, int glslVersion, uint32_t stage);
 
 	// Parses a leading "#version <n>" out of `text`; 0 when absent.
 	int ParseGlslVersion(const std::string& text);
@@ -85,6 +94,26 @@ namespace GL {
 	// the draw and lowered again afterwards, because the next draw through the
 	// same program may well be one fixed function still feeds.
 	void DrawFFAttribStream(uint32_t drawMode, const float* data, size_t vertCount, const FFAttribBinding& b);
+
+	// Feed the uniforms the rewrite introduced into `prog`, which is about to be
+	// (or has just been) bound. Locations are looked up once per program and the
+	// upload is skipped while the mirrored state has not moved since this
+	// program last saw it, so a bound-but-unchanged program costs one map lookup.
+	void PushFFUniforms(uint32_t prog);
+
+	// Wrap glUseProgram so PushFFUniforms runs on every bind, and glLinkProgram /
+	// glDeleteProgram so the location cache cannot outlive the layout it
+	// describes. glad has one pointer per entry point, so engine and Lua binds
+	// both come through it -- there is no second path to miss.
+	void InstallFFUniformFeed();
+
+	// True while a gl.CreateList body runs. Two things must not happen there:
+	// uniform uploads (RECORDED by a real compile, and a MATERIALIZER for a
+	// capture -- one glUniform1i turns a capture into a real display list and
+	// every legacy call in it into a real GL call), and materializing mirrored
+	// fixed-function state for the same reason. Both are re-done at replay time,
+	// which is when the program is re-bound and the draw actually happens.
+	inline bool ffListBodyOpen = false;
 
 	// Config FFVertexAttribRewrite. Off leaves every shader source untouched.
 	bool FFRewriteEnabled();

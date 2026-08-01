@@ -121,6 +121,19 @@ namespace GL {
 	// through glBegin first, so the meter names it before this matters.
 	inline bool ffDrawsPossible = true;
 
+	// Push every mirrored fixed-function state (current colour, fog) into GL,
+	// because the caller is about to draw through fixed function after all.
+	//
+	// ffDrawsPossible covers the case where the legacy path is live for the whole
+	// run; this covers the per-DRAW one, where a modern substitute inspected the
+	// live state, could not reproduce it, and handed the draw back. Those draws
+	// are issuing glBegin or client-array calls anyway, so the fixed-function
+	// setters they need cost a capture that was already lost.
+	//
+	// Any new fixed-function emitter has to call this. Missing it does not fail
+	// loudly: the draw simply uses whatever GL last held.
+	void MaterializeFFState();
+
 	// Which fixed-function call the removal experiment is testing this run. Add an
 	// enumerator plus its Active() call site for a candidate, prove it inert, then
 	// delete the call outright and retire the enumerator -- so an empty list here
@@ -160,6 +173,12 @@ namespace GL {
 		// generation -- experiment 3 on this same function was a vacuous zero
 		// until that driver existed.
 		ModelFFShader = 6,
+		// 9: rewritten shaders reading gl_Fog through the engine-fed uniform
+		// rather than the compatibility builtin. The candidate pass takes the
+		// BUILTIN, so a signal means the uniform feed differs from what fixed
+		// function would have supplied -- which the pixel gate cannot otherwise
+		// see, since a wrong feed moves all four passes together.
+		FogUniform = 9,
 		// 8: experiment 5 re-armed, see above -- and now measured INERT (667
 		// frames, 0 px, shipped configuration, knobs echoed back). The write
 		// stays anyway, because GL::FFStandIn::StateReproducible rejects a

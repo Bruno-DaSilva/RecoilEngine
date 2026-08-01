@@ -60,6 +60,7 @@
 #include "Rendering/Env/MapRendering.h"
 #include "Rendering/GL/glExtra.h"
 #include "Rendering/GL/FFStateTracker.h"
+#include "Rendering/GL/FFFog.h"
 #include "Rendering/GL/FFShaderRewrite.h"
 #include "Rendering/GL/AttribStateVerify.h"
 #include "Rendering/GL/TexBind.h"
@@ -178,6 +179,36 @@ static void SetImmBufferFixedFunctionMatrices()
 //
 // Queries live GL state, so it catches BOTH engine shaders and Lua gl.UseShader,
 // which calls glUseProgram directly without notifying shaderHandler.
+// The command-list replay re-issues a recorded glFog* by enum, which the mirror
+// takes by parameter instead. Nothing else in the engine sets fog by enum.
+static void SetFFFogf(GLenum pname, float v)
+{
+	switch (pname) {
+		case GL_FOG_START:   GL::ffFog.SetStart(v); break;
+		case GL_FOG_END:     GL::ffFog.SetEnd(v); break;
+		case GL_FOG_DENSITY: GL::ffFog.SetDensity(v); break;
+		default: LOG_L(L_WARNING, "[FFFog] replay of an unmirrored glFogf(0x%x)", pname); break;
+	}
+}
+
+static void SetFFFogi(GLenum pname, GLint v)
+{
+	if (pname == GL_FOG_MODE) {
+		GL::ffFog.SetMode(v);
+		return;
+	}
+	LOG_L(L_WARNING, "[FFFog] replay of an unmirrored glFogi(0x%x)", pname);
+}
+
+static void SetFFFogfv(GLenum pname, const float* v)
+{
+	if (pname == GL_FOG_COLOR) {
+		GL::ffFog.SetColor(v);
+		return;
+	}
+	SetFFFogf(pname, v[0]);
+}
+
 static bool ModernFeedable()
 {
 	const uint32_t prog = GL::CurrentProgram();
@@ -695,9 +726,9 @@ static void CmdListEmitIntoCompile(const LuaCommandList& cl)
 			case Op::ColorMask:         glColorMask((GLboolean)c.u0, (GLboolean)c.u1, (GLboolean)c.u2, (GLboolean)c.u3); break;
 			case Op::Scissor:           glScissor((GLint)c.u0, (GLint)c.u1, (GLsizei)c.u2, (GLsizei)c.u3); break;
 			case Op::ShadeModel:        glShadeModel(c.u0); GL::ffResetState.NoteShadeModel(c.u0); break;
-			case Op::Fogf:              glFogf(c.u0, c.f[0]); break;
-			case Op::Fogi:              glFogi(c.u0, (GLint)c.u1); break;
-			case Op::Fogfv:             glFogfv(c.u0, c.f); break;
+			case Op::Fogf:              SetFFFogf(c.u0, c.f[0]); break;
+			case Op::Fogi:              SetFFFogi(c.u0, (GLint)c.u1); break;
+			case Op::Fogfv:             SetFFFogfv(c.u0, c.f); break;
 			case Op::Color:             GL::ffColor.Set(c.f); break;
 			case Op::TexCoord:          glTexCoord2f(c.f[0], c.f[1]); break;
 			case Op::MatrixMode:        glMatrixMode(c.u0); break;
@@ -911,9 +942,9 @@ static void CmdListReplayLive(const LuaCommandList& cl)
 			case Op::ColorMask:         glColorMask((GLboolean)c.u0, (GLboolean)c.u1, (GLboolean)c.u2, (GLboolean)c.u3); break;
 			case Op::Scissor:           glScissor((GLint)c.u0, (GLint)c.u1, (GLsizei)c.u2, (GLsizei)c.u3); break;
 			case Op::ShadeModel:        glShadeModel(c.u0); GL::ffResetState.NoteShadeModel(c.u0); break;
-			case Op::Fogf:              glFogf(c.u0, c.f[0]); break;
-			case Op::Fogi:              glFogi(c.u0, (GLint)c.u1); break;
-			case Op::Fogfv:             glFogfv(c.u0, c.f); break;
+			case Op::Fogf:              SetFFFogf(c.u0, c.f[0]); break;
+			case Op::Fogi:              SetFFFogi(c.u0, (GLint)c.u1); break;
+			case Op::Fogfv:             SetFFFogfv(c.u0, c.f); break;
 			case Op::Color:             GL::ffColor.Set(c.f); break;
 			case Op::TexCoord:          glTexCoord2f(c.f[0], c.f[1]); break;
 			case Op::MatrixMode: {
@@ -7367,15 +7398,15 @@ int LuaOpenGL::GetFixedState(lua_State* L)
 			lua_pushboolean(L, glIsEnabled(GL_FOG));
 
 			GLfloat fogColor[4];
-			glGetFloatv(GL_FOG_COLOR, fogColor);
+			std::copy_n(GL::ffFog.Color(), 4, fogColor);
 
 			GLfloat fogDensity;
-			glGetFloatv(GL_FOG_DENSITY, &fogDensity);
+			fogDensity = GL::ffFog.Density();
 
 			GLfloat fogStart;
-			glGetFloatv(GL_FOG_START, &fogStart);
+			fogStart = GL::ffFog.Start();
 			GLfloat fogEnd;
-			glGetFloatv(GL_FOG_END, &fogEnd);
+			fogEnd = GL::ffFog.End();
 
 			lua_createtable(L, 0, 8);
 			HSTR_PUSH_NUMBER(L, "GL_FOG_COLOR_R", fogColor[0]);
@@ -7586,9 +7617,14 @@ int LuaOpenGL::CreateList(lua_State* L)
 		glNewList(list, GL_COMPILE);
 	SMatrixStateData prevMSD = GetLuaContextData(L)->glMatrixTracker.PushMatrixState(true);
 	const bool prevCompiling = compilingDisplayList;
+	const bool prevListBodyOpen = GL::ffListBodyOpen;
 	compilingDisplayList = true; // recorded gl.* matrix ops must not reach the FF mirror
+	// a uniform upload here is RECORDED by a real compile and MATERIALIZES a
+	// capture; the program is re-bound at replay time, which feeds it then
+	GL::ffListBodyOpen = true;
 	const int error = lua_pcall(L, (args - 1), 0, 0);
 	compilingDisplayList = prevCompiling;
+	GL::ffListBodyOpen = prevListBodyOpen;
 	SMatrixStateData matData = GetLuaContextData(L)->glMatrixTracker.GetMatrixState();
 	GetLuaContextData(L)->glMatrixTracker.PopMatrixState(prevMSD, false);
 

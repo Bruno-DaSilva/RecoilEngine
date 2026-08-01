@@ -2,8 +2,23 @@
 
 #include "Rendering/GL/FFStateTracker.h"
 
+#include "Rendering/GL/FFColor.h"
+#include "Rendering/GL/FFShaderRewrite.h"
+#include "Rendering/GL/FFFog.h"
 #include "Rendering/GL/MatrixStateTracker.h"
 #include "System/Log/ILog.h"
+
+void GL::MaterializeFFState()
+{
+	// Not inside a gl.CreateList body: there the calls are recorded rather than
+	// drawn, and a capture would materialize into a real display list on the
+	// strength of state its replay establishes for itself.
+	if (ffListBodyOpen)
+		return;
+
+	glColor4fv(ffColor.Get());
+	ffFog.MaterializeIntoGL();
+}
 
 void GL::FFResetState::Verify(const char* where) const
 {

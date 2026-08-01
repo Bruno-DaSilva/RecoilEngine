@@ -450,7 +450,7 @@ namespace {
 			if (version == 0)
 				version = GL::ParseGlslVersion(joined);
 
-			if (!GL::RewriteFFVertexBuiltins(joined, version))
+			if (!GL::RewriteFFBuiltins(joined, version, type))
 				joined.clear();
 		}
 

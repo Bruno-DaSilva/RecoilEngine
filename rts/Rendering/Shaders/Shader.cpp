@@ -191,7 +191,7 @@ namespace Shader {
 		// one of the engine's two GLSL compile funnels (the other is LuaShaders'
 		// CompileObject); rewriting here reaches every engine-shipped shader
 		const bool rewritten = (type == GL_VERTEX_SHADER) &&
-			GL::RewriteFFVertexBuiltins(sourceStr, GL::ParseGlslVersion(versionStr));
+			GL::RewriteFFBuiltins(sourceStr, GL::ParseGlslVersion(versionStr), type);
 
 		std::vector<const GLchar*> sources(7);
 		const auto compile = [&]() {

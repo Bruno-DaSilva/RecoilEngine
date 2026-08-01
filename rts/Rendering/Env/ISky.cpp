@@ -11,6 +11,7 @@
 #include "Map/MapInfo.h"
 #include "Rendering/GlobalRendering.h"
 #include "Rendering/Env/DebugCubeMapTexture.h"
+#include "Rendering/GL/FFFog.h"
 #include "Rendering/GL/FFStateTracker.h"
 #include "Rendering/GL/myGL.h"
 #include "System/Config/ConfigHandler.h"
@@ -65,17 +66,17 @@ void ISky::SetupFog() {
 	const float fogStartDist = camera->GetFarPlaneDist() * fogStart;
 	const float fogEndDist   = camera->GetFarPlaneDist() * fogEnd;
 
-	float curFogColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-	GLint curFogMode = 0;
-	float curFogStart = 0.0f, curFogEnd = 0.0f, curFogDensity = 0.0f;
-	glGetFloatv(GL_FOG_COLOR, curFogColor);
-	glGetIntegerv(GL_FOG_MODE, &curFogMode);
-	glGetFloatv(GL_FOG_START, &curFogStart);
-	glGetFloatv(GL_FOG_END, &curFogEnd);
-	glGetFloatv(GL_FOG_DENSITY, &curFogDensity);
+	// against the MIRROR, not against GL: with the rewrite on the parameters live
+	// there and GL's copy is deliberately stale, so comparing with GL would find a
+	// difference every pass and re-set the state 5,601 times a run
+	const float* curFogColor = GL::ffFog.Color();
+	const GLint curFogMode = GL::ffFog.Mode();
+	const float curFogStart = GL::ffFog.Start();
+	const float curFogEnd = GL::ffFog.End();
+	const float curFogDensity = GL::ffFog.Density();
 
 	if (!std::equal(curFogColor, curFogColor + 4, static_cast<const float*>(fogColor)))
-		glFogfv(GL_FOG_COLOR, fogColor);
+		GL::ffFog.SetColor(fogColor);
 	// Only fixed-function rasterization reads the fog MODE: shaders take
 	// gl_Fog.end and gl_Fog.scale, and both derive from GL_FOG_START/END whichever
 	// mode is set. The candidate pass HOLDS GL_EXP rather than skipping the write
@@ -83,13 +84,13 @@ void ISky::SetupFog() {
 	// GL_LINEAR an earlier pass set and measures nothing at all.
 	const GLint wantFogMode = GL::ffExperiment.Active(GL::FFExperiment::FogMode) ? GL_EXP : GL_LINEAR;
 	if (curFogMode != wantFogMode)
-		glFogi(GL_FOG_MODE, wantFogMode);
+		GL::ffFog.SetMode(wantFogMode);
 	if (curFogStart != fogStartDist)
-		glFogf(GL_FOG_START, fogStartDist);
+		GL::ffFog.SetStart(fogStartDist);
 	if (curFogEnd != fogEndDist)
-		glFogf(GL_FOG_END, fogEndDist);
+		GL::ffFog.SetEnd(fogEndDist);
 	if (curFogDensity != 1.0f)
-		glFogf(GL_FOG_DENSITY, 1.0f);
+		GL::ffFog.SetDensity(1.0f);
 }
 
 void ISky::SetSky()

@@ -5,6 +5,7 @@
 #include "Lua/LuaOpenGL.h"
 #include "Rendering/GL/myGL.h"
 #include "Rendering/GL/FFStateTracker.h"
+#include "Rendering/GL/FFFog.h"
 #include "Rendering/GL/FFShaderRewrite.h"
 #include "Rendering/GlobalRendering.h"
 #include "Rendering/Shaders/ShaderHandler.h"
@@ -190,10 +191,8 @@ namespace {
 	// byte-parity-proven fogless program handles the draw.
 	bool FogIsEffective(const CMatrix44f& mv, const std::vector<VA_TYPE_TC>& verts)
 	{
-		GLfloat fogStart = 0.0f;
-		GLfloat fogEnd = 0.0f;
-		glGetFloatv(GL_FOG_START, &fogStart);
-		glGetFloatv(GL_FOG_END, &fogEnd);
+		const GLfloat fogStart = GL::ffFog.Start();
+		const GLfloat fogEnd = GL::ffFog.End();
 		if (fogEnd <= fogStart)
 			return true; // degenerate scale; be conservative
 
@@ -594,6 +593,8 @@ void LuaImmediateBuffer::FlushLegacy() const
 	// colors (not the quantized SColor), so it is an exact legacy equivalent
 	// either way.
 	assert(vertColorsF.size() == verts.size() * 4);
+	GL::MaterializeFFState();
+
 	glBegin(mode);
 	for (size_t i = 0; i < verts.size(); ++i) {
 		const VA_TYPE_TC& v = verts[i];
@@ -728,8 +729,7 @@ void LuaImmediateBuffer::FlushModern() const
 	// program.
 	bool fogged = (glIsEnabled(GL_FOG) == GL_TRUE);
 	if (fogged) {
-		GLint fogMode = GL_LINEAR;
-		glGetIntegerv(GL_FOG_MODE, &fogMode);
+		const GLint fogMode = GL::ffFog.Mode();
 		if (fogMode != GL_LINEAR) {
 			CountFallback(LuaImmFallback::REASON_FOG_MODE, verts.size());
 			FlushLegacy();
@@ -882,6 +882,8 @@ void LuaImmediateBuffer::FlushTexRectLegacy() const
 	if (!texRect.set)
 		return;
 
+	GL::MaterializeFFState();
+
 	// caller has bound the texture and enabled GL_TEXTURE_2D; FF MODULATE
 	// gives texture * glColor (exact float color).
 	GL::ffColor.Set(texRect.cf);
@@ -926,8 +928,7 @@ void LuaImmediateBuffer::FlushTexRectModern() const
 	// FlushModern); saturated fog stays on the proven fogless program
 	bool fogged = (glIsEnabled(GL_FOG) == GL_TRUE);
 	if (fogged) {
-		GLint fogMode = GL_LINEAR;
-		glGetIntegerv(GL_FOG_MODE, &fogMode);
+		const GLint fogMode = GL::ffFog.Mode();
 		if (fogMode != GL_LINEAR) {
 			CountFallback(LuaImmFallback::REASON_FOG_MODE, TEX_RECT_VERTS);
 			FlushTexRectLegacy();

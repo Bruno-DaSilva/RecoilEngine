@@ -362,6 +362,10 @@ void S3DModelVAO::BindLegacyVertexAttribsAndVBOs() const
 		}
 	}
 
+	// no substitute took it: this really is a fixed-function draw, and it reads
+	// the mirrored fixed-function state out of GL
+	GL::MaterializeFFState();
+
 	legacyAttribsBound = true;
 	vertVBO.Bind();
 	indxVBO.Bind();

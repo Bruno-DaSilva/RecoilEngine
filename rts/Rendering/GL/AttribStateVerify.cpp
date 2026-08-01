@@ -2,6 +2,7 @@
 
 #include "Rendering/GL/AttribStateVerify.h"
 
+#include "Rendering/GL/FFFog.h"
 #include "Rendering/GL/MatrixStateTracker.h"
 #include "System/Log/ILog.h"
 
@@ -85,12 +86,15 @@ void GL::AttribSnapshot::Capture(GLbitfield mask)
 	if (mask & GL_CURRENT_BIT)
 		std::copy_n(GL::ffColor.Get(), 4, currentColor);
 
+	// from the mirror, not from GL: the fog parameters live there once the shader
+	// rewrite is on, and GL's copy is deliberately stale -- a bracket that saved
+	// GL's would restore a value nothing had set
 	if (mask & GL_FOG_BIT) {
-		glGetFloatv(GL_FOG_COLOR, fogColor);
-		glGetIntegerv(GL_FOG_MODE, &fogMode);
-		glGetFloatv(GL_FOG_DENSITY, &fogDensity);
-		glGetFloatv(GL_FOG_START, &fogStart);
-		glGetFloatv(GL_FOG_END, &fogEnd);
+		std::copy_n(GL::ffFog.Color(), 4, fogColor);
+		fogMode = GL::ffFog.Mode();
+		fogDensity = GL::ffFog.Density();
+		fogStart = GL::ffFog.Start();
+		fogEnd = GL::ffFog.End();
 	}
 
 	// detect-only, and cheap enough to always take: it is the tripwire for
@@ -241,11 +245,11 @@ void GL::AttribSnapshot::Restore(GLbitfield mask) const
 
 	if (mask & GL_FOG_BIT) {
 		if (!std::equal(fogColor, fogColor + 4, cur.fogColor))
-			glFogfv(GL_FOG_COLOR, fogColor);
-		if (cur.fogMode    != fogMode)    glFogi(GL_FOG_MODE, fogMode);
-		if (cur.fogDensity != fogDensity) glFogf(GL_FOG_DENSITY, fogDensity);
-		if (cur.fogStart   != fogStart)   glFogf(GL_FOG_START, fogStart);
-		if (cur.fogEnd     != fogEnd)     glFogf(GL_FOG_END, fogEnd);
+			GL::ffFog.SetColor(fogColor);
+		if (cur.fogMode    != fogMode)    GL::ffFog.SetMode(fogMode);
+		if (cur.fogDensity != fogDensity) GL::ffFog.SetDensity(fogDensity);
+		if (cur.fogStart   != fogStart)   GL::ffFog.SetStart(fogStart);
+		if (cur.fogEnd     != fogEnd)     GL::ffFog.SetEnd(fogEnd);
 		RestoreCap(GL_FOG);
 	}
 

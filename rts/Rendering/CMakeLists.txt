@@ -54,6 +54,7 @@ set(sources_engine_Rendering
 		"${CMAKE_CURRENT_SOURCE_DIR}/GL/FBO.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/GL/FFStateTracker.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/GL/FFColor.cpp"
+		"${CMAKE_CURRENT_SOURCE_DIR}/GL/FFFog.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/GL/FFDrawCensus.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/GL/FFStandIn.cpp"
 		"${CMAKE_CURRENT_SOURCE_DIR}/GL/FFShaderRewrite.cpp"

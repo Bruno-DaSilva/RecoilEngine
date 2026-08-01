@@ -6,8 +6,11 @@
 #include <array>
 #include <cctype>
 #include <cstring>
+#include <unordered_map>
 #include <vector>
 
+#include "Rendering/GL/FFFog.h"
+#include "Rendering/GL/FFStateTracker.h"
 #include "Rendering/GL/myGL.h"
 #include "System/Config/ConfigHandler.h"
 #include "System/Log/ILog.h"
@@ -101,25 +104,55 @@ namespace {
 		return std::string::npos;
 	}
 
-	// Insert after the #version directive, or at the very top when the caller
-	// already stripped it. Returns the byte offset and the source line the next
-	// line then carries, so #line can be re-anchored and a compile error in the
-	// game's own source still reports the line its author wrote.
+	// Insert after the #version directive AND after the leading #extension /
+	// #pragma block, or at the very top when the caller already stripped the
+	// version. #extension is only legal before the first non-preprocessor token,
+	// so a declaration placed between #version and it makes the shader
+	// uncompilable -- which is how the engine's own fogged stand-in broke.
+	//
+	// Returns the byte offset and the source line the next line then carries, so
+	// #line can be re-anchored and a compile error in the game's own source still
+	// reports the line its author wrote.
 	std::pair<size_t, int> PrologueInsertPoint(const std::string& code)
 	{
-		const size_t v = FindVersionDirective(code);
-		if (v == std::string::npos)
-			return { 0, 1 };
+		// The caller may have stripped the version already (Shader.cpp extracts it
+		// and re-prepends it after compiling), in which case the #extension block
+		// is the very first thing in the source and the skip below is the ONLY
+		// thing keeping the declarations out from in front of it.
+		size_t at = 0;
 
-		const size_t eol = code.find('\n', v);
-		if (eol == std::string::npos)
-			return { code.size(), 1 };
+		if (const size_t v = FindVersionDirective(code); v != std::string::npos) {
+			at = code.find('\n', v);
+			if (at == std::string::npos)
+				return { code.size(), 1 };
+			++at;
+		}
+
+		// Only blank lines and the two directives that must stay at the top are
+		// skipped; anything else (a #define, a #if) could put the declarations
+		// inside a conditional or past something that reads them.
+		for (;;) {
+			size_t p = at;
+			while (p < code.size() && (code[p] == ' ' || code[p] == '\t'))
+				++p;
+
+			const bool skippable = (p < code.size() && code[p] == '\n') ||
+			                       (code.compare(p, 10, "#extension") == 0) ||
+			                       (code.compare(p, 7, "#pragma") == 0);
+			if (!skippable)
+				break;
+
+			const size_t eol = code.find('\n', p);
+			if (eol == std::string::npos)
+				return { code.size(), 1 };
+			at = eol + 1;
+		}
 
 		int line = 1;
-		for (size_t i = 0; i <= eol; ++i)
+		for (size_t i = 0; i < at; ++i)
 			line += (code[i] == '\n');
 
-		return { eol + 1, line };
+		return { at, line };
 	}
 }
 
@@ -146,7 +179,7 @@ int GL::ParseGlslVersion(const std::string& text)
 	return ver;
 }
 
-bool GL::RewriteFFVertexBuiltins(std::string& src, int glslVersion)
+bool GL::RewriteFFBuiltins(std::string& src, int glslVersion, uint32_t stage)
 {
 	if (!FFRewriteEnabled())
 		return false;
@@ -155,12 +188,18 @@ bool GL::RewriteFFVertexBuiltins(std::string& src, int glslVersion)
 	// triggers a rewrite nor gets one
 	const std::string code = MaskComments(src);
 
-	const bool usesColor = HasIdent(code, "gl_Color");
-	bool usesFtransform = HasIdent(code, "ftransform");
-	bool usesVertex = usesFtransform || HasIdent(code, "gl_Vertex");
-	bool usesTexCrd = HasIdent(code, "gl_MultiTexCoord0");
+	// gl_Fog is fixed-function state read identically in both stages. The vertex
+	// channels are vertex-stage only, and gl_Color especially so: in a fragment
+	// shader that name is the INTERPOLATED varying, not the attribute, and
+	// substituting it there would read a vertex input that does not exist.
+	const bool vs = (stage == GL_VERTEX_SHADER);
+	const bool usesFog = HasIdent(code, "gl_Fog");
+	const bool usesColor = vs && HasIdent(code, "gl_Color");
+	bool usesFtransform = vs && HasIdent(code, "ftransform");
+	bool usesVertex = usesFtransform || (vs && HasIdent(code, "gl_Vertex"));
+	bool usesTexCrd = vs && HasIdent(code, "gl_MultiTexCoord0");
 
-	if (!usesVertex && !usesColor && !usesTexCrd)
+	if (!usesVertex && !usesColor && !usesTexCrd && !usesFog)
 		return false;
 
 	// The stream channels come as a set -- half-feeding one of the builtins this
@@ -177,7 +216,7 @@ bool GL::RewriteFFVertexBuiltins(std::string& src, int glslVersion)
 		break;
 	}
 
-	if (!usesVertex && !usesColor && !usesTexCrd)
+	if (!usesVertex && !usesColor && !usesTexCrd && !usesFog)
 		return false;
 
 	// Collect every site against the mask, then rewrite `src` once from the back,
@@ -199,6 +238,10 @@ bool GL::RewriteFFVertexBuiltins(std::string& src, int glslVersion)
 	collect(usesVertex, "gl_Vertex", "recoil_ff_Vertex()");
 	collect(usesColor, "gl_Color", "recoil_ff_Color()");
 	collect(usesTexCrd, "gl_MultiTexCoord0", "recoil_ff_MultiTexCoord0()");
+	// an accessor RETURNING the struct, so member access carries over unchanged
+	// (gl_Fog.color becomes recoil_ff_Fog().color) and the builtin stays reachable
+	// behind the selector below
+	collect(usesFog, "gl_Fog", "recoil_ff_Fog()");
 
 	// the insertion point is taken before any of this, off the same mask; every
 	// site is below the #version line, so the offset survives the rewrite
@@ -238,8 +281,133 @@ bool GL::RewriteFFVertexBuiltins(std::string& src, int glslVersion)
 		decl += " vec4 recoil_ff_MultiTexCoord0() { return " + std::string(UNIFORM_USE) + " ? " + ATTR_TEXCRD + " : gl_MultiTexCoord0; }";
 	}
 
+	if (usesFog) {
+		// The member set and its meanings are the builtin's, so a shader reading
+		// any of them keeps compiling untouched. scale is 1/(end - start) whichever
+		// mode is set, which is why nothing reads the mode.
+		//
+		// Both sources are compiled in and selected by a uniform, because the
+		// whole-frame gate compares Lua backends within ONE build and is otherwise
+		// blind to this substitution: a wrong uniform feed would move every pass
+		// together and read a clean 0/0. With the selector, the A/B harness flips
+		// it per pass and the gate measures "uniform == builtin" directly. The
+		// selector costs one bool once the answer is in.
+		decl += " struct recoil_ff_FogParameters { vec4 color; float density; float start; float end; float scale; };";
+		decl += " uniform recoil_ff_FogParameters " + std::string(FF_FOG_UNIFORM_NAME) + ";";
+		decl += " uniform bool " + std::string(FF_FOG_SELECT_NAME) + ";";
+		decl += " recoil_ff_FogParameters recoil_ff_Fog() { return " + std::string(FF_FOG_SELECT_NAME) + " ? " +
+		        std::string(FF_FOG_UNIFORM_NAME) +
+		        " : recoil_ff_FogParameters(gl_Fog.color, gl_Fog.density, gl_Fog.start, gl_Fog.end, gl_Fog.scale); }";
+	}
+
 	src.insert(at, decl + "\n#line " + std::to_string(nextLine) + "\n");
 	return true;
+}
+
+namespace {
+	struct ProgFFUniforms {
+		int32_t fogColor = -1, fogDensity = -1, fogStart = -1, fogEnd = -1, fogScale = -1;
+		int32_t fogSelect = -1;
+		uint32_t fedGeneration = 0; // 0 = never fed
+		int32_t fedSelect = -1;     // the selector value this program last saw
+		bool anything = false;
+	};
+
+	// Keyed by program id, and the ids are RECYCLED -- an entry that outlives its
+	// program would hand the next one the previous layout -- so glLinkProgram and
+	// glDeleteProgram evict, which is why the feed wraps them too.
+	std::unordered_map<uint32_t, ProgFFUniforms> progUniforms;
+
+	decltype(glad_glUseProgram) origUseProgram = nullptr;
+	decltype(glad_glLinkProgram) origLinkProgram = nullptr;
+	decltype(glad_glDeleteProgram) origDeleteProgram = nullptr;
+
+	void APIENTRY FeedUseProgram(GLuint program)
+	{
+		origUseProgram(program);
+		GL::PushFFUniforms(program);
+	}
+
+	void APIENTRY FeedLinkProgram(GLuint program)
+	{
+		progUniforms.erase(program);
+		origLinkProgram(program);
+	}
+
+	void APIENTRY FeedDeleteProgram(GLuint program)
+	{
+		progUniforms.erase(program);
+		origDeleteProgram(program);
+	}
+}
+
+void GL::PushFFUniforms(uint32_t prog)
+{
+	if (prog == 0 || ffListBodyOpen || !FFRewriteEnabled())
+		return;
+
+	auto it = progUniforms.find(prog);
+
+	if (it == progUniforms.end()) {
+		ProgFFUniforms u;
+		const std::string base = FF_FOG_UNIFORM_NAME;
+		u.fogColor   = glGetUniformLocation(prog, (base + ".color").c_str());
+		u.fogDensity = glGetUniformLocation(prog, (base + ".density").c_str());
+		u.fogStart   = glGetUniformLocation(prog, (base + ".start").c_str());
+		u.fogEnd     = glGetUniformLocation(prog, (base + ".end").c_str());
+		u.fogScale   = glGetUniformLocation(prog, (base + ".scale").c_str());
+		u.fogSelect  = glGetUniformLocation(prog, FF_FOG_SELECT_NAME);
+		u.anything = (u.fogColor >= 0 || u.fogDensity >= 0 || u.fogStart >= 0 || u.fogEnd >= 0 || u.fogScale >= 0 || u.fogSelect >= 0);
+		it = progUniforms.emplace(prog, u).first;
+	}
+
+	ProgFFUniforms& u = it->second;
+
+	// The candidate pass of FFExperiment 9 reads the BUILTIN, so the selector is
+	// pass-dependent and has to be re-pushed whenever it flips, not only when the
+	// values move.
+	const int32_t select = ffExperiment.Active(FFExperiment::FogUniform) ? 0 : 1;
+
+	if (!u.anything || (u.fedGeneration == ffFog.Generation() && u.fedSelect == select))
+		return;
+
+	u.fedGeneration = ffFog.Generation();
+	u.fedSelect = select;
+
+	// A selector that never reaches GL leaves every program on the builtin, which
+	// is a clean 0/0 over a substitution that never happened -- the exact vacuous
+	// pass this experiment exists to rule out.
+	static bool reported = false;
+	if (!reported && u.fogSelect >= 0) {
+		reported = true;
+		LOG_L(L_WARNING, "[FFUniformFeed] fog uniform FED to program %u (select=%d)", prog, select);
+	}
+
+	if (u.fogSelect >= 0) glUniform1i(u.fogSelect, select);
+
+	// The linker drops members the shader never reads, so each of these is
+	// optional rather than a set.
+	if (u.fogColor >= 0)   glUniform4fv(u.fogColor, 1, ffFog.Color());
+	if (u.fogDensity >= 0) glUniform1f(u.fogDensity, ffFog.Density());
+	if (u.fogStart >= 0)   glUniform1f(u.fogStart, ffFog.Start());
+	if (u.fogEnd >= 0)     glUniform1f(u.fogEnd, ffFog.End());
+	if (u.fogScale >= 0)   glUniform1f(u.fogScale, ffFog.Scale());
+}
+
+void GL::InstallFFUniformFeed()
+{
+	if (!FFRewriteEnabled() || origUseProgram != nullptr)
+		return;
+
+	origUseProgram = glad_glUseProgram;
+	origLinkProgram = glad_glLinkProgram;
+	origDeleteProgram = glad_glDeleteProgram;
+
+	glad_glUseProgram = &FeedUseProgram;
+	glad_glLinkProgram = &FeedLinkProgram;
+	glad_glDeleteProgram = &FeedDeleteProgram;
+
+	LOG_L(L_WARNING, "[FFUniformFeed] ACTIVE: rewritten fixed-function state is fed per program bind");
 }
 
 void GL::BindFFColorAttribLocation(uint32_t prog)
