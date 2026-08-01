@@ -11,6 +11,7 @@
 
 #include "Rendering/GL/FFFog.h"
 #include "Rendering/GL/FFRasterState.h"
+#include "System/Matrix44f.h"
 #include "Rendering/GL/FFStateTracker.h"
 #include "Rendering/GL/myGL.h"
 #include "System/Config/ConfigHandler.h"
@@ -20,6 +21,8 @@ CONFIG(bool, FFVertexAttribRewrite).defaultValue(false).safemodeValue(false)
 	.description("Rewrite the fixed-function vertex builtins (gl_Vertex, gl_Color, gl_MultiTexCoord0, ftransform) in compiled GLSL to generic attributes, so shader-bound immediate-mode draws can be fed without glBegin/glVertex. Off leaves every shader source byte-identical.");
 
 namespace {
+	bool usesFtransformEarly(const std::string& code);
+
 	constexpr const char* ATTR_VERTEX = "recoil_ff_aVertex";
 	constexpr const char* ATTR_TEXCRD = "recoil_ff_aTexCoord0";
 	constexpr const char* UNIFORM_USE = "recoil_ff_useAttrs";
@@ -40,6 +43,9 @@ namespace {
 	}
 
 	bool HasIdent(const std::string& s, const std::string& id) { return FindIdent(s, id, 0) != std::string::npos; }
+
+	// ftransform() expands to the same transform, so it counts as a reader of it
+	bool usesFtransformEarly(const std::string& code) { return HasIdent(code, "ftransform"); }
 
 	// Same length as `src` with every comment blanked, so identifier positions
 	// carry straight over. Commented-out code has to be invisible here or it
@@ -195,12 +201,13 @@ bool GL::RewriteFFBuiltins(std::string& src, int glslVersion, uint32_t stage)
 	// substituting it there would read a vertex input that does not exist.
 	const bool vs = (stage == GL_VERTEX_SHADER);
 	const bool usesFog = HasIdent(code, "gl_Fog");
+	const bool usesMVP = vs && (usesFtransformEarly(code) || HasIdent(code, "gl_ModelViewProjectionMatrix"));
 	const bool usesColor = vs && HasIdent(code, "gl_Color");
 	bool usesFtransform = vs && HasIdent(code, "ftransform");
 	bool usesVertex = usesFtransform || (vs && HasIdent(code, "gl_Vertex"));
 	bool usesTexCrd = vs && HasIdent(code, "gl_MultiTexCoord0");
 
-	if (!usesVertex && !usesColor && !usesTexCrd && !usesFog)
+	if (!usesVertex && !usesColor && !usesTexCrd && !usesFog && !usesMVP)
 		return false;
 
 	// The stream channels come as a set -- half-feeding one of the builtins this
@@ -217,7 +224,7 @@ bool GL::RewriteFFBuiltins(std::string& src, int glslVersion, uint32_t stage)
 		break;
 	}
 
-	if (!usesVertex && !usesColor && !usesTexCrd && !usesFog)
+	if (!usesVertex && !usesColor && !usesTexCrd && !usesFog && !usesMVP)
 		return false;
 
 	// Collect every site against the mask, then rewrite `src` once from the back,
@@ -243,6 +250,7 @@ bool GL::RewriteFFBuiltins(std::string& src, int glslVersion, uint32_t stage)
 	// (gl_Fog.color becomes recoil_ff_Fog().color) and the builtin stays reachable
 	// behind the selector below
 	collect(usesFog, "gl_Fog", "recoil_ff_Fog()");
+	collect(usesMVP, "gl_ModelViewProjectionMatrix", "recoil_ff_MVP()");
 
 	// the insertion point is taken before any of this, off the same mask; every
 	// site is below the #version line, so the offset survives the rewrite
@@ -264,9 +272,9 @@ bool GL::RewriteFFBuiltins(std::string& src, int glslVersion, uint32_t stage)
 		decl += " vec4 recoil_ff_Vertex() { return " + std::string(UNIFORM_USE) + " ? " + ATTR_VERTEX + " : gl_Vertex; }";
 	}
 	if (usesFtransform) {
-		// ftransform() is gl_ModelViewProjectionMatrix * gl_Vertex; the matrix
-		// builtin is untouched here, only where the position comes from
-		decl += " vec4 recoil_ff_Transform() { return gl_ModelViewProjectionMatrix * recoil_ff_Vertex(); }";
+		// ftransform() is gl_ModelViewProjectionMatrix * gl_Vertex, so it takes
+		// the same transform source as an explicit read of the builtin does
+		decl += " vec4 recoil_ff_Transform() { return recoil_ff_MVP() * recoil_ff_Vertex(); }";
 	}
 	if (usesColor) {
 		// No useAttrs branch, unlike the two above: the pinned slot's CURRENT
@@ -301,6 +309,13 @@ bool GL::RewriteFFBuiltins(std::string& src, int glslVersion, uint32_t stage)
 		        " : recoil_ff_FogParameters(gl_Fog.color, gl_Fog.density, gl_Fog.start, gl_Fog.end, gl_Fog.scale); }";
 	}
 
+	if (usesMVP) {
+		decl += " uniform mat4 " + std::string(FF_MVP_UNIFORM_NAME) + ";";
+		decl += " uniform bool " + std::string(FF_MVP_SELECT_NAME) + ";";
+		decl += " mat4 recoil_ff_MVP() { return " + std::string(FF_MVP_SELECT_NAME) + " ? " +
+		        std::string(FF_MVP_UNIFORM_NAME) + " : gl_ModelViewProjectionMatrix; }";
+	}
+
 	src.insert(at, decl + "\n#line " + std::to_string(nextLine) + "\n");
 	return true;
 }
@@ -309,6 +324,7 @@ namespace {
 	struct ProgFFUniforms {
 		int32_t fogColor = -1, fogDensity = -1, fogStart = -1, fogEnd = -1, fogScale = -1;
 		int32_t fogSelect = -1;
+		int32_t mvp = -1, mvpSelect = -1;
 		uint32_t fedGeneration = 0; // 0 = never fed
 		int32_t fedSelect = -1;     // the selector value this program last saw
 		bool anything = false;
@@ -385,6 +401,65 @@ namespace {
 		GL::ffRaster.ResyncCaps();
 	}
 
+	// Per DRAW rather than per bind, because the fixed-function matrices move
+	// while a program stays bound -- CModelDrawerStateGLSL::Enable binds, then
+	// PushTransform and DrawStaticLegacy push a transform per object and per
+	// piece. Both matrices are read back from GL, so the only thing that differs
+	// between the two sides of the selector is who multiplies them.
+	void PushMVPUniform()
+	{
+		const uint32_t prog = GL::CurrentProgram();
+		if (prog == 0)
+			return;
+
+		const auto it = progUniforms.find(prog);
+		if (it == progUniforms.end() || it->second.mvpSelect < 0)
+			return;
+
+		const int32_t select = GL::ffExperiment.Active(GL::FFExperiment::MatrixUniform) ? 1 : 0;
+		glUniform1i(it->second.mvpSelect, select);
+
+		if (select == 0 || it->second.mvp < 0)
+			return;
+
+		CMatrix44f proj;
+		CMatrix44f modelView;
+		glGetFloatv(GL_PROJECTION_MATRIX, static_cast<float*>(proj));
+		glGetFloatv(GL_MODELVIEW_MATRIX, static_cast<float*>(modelView));
+
+		const CMatrix44f mvp = proj * modelView;
+		glUniformMatrix4fv(it->second.mvp, 1, GL_FALSE, static_cast<const float*>(mvp));
+
+		// how many distinct programs the measurement actually covered; a 0-pixel
+		// result over two of them would say very little
+		static std::unordered_map<uint32_t, bool> fedPrograms;
+		if (bool& seen = fedPrograms[prog]; !seen) {
+			seen = true;
+			LOG_L(L_WARNING, "[FFUniformFeed] CPU-composed MVP FED to program %u (%d distinct so far)",
+				prog, static_cast<int>(fedPrograms.size()));
+		}
+	}
+
+	#define FFMVP_DRAWS(X) \
+		X(glDrawArrays,             (GLenum a, GLint b, GLsizei c), (a, b, c)) \
+		X(glDrawElements,           (GLenum a, GLsizei b, GLenum c, const void* d), (a, b, c, d)) \
+		X(glDrawRangeElements,      (GLenum a, GLuint b, GLuint c, GLsizei d, GLenum e, const void* f), (a, b, c, d, e, f)) \
+		X(glDrawElementsBaseVertex, (GLenum a, GLsizei b, GLenum c, const void* d, GLint e), (a, b, c, d, e)) \
+		X(glDrawArraysInstanced,    (GLenum a, GLint b, GLsizei c, GLsizei d), (a, b, c, d)) \
+		X(glDrawElementsInstanced,  (GLenum a, GLsizei b, GLenum c, const void* d, GLsizei e), (a, b, c, d, e))
+
+	#define FFMVP_DECL_ORIG(name, params, args) decltype(glad_##name) origMVP_##name = nullptr;
+	FFMVP_DRAWS(FFMVP_DECL_ORIG)
+	#undef FFMVP_DECL_ORIG
+
+	#define FFMVP_DEFINE(name, params, args) \
+		void APIENTRY MVPHook_##name params { \
+			PushMVPUniform(); \
+			origMVP_##name args; \
+		}
+	FFMVP_DRAWS(FFMVP_DEFINE)
+	#undef FFMVP_DEFINE
+
 	void APIENTRY FeedUseProgram(GLuint program)
 	{
 		origUseProgram(program);
@@ -420,6 +495,8 @@ void GL::PushFFUniforms(uint32_t prog)
 		u.fogEnd     = glGetUniformLocation(prog, (base + ".end").c_str());
 		u.fogScale   = glGetUniformLocation(prog, (base + ".scale").c_str());
 		u.fogSelect  = glGetUniformLocation(prog, FF_FOG_SELECT_NAME);
+		u.mvp        = glGetUniformLocation(prog, FF_MVP_UNIFORM_NAME);
+		u.mvpSelect  = glGetUniformLocation(prog, FF_MVP_SELECT_NAME);
 		u.anything = (u.fogColor >= 0 || u.fogDensity >= 0 || u.fogStart >= 0 || u.fogEnd >= 0 || u.fogScale >= 0 || u.fogSelect >= 0);
 		it = progUniforms.emplace(prog, u).first;
 	}
@@ -474,6 +551,17 @@ void GL::InstallFFUniformFeed()
 
 	if (!FFRewriteEnabled())
 		return;
+
+	// Only while an experiment is selected: the per-draw readback is a
+	// measurement cost, not something a shipping frame should pay.
+	if (configHandler->GetInt("GLFFRemovalExperiment") == static_cast<int>(FFExperiment::MatrixUniform)) {
+		#define FFMVP_SWAP(name, params, args) \
+			origMVP_##name = glad_##name; \
+			glad_##name = &MVPHook_##name;
+		FFMVP_DRAWS(FFMVP_SWAP)
+		#undef FFMVP_SWAP
+		LOG_L(L_WARNING, "[FFUniformFeed] MVP experiment armed: composing P*MV per draw");
+	}
 
 	origUseProgram = glad_glUseProgram;
 	origLinkProgram = glad_glLinkProgram;

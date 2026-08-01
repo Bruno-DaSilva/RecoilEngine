@@ -182,6 +182,14 @@ namespace GL {
 		AlphaTestOff = 10,
 		LineStippleOff = 11,
 		ClipPlanesOff = 12,
+		// 13: rewritten shaders taking gl_ModelViewProjectionMatrix from a
+		// CPU-composed uniform on the candidate pass. This is the measurement the
+		// matrix decision has been waiting on: the objection to retiring the
+		// family is that no CPU composition reproduces the driver's own
+		// bit-for-bit on dense matrices, and under perspective the divide turns
+		// those ULPs into whole shades. Both matrices come from glGetFloatv, so
+		// the ONLY variable is who multiplies them.
+		MatrixUniform = 13,
 		// 9: rewritten shaders reading gl_Fog through the engine-fed uniform
 		// rather than the compatibility builtin. The candidate pass takes the
 		// BUILTIN, so a signal means the uniform feed differs from what fixed

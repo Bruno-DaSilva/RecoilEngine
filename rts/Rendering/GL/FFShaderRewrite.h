@@ -42,6 +42,13 @@ namespace GL {
 	// both are compiled in
 	constexpr const char* FF_FOG_SELECT_NAME = "recoil_ff_useFogU";
 
+	// The composed modelview-projection, and its selector. Same both-sources
+	// shape as the fog pair, for the same reason: an engine-side substitution is
+	// invisible to a gate that compares passes of one build unless the builtin
+	// stays reachable.
+	constexpr const char* FF_MVP_UNIFORM_NAME = "recoil_ff_MVPu";
+	constexpr const char* FF_MVP_SELECT_NAME = "recoil_ff_useMVP";
+
 	// Pin FF_COLOR_ATTRIB_NAME in `prog` ahead of linking it. Binding a name the
 	// program does not declare is a no-op, so this is unconditional at each link
 	// site rather than conditional on the rewrite having fired.
