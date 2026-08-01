@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "SMFReadMap.h"
+#include "Rendering/GL/AttribStateVerify.h"
 #include "SMFGroundDrawer.h"
 #include "SMFGroundTextures.h"
 #include "SMFRenderState.h"
@@ -281,7 +282,10 @@ void CSMFGroundDrawer::DrawForwardPass(const DrawPass::e& drawPass, bool alphaTe
 	smfRenderStates[RENDER_STATE_SEL]->SetCurrentShader(this, drawPass);
 	smfRenderStates[RENDER_STATE_SEL]->Enable(this, drawPass);
 
-	glPushAttrib((GL_ENABLE_BIT * alphaTest) | (GL_POLYGON_BIT * wireframe));
+	const GLbitfield attribMask = (GL_ENABLE_BIT * alphaTest) | (GL_POLYGON_BIT * wireframe);
+	GL::ShadowPushAttrib(attribMask);
+	GL::AttribSnapshot savedAttribs;
+	savedAttribs.Capture();
 
 	if (wireframe)
 		glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
@@ -296,7 +300,8 @@ void CSMFGroundDrawer::DrawForwardPass(const DrawPass::e& drawPass, bool alphaTe
 
 	meshDrawer->DrawMesh(drawPass);
 
-	glPopAttrib();
+	savedAttribs.Restore(attribMask);
+	GL::VerifyAttribRestore("CSMFGroundDrawer::DrawForwardPass");
 
 	smfRenderStates[RENDER_STATE_SEL]->Disable(this, drawPass);
 	smfRenderStates[RENDER_STATE_SEL]->SetCurrentShader(this, DrawPass::Normal);

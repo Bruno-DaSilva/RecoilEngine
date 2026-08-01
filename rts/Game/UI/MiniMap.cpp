@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include <array>
+#include "Rendering/GL/AttribStateVerify.h"
 #include <tuple>
 
 #include <SDL_keycode.h>
@@ -1359,7 +1360,9 @@ void CMiniMap::DrawForReal(bool useNormalizedCoors, bool updateTex, bool luaCall
 		return;
 	}
 
-	glPushAttrib(GL_DEPTH_BUFFER_BIT);
+	GL::ShadowPushAttrib(GL_DEPTH_BUFFER_BIT);
+	GL::AttribSnapshot savedDrawAttribs;
+	savedDrawAttribs.Capture();
 	glEnable(GL_BLEND);
 	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 	glDisable(GL_DEPTH_TEST);
@@ -1393,7 +1396,8 @@ void CMiniMap::DrawForReal(bool useNormalizedCoors, bool updateTex, bool luaCall
 	if (useNormalizedCoors)
 		glPopMatrix();
 
-	glPopAttrib();
+	savedDrawAttribs.Restore(GL_DEPTH_BUFFER_BIT);
+	GL::VerifyAttribRestore("CMiniMap::DrawForReal");
 	glEnable(GL_TEXTURE_2D);
 
 	// allow Lua scripts to draw into the minimap
@@ -1789,7 +1793,9 @@ bool CMiniMap::RenderCachedTexture(bool useNormalizedCoors)
 	if (!renderToTexture)
 		return false;
 
-	glPushAttrib(GL_COLOR_BUFFER_BIT);
+	GL::ShadowPushAttrib(GL_COLOR_BUFFER_BIT);
+	GL::AttribSnapshot savedCacheAttribs;
+	savedCacheAttribs.Capture();
 	glBindTexture(GL_TEXTURE_2D, minimapTex);
 	glEnable(GL_TEXTURE_2D);
 	glDisable(GL_BLEND);
@@ -1834,7 +1840,8 @@ bool CMiniMap::RenderCachedTexture(bool useNormalizedCoors)
 	}
 
 	glDisable(GL_TEXTURE_2D);
-	glPopAttrib();
+	savedCacheAttribs.Restore(GL_COLOR_BUFFER_BIT);
+	GL::VerifyAttribRestore("CMiniMap::RenderCachedTexture");
 	return true;
 }
 

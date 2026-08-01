@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include <cstdint>
+#include "Rendering/GL/AttribStateVerify.h"
 
 #include <SDL.h>
 
@@ -70,7 +71,9 @@ void ShowSplashScreen(
 	rb.AssertSubmission();
 	auto& sh = rb.GetShader();
 
-	glPushAttrib(GL_ENABLE_BIT);
+	GL::ShadowPushAttrib(GL_ENABLE_BIT);
+	GL::AttribSnapshot savedAttribs;
+	savedAttribs.Capture();
 	glEnable(GL_TEXTURE_2D);
 
 	for (spring_time t0 = spring_now(), t1 = t0; !testDoneFunc(); t1 = spring_now()) {
@@ -113,7 +116,8 @@ void ShowSplashScreen(
 		Watchdog::ClearTimer(WDT_MAIN);
 	}
 
-	glPopAttrib();
+	savedAttribs.Restore(GL_ENABLE_BIT);
+	GL::VerifyAttribRestore("ShowSplashScreen");
 	glDeleteTextures(1, &splashTex);
 }
 #endif
