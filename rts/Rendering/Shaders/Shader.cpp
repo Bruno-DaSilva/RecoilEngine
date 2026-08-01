@@ -700,6 +700,13 @@ namespace Shader {
 			GL::BindFFColorAttribLocation(objID);
 			glLinkProgram(objID);
 
+			// Program ids are all the fixed-function feed can report, so give the
+			// log a way to say WHICH shader a fed (or unfed) id was. That mapping
+			// is what showed the ground, water and sky ARE fed correct matrices
+			// under suppression while the view stays blank.
+			if (GL::FFRewriteEnabled())
+				LOG_L(L_INFO, "[FFRewrite] program %u linked as \"%s\"", objID, name.c_str());
+
 			valid = glslIsValid(objID);
 			log += glslGetLog(objID);
 
