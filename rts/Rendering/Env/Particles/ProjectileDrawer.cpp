@@ -2,6 +2,7 @@
 
 
 #include "ProjectileDrawer.h"
+#include "Rendering/GL/FFRasterState.h"
 
 #include <tuple>
 #include <bit>
@@ -1020,7 +1021,7 @@ void CProjectileDrawer::DrawGroundFlashes()
 /*
 	glEnable(GL_TEXTURE_2D);
 	glEnable(GL_ALPHA_TEST);
-	glAlphaFunc(GL_GREATER, 0.01f);
+	GL::ffRaster.SetAlphaFunc(GL_GREATER, 0.01f);
 */
 	glPolygonOffset(-20, -1000);
 	glEnable(GL_POLYGON_OFFSET_FILL);

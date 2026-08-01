@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "IWater.h"
+#include "Rendering/GL/FFRasterState.h"
 #include "ISky.h"
 #include "BasicWater.h"
 #include "AdvWater.h"
@@ -50,7 +51,7 @@ void IWater::SetModelClippingPlane(const double* planeEq) {
 	RECOIL_DETAILED_TRACY_ZONE;
 	glPushMatrix();
 	glLoadIdentity();
-	glClipPlane(GL_CLIP_PLANE2, planeEq);
+	GL::ffRaster.SetClipPlane(GL_CLIP_PLANE2, planeEq);
 	glPopMatrix();
 }
 
@@ -151,7 +152,7 @@ void IWater::DrawReflections(const double* clipPlaneEqs, bool drawGround, bool d
 		}
 
 		glEnable(GL_CLIP_PLANE2);
-		glClipPlane(GL_CLIP_PLANE2, &clipPlaneEqs[0]);
+		GL::ffRaster.SetClipPlane(GL_CLIP_PLANE2, &clipPlaneEqs[0]);
 
 		if (drawGround)
 			readMap->GetGroundDrawer()->Draw(DrawPass::WaterReflection);
@@ -189,7 +190,7 @@ void IWater::DrawRefractions(const double* clipPlaneEqs, bool drawGround, bool d
 		SCOPED_GL_DEBUGGROUP("Draw::Water::DrawRefractions");
 
 		glEnable(GL_CLIP_PLANE2);
-		glClipPlane(GL_CLIP_PLANE2, &clipPlaneEqs[0]);
+		GL::ffRaster.SetClipPlane(GL_CLIP_PLANE2, &clipPlaneEqs[0]);
 
 		// opaque
 		if (drawSky) {

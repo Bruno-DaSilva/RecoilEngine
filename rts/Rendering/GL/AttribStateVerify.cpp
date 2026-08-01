@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "Rendering/GL/AttribStateVerify.h"
+#include "Rendering/GL/FFRasterState.h"
 
 #include "Rendering/GL/FFFog.h"
 #include "Rendering/GL/MatrixStateTracker.h"
@@ -189,7 +190,7 @@ void GL::AttribSnapshot::Restore(GLbitfield mask) const
 		glBlendEquationSeparate(blendEquationRGB, blendEquationAlpha);
 		glColorMask(colorMask[0], colorMask[1], colorMask[2], colorMask[3]);
 		if (cur.alphaTestFunc != alphaTestFunc || cur.alphaTestRef != alphaTestRef)
-			glAlphaFunc(alphaTestFunc, alphaTestRef);
+			GL::ffRaster.SetAlphaFunc(alphaTestFunc, alphaTestRef);
 		RestoreCap(GL_ALPHA_TEST); RestoreCap(GL_BLEND);
 		RestoreCap(GL_DITHER);     RestoreCap(GL_COLOR_LOGIC_OP);
 		glClearColor(clearColor[0], clearColor[1], clearColor[2], clearColor[3]);
@@ -259,7 +260,7 @@ void GL::AttribSnapshot::Restore(GLbitfield mask) const
 	if (mask & GL_LINE_BIT) {
 		glLineWidth(lineWidth);
 		if (cur.lineStippleRepeat != lineStippleRepeat || cur.lineStipplePattern != lineStipplePattern)
-			glLineStipple(lineStippleRepeat, static_cast<GLushort>(lineStipplePattern));
+			GL::ffRaster.SetLineStipple(lineStippleRepeat, lineStipplePattern);
 		RestoreCap(GL_LINE_SMOOTH); RestoreCap(GL_LINE_STIPPLE);
 	}
 

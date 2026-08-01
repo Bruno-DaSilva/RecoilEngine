@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "LuaObjectDrawer.h"
+#include "Rendering/GL/FFRasterState.h"
 #include "Features/FeatureDrawer.h"
 #include "Common/ModelDrawerHelpers.h"
 #include "Units/UnitDrawer.h"
@@ -343,12 +344,12 @@ void LuaObjectDrawer::DrawMaterialBins(LuaObjType objType, LuaMatType matType, b
 
 	if (inAlphaBin) {
 		glEnable(GL_ALPHA_TEST);
-		glAlphaFunc(GL_GREATER, 0.1f);
+		GL::ffRaster.SetAlphaFunc(GL_GREATER, 0.1f);
 		glEnable(GL_BLEND);
 		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 	} else {
 		glEnable(GL_ALPHA_TEST);
-		glAlphaFunc(GL_GREATER, 0.5f);
+		GL::ffRaster.SetAlphaFunc(GL_GREATER, 0.5f);
 	}
 
 	const LuaMaterial* prevMat = &LuaMaterial::defMat;

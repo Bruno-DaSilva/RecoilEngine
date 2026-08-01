@@ -9,6 +9,7 @@
 // - use materials instead of raw calls (again, handle dlists)
 
 #include "Rendering/GL/myGL.h"
+#include "Rendering/GL/FFRasterState.h"
 
 #include <vector>
 #include <algorithm>
@@ -716,11 +717,11 @@ static void CmdListEmitIntoCompile(const LuaCommandList& cl)
 			case Op::ActiveTexture:     glActiveTexture(c.u0); break;
 			case Op::LineWidth:         glLineWidth(c.f[0]); break;
 			case Op::PointSize:         glPointSize(c.f[0]); break;
-			case Op::LineStipple:       glLineStipple((GLint)c.u0, (GLushort)c.u1); break;
+			case Op::LineStipple:       GL::ffRaster.SetLineStipple((GLint)c.u0, c.u1); break;
 			case Op::DepthMask:         glDepthMask((GLboolean)c.u0); break;
 			case Op::DepthFunc:         glDepthFunc(c.u0); break;
 			case Op::CullFace:          glCullFace(c.u0); break;
-			case Op::AlphaFunc:         glAlphaFunc(c.u0, c.f[0]); break;
+			case Op::AlphaFunc:         GL::ffRaster.SetAlphaFunc(c.u0, c.f[0]); break;
 			case Op::PolygonMode:       glPolygonMode(c.u0, c.u1); break;
 			case Op::PolygonOffset:     glPolygonOffset(c.f[0], c.f[1]); break;
 			case Op::ColorMask:         glColorMask((GLboolean)c.u0, (GLboolean)c.u1, (GLboolean)c.u2, (GLboolean)c.u3); break;
@@ -932,11 +933,11 @@ static void CmdListReplayLive(const LuaCommandList& cl)
 			case Op::ActiveTexture:     glActiveTexture(c.u0); break;
 			case Op::LineWidth:         glLineWidth(c.f[0]); break;
 			case Op::PointSize:         glPointSize(c.f[0]); break;
-			case Op::LineStipple:       glLineStipple((GLint)c.u0, (GLushort)c.u1); break;
+			case Op::LineStipple:       GL::ffRaster.SetLineStipple((GLint)c.u0, c.u1); break;
 			case Op::DepthMask:         glDepthMask((GLboolean)c.u0); break;
 			case Op::DepthFunc:         glDepthFunc(c.u0); break;
 			case Op::CullFace:          glCullFace(c.u0); break;
-			case Op::AlphaFunc:         glAlphaFunc(c.u0, c.f[0]); break;
+			case Op::AlphaFunc:         GL::ffRaster.SetAlphaFunc(c.u0, c.f[0]); break;
 			case Op::PolygonMode:       glPolygonMode(c.u0, c.u1); break;
 			case Op::PolygonOffset:     glPolygonOffset(c.f[0], c.f[1]); break;
 			case Op::ColorMask:         glColorMask((GLboolean)c.u0, (GLboolean)c.u1, (GLboolean)c.u2, (GLboolean)c.u3); break;
@@ -1586,7 +1587,7 @@ void LuaOpenGL::ResetGLState()
 		glGetIntegerv(GL_ALPHA_TEST_FUNC, &curAlphaFunc);
 		glGetFloatv(GL_ALPHA_TEST_REF, &curAlphaRef);
 		if (curAlphaFunc != GL_GREATER || curAlphaRef != 0.5f)
-			glAlphaFunc(GL_GREATER, 0.5f);
+			GL::ffRaster.SetAlphaFunc(GL_GREATER, 0.5f);
 	}
 
 	glDisable(GL_LIGHTING);
@@ -4944,7 +4945,7 @@ int LuaOpenGL::AlphaTest(lua_State* L)
 	}
 	else if (args == 2) {
 		glEnable(GL_ALPHA_TEST);
-		glAlphaFunc((GLenum)luaL_checkint(L, 1), (GLfloat)luaL_checkint(L, 2));
+		GL::ffRaster.SetAlphaFunc((GLenum)luaL_checkint(L, 1), (GLfloat)luaL_checkint(L, 2));
 	}
 	else {
 		luaL_error(L, "Incorrect arguments to gl.AlphaTest()");
@@ -5226,7 +5227,7 @@ int LuaOpenGL::LineStipple(lua_State* L)
 			pattern = pat >> shift;
 		}
 		glEnable(GL_LINE_STIPPLE);
-		glLineStipple(factor, pattern);
+		GL::ffRaster.SetLineStipple(factor, pattern);
 	}
 	else {
 		luaL_error(L, "Incorrect arguments to gl.LineStipple()");
@@ -6757,7 +6758,7 @@ int LuaOpenGL::ClipPlane(lua_State* L)
 	equation[1] = (double)luaL_checknumber(L, 3);
 	equation[2] = (double)luaL_checknumber(L, 4);
 	equation[3] = (double)luaL_checknumber(L, 5);
-	glClipPlane(gl_plane, equation);
+	GL::ffRaster.SetClipPlane(gl_plane, equation);
 	glEnable(gl_plane);
 	return 0;
 }

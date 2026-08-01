@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include <cmath>
+#include "Rendering/GL/FFRasterState.h"
 
 #include "GrassDrawer.h"
 #include "Game/Camera.h"
@@ -919,7 +920,7 @@ void CGrassDrawer::CreateFarTex()
 
 		// has to be applied after the matrix transformations,
 		// cause it uses those an `compiles` them into the clip plane
-		glClipPlane(GL_CLIP_PLANE0, &eq[0]);
+		GL::ffRaster.SetClipPlane(GL_CLIP_PLANE0, &eq[0]);
 
 		glCallList(grassDL);
 	}

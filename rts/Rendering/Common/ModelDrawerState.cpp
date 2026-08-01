@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "ModelDrawerState.hpp"
+#include "Rendering/GL/FFRasterState.h"
 #include "Rendering/Models/3DModelVAO.hpp"
 #include "ModelDrawer.h"
 #include "Game/Camera.h"
@@ -53,7 +54,7 @@ void IModelDrawerState::SetupOpaqueDrawing(bool deferredPass) const
 	glEnable(GL_CULL_FACE);
 
 	if (IsLegacy()) {
-		glAlphaFunc(GL_GREATER, 0.5f);
+		GL::ffRaster.SetAlphaFunc(GL_GREATER, 0.5f);
 		glEnable(GL_ALPHA_TEST);
 	}
 
@@ -89,7 +90,7 @@ void IModelDrawerState::SetupAlphaDrawing(bool deferredPass) const
 
 	if (IsLegacy()) {
 		glEnable(GL_ALPHA_TEST);
-		glAlphaFunc(GL_GREATER, 0.1f);
+		GL::ffRaster.SetAlphaFunc(GL_GREATER, 0.1f);
 	}
 
 	glDepthMask(GL_FALSE);

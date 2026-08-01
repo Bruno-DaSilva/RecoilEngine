@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "Rendering/GL/FFFog.h"
+#include "Rendering/GL/FFRasterState.h"
 #include "Rendering/GL/FFStateTracker.h"
 #include "Rendering/GL/myGL.h"
 #include "System/Config/ConfigHandler.h"
@@ -318,9 +319,30 @@ namespace {
 	// glDeleteProgram evict, which is why the feed wraps them too.
 	std::unordered_map<uint32_t, ProgFFUniforms> progUniforms;
 
+	decltype(glad_glEnable) origEnable = nullptr;
+	decltype(glad_glPopAttrib) origPopAttrib = nullptr;
+	decltype(glad_glDisable) origDisable = nullptr;
 	decltype(glad_glUseProgram) origUseProgram = nullptr;
 	decltype(glad_glLinkProgram) origLinkProgram = nullptr;
 	decltype(glad_glDeleteProgram) origDeleteProgram = nullptr;
+
+	void APIENTRY HookEnable(GLenum cap)
+	{
+		GL::ffRaster.NoteCap(cap, true);
+		origEnable(cap);
+	}
+
+	void APIENTRY HookDisable(GLenum cap)
+	{
+		GL::ffRaster.NoteCap(cap, false);
+		origDisable(cap);
+	}
+
+	void APIENTRY HookPopAttrib()
+	{
+		origPopAttrib();
+		GL::ffRaster.ResyncCaps();
+	}
 
 	void APIENTRY FeedUseProgram(GLuint program)
 	{
@@ -396,7 +418,20 @@ void GL::PushFFUniforms(uint32_t prog)
 
 void GL::InstallFFUniformFeed()
 {
-	if (!FFRewriteEnabled() || origUseProgram != nullptr)
+	if (origEnable != nullptr)
+		return;
+
+	// Unconditional, unlike the uniform feed below: the rasterization mirror only
+	// SKIPS writes to state nothing can observe, which is sound whether or not
+	// the rewrite is on, and it has to see every enable to know when that is.
+	origEnable = glad_glEnable;
+	origDisable = glad_glDisable;
+	origPopAttrib = glad_glPopAttrib;
+	glad_glEnable = &HookEnable;
+	glad_glDisable = &HookDisable;
+	glad_glPopAttrib = &HookPopAttrib;
+
+	if (!FFRewriteEnabled())
 		return;
 
 	origUseProgram = glad_glUseProgram;

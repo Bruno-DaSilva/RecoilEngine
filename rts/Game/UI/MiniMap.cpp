@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include <array>
+#include "Rendering/GL/FFRasterState.h"
 #include "Rendering/GL/AttribStateVerify.h"
 #include <tuple>
 
@@ -2065,10 +2066,10 @@ void CMiniMap::SetClipPlanes(const bool lua) const
 		const double plane2[4] = {-1,  0, 0, double(curDim.x)};
 		const double plane3[4] = { 1,  0, 0,                0};
 
-		glClipPlane(GL_CLIP_PLANE0, plane0); // clip bottom
-		glClipPlane(GL_CLIP_PLANE1, plane1); // clip top
-		glClipPlane(GL_CLIP_PLANE2, plane2); // clip right
-		glClipPlane(GL_CLIP_PLANE3, plane3); // clip left
+		GL::ffRaster.SetClipPlane(GL_CLIP_PLANE0, plane0); // clip bottom
+		GL::ffRaster.SetClipPlane(GL_CLIP_PLANE1, plane1); // clip top
+		GL::ffRaster.SetClipPlane(GL_CLIP_PLANE2, plane2); // clip right
+		GL::ffRaster.SetClipPlane(GL_CLIP_PLANE3, plane3); // clip left
 
 		glPopMatrix();
 	} else {
@@ -2078,10 +2079,10 @@ void CMiniMap::SetClipPlanes(const bool lua) const
 		const double plane2[4] = {-1, 0, 0, 1};
 		const double plane3[4] = { 1, 0, 0, 0};
 
-		glClipPlane(GL_CLIP_PLANE0, plane0); // clip bottom
-		glClipPlane(GL_CLIP_PLANE1, plane1); // clip top
-		glClipPlane(GL_CLIP_PLANE2, plane2); // clip right
-		glClipPlane(GL_CLIP_PLANE3, plane3); // clip left
+		GL::ffRaster.SetClipPlane(GL_CLIP_PLANE0, plane0); // clip bottom
+		GL::ffRaster.SetClipPlane(GL_CLIP_PLANE1, plane1); // clip top
+		GL::ffRaster.SetClipPlane(GL_CLIP_PLANE2, plane2); // clip right
+		GL::ffRaster.SetClipPlane(GL_CLIP_PLANE3, plane3); // clip left
 	}
 }
 

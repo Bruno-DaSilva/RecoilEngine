@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "UnitDrawer.h"
+#include "Rendering/GL/FFRasterState.h"
 #include "Rendering/GL/AttribStateVerify.h"
 
 #include "Game/Camera.h"
@@ -1108,8 +1109,8 @@ void CUnitDrawerGLSL::DrawModelWireBuildStageShadow(const CUnit* unit, const dou
 	} else {
 		glPushMatrix();
 		glLoadIdentity();
-		glClipPlane(GL_CLIP_PLANE0, upperPlane);
-		glClipPlane(GL_CLIP_PLANE1, lowerPlane);
+		GL::ffRaster.SetClipPlane(GL_CLIP_PLANE0, upperPlane);
+		GL::ffRaster.SetClipPlane(GL_CLIP_PLANE1, lowerPlane);
 		glPopMatrix();
 	}
 
@@ -1128,8 +1129,8 @@ void CUnitDrawerGLSL::DrawModelFlatBuildStageShadow(const CUnit* unit, const dou
 	RECOIL_DETAILED_TRACY_ZONE;
 	glPushMatrix();
 	glLoadIdentity();
-	glClipPlane(GL_CLIP_PLANE0, upperPlane);
-	glClipPlane(GL_CLIP_PLANE1, lowerPlane);
+	GL::ffRaster.SetClipPlane(GL_CLIP_PLANE0, upperPlane);
+	GL::ffRaster.SetClipPlane(GL_CLIP_PLANE1, lowerPlane);
 	glPopMatrix();
 
 	DrawUnitModel(unit, noLuaCall);
@@ -1214,8 +1215,8 @@ void CUnitDrawerGLSL::DrawModelWireBuildStageOpaque(const CUnit* unit, const dou
 		glDisable(GL_CLIP_PLANE0);
 		glDisable(GL_CLIP_PLANE1);
 	} else {
-		glClipPlane(GL_CLIP_PLANE0, upperPlane);
-		glClipPlane(GL_CLIP_PLANE1, lowerPlane);
+		GL::ffRaster.SetClipPlane(GL_CLIP_PLANE0, upperPlane);
+		GL::ffRaster.SetClipPlane(GL_CLIP_PLANE1, lowerPlane);
 	}
 
 	glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
@@ -1231,8 +1232,8 @@ void CUnitDrawerGLSL::DrawModelWireBuildStageOpaque(const CUnit* unit, const dou
 void CUnitDrawerGLSL::DrawModelFlatBuildStageOpaque(const CUnit* unit, const double* upperPlane, const double* lowerPlane, bool noLuaCall) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	glClipPlane(GL_CLIP_PLANE0, upperPlane);
-	glClipPlane(GL_CLIP_PLANE1, lowerPlane);
+	GL::ffRaster.SetClipPlane(GL_CLIP_PLANE0, upperPlane);
+	GL::ffRaster.SetClipPlane(GL_CLIP_PLANE1, lowerPlane);
 
 	DrawUnitModel(unit, noLuaCall);
 }
@@ -1243,7 +1244,7 @@ void CUnitDrawerGLSL::DrawModelFillBuildStageOpaque(const CUnit* unit, const dou
 	if (globalRendering->amdHacks)
 		glDisable(GL_CLIP_PLANE0);
 	else
-		glClipPlane(GL_CLIP_PLANE0, upperPlane);
+		GL::ffRaster.SetClipPlane(GL_CLIP_PLANE0, upperPlane);
 
 	glPolygonOffset(1.0f, 1.0f);
 	glEnable(GL_POLYGON_OFFSET_FILL);

@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "SMFReadMap.h"
+#include "Rendering/GL/FFRasterState.h"
 #include "Rendering/GL/AttribStateVerify.h"
 #include "SMFGroundDrawer.h"
 #include "SMFGroundTextures.h"
@@ -240,7 +241,7 @@ void CSMFGroundDrawer::DrawDeferredPass(const DrawPass::e& drawPass, bool alphaT
 
 		if (alphaTest) {
 			glEnable(GL_ALPHA_TEST);
-			glAlphaFunc(GL_GREATER, mapInfo->map.voidAlphaMin);
+			GL::ffRaster.SetAlphaFunc(GL_GREATER, mapInfo->map.voidAlphaMin);
 		}
 
 		if (alwaysDispatchEvents || HaveLuaRenderState())
@@ -292,7 +293,7 @@ void CSMFGroundDrawer::DrawForwardPass(const DrawPass::e& drawPass, bool alphaTe
 
 	if (alphaTest) {
 		glEnable(GL_ALPHA_TEST);
-		glAlphaFunc(GL_GREATER, mapInfo->map.voidAlphaMin);
+		GL::ffRaster.SetAlphaFunc(GL_GREATER, mapInfo->map.voidAlphaMin);
 	}
 
 	if (alwaysDispatchEvents || HaveLuaRenderState())

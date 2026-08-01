@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include "Rendering/GL/FFRasterState.h"
 #include <string>
 #include <string_view>
 #include <stack>
@@ -410,7 +411,7 @@ inline void CModelDrawerBase<TDrawerData, TDrawer>::DrawShadowPassImpl() const
 		glPolygonOffset(1.0f, 1.0f);
 		glEnable(GL_POLYGON_OFFSET_FILL);
 
-		glAlphaFunc(GL_GREATER, 0.5f);
+		GL::ffRaster.SetAlphaFunc(GL_GREATER, 0.5f);
 		glEnable(GL_ALPHA_TEST);
 	}
 

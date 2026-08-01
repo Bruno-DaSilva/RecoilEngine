@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "Rendering/GL/myGL.h"
+#include "Rendering/GL/FFRasterState.h"
 
 #include "WorldDrawer.h"
 #include "Sim/Units/UnitDefHandler.h"
@@ -402,7 +403,7 @@ void CWorldDrawer::DrawAlphaObjects() const
 		if (hasWaterRendering) {
 			glPushMatrix();
 			glLoadIdentity();
-			glClipPlane(GL_CLIP_PLANE3, belowPlaneEq);
+			GL::ffRaster.SetClipPlane(GL_CLIP_PLANE3, belowPlaneEq);
 			glPopMatrix();
 			glEnable(GL_CLIP_PLANE3);
 		}
@@ -442,7 +443,7 @@ void CWorldDrawer::DrawAlphaObjects() const
 		SCOPED_GL_DEBUGGROUP("Draw::World::Alpha");
 		glPushMatrix();
 		glLoadIdentity();
-		glClipPlane(GL_CLIP_PLANE3, abovePlaneEq);
+		GL::ffRaster.SetClipPlane(GL_CLIP_PLANE3, abovePlaneEq);
 		glPopMatrix();
 		glEnable(GL_CLIP_PLANE3);
 

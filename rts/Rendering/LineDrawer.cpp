@@ -3,6 +3,7 @@
 // TODO: move this out of Sim, this is rendering code!
 
 #include "LineDrawer.h"
+#include "Rendering/GL/FFRasterState.h"
 
 #include <cmath>
 
@@ -47,7 +48,7 @@ void CLineDrawer::SetupLineStipple()
 	}
 	const unsigned int fullPat = (stipPat << 16) | (stipPat & 0x0000ffff);
 	const int shiftBits = 15 - (int(stippleTimer * 20.0f) % 16);
-	glLineStipple(cmdColors.StippleFactor(), (fullPat >> shiftBits));
+	GL::ffRaster.SetLineStipple(cmdColors.StippleFactor(), (fullPat >> shiftBits));
 }
 
 

@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "GuiHandler.h"
+#include "Rendering/GL/FFRasterState.h"
 #include "Rendering/GL/AttribStateVerify.h"
 
 #include <Rml/Backends/RmlUi_Backend.h>
@@ -2647,7 +2648,7 @@ void CGuiHandler::Draw()
 	glEnable(GL_BLEND);
 	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 	glEnable(GL_ALPHA_TEST);
-	glAlphaFunc(GL_GEQUAL, 0.01f);
+	GL::ffRaster.SetAlphaFunc(GL_GEQUAL, 0.01f);
 
 	if (iconsCount > 0)
 		DrawButtons();
