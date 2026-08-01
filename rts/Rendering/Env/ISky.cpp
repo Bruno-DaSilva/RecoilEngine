@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 
+#include <algorithm>
 #include "ISky.h"
 #include "NullSky.h"
 #include "SkyBox.h"
@@ -55,11 +56,33 @@ void ISky::SetupFog() {
 		glDisable(GL_FOG);
 	}
 
-	glFogfv(GL_FOG_COLOR, fogColor);
-	glFogi(GL_FOG_MODE,   GL_LINEAR);
-	glFogf(GL_FOG_START,  camera->GetFarPlaneDist() * fogStart);
-	glFogf(GL_FOG_END,    camera->GetFarPlaneDist() * fogEnd);
-	glFogf(GL_FOG_DENSITY, 1.0f);
+	// Every glFog* is on RenderDoc's unsupported list and the queries that read
+	// the state back are not, so only write what actually moved -- this runs per
+	// draw pass (5,601 times a run) while the values change at most once a frame,
+	// and mostly never. Writing a state the value it already holds cannot change
+	// rendering. Same trade as GL::AttribSnapshot::Restore.
+	const float fogStartDist = camera->GetFarPlaneDist() * fogStart;
+	const float fogEndDist   = camera->GetFarPlaneDist() * fogEnd;
+
+	float curFogColor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+	GLint curFogMode = 0;
+	float curFogStart = 0.0f, curFogEnd = 0.0f, curFogDensity = 0.0f;
+	glGetFloatv(GL_FOG_COLOR, curFogColor);
+	glGetIntegerv(GL_FOG_MODE, &curFogMode);
+	glGetFloatv(GL_FOG_START, &curFogStart);
+	glGetFloatv(GL_FOG_END, &curFogEnd);
+	glGetFloatv(GL_FOG_DENSITY, &curFogDensity);
+
+	if (!std::equal(curFogColor, curFogColor + 4, static_cast<const float*>(fogColor)))
+		glFogfv(GL_FOG_COLOR, fogColor);
+	if (curFogMode != GL_LINEAR)
+		glFogi(GL_FOG_MODE, GL_LINEAR);
+	if (curFogStart != fogStartDist)
+		glFogf(GL_FOG_START, fogStartDist);
+	if (curFogEnd != fogEndDist)
+		glFogf(GL_FOG_END, fogEndDist);
+	if (curFogDensity != 1.0f)
+		glFogf(GL_FOG_DENSITY, 1.0f);
 }
 
 void ISky::SetSky()
