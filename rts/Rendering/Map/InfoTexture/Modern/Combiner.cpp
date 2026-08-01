@@ -6,6 +6,7 @@
 #include "Rendering/Shaders/ShaderHandler.h"
 #include "Rendering/Shaders/Shader.h"
 #include "Rendering/GL/SubState.h"
+#include "Rendering/GL/FFShaderRewrite.h"
 #include "Map/ReadMap.h"
 #include "System/Exceptions.h"
 #include "System/Config/ConfigHandler.h"
@@ -130,13 +131,35 @@ void CInfoTextureCombiner::Update()
 	const float isx = 2.0f * (mapDims.mapx / float(mapDims.pwr2mapx)) - 1.0f;
 	const float isy = 2.0f * (mapDims.mapy / float(mapDims.pwr2mapy)) - 1.0f;
 
-	// need to keep this old nonsence intact to keep Lua shaders compatible
-	glBegin(GL_QUADS);
-		glTexCoord2f(0.f, 0.f); glVertex2f(-1.f, -1.f);
-		glTexCoord2f(0.f, 1.f); glVertex2f(-1.f, +isy);
-		glTexCoord2f(1.f, 1.f); glVertex2f(+isx, +isy);
-		glTexCoord2f(1.f, 0.f); glVertex2f(+isx, -1.f);
-	glEnd();
+	// The Lua-supplied combiner shader reads gl_Vertex and gl_MultiTexCoord0, so
+	// immediate mode used to be the only way to deliver them. Where the source
+	// rewrite reached it those come from generic attributes instead; where it
+	// did not -- a shader reading a builtin with no attribute channel -- the
+	// fixed-function quad still has to draw, which is what keeps an unchanged
+	// game rendering. Corner texcoords are axis-aligned, so the two triangles
+	// interpolate exactly as the quad did.
+	const float corners[4][9] = {
+		{ -1.f, -1.f, 0.f, 0.f, 0.f, 1.f, 1.f, 1.f, 1.f },
+		{ -1.f, +isy, 0.f, 0.f, 1.f, 1.f, 1.f, 1.f, 1.f },
+		{ +isx, +isy, 0.f, 1.f, 1.f, 1.f, 1.f, 1.f, 1.f },
+		{ +isx, -1.f, 0.f, 1.f, 0.f, 1.f, 1.f, 1.f, 1.f },
+	};
+
+	if (const GL::FFAttribBinding* b = GL::GetFFAttribBinding(GL::CurrentProgram()); b != nullptr) {
+		float tris[6][9];
+		int n = 0;
+		for (const int k : {0, 1, 2, 0, 2, 3})
+			std::copy(corners[k], corners[k] + 9, tris[n++]);
+
+		GL::DrawFFAttribStream(GL_TRIANGLES, &tris[0][0], 6, *b);
+	} else {
+		glBegin(GL_QUADS);
+			for (const float(&c)[9] : corners) {
+				glTexCoord2f(c[3], c[4]);
+				glVertex2f(c[0], c[1]);
+			}
+		glEnd();
+	}
 
 	shader->Disable();
 	shader->UnbindTextures();

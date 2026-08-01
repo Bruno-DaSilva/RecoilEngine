@@ -5,6 +5,7 @@
 #include "Lua/LuaOpenGL.h"
 #include "Rendering/GL/myGL.h"
 #include "Rendering/GL/FFStateTracker.h"
+#include "Rendering/GL/FFShaderRewrite.h"
 #include "Rendering/GlobalRendering.h"
 #include "Rendering/Shaders/ShaderHandler.h"
 #include "Rendering/Shaders/Shader.h"
@@ -247,6 +248,21 @@ namespace {
 
 	ImmFloatStream immStream;
 
+	// A rejected draw falls back silently and reads exactly like a converted
+	// one, so say which happened -- once per outcome, since these fire
+	// thousands of times a run.
+	void ReportBoundShaderOutcome(bool active, uint32_t prog)
+	{
+		static bool saidActive = false, saidRejected = false;
+		bool& said = active ? saidActive : saidRejected;
+		if (said)
+			return;
+
+		said = true;
+		LOG_L(L_WARNING, "[FFAttribFeed] %s: immediate stream into bound program %u",
+			active ? "ACTIVE" : "REJECTED (program not rewritten -- keeping the legacy replay)", prog);
+	}
+
 	// GL_QUADS / GL_QUAD_STRIP / GL_POLYGON are not in the core profile, so the
 	// modern path triangulates them (as an index remap into the captured
 	// stream); other modes pass through unchanged. For a planar convex
@@ -462,6 +478,7 @@ namespace LuaImmFallback {
 		"DENSE_MV", "PERSPECTIVE_P", "TEX_ACTIVE_UNIT", "TEX_2D_DISABLED",
 		"TEX_TARGET_PRIORITY", "TEX_TEXGEN", "TEX_ENV_MODE", "TEX_MATRIX",
 		"TEX_MIP_INCOMPLETE", "TEX_ALPHA_FORMAT", "TEX_MULTI_UNIT", "FOG_MODE",
+		"BOUND_SHADER",
 	};
 	static const char* drawModeNames[NUM_DRAW_MODES] = {
 		"NONE", "GENESIS", "WORLD", "WORLD_SHADOW", "WORLD_REFLECTION",
@@ -653,6 +670,16 @@ void LuaImmediateBuffer::FlushModern() const
 	if (verts.empty())
 		return;
 
+	// A game-supplied shader is bound: it is what must draw the primitive, so
+	// feed it rather than picking a program of this backend's own.
+	if (GL::CurrentProgram() != 0) {
+		if (!FlushIntoBoundShader(false)) {
+			CountFallback(LuaImmFallback::REASON_BOUND_SHADER, verts.size());
+			FlushLegacy();
+		}
+		return;
+	}
+
 	// A CPU-composed P*MV can ULP-differ from the driver's own on dense or
 	// perspective matrices, which used to force these streams down the exact
 	// legacy replay. They now take the builtin-MVP shader variant instead: the
@@ -767,13 +794,87 @@ void LuaImmediateBuffer::FlushModern() const
 	// never touches glColor, so replicate the exact legacy side effect
 	// (apitrace-confirmed classes: the gui_pip minimap wash, the minimap
 	// camera-box blue-channel divergence). Float precision so unclamped/
-	// overbright current colors round-trip. Ditto the FF current texcoord for
-	// textured streams: FlushLegacy's per-vertex glTexCoord replay leaves it at
-	// the LAST vertex's coords, consumed by later inheriting draws
-	// (display-list replays with no leading glTexCoord).
-	if (textured)
+	// overbright current colors round-trip. The FF current texcoord went the
+	// other way: priming it here was the last thing keeping glTexCoord2f alive.
+	// Every immediate-mode emitter in the engine sets its own coords (audited),
+	// so the only draw that could inherit this one is an UNTEXTURED legacy
+	// replay sampling an enabled texture -- and the modern flush already draws
+	// that case as a flat fill, so the two have never agreed on it anyway. The
+	// one real inheritor left is CmdListEmitStreamIntoCompile's texSeed
+	// vertices, inside a real display-list compile, which this configuration no
+	// longer produces. Hence the knob: with it off, nothing moves at all.
+	if (textured && !GL::FFRewriteEnabled())
 		glTexCoord2f(verts.back().s, verts.back().t);
 	glColor4fv(sawColor ? lastColorF : seedColorF);
+}
+
+bool LuaImmediateBuffer::FlushIntoBoundShader(bool isTexRect) const
+{
+	const uint32_t prog = GL::CurrentProgram();
+	const GL::FFAttribBinding* ffb = GL::GetFFAttribBinding(prog);
+
+	ReportBoundShaderOutcome(ffb != nullptr, prog);
+
+	if (ffb == nullptr)
+		return false;
+
+	// No texture, fog or matrix gate here, unlike the no-shader flushes. Those
+	// exist because this backend's OWN program has to reproduce what fixed
+	// function would have done to the fragment; here the game's shader does its
+	// own texturing, fogging and transform, exactly as it did when immediate
+	// mode delivered the same vertices. All that has to match is the stream.
+	const auto c01 = [](float v) { return std::clamp(v, 0.0f, 1.0f); };
+
+	std::vector<float> data;
+	uint32_t drawMode = GL_TRIANGLES;
+
+	if (isTexRect) {
+		if (!texRect.set)
+			return true;
+
+		const float r = c01(texRect.cf[0]), g = c01(texRect.cf[1]);
+		const float b = c01(texRect.cf[2]), a = c01(texRect.cf[3]);
+		const float quad[4][9] = {
+			{ texRect.x0, texRect.y0, 0.0f, texRect.s0, texRect.t0, r, g, b, a },
+			{ texRect.x1, texRect.y0, 0.0f, texRect.s1, texRect.t0, r, g, b, a },
+			{ texRect.x1, texRect.y1, 0.0f, texRect.s1, texRect.t1, r, g, b, a },
+			{ texRect.x0, texRect.y1, 0.0f, texRect.s0, texRect.t1, r, g, b, a },
+		};
+
+		data.reserve(6 * 9);
+		for (const int k : {0, 1, 2, 0, 2, 3})
+			data.insert(data.end(), quad[k], quad[k] + 9);
+	} else {
+		if (verts.empty())
+			return true;
+
+		assert(vertColorsF.size() == verts.size() * 4);
+
+		auto [idx, mode] = TriangulateIndicesForModern(this->mode, verts.size());
+		if (idx.empty())
+			return true;
+
+		drawMode = mode;
+		data.reserve(idx.size() * 9);
+		for (const uint32_t k : idx) {
+			const VA_TYPE_TC& v = verts[k];
+			data.insert(data.end(), {
+				v.pos.x, v.pos.y, v.pos.z, v.s, v.t,
+				c01(vertColorsF[k * 4 + 0]), c01(vertColorsF[k * 4 + 1]),
+				c01(vertColorsF[k * 4 + 2]), c01(vertColorsF[k * 4 + 3]),
+			});
+		}
+	}
+
+	GL::DrawFFAttribStream(drawMode, data.data(), data.size() / 9, *ffb);
+
+	// same exact-legacy end state the no-shader flushes replicate: the fixed
+	// function current color a glBegin/glEnd body would have left behind, which
+	// later inheriting draws still read. This path only exists under the source
+	// rewrite, so the current texcoord is never primed here -- see FlushModern.
+	glColor4fv(isTexRect ? texRect.cf : (sawColor ? lastColorF : seedColorF));
+
+	return true;
 }
 
 void LuaImmediateBuffer::FlushTexRectLegacy() const
@@ -799,6 +900,14 @@ void LuaImmediateBuffer::FlushTexRectModern() const
 
 	// a TexRect carries no accumulated stream; it is always the one quad
 	static constexpr size_t TEX_RECT_VERTS = 4;
+
+	if (GL::CurrentProgram() != 0) {
+		if (!FlushIntoBoundShader(true)) {
+			CountFallback(LuaImmFallback::REASON_BOUND_SHADER, TEX_RECT_VERTS);
+			FlushTexRectLegacy();
+		}
+		return;
+	}
 
 	// Dense modelview or perspective projection takes the builtin-MVP variant,
 	// where the driver composes P*MV, rather than the exact legacy quad -- see
@@ -869,9 +978,10 @@ void LuaImmediateBuffer::FlushTexRectModern() const
 	// carries that FF current color into LATER draws (gl_Color). Replicate it so a
 	// modern gl.TexRect is state-identical to legacy -- otherwise a following text
 	// draw inherits a stale color (apitrace class: the minimap wash, here on the
-	// countdown text). Ditto the FF current texcoord: the legacy quad's last
-	// glTexCoord is (s0, t1).
-	glTexCoord2f(texRect.s0, texRect.t1);
+	// countdown text). The current texcoord the legacy quad would have left at
+	// (s0, t1) is no longer primed here -- see FlushModern.
+	if (!GL::FFRewriteEnabled())
+		glTexCoord2f(texRect.s0, texRect.t1);
 	glColor4fv(texRect.cf);
 }
 

@@ -53,6 +53,7 @@ namespace LuaImmFallback {
 		REASON_TEX_ALPHA_FORMAT,    // GL_ALPHA internal format
 		REASON_TEX_MULTI_UNIT,      // another FF texture unit is enabled
 		REASON_FOG_MODE,            // fog mode is not LINEAR
+		REASON_BOUND_SHADER,        // bound program still reads the FF builtins
 		REASON_NONE,                // gate passed (not counted)
 		REASON_COUNT = REASON_NONE
 	};
@@ -134,6 +135,14 @@ public:
 	void Flush(Backend b) const { (b == Backend::Legacy) ? FlushLegacy() : FlushModern(); }
 	void FlushLegacy() const;
 	void FlushModern() const;
+
+	// Draw the accumulated stream through the bound game-supplied shader, fed
+	// by the generic attributes GL::RewriteFFVertexBuiltins put in its source.
+	// False when the bound program cannot be fed that way (it was never
+	// rewritten, or it reads a builtin with no attribute channel), in which
+	// case the caller must keep the exact legacy replay -- that program is
+	// still expecting fixed function to deliver its vertices.
+	bool FlushIntoBoundShader(bool isTexRect) const;
 
 	// tally one modern->legacy fallback against the current Lua draw mode
 	void CountFallback(LuaImmFallback::Reason r, size_t numVerts) const;

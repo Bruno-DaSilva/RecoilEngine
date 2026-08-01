@@ -60,6 +60,7 @@
 #include "Rendering/Env/MapRendering.h"
 #include "Rendering/GL/glExtra.h"
 #include "Rendering/GL/FFStateTracker.h"
+#include "Rendering/GL/FFShaderRewrite.h"
 #include "Rendering/GL/AttribStateVerify.h"
 #include "Rendering/GL/TexBind.h"
 #include "Rendering/Models/3DModelMisc.hpp"
@@ -167,16 +168,20 @@ static void SetImmBufferFixedFunctionMatrices()
 	}
 }
 
-// True only in fixed-function mode (no shader program bound) -- the only case
-// the modern immediate backend may take over; otherwise the primitive is meant
-// to feed the bound shader and must go the legacy way. Queries the live GL
-// state so it catches BOTH engine shaders and Lua gl.UseShader, which calls
-// glUseProgram directly without notifying shaderHandler.
-static bool NoShaderBound()
+// True when the modern backend may take the primitive: either fixed function is
+// what would have drawn it (no program bound), or a program is bound whose
+// source was rewritten off the fixed-function vertex builtins, so the stream can
+// be handed to it as generic attributes instead of through glBegin/glVertex.
+// The second case is what retires the immediate-mode family -- those calls
+// survive only where a game's own shader still expects the fixed-function
+// channels (see GL::RewriteFFVertexBuiltins).
+//
+// Queries live GL state, so it catches BOTH engine shaders and Lua gl.UseShader,
+// which calls glUseProgram directly without notifying shaderHandler.
+static bool ModernFeedable()
 {
-	GLint prog = 0;
-	glGetIntegerv(GL_CURRENT_PROGRAM, &prog);
-	return prog == 0;
+	const uint32_t prog = GL::CurrentProgram();
+	return (prog == 0) || (GL::GetFFAttribBinding(prog) != nullptr);
 }
 
 // glRectf/glBegin-quads honor glPolygonMode (widgets draw outline rects via
@@ -856,7 +861,7 @@ static void CmdListReplayStream(const LuaCommandList::ImmStreamData& s)
 	if (s.mode == GL_POINTS)
 		WorkaroundATIPointSizeBug();
 
-	const bool modernOK = LuaOpenGL::GetModernImmediate() && NoShaderBound() && PolygonModeFill();
+	const bool modernOK = LuaOpenGL::GetModernImmediate() && ModernFeedable() && PolygonModeFill();
 	if (modernOK) {
 		SetImmBufferFixedFunctionMatrices();
 		// Seed-class vertices take the REPLAY-time current colour, so their
@@ -964,7 +969,7 @@ static void CmdListReplayLive(const LuaCommandList& cl)
 			} break;
 			case Op::Rect: {
 				// exactly the live gl.Rect dispatch
-				const bool modernOK = LuaOpenGL::GetModernImmediate() && NoShaderBound() && PolygonModeFill();
+				const bool modernOK = LuaOpenGL::GetModernImmediate() && ModernFeedable() && PolygonModeFill();
 				if (modernOK) {
 					DrawRectModern(c.f[0], c.f[1], c.f[2], c.f[3]);
 				} else {
@@ -1002,6 +1007,36 @@ static void SetImmFallbackCallSite(lua_State* L)
 	} else {
 		LuaImmFallback::SetCallSite("<unknown>");
 	}
+}
+
+// One line per distinct (draw, reason, Lua call site) whose immediate stream
+// stayed on the legacy replay. The offender census can say which function still
+// fires and from which C++ line, never which widget produced it or which gate
+// turned it away -- and a refusal is otherwise indistinguishable from a
+// conversion, which is how a clean-looking run can be hiding the whole job.
+static void ReportImmLegacy(lua_State* L, const char* fn, bool compilingList)
+{
+	if (!LuaImmFallback::Enabled())
+		return;
+
+	static std::unordered_set<std::string> seen;
+
+	const uint32_t prog = GL::CurrentProgram();
+	const char* why =
+		(prog != 0 && GL::GetFFAttribBinding(prog) == nullptr) ? "bound program reads the FF builtins (not rewritten)" :
+		!PolygonModeFill()                                     ? "polygon mode is not FILL" :
+		compilingList                                          ? "inside a display-list compile" :
+		                                                         "modern immediate backend off";
+
+	std::string site = "<unknown>";
+	lua_Debug info;
+	if (lua_getstack(L, 1, &info) && lua_getinfo(L, "Sl", &info))
+		site = fmt::format("{}:{}", info.short_src, info.currentline);
+
+	if (!seen.emplace(fmt::format("{}|{}|{}", fn, why, site)).second)
+		return;
+
+	LOG_L(L_WARNING, "[FFAttribFeed] LEGACY %s at %s: %s (program %u)", fn, site.c_str(), why, prog);
 }
 
 // per-Lua-caller dedup of LuaGLCompareMode results so the log isn't spammed.
@@ -3436,7 +3471,12 @@ int LuaOpenGL::Shape(lua_State* L)
 
 	const GLuint type = (GLuint)luaL_checkint(L, 1);
 
-	glBegin(type);
+	// Read the whole table before emitting anything: whether this can go the
+	// modern way depends on the vertices themselves (a per-vertex normal has no
+	// channel in the immediate buffer), and that is only known once they are all
+	// parsed.
+	std::vector<VertexData> shape;
+	bool anyNorm = false;
 
 	const int table = 2;
 	int i = 1;
@@ -3448,17 +3488,47 @@ int LuaOpenGL::Shape(lua_State* L)
 			luaL_error(L, "Shape: bad vertex data");
 			break;
 		}
-		if (vd.hasColor) { glColor4fv(vd.color);   }
-		if (vd.hasTxcd)  { glTexCoord2fv(vd.txcd); }
-		if (vd.hasNorm)  { glNormal3fv(vd.norm);   }
-		if (vd.hasVert)  { glVertex3fv(vd.vert);   } // always last
+		anyNorm |= vd.hasNorm;
+		shape.push_back(vd);
 	}
 	if (!lua_isnil(L, -1)) {
 		luaL_error(L, "Shape: bad vertex data, not a table");
 	}
 	// lua_pop(L, 1);
 
-	glEnd();
+	// see gl.BeginEnd for the compile and polygon-mode conditions
+	const bool modernOK = modernImmediate && ModernFeedable() && PolygonModeFill()
+	                   && !compilingDisplayList && !anyNorm;
+
+	if (!modernOK) {
+		ReportImmLegacy(L, __func__, compilingDisplayList);
+		glBegin(type);
+		for (const VertexData& vd : shape) {
+			if (vd.hasColor) { glColor4fv(vd.color);   }
+			if (vd.hasTxcd)  { glTexCoord2fv(vd.txcd); }
+			if (vd.hasNorm)  { glNormal3fv(vd.norm);   }
+			if (vd.hasVert)  { glVertex3fv(vd.vert);   } // always last
+		}
+		glEnd();
+		return 0;
+	}
+
+	GLfloat cc[4];
+	glGetFloatv(GL_CURRENT_COLOR, cc);
+
+	luaImmBuffer.Begin(type);
+	luaImmBuffer.SeedColor(cc);
+	SetImmBufferFixedFunctionMatrices();
+
+	for (const VertexData& vd : shape) {
+		if (vd.hasColor) { luaImmBuffer.Color(vd.color[0], vd.color[1], vd.color[2], vd.color[3]); }
+		if (vd.hasTxcd)  { luaImmBuffer.TexCoord(vd.txcd[0], vd.txcd[1]); }
+		if (vd.hasVert)  { luaImmBuffer.Vertex(vd.vert[0], vd.vert[1], vd.vert[2]); }
+	}
+
+	SetImmFallbackCallSite(L);
+	luaImmBuffer.FlushModern();
+	luaImmBuffer.Clear();
 
 	return 0;
 }
@@ -3502,7 +3572,8 @@ int LuaOpenGL::BeginEnd(lua_State* L)
 	// cache -- the font-renderer bug class, seen as vanishing/phantom geometry from
 	// gl.CreateList bodies under the A/B gate). Legacy glBegin/glEnd IS the recordable
 	// representation, so always compile that.
-	if (!((modernImmediate || glCompareMode) && NoShaderBound() && PolygonModeFill()) || compilingDisplayList) {
+	if (!((modernImmediate || glCompareMode) && ModernFeedable() && PolygonModeFill()) || compilingDisplayList) {
+		ReportImmLegacy(L, __func__, compilingDisplayList);
 		glBegin(primMode);
 		const int error = lua_pcall(L, (args - 2), 0, 0);
 		glEnd();
@@ -3990,7 +4061,7 @@ int LuaOpenGL::Rect(lua_State* L)
 	const float x2 = luaL_checkfloat(L, 3);
 	const float y2 = luaL_checkfloat(L, 4);
 
-	const bool noShader = NoShaderBound();
+	const bool noShader = ModernFeedable();
 
 	const auto drawLegacy = [&]() { glRectf(x1, y1, x2, y2); };
 	// glRectf fills with the FF CURRENT color (which dlist replays/fonts can
@@ -4011,6 +4082,9 @@ int LuaOpenGL::Rect(lua_State* L)
 		GLint vp[4]; glGetIntegerv(GL_VIEWPORT, vp);
 		LogGLCompare(L, __func__, LuaGLCompare::CompareDraws(vp[2], vp[3], drawLegacy, drawModern));
 	}
+
+	if (!(modernImmediate && modernOK))
+		ReportImmLegacy(L, __func__, compilingDisplayList);
 
 	(modernImmediate && modernOK) ? drawModern() : drawLegacy();
 	return 0;
@@ -4076,7 +4150,7 @@ int LuaOpenGL::TexRect(lua_State* L)
 		t2 = luaL_checkfloat(L, 8);
 	}
 
-	const bool noShader = NoShaderBound();
+	const bool noShader = ModernFeedable();
 
 	const auto drawLegacy = [&]() {
 		glBegin(GL_QUADS); {
@@ -4112,6 +4186,9 @@ int LuaOpenGL::TexRect(lua_State* L)
 		GLint vp[4]; glGetIntegerv(GL_VIEWPORT, vp);
 		LogGLCompare(L, __func__, LuaGLCompare::CompareDraws(vp[2], vp[3], drawLegacy, drawModern));
 	}
+
+	if (!(modernImmediate && modernOK))
+		ReportImmLegacy(L, __func__, compilingDisplayList);
 
 	(modernImmediate && modernOK) ? drawModern() : drawLegacy();
 	return 0;
