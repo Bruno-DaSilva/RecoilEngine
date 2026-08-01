@@ -53,6 +53,7 @@
 #include "Rendering/Fonts/glFont.h"
 #include "Rendering/GL/FBO.h"
 #include "Rendering/GL/FFDrawCensus.h"
+#include "Rendering/GL/FFMatrixTracking.h"
 #include "Rendering/GL/FFShaderRewrite.h"
 #include "Rendering/Models/ModelsMemStorage.h"
 #include "Rendering/GL/RenderBuffers.h"
@@ -272,6 +273,7 @@ bool SpringApp::Init()
 	globalRendering->UpdateGLConfigs();
 	globalRendering->UpdateGLGeometry();
 	globalRendering->InitGLState();
+	GL::InstallFFMatrixTracking();
 	GL::InstallFFUniformFeed();
 	GL::FFDrawCensus::Install();
 

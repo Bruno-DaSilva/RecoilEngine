@@ -6,11 +6,13 @@
 #include <array>
 #include <cctype>
 #include <cstring>
+#include <cmath>
 #include <unordered_map>
 #include <vector>
 
 #include "Rendering/GL/FFFog.h"
 #include "Rendering/GL/FFRasterState.h"
+#include "Rendering/GL/MatrixStateTracker.h"
 #include "System/Matrix44f.h"
 #include "Rendering/GL/FFStateTracker.h"
 #include "Rendering/GL/myGL.h"
@@ -416,18 +418,47 @@ namespace {
 		if (it == progUniforms.end() || it->second.mvpSelect < 0)
 			return;
 
-		const int32_t select = GL::ffExperiment.Active(GL::FFExperiment::MatrixUniform) ? 1 : 0;
+		const bool fromMirror = GL::ffExperiment.Active(GL::FFExperiment::MatrixUniformFromMirror);
+		const int32_t select = (fromMirror || GL::ffExperiment.Active(GL::FFExperiment::MatrixUniform)) ? 1 : 0;
 		glUniform1i(it->second.mvpSelect, select);
 
 		if (select == 0 || it->second.mvp < 0)
 			return;
+
+		// gl.CallList replays matrix ops inside the driver, where glad cannot see
+		// them, so the mirror can be tainted. Falling back keeps the frame
+		// rendering, but a tainted push is a phase-C blocker in its own right and
+		// has to be counted rather than absorbed.
+		const bool useMirror = fromMirror && GL::ffMirror.Valid();
+
+		if (fromMirror && !useMirror) {
+			static int tainted = 0;
+			if (tainted++ == 0)
+				LOG_L(L_WARNING, "[FFUniformFeed] mirror TAINTED at a draw; this push fell back to glGetFloatv");
+		}
 
 		CMatrix44f proj;
 		CMatrix44f modelView;
 		glGetFloatv(GL_PROJECTION_MATRIX, static_cast<float*>(proj));
 		glGetFloatv(GL_MODELVIEW_MATRIX, static_cast<float*>(modelView));
 
-		const CMatrix44f mvp = proj * modelView;
+		const CMatrix44f mvp = useMirror ? GL::ffMirror.GetMVP() : (proj * modelView);
+
+		// A mirror that happened to agree with glGetFloatv everywhere would make
+		// this experiment a re-run of the last one. Report how far apart they
+		// actually got, so a 0-pixel result is a result about a real difference.
+		if (useMirror) {
+			const CMatrix44f ref = proj * modelView;
+			static float worst = 0.0f;
+			float d = 0.0f;
+			for (int i = 0; i < 16; ++i)
+				d = std::max(d, std::fabs(mvp.m[i] - ref.m[i]) / std::max(1.0f, std::fabs(ref.m[i])));
+
+			if (d > worst * 2.0f && d > 0.0f) {
+				worst = d;
+				LOG_L(L_WARNING, "[FFUniformFeed] mirror MVP differs from the glGetFloatv product by %g relative", d);
+			}
+		}
 		glUniformMatrix4fv(it->second.mvp, 1, GL_FALSE, static_cast<const float*>(mvp));
 
 		// how many distinct programs the measurement actually covered; a 0-pixel
@@ -554,7 +585,8 @@ void GL::InstallFFUniformFeed()
 
 	// Only while an experiment is selected: the per-draw readback is a
 	// measurement cost, not something a shipping frame should pay.
-	if (configHandler->GetInt("GLFFRemovalExperiment") == static_cast<int>(FFExperiment::MatrixUniform)) {
+	if (const int e = configHandler->GetInt("GLFFRemovalExperiment");
+	    e == static_cast<int>(FFExperiment::MatrixUniform) || e == static_cast<int>(FFExperiment::MatrixUniformFromMirror)) {
 		#define FFMVP_SWAP(name, params, args) \
 			origMVP_##name = glad_##name; \
 			glad_##name = &MVPHook_##name;

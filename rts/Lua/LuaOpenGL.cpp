@@ -62,6 +62,7 @@
 #include "Rendering/GL/glExtra.h"
 #include "Rendering/GL/FFStateTracker.h"
 #include "Rendering/GL/FFFog.h"
+#include "Rendering/GL/FFMatrixTracking.h"
 #include "Rendering/GL/FFShaderRewrite.h"
 #include "Rendering/GL/AttribStateVerify.h"
 #include "Rendering/GL/TexBind.h"
@@ -131,6 +132,11 @@ static bool compilingDisplayList = false;
 // a display list is being compiled (see above).
 static inline GLMatrixStateTracker* FFMirrorOps()
 {
+	// With glad-level tracking installed the mirror has already seen the call
+	// these sites accompany; replaying it here as well would apply it twice.
+	if (GL::FFMatrixTrackingInstalled())
+		return nullptr;
+
 	return compilingDisplayList ? nullptr : &GL::ffMirror.tracker;
 }
 

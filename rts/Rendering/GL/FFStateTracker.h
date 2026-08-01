@@ -190,6 +190,13 @@ namespace GL {
 		// those ULPs into whole shades. Both matrices come from glGetFloatv, so
 		// the ONLY variable is who multiplies them.
 		MatrixUniform = 13,
+		// 14: the same uniform, composed from GL::ffMirror instead of from
+		// glGetFloatv. 13 proved the multiply is free; this is the other half --
+		// whether the CPU mirror reproduces the OPERANDS well enough, which is
+		// what phase C actually depends on, since deleting the set-calls also
+		// deletes the glGetFloatv source. The mirror is exact for absolute loads
+		// and diverges at glRotatef, whose trigonometry it re-derives in float.
+		MatrixUniformFromMirror = 14,
 		// 9: rewritten shaders reading gl_Fog through the engine-fed uniform
 		// rather than the compatibility builtin. The candidate pass takes the
 		// BUILTIN, so a signal means the uniform feed differs from what fixed
