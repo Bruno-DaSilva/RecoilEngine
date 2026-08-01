@@ -21,7 +21,7 @@ forceLegacy=0
 # its default value, so a knob set to its default silently disappears and the
 # next run measures a different configuration. Reported rather than asserted:
 # gating a knob deliberately OFF is a legitimate run.
-migrationKnobs=(LuaModernGLBackend LuaCmdListBakedStreams LuaCmdListSuspendOnObjectCreate ModernModelAttribs ModernModelFFShader FFVertexAttribRewrite)
+migrationKnobs=(LuaModernGLBackend LuaCmdListBakedStreams LuaCmdListSuspendOnObjectCreate ModernModelAttribs ModernModelFFShader FFVertexAttribRewrite FFMatrixSuppress)
 ffExperiment=0
 mixedOK=0
 content=

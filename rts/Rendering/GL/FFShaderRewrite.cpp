@@ -542,8 +542,20 @@ namespace {
 			it = progUniforms.find(prog);
 		}
 
-		if (it == progUniforms.end() || it->second.mvpSelect < 0)
+		if (it == progUniforms.end() || it->second.mvpSelect < 0) {
+			// This draw's program has no engine-fed transform: either nothing was
+			// rewritten into it (it uses its own uniforms) or it reads a builtin
+			// the rewrite never saw. Under suppression the second kind gets an
+			// identity, and that is the shape of a blank world.
+			static std::unordered_map<uint32_t, bool> unfed;
+			if (bool& seen = unfed[prog]; !seen) {
+				seen = true;
+				LOG_L(L_WARNING, "[FFUniformFeed] draw through program %u with NO engine-fed transform (%d distinct)",
+					prog, static_cast<int>(unfed.size()));
+			}
+
 			return;
+		}
 
 		// Suppression is the shipping case: the builtins have nothing behind them
 		// any more, so every rewritten program takes the uniform on every pass.
