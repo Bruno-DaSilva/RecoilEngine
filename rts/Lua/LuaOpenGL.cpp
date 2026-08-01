@@ -1492,7 +1492,21 @@ void LuaOpenGL::ResetGLState()
 	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
 	glDisable(GL_ALPHA_TEST);
-	glAlphaFunc(GL_GREATER, 0.5f);
+	// Same trade as GL::AttribSnapshot::Restore: this runs before every draw
+	// callin (19,108 calls a run), glAlphaFunc is unsupported by RenderDoc and
+	// the two queries are not, so read the state back and only write when it has
+	// actually moved. Skipping a write of the value already held cannot change
+	// any rendering. Note this resets to GREATER/0.5, not the GL default, so the
+	// comparison is against what the reset intends -- not against ffResetState,
+	// which models families BAR never touches at all.
+	{
+		GLint curAlphaFunc = GL_GREATER;
+		GLfloat curAlphaRef = 0.5f;
+		glGetIntegerv(GL_ALPHA_TEST_FUNC, &curAlphaFunc);
+		glGetFloatv(GL_ALPHA_TEST_REF, &curAlphaRef);
+		if (curAlphaFunc != GL_GREATER || curAlphaRef != 0.5f)
+			glAlphaFunc(GL_GREATER, 0.5f);
+	}
 
 	glDisable(GL_LIGHTING);
 
