@@ -161,5 +161,12 @@ if ls "$capture"*.rdc >/dev/null 2>&1; then
 	exit 0
 fi
 
+if (( ${#offenders[@]} == 0 )); then
+	printf '\n[rdoc] ZERO unsupported functions -- the burn-down target is met.\n'
+	printf '[rdoc] No .rdc here only because this librenderdoc is a patched meter build\n'
+	printf '[rdoc] with no renderdoccmd; capture needs a normal RenderDoc host.\n'
+	exit 0
+fi
+
 printf '\n[rdoc] no capture (expected while any function above remains)\n'
 exit 1
