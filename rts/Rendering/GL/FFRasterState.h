@@ -40,6 +40,10 @@ namespace GL {
 		// gl.PushAttrib and for the shadow-compare verifier's real pop.
 		void ResyncCaps();
 
+		// For GL::MaterializeFFState: a draw that fell back to fixed function is
+		// rasterized by it, so it needs the parameters the writes above skipped.
+		void MaterializeIntoGL() const;
+
 	private:
 		static constexpr int NUM_CLIP_PLANES = 6;
 

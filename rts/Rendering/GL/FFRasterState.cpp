@@ -4,9 +4,14 @@
 
 #include "Rendering/GL/myGL.h"
 
+#include "Rendering/GL/FFShaderRewrite.h"
+
 #include <algorithm>
 
 namespace {
+	// The measured-inert half; see the header. Off leaves every write in place.
+	bool WritesGL() { return !GL::FFRewriteEnabled(); }
+
 	int ClipPlaneIndex(uint32_t cap)
 	{
 		const int i = static_cast<int>(cap) - GL_CLIP_PLANE0;
@@ -19,7 +24,7 @@ void GL::FFRasterMirror::SetAlphaFunc(uint32_t func, float ref)
 	alphaFunc = func;
 	alphaRef = ref;
 
-	if (alphaTestOn)
+	if (alphaTestOn && WritesGL())
 		glAlphaFunc(alphaFunc, alphaRef);
 }
 
@@ -28,7 +33,7 @@ void GL::FFRasterMirror::SetLineStipple(int32_t factor, uint32_t pattern)
 	stippleFactor = factor;
 	stipplePattern = pattern;
 
-	if (stippleOn)
+	if (stippleOn && WritesGL())
 		glLineStipple(stippleFactor, static_cast<GLushort>(stipplePattern));
 }
 
@@ -40,7 +45,7 @@ void GL::FFRasterMirror::SetClipPlane(uint32_t plane, const double* equation)
 
 	std::copy(equation, equation + 4, clipPlanes[i]);
 
-	if (clipPlaneOn[i])
+	if (clipPlaneOn[i] && WritesGL())
 		glClipPlane(plane, clipPlanes[i]);
 }
 
@@ -49,23 +54,38 @@ void GL::FFRasterMirror::NoteCap(uint32_t cap, bool on)
 	if (cap == GL_ALPHA_TEST) {
 		// the write the setter skipped while this was off, put in place before
 		// anything can observe it
-		if (on && !alphaTestOn)
+		if (on && !alphaTestOn && WritesGL())
 			glAlphaFunc(alphaFunc, alphaRef);
 		alphaTestOn = on;
 		return;
 	}
 
 	if (cap == GL_LINE_STIPPLE) {
-		if (on && !stippleOn)
+		if (on && !stippleOn && WritesGL())
 			glLineStipple(stippleFactor, static_cast<GLushort>(stipplePattern));
 		stippleOn = on;
 		return;
 	}
 
 	if (const int i = ClipPlaneIndex(cap); i >= 0) {
-		if (on && !clipPlaneOn[i])
+		if (on && !clipPlaneOn[i] && WritesGL())
 			glClipPlane(cap, clipPlanes[i]);
 		clipPlaneOn[i] = on;
+	}
+}
+
+void GL::FFRasterMirror::MaterializeIntoGL() const
+{
+	// the caller is about to draw through fixed function after all, so give the
+	// rasterizer the parameters the writes above skipped
+	if (alphaTestOn)
+		glAlphaFunc(alphaFunc, alphaRef);
+	if (stippleOn)
+		glLineStipple(stippleFactor, static_cast<GLushort>(stipplePattern));
+
+	for (int i = 0; i < NUM_CLIP_PLANES; ++i) {
+		if (clipPlaneOn[i])
+			glClipPlane(GL_CLIP_PLANE0 + i, clipPlanes[i]);
 	}
 }
 

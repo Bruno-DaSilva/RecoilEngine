@@ -173,6 +173,15 @@ namespace GL {
 		// generation -- experiment 3 on this same function was a vacuous zero
 		// until that driver existed.
 		ModelFFShader = 6,
+		// 10/11/12: the candidate pass never ENABLES alpha test / line stipple /
+		// the user clip planes. Each of the three is a rasterization operation
+		// applied to shader draws, so before writing a shader-side replacement,
+		// measure whether the operation does anything in a BAR frame at all --
+		// the engine sets all three for content that may long since have moved
+		// its own handling into its shaders.
+		AlphaTestOff = 10,
+		LineStippleOff = 11,
+		ClipPlanesOff = 12,
 		// 9: rewritten shaders reading gl_Fog through the engine-fed uniform
 		// rather than the compatibility builtin. The candidate pass takes the
 		// BUILTIN, so a signal means the uniform feed differs from what fixed

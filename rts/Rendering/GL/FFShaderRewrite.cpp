@@ -326,8 +326,49 @@ namespace {
 	decltype(glad_glLinkProgram) origLinkProgram = nullptr;
 	decltype(glad_glDeleteProgram) origDeleteProgram = nullptr;
 
+	// True when the candidate pass of an FF-removal experiment holds `cap` off.
+	// Done at the enable rather than per call site: all of them are covered at
+	// once, including the ones a grep would miss.
+	bool ExperimentHoldsCapOff(GLenum cap)
+	{
+		switch (cap) {
+			case GL_ALPHA_TEST:    return GL::ffExperiment.Active(GL::FFExperiment::AlphaTestOff);
+			case GL_LINE_STIPPLE:  return GL::ffExperiment.Active(GL::FFExperiment::LineStippleOff);
+			case GL_CLIP_PLANE0:
+			case GL_CLIP_PLANE1:
+			case GL_CLIP_PLANE2:
+			case GL_CLIP_PLANE3:
+			case GL_CLIP_PLANE4:
+			case GL_CLIP_PLANE5:   return GL::ffExperiment.Active(GL::FFExperiment::ClipPlanesOff);
+			default:               return false;
+		}
+	}
+
 	void APIENTRY HookEnable(GLenum cap)
 	{
+		// An experiment that holds a capability off reads 0 px both when the
+		// operation is inert and when it was never switched on to begin with, so
+		// say which caps a run actually reached.
+		switch (cap) {
+			case GL_ALPHA_TEST:
+			case GL_LINE_STIPPLE:
+			case GL_CLIP_PLANE0: case GL_CLIP_PLANE1: case GL_CLIP_PLANE2:
+			case GL_CLIP_PLANE3: case GL_CLIP_PLANE4: case GL_CLIP_PLANE5: {
+				static std::unordered_map<GLenum, bool> reported;
+				if (bool& seen = reported[cap]; !seen) {
+					seen = true;
+					LOG_L(L_WARNING, "[FFRaster] cap 0x%x ENABLED at least once this run", cap);
+				}
+			} break;
+			default: break;
+		}
+
+		if (ExperimentHoldsCapOff(cap)) {
+			GL::ffRaster.NoteCap(cap, false);
+			origDisable(cap);
+			return;
+		}
+
 		GL::ffRaster.NoteCap(cap, true);
 		origEnable(cap);
 	}
