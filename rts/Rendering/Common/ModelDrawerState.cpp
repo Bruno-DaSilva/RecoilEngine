@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "ModelDrawerState.hpp"
+#include "Rendering/Models/3DModelVAO.hpp"
 #include "ModelDrawer.h"
 #include "Game/Camera.h"
 #include "Game/Game.h"
@@ -122,7 +123,8 @@ CModelDrawerStateGLSL::CModelDrawerStateGLSL()
 	};
 	const std::string extraDefs =
 		("#define BASE_DYNAMIC_MODEL_LIGHT " + IntToString(lightHandler->GetBaseLight()) + "\n") +
-		("#define MAX_DYNAMIC_MODEL_LIGHTS " + IntToString(lightHandler->GetMaxLights()) + "\n");
+		("#define MAX_DYNAMIC_MODEL_LIGHTS " + IntToString(lightHandler->GetMaxLights()) + "\n") +
+		("#define GENERIC_ATTRIBS " + IntToString(GL::ModernModelAttribs() ? 1 : 0) + "\n");
 
 	for (uint32_t n = MODEL_SHADER_NOSHADOW_STANDARD; n <= MODEL_SHADER_SHADOWED_DEFERRED; n++) {
 		modelShaders[n] = sh->CreateProgramObject(PO_CLASS, shaderNames[n]);

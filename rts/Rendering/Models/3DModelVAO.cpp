@@ -27,6 +27,21 @@ CONFIG(bool, BindLegacyModelTexUnits).defaultValue(false)
 // Function-local so the read happens on first draw, not during static init --
 // configHandler does not exist yet at namespace-scope initialisation time, and
 // reading it there segfaults before the window is even up.
+CONFIG(bool, ModernModelAttribs).defaultValue(false)
+	.description("Feed the legacy model draw path (gl.UnitShape, ghosted buildings, AI units, "
+	             "model projectiles) from the modern VAO's generic vertex attributes instead of "
+	             "fixed-function client arrays, and compile the engine model shader to read them. "
+	             "Off by default: a game whose own model shaders read gl_Vertex/gl_Normal/"
+	             "gl_MultiTexCoord0 needs those channels. On, it removes five unsupported "
+	             "functions from the frame.");
+
+bool GL::ModernModelAttribs()
+{
+	// function-local: configHandler does not exist during static init
+	static const bool b = configHandler->GetBool("ModernModelAttribs");
+	return b;
+}
+
 static bool BindLegacyTexUnits()
 {
 	static const bool b = configHandler->GetBool("BindLegacyModelTexUnits");
@@ -249,6 +264,16 @@ void S3DModelVAO::Unbind() const
 void S3DModelVAO::BindLegacyVertexAttribsAndVBOs() const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+
+	// Modern path: the VAO carries generic attribs 0..5 AND the element buffer,
+	// so S3DModelPiece::DrawElements needs no change. Retires the five
+	// client-array functions -- but only together with the shader define, since a
+	// shader reading gl_Vertex gets nothing from generic attributes.
+	if (GL::ModernModelAttribs()) {
+		vao.Bind();
+		return;
+	}
+
 	vertVBO.Bind();
 	indxVBO.Bind();
 
@@ -299,6 +324,11 @@ void S3DModelVAO::BindLegacyVertexAttribsAndVBOs() const
 void S3DModelVAO::UnbindLegacyVertexAttribsAndVBOs() const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+
+	if (GL::ModernModelAttribs()) {
+		vao.Unbind();
+		return;
+	}
 	if (BindLegacyTexUnits()) {
 		glClientActiveTexture(GL_TEXTURE6);
 		glDisableClientState(GL_TEXTURE_COORD_ARRAY);

@@ -1,6 +1,13 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 #pragma once
 
+namespace GL {
+	// True when the legacy model path feeds from the modern VAO's generic
+	// attributes rather than fixed-function client arrays (config
+	// ModernModelAttribs). Engine model shader and bind must agree.
+	bool ModernModelAttribs();
+}
+
 #include <memory>
 
 #include "Rendering/Models/VertexData.hpp"
