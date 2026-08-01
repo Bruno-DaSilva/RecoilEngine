@@ -7521,6 +7521,16 @@ int LuaOpenGL::CreateList(lua_State* L)
 			for (const auto& s : cl->streams)
 				totalVerts += s.posUV.size() / 5;
 			if (totalVerts > CMDLIST_MAX_CAPTURED_VERTS) {
+				// This conversion is SILENT, unlike CmdListMaterialize's report,
+				// and it is now the last thing in a BAR run that creates a real
+				// display list -- so it has to name itself, or the remaining work
+				// cannot be aimed. Keyed per site so each is named once.
+				static std::unordered_set<std::string> capWarned;
+				if (capWarned.insert(cl->createSite).second) {
+					LOG_L(L_INFO, "gl.CreateList: %zu verts exceeds the %zu-vert command-list cap; compiling a GL display list instead (body at %s)",
+						totalVerts, CMDLIST_MAX_CAPTURED_VERTS,
+						cl->createSite.empty() ? "<unknown: LuaImmediateFallbackStats off>" : cl->createSite.c_str());
+				}
 				list = glGenLists(1);
 				if (list != 0) {
 					glNewList(list, GL_COMPILE);
