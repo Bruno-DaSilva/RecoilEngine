@@ -25,6 +25,14 @@
 # performance conclusion without checking the cache first -- this cost a whole
 # false "the conversions are too expensive" investigation.
 #
+# NOTE ON COVERAGE. The score counts functions this RUN reached, so anything the
+# content happens not to exercise reads as retired. That is not hypothetical: the
+# client-array family is reachable only via gl.UnitShape, whose BAR call sites are
+# a build menu being open and an icon generator sitting behind a CPU-time delay,
+# and the same binary scored 35 or 30 depending on whether the run was slow enough
+# to trip that delay. Paths under active burn-down therefore have to be DRIVEN,
+# not awaited, and their driver checked -- see the guards below.
+#
 # Companions, both reading the log this leaves in the write-dir:
 #   rdoc_offender_sites.sh  resolves each function's FIRST-USE backtrace to source
 #   rdoc_site_census.sh     with RDOC_SITE_CENSUS=1 set here, resolves EVERY
@@ -80,6 +88,40 @@ if [[ -f $cfg ]] && grep -qE '^GLFrameABCompare(Dump)? *= *[^0]' "$cfg"; then
 	sed -i -E 's/^(GLFrameABCompare(Dump)?) *= *.*/\1 = 0/' "$cfg"
 fi
 
+# The legacy model path (S3DModelVAO::BindLegacyVertexAttribsAndVBOs, and with it
+# the whole client-array family) is reached ONLY through gl.UnitShape, and BAR's
+# two call sites are both demand-driven: an on-screen build menu, and the icon
+# generator behind gui_cache_icons' os.clock() CPU-time delay. Whether that timer
+# expires before the script's quitforce depends on how slow the run happens to be
+# -- measured, the same binary and content reported 35 offenders with
+# RDOC_SITE_CENSUS=1 (slow enough to trip the delay) and 30 without it. A meter
+# whose headline number moves with unrelated timing cannot be used to score a
+# burn-down, so drive the path deliberately instead of hoping content reaches it.
+cfgSet() { # cfgSet KEY VALUE -- substitute in place or append; never silently miss
+	if grep -qE "^$1 *=" "$cfg" 2>/dev/null; then
+		sed -i -E "s/^$1 *=.*/$1 = $2/" "$cfg"
+	else
+		printf '%s = %s\n' "$1" "$2" >> "$cfg"
+	fi
+	grep -qE "^$1 = $2\$" "$cfg" || die "could not set $1=$2 in $cfg"
+}
+install -D -m644 "$here/ab_unitshape_driver.lua" "$writeDir/LuaUI/Widgets/ab_unitshape_driver.lua" \
+	|| die "could not install the unit-shape driver widget"
+cfgSet ABUnitShapeDriver 1
+
+# The driver calls widgetHandler:RemoveWidget() when its knob is off, and BAR
+# PERSISTS that as order=0 in LuaUI/Config/BYAR.lua -- "disabled", permanently.
+# One run with the knob off therefore disables the widget for every run after,
+# knob or no knob, which is how the path came to be unmeasured in the first
+# place. Re-enable it rather than trusting the saved order.
+byar=$writeDir/LuaUI/Config/BYAR.lua
+if [[ -f $byar ]] && grep -q '\["AB Gate UnitShape Driver"\] *= *0,' "$byar"; then
+	printf '[rdoc] re-enabling the unit-shape driver in BYAR.lua (was persisted disabled)\n'
+	sed -i 's/\["AB Gate UnitShape Driver"\] *= *0,/["AB Gate UnitShape Driver"] = 1,/' "$byar"
+	grep -q '\["AB Gate UnitShape Driver"\] = 1,' "$byar" \
+		|| die "failed to re-enable the unit-shape driver in $byar"
+fi
+
 rm -f "$capture"*.rdc
 : > "$writeDir/infolog.txt"
 
@@ -99,6 +141,12 @@ esac
 # the engine actually got somewhere.
 grep -q "Adding debug command\|Game::Load\|GameServer" "$writeDir/infolog.txt" \
 	|| die "engine does not appear to have started a game -- zero offenders would be meaningless"
+
+# ...and that the deliberately-driven path above actually ran. A widget that fails
+# to load is silent, and its absence subtracts five functions from the score, so
+# this has to be an error rather than a smaller number.
+grep -q "\[AB UnitShape Driver\] active" "$writeDir/infolog.txt" \
+	|| die "the unit-shape driver widget never activated -- the legacy model path is unmeasured, so the count would be understated by the client-array family"
 
 mapfile -t offenders < <(grep '^\[RDOC-UNSUPPORTED\] ' "$log" | sed 's/^\[RDOC-UNSUPPORTED\] //')
 
