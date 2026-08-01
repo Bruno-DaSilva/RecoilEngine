@@ -9,6 +9,7 @@
 #include "Rendering/GL/myGL.h"
 #include "Bitmap.h"
 #include "Rendering/GlobalRendering.h"
+#include "Lua/LuaCommandList.h"
 #include "System/type2.h"
 #include "System/Log/ILog.h"
 #include "System/Threading/SpringThreading.h"
@@ -156,6 +157,11 @@ namespace CNamedTextures {
 	static bool Load(const std::string& texName, unsigned int texID, bool genInsert)
 	{
 	RECOIL_DETAILED_TRACY_ZONE;
+		// A first gl.Texture("...") inside a gl.CreateList body lands here, and
+		// everything below builds a texture OBJECT rather than draws with one.
+		// Construction must not be recorded into the list.
+		const LuaCmdListCapture::SuspendScope noCapture;
+
 		// strip off the qualifiers
 		std::string filename = texName;
 		bool border  = false;

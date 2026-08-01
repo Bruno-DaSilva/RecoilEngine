@@ -107,6 +107,9 @@ CONFIG(bool, SetupLegacyFFLighting).defaultValue(false)
 CONFIG(bool, LuaCommandLists).defaultValue(false).headlessValue(false).safemodeValue(false)
 	.description("Capture gl.CreateList bodies as replayable command lists instead of compiling GL display lists, so list content renders through the live (optionally modern) backend at gl.CallList. Phase 2 of the modern-GL migration; off => legacy display lists unchanged.");
 
+CONFIG(bool, LuaCmdListSuspendOnObjectCreate).defaultValue(false).headlessValue(false).safemodeValue(false)
+	.description("Let GL-object construction reached from a gl.CreateList body (a first gl.Texture of an unloaded name) run for real instead of materializing the capture into a display list. Removes 12 of BAR's 14 real display lists, but converts those lists to the command-list replay, which currently diverges from the legacy backend on them -- off until that is fixed.");
+
 // transient accumulator for the modern immediate-mode backend; reused across
 // calls (Lua GL calls are serial on the render thread).
 static LuaImmediateBuffer luaImmBuffer;
@@ -600,6 +603,27 @@ void LuaCmdListCapture::RecordFont(LuaCommandList::FontCmd&& fc)
 	CmdListCapture& cap = *cmdCapture;
 	cap.cl->fontCmds.push_back(std::move(fc));
 	CmdListNew(LuaCommandList::Op::Font).u0 = cap.cl->fontCmds.size() - 1;
+}
+
+// Function-local so the read happens after configHandler exists; at namespace
+// scope this is a static-init-order segfault.
+static bool SuspendOnObjectCreate()
+{
+	static const bool enabled = configHandler->GetBool("LuaCmdListSuspendOnObjectCreate");
+	return enabled;
+}
+
+LuaCmdListCapture::SuspendScope::SuspendScope()
+	: suspended(SuspendOnObjectCreate() && (cmdCapture != nullptr) && !cmdCapture->materialized)
+{
+	if (suspended && (cmdCapture->suspendDepth++ == 0))
+		CmdListRestorePointers();
+}
+
+LuaCmdListCapture::SuspendScope::~SuspendScope()
+{
+	if (suspended && (--cmdCapture->suspendDepth == 0))
+		CmdListSwapInRecorders();
 }
 
 // Emit a captured stream into an OPEN real glNewList compile as exact legacy

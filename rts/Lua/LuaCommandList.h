@@ -140,4 +140,31 @@ struct LuaCommandList {
 namespace LuaCmdListCapture {
 	bool CapturingFonts();
 	void RecordFont(LuaCommandList::FontCmd&& fc);
+
+	// Lets GL-OBJECT CONSTRUCTION run for real inside a gl.CreateList body.
+	//
+	// A list body is a recording of drawing, but a first gl.Texture("...") in
+	// one also CONSTRUCTS the texture, and construction is not drawing: under a
+	// real display list glTexImage2D and glTexParameteri are compiled rather
+	// than executed, so the object stays undefined until the first gl.CallList
+	// and its parameters land on whatever happens to be bound then. The capture
+	// inherited that, and materialized the list rather than record calls it
+	// cannot replay -- 12 of the 14 real display lists in a BAR run come from
+	// exactly this, none of them from Lua asking for it.
+	//
+	// Scope construction with this instead. It is the same treatment glGen*
+	// and glBindBuffer already get by being left unwrapped, just applied where
+	// the calls are too far from LuaOpenGL.cpp to leave unwrapped.
+	//
+	// Only suspends a live capture. Once a capture has materialized a real
+	// glNewList is open and the calls compile into it, which is the legacy
+	// path's own long-standing behaviour and not this scope's to change.
+	struct SuspendScope {
+		SuspendScope();
+		~SuspendScope();
+		SuspendScope(const SuspendScope&) = delete;
+		SuspendScope& operator=(const SuspendScope&) = delete;
+	private:
+		bool suspended = false;
+	};
 }
