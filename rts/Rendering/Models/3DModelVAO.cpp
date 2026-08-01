@@ -269,9 +269,23 @@ void S3DModelVAO::BindLegacyVertexAttribsAndVBOs() const
 	// so S3DModelPiece::DrawElements needs no change. Retires the five
 	// client-array functions -- but only together with the shader define, since a
 	// shader reading gl_Vertex gets nothing from generic attributes.
+	//
+	// ...and only when a program is actually bound. gl.UnitShape's rawState arg
+	// defaults to TRUE, and CUnitDrawerGLSL::DrawIndividualDefOpaque then skips
+	// PushIndividualOpaqueState entirely, so the caller owns the state and there
+	// may be no shader at all. Generic attributes feed nothing in that case and
+	// the draw would render blank -- which would break unupdated games the
+	// moment this mode is enabled. Fall back per draw instead of per run: a
+	// caller that binds its own generic-attrib shader gets the modern path, one
+	// that relies on fixed-function keeps working exactly as before. The query
+	// is supported by RenderDoc; the client-array calls below are not.
+	GLint boundProgram = 0;
 	if (GL::ModernModelAttribs()) {
-		vao.Bind();
-		return;
+		glGetIntegerv(GL_CURRENT_PROGRAM, &boundProgram);
+		if (boundProgram != 0) {
+			vao.Bind();
+			return;
+		}
 	}
 
 	vertVBO.Bind();
