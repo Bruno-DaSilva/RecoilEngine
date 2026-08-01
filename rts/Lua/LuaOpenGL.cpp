@@ -60,6 +60,7 @@
 #include "Rendering/Env/MapRendering.h"
 #include "Rendering/GL/glExtra.h"
 #include "Rendering/GL/FFStateTracker.h"
+#include "Rendering/GL/AttribStateVerify.h"
 #include "Rendering/GL/TexBind.h"
 #include "Rendering/Models/3DModelMisc.hpp"
 #include "Rendering/Models/3DModelPiece.hpp"
@@ -5572,6 +5573,7 @@ int LuaOpenGL::RenderToTexture(lua_State* L)
 	// exact substitute for the attrib push -- which matters because the pcall
 	// below runs arbitrary Lua that may set either. glGetIntegerv/glGetFloatv are
 	// not on RenderDoc's unsupported list; glPushAttrib is.
+	GL::ShadowPushAttrib(GL_VIEWPORT_BIT);
 	GLint savedViewport[4] = { 0, 0, 0, 0 };
 	GLfloat savedDepthRange[2] = { 0.0f, 1.0f };
 	glGetIntegerv(GL_VIEWPORT, savedViewport);
@@ -5591,6 +5593,7 @@ int LuaOpenGL::RenderToTexture(lua_State* L)
 	glMatrixMode(GL_MODELVIEW);  glPopMatrix();
 	glViewport(savedViewport[0], savedViewport[1], savedViewport[2], savedViewport[3]);
 	glDepthRange(savedDepthRange[0], savedDepthRange[1]);
+	GL::VerifyAttribRestore("LuaOpenGL::RenderToTexture");
 	if (auto* mirror = FFMirrorOps()) {
 		mirror->SetMatrixMode(GL_PROJECTION); mirror->PopMatrix();
 		mirror->SetMatrixMode(GL_MODELVIEW);  mirror->PopMatrix();

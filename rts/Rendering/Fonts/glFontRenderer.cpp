@@ -3,6 +3,7 @@
 #include "glFont.h"
 #include "glFontRendererShaders.h"
 #include "Rendering/GlobalRendering.h"
+#include "Rendering/GL/AttribStateVerify.h"
 #include "Rendering/Shaders/Shader.h"
 #include "System/Config/ConfigHandler.h"
 #include "System/Log/ILog.h"
@@ -301,6 +302,7 @@ void CglShaderFontRenderer::PushGLState(const CglFont& fnt)
 	// it, so the wide pop used to put back whatever the caller had, while a
 	// narrower save left texturing off for the next draw (1 frame per run, max
 	// delta 73 -- intermittent because it needs a display-list compile).
+	GL::ShadowPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT);
 	savedState.depthTest = glIsEnabled(GL_DEPTH_TEST);
 	savedState.texture2D = glIsEnabled(GL_TEXTURE_2D);
 	savedState.alphaTest = glIsEnabled(GL_ALPHA_TEST);
@@ -370,6 +372,7 @@ void CglShaderFontRenderer::PopGLState(const CglFont& fnt)
 	if (savedState.blend)     glEnable(GL_BLEND);      else glDisable(GL_BLEND);
 	glBlendFuncSeparate(savedState.blendSrcRGB, savedState.blendDstRGB,
 	                    savedState.blendSrcAlpha, savedState.blendDstAlpha);
+	GL::VerifyAttribRestore("CglShaderFontRenderer::PopGLState");
 }
 
 void CglShaderFontRenderer::GetStats(std::array<size_t, 8>& stats) const
