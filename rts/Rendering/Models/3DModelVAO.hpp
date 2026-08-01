@@ -116,6 +116,13 @@ private:
 private:
 	bool safeToDeleteVectors = false;
 
+	// Which path the last BindLegacyVertexAttribsAndVBOs took. Under
+	// ModernModelAttribs that decision is per DRAW (it depends on whether the
+	// caller bound a program), so the unbind cannot re-derive it from the
+	// config or it will skip the client-array teardown on exactly the draws
+	// that set one up -- leaving the arrays enabled and the VBOs bound.
+	mutable bool legacyAttribsBound = false;
+
 	uint32_t batchedBaseInstance   = 0;
 	uint32_t immediateBaseInstance = 0; //note relative index
 

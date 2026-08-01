@@ -283,11 +283,13 @@ void S3DModelVAO::BindLegacyVertexAttribsAndVBOs() const
 	if (GL::ModernModelAttribs()) {
 		glGetIntegerv(GL_CURRENT_PROGRAM, &boundProgram);
 		if (boundProgram != 0) {
+			legacyAttribsBound = false;
 			vao.Bind();
 			return;
 		}
 	}
 
+	legacyAttribsBound = true;
 	vertVBO.Bind();
 	indxVBO.Bind();
 
@@ -339,7 +341,7 @@ void S3DModelVAO::UnbindLegacyVertexAttribsAndVBOs() const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 
-	if (GL::ModernModelAttribs()) {
+	if (!legacyAttribsBound) {
 		vao.Unbind();
 		return;
 	}
