@@ -123,6 +123,13 @@ private:
 	// that set one up -- leaving the arrays enabled and the VBOs bound.
 	mutable bool legacyAttribsBound = false;
 
+	// Whether that bind also enabled the fixed-function-equivalent program, so
+	// the unbind knows to disable it. Separate from the flag above because a
+	// modern-VAO bind can happen either way: with the caller's own program, or
+	// with ours standing in for fixed function.
+	mutable bool ffShaderBound = false;
+	mutable bool ffShaderFogged = false;
+
 	uint32_t batchedBaseInstance   = 0;
 	uint32_t immediateBaseInstance = 0; //note relative index
 

@@ -126,6 +126,15 @@ namespace GL {
 	// of the family.
 	enum class FFExperiment : int {
 		None = 0,
+		// 6: S3DModelVAO's legacy bind standing in for fixed function with an
+		// engine shader (ModernModelFFShader) instead of client arrays, on the
+		// draws where the caller bound no program of its own. Needs
+		// ModernModelAttribs=1 so the non-candidate passes are the client-array
+		// path this replaces, and ab_unitshape_driver.lua's rawState draw so the
+		// path runs every frame rather than only during load-time icon
+		// generation -- experiment 3 on this same function was a vacuous zero
+		// until that driver existed.
+		ModelFFShader = 6,
 	};
 
 	// Proving that deleting a fixed-function call changes no pixel needs a

@@ -30,8 +30,18 @@ local myTeam = 0
 -- Band geometry is FIXED, not derived from the viewport: the hash has to describe
 -- the same pixels on every run, and a viewport-relative band would silently
 -- compare different regions if the window size ever differed.
-local bandW, bandH = 640, 160
+-- Sized to contain BOTH rows below (shader-bound and rawState), so the
+-- cross-build hash covers the client-array/FF-shader path too rather than
+-- stopping short of it.
+local bandW, bandH = 1280, 400
 local hashFrame = Spring.GetConfigInt("ABUnitShapeHashFrame", 0)
+
+-- The rawState row textures half its shapes so the pixel gate covers the
+-- textured fixed-function draw. Set ABUnitShapeTextured=0 to suppress that:
+-- the OFFENDER METER has to score what BAR itself still reaches, and BAR's
+-- only rawState site (unit_icongenerator) draws with GL_TEXTURE_2D disabled,
+-- so leaving the amplifier on would report a path alive that BAR does not use.
+local texturedRaw = (Spring.GetConfigInt("ABUnitShapeTextured", 1) == 1)
 
 function widget:Initialize()
 	if not enabled then
@@ -86,6 +96,34 @@ function widget:DrawScreen()
 			-- read gl_LightSource/gl_FrontMaterial, so an FF-lighting experiment
 			-- can only be trusted if this path is covered too.
 			gl.UnitShape(shapes[i], myTeam, false, (i % 2) == 1, false)
+		gl.PopMatrix()
+	end
+
+	-- rawState = TRUE, and nothing bound: the caller owns the state and owns
+	-- none, so fixed function draws the model. This is the only thing that
+	-- reaches S3DModelVAO's client-array bind, and in BAR the only site is
+	-- unit_icongenerator's offscreen atlas -- a LOAD-TIME one-shot that no
+	-- pixel gate can see. Drawing it per frame here is what makes the
+	-- ModernModelFFShader experiment a measurement instead of a vacuous zero,
+	-- exactly as the useLuaMat row above did for the tex-unit experiment.
+	-- Half of them with GL_TEXTURE_2D enabled and half without: fixed function
+	-- MODULATEs the bound texture only when the target is enabled, and
+	-- gl.UnitShapeTextures binds without enabling, so a row that never calls
+	-- gl.Texture(true) leaves the textured half of the substitute program
+	-- unexercised while still reporting a clean gate.
+	for i = 1, #shapes do
+		gl.PushMatrix()
+			gl.Translate(size * (i * 1.5), size * 2.6, 0)
+			gl.Scale(size, size, size)
+			gl.Rotate(25, 1, 0, 0)
+			gl.Rotate(180 + i * 15, 0, 1, 0)
+			gl.UnitShapeTextures(shapes[i], true)
+			if texturedRaw and (i % 2) == 1 then
+				gl.Texture(true)
+			end
+			gl.UnitShape(shapes[i], myTeam, true)
+			gl.Texture(false)
+			gl.UnitShapeTextures(shapes[i], false)
 		gl.PopMatrix()
 	end
 
