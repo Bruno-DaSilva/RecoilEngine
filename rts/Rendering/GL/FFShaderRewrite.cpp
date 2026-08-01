@@ -87,6 +87,77 @@ namespace {
 		return out;
 	}
 
+	// Blank the body of every `#if 0` block, for the same reason comments are
+	// blanked: dead code otherwise drives the whole decision. BAR's
+	// cus_gl4.vert.glsl reads gl_ModelViewMatrix exactly once, inside `#if 0`,
+	// and that alone made the generated accessor reference a builtin the live
+	// shader never touches -- which compiles fine in a compatibility profile and
+	// not at all where the surrounding code had already stopped needing it.
+	//
+	// Only the literal `#if 0` form, and only up to its own `#else`/`#elif`,
+	// whose branch IS live. Evaluating the preprocessor properly is a different
+	// project; this is the form people actually use to switch code off.
+	std::string MaskDisabledBlocks(const std::string& src)
+	{
+		std::string out = src;
+		size_t i = 0;
+
+		while (i < out.size()) {
+			const size_t eol = std::min(out.find('\n', i), out.size());
+			size_t p = i;
+			while (p < eol && (out[p] == ' ' || out[p] == '\t'))
+				++p;
+
+			// "#if 0" with only whitespace after the 0
+			bool disabled = (out.compare(p, 3, "#if") == 0);
+			if (disabled) {
+				size_t q = p + 3;
+				while (q < eol && (out[q] == ' ' || out[q] == '\t'))
+					++q;
+				disabled = (q < eol && out[q] == '0');
+				if (disabled) {
+					for (++q; q < eol; ++q)
+						disabled &= (out[q] == ' ' || out[q] == '\t' || out[q] == '\r');
+				}
+			}
+
+			if (!disabled) {
+				i = eol + 1;
+				continue;
+			}
+
+			// blank through to the matching #else/#elif/#endif
+			int depth = 0;
+			size_t j = eol + 1;
+			while (j < out.size()) {
+				const size_t lineEnd = std::min(out.find('\n', j), out.size());
+				size_t k = j;
+				while (k < lineEnd && (out[k] == ' ' || out[k] == '\t'))
+					++k;
+
+				const bool opens = (out.compare(k, 3, "#if") == 0);
+				const bool closes = (out.compare(k, 6, "#endif") == 0);
+				const bool alt = (depth == 0) && (out.compare(k, 5, "#else") == 0 || out.compare(k, 5, "#elif") == 0);
+
+				if (alt || (closes && depth == 0))
+					break;
+
+				depth += opens;
+				depth -= closes;
+
+				for (size_t b = j; b < lineEnd; ++b) {
+					if (out[b] != '\n')
+						out[b] = ' ';
+				}
+				j = lineEnd + 1;
+			}
+
+			i = j;
+		}
+
+		return out;
+	}
+
 	// The builtins this does NOT feed. A shader reading one of them cannot take
 	// the attribute path at all, because the value it needs has no channel --
 	// so it keeps fixed function rather than getting a silent zero.
@@ -195,7 +266,7 @@ bool GL::RewriteFFBuiltins(std::string& src, int glslVersion, uint32_t stage)
 
 	// every decision below reads the MASKED source, so commented-out code neither
 	// triggers a rewrite nor gets one
-	const std::string code = MaskComments(src);
+	const std::string code = MaskDisabledBlocks(MaskComments(src));
 
 	// gl_Fog is fixed-function state read identically in both stages. The vertex
 	// channels are vertex-stage only, and gl_Color especially so: in a fragment
@@ -203,7 +274,35 @@ bool GL::RewriteFFBuiltins(std::string& src, int glslVersion, uint32_t stage)
 	// substituting it there would read a vertex input that does not exist.
 	const bool vs = (stage == GL_VERTEX_SHADER);
 	const bool usesFog = HasIdent(code, "gl_Fog");
-	const bool usesMVP = vs && (usesFtransformEarly(code) || HasIdent(code, "gl_ModelViewProjectionMatrix"));
+	// The matrix builtins are fixed-function state, readable from either stage
+	// like gl_Fog. FindIdent matches whole identifiers, so gl_ModelViewMatrix
+	// never matches inside gl_ModelViewMatrixInverse and the order here is free.
+	struct MatrixBuiltin { const char* builtin; const char* uniform; const char* accessor; bool used; };
+	MatrixBuiltin matrices[] = {
+		{ "gl_ModelViewProjectionMatrix",        "recoil_ff_MVPu",    "recoil_ff_MVP()",    false },
+		{ "gl_ModelViewMatrix",                  "recoil_ff_MVu",     "recoil_ff_MV()",     false },
+		{ "gl_ProjectionMatrix",                 "recoil_ff_Pu",      "recoil_ff_P()",      false },
+		{ "gl_ModelViewProjectionMatrixInverse", "recoil_ff_MVPinvU", "recoil_ff_MVPinv()", false },
+		{ "gl_ModelViewMatrixInverse",           "recoil_ff_MVinvU",  "recoil_ff_MVinv()",  false },
+		{ "gl_ProjectionMatrixInverse",          "recoil_ff_PinvU",   "recoil_ff_Pinv()",   false },
+	};
+
+	bool usesAnyMatrix = false;
+	for (MatrixBuiltin& mb : matrices) {
+		mb.used = HasIdent(code, mb.builtin);
+		usesAnyMatrix |= mb.used;
+	}
+
+	// ftransform() expands to gl_ModelViewProjectionMatrix * gl_Vertex
+	matrices[0].used |= (vs && usesFtransformEarly(code));
+	usesAnyMatrix |= matrices[0].used;
+
+	// gl_NormalMatrix is mat3, so it gets its own declaration rather than joining
+	// the loop; it is derived from the modelview the same way the builtin is.
+	const bool usesNormalMatrix = HasIdent(code, "gl_NormalMatrix");
+	usesAnyMatrix |= usesNormalMatrix;
+
+	const bool usesMVP = usesAnyMatrix;
 	const bool usesColor = vs && HasIdent(code, "gl_Color");
 	bool usesFtransform = vs && HasIdent(code, "ftransform");
 	bool usesVertex = usesFtransform || (vs && HasIdent(code, "gl_Vertex"));
@@ -252,7 +351,9 @@ bool GL::RewriteFFBuiltins(std::string& src, int glslVersion, uint32_t stage)
 	// (gl_Fog.color becomes recoil_ff_Fog().color) and the builtin stays reachable
 	// behind the selector below
 	collect(usesFog, "gl_Fog", "recoil_ff_Fog()");
-	collect(usesMVP, "gl_ModelViewProjectionMatrix", "recoil_ff_MVP()");
+	for (const MatrixBuiltin& mb : matrices)
+		collect(mb.used, mb.builtin, mb.accessor);
+	collect(usesNormalMatrix, "gl_NormalMatrix", "recoil_ff_N()");
 
 	// the insertion point is taken before any of this, off the same mask; every
 	// site is below the #version line, so the offset survives the rewrite
@@ -311,11 +412,24 @@ bool GL::RewriteFFBuiltins(std::string& src, int glslVersion, uint32_t stage)
 		        " : recoil_ff_FogParameters(gl_Fog.color, gl_Fog.density, gl_Fog.start, gl_Fog.end, gl_Fog.scale); }";
 	}
 
-	if (usesMVP) {
-		decl += " uniform mat4 " + std::string(FF_MVP_UNIFORM_NAME) + ";";
+	if (usesAnyMatrix) {
+		// One selector for the whole set: they are fed together and there is no
+		// case where a shader should take some from the engine and some from the
+		// driver.
 		decl += " uniform bool " + std::string(FF_MVP_SELECT_NAME) + ";";
-		decl += " mat4 recoil_ff_MVP() { return " + std::string(FF_MVP_SELECT_NAME) + " ? " +
-		        std::string(FF_MVP_UNIFORM_NAME) + " : gl_ModelViewProjectionMatrix; }";
+
+		for (const MatrixBuiltin& mb : matrices) {
+			if (!mb.used)
+				continue;
+			decl += " uniform mat4 " + std::string(mb.uniform) + ";";
+			decl += " mat4 " + std::string(mb.accessor).substr(0, std::strlen(mb.accessor) - 2) +
+			        "() { return " + std::string(FF_MVP_SELECT_NAME) + " ? " + mb.uniform + " : " + mb.builtin + "; }";
+		}
+
+		if (usesNormalMatrix) {
+			decl += " uniform mat3 recoil_ff_Nu;";
+			decl += " mat3 recoil_ff_N() { return " + std::string(FF_MVP_SELECT_NAME) + " ? recoil_ff_Nu : gl_NormalMatrix; }";
+		}
 	}
 
 	src.insert(at, decl + "\n#line " + std::to_string(nextLine) + "\n");
@@ -327,6 +441,8 @@ namespace {
 		int32_t fogColor = -1, fogDensity = -1, fogStart = -1, fogEnd = -1, fogScale = -1;
 		int32_t fogSelect = -1;
 		int32_t mvp = -1, mvpSelect = -1;
+		int32_t mv = -1, proj = -1, normal = -1;
+		int32_t mvpInv = -1, mvInv = -1, projInv = -1;
 		uint32_t fedGeneration = 0; // 0 = never fed
 		int32_t fedSelect = -1;     // the selector value this program last saw
 		bool anything = false;
@@ -414,7 +530,16 @@ namespace {
 		if (prog == 0)
 			return;
 
-		const auto it = progUniforms.find(prog);
+		auto it = progUniforms.find(prog);
+
+		// A program drawn before it was ever bound through the feed has no cache
+		// entry yet; the matrices are needed for THIS draw, so build it here
+		// rather than waiting for a bind that already happened.
+		if (it == progUniforms.end()) {
+			GL::PushFFUniforms(prog);
+			it = progUniforms.find(prog);
+		}
+
 		if (it == progUniforms.end() || it->second.mvpSelect < 0)
 			return;
 
@@ -443,6 +568,32 @@ namespace {
 		glGetFloatv(GL_MODELVIEW_MATRIX, static_cast<float*>(modelView));
 
 		const CMatrix44f mvp = useMirror ? GL::ffMirror.GetMVP() : (proj * modelView);
+
+		const auto upload = [](int32_t loc, const CMatrix44f& m) {
+			if (loc >= 0)
+				glUniformMatrix4fv(loc, 1, GL_FALSE, static_cast<const float*>(m));
+		};
+		const ProgFFUniforms& u = it->second;
+		upload(u.mv,   useMirror ? GL::ffMirror.tracker.GetMatrix(GL_MODELVIEW) : modelView);
+		upload(u.proj, useMirror ? GL::ffMirror.tracker.GetMatrix(GL_PROJECTION) : proj);
+
+		// The inverses are the builtins' own definitions, computed where the
+		// matrices are rather than asked of a driver that will not have them.
+		if (u.mvInv >= 0)   upload(u.mvInv,  (useMirror ? GL::ffMirror.tracker.GetMatrix(GL_MODELVIEW) : modelView).Invert());
+		if (u.projInv >= 0) upload(u.projInv, (useMirror ? GL::ffMirror.tracker.GetMatrix(GL_PROJECTION) : proj).Invert());
+		if (u.mvpInv >= 0)  upload(u.mvpInv, mvp.Invert());
+
+		if (u.normal >= 0) {
+			// gl_NormalMatrix is the transpose of the inverse of the upper-left
+			// 3x3 of the modelview, flattened column-major for a mat3 uniform.
+			const CMatrix44f inv = (useMirror ? GL::ffMirror.tracker.GetMatrix(GL_MODELVIEW) : modelView).Invert();
+			const float n3[9] = {
+				inv.m[0], inv.m[4], inv.m[8],
+				inv.m[1], inv.m[5], inv.m[9],
+				inv.m[2], inv.m[6], inv.m[10],
+			};
+			glUniformMatrix3fv(u.normal, 1, GL_FALSE, n3);
+		}
 
 		// A mirror that happened to agree with glGetFloatv everywhere would make
 		// this experiment a re-run of the last one. Report how far apart they
@@ -528,6 +679,12 @@ void GL::PushFFUniforms(uint32_t prog)
 		u.fogSelect  = glGetUniformLocation(prog, FF_FOG_SELECT_NAME);
 		u.mvp        = glGetUniformLocation(prog, FF_MVP_UNIFORM_NAME);
 		u.mvpSelect  = glGetUniformLocation(prog, FF_MVP_SELECT_NAME);
+		u.mv         = glGetUniformLocation(prog, "recoil_ff_MVu");
+		u.proj       = glGetUniformLocation(prog, "recoil_ff_Pu");
+		u.normal     = glGetUniformLocation(prog, "recoil_ff_Nu");
+		u.mvpInv     = glGetUniformLocation(prog, "recoil_ff_MVPinvU");
+		u.mvInv      = glGetUniformLocation(prog, "recoil_ff_MVinvU");
+		u.projInv    = glGetUniformLocation(prog, "recoil_ff_PinvU");
 		u.anything = (u.fogColor >= 0 || u.fogDensity >= 0 || u.fogStart >= 0 || u.fogEnd >= 0 || u.fogScale >= 0 || u.fogSelect >= 0);
 		it = progUniforms.emplace(prog, u).first;
 	}
