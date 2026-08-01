@@ -127,6 +127,16 @@ esac
 
 [[ -s $infolog ]] || die "empty infolog: $infolog"
 
+# A shader that failed to compile draws nothing in EVERY pass alike, so the
+# compare below reports a clean run over a broken frame -- measured: 646 frames
+# control 0 / signal 0 while BAR's whole unit-material set was dead. That reads
+# exactly like a pass, which makes it the worst of the vacuous-clean class.
+if grep -qE 'shader error\(s\)|shader errors:|FFVertexAttribRewrite broke' "$infolog"; then
+	printf '\n[gate] shader compile failures:\n'
+	grep -E 'shader error\(s\)|shader errors:|FFVertexAttribRewrite broke' "$infolog" | head -n 10
+	die "shader(s) failed to compile -- whatever this run compared, it was not the frame"
+fi
+
 # [Frame A/B] control(L<->L)=N px (max D), signal(L<->M)=N / T px (masked, max D)
 # -- stripped of the log prefix, the digits are exactly (ctl, ctlMax, sig, total, sigMax)
 read -r compares ctlFrames ctlMax sigFrames sigMax malformed <<<"$(
