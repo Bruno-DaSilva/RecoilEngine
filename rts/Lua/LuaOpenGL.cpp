@@ -4044,13 +4044,12 @@ int LuaOpenGL::TexRect(lua_State* L)
 	};
 
 	// see gl.Rect: modern flush is neither list-safe nor polygon-mode-aware.
-	// Also require GL_TEXTURE_2D actually enabled: the legacy quad only samples
-	// when FF texturing is on (a widget that binds but forgets gl.Texture(true)
-	// legally gets a flat current-color quad), while the modern shader would
-	// sample the bound texture regardless -- legacy is the parity oracle.
+	// GL_TEXTURE_2D no longer gates this. A widget that binds a texture but
+	// forgets gl.Texture(true) legally gets a flat current-colour quad, and
+	// FlushTexRectModern now reproduces that with the untextured program rather
+	// than handing the draw back to the legacy replay.
 	const bool modernOK = (modernImmediate || glCompareMode)
-			&& noShader && !compilingDisplayList && PolygonModeFill()
-			&& (glIsEnabled(GL_TEXTURE_2D) == GL_TRUE);
+			&& noShader && !compilingDisplayList && PolygonModeFill();
 
 	if (glCompareMode && modernOK) {
 		GLint vp[4]; glGetIntegerv(GL_VIEWPORT, vp);

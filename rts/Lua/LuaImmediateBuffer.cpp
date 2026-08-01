@@ -732,12 +732,12 @@ void LuaImmediateBuffer::FlushTexRectModern() const
 	const bool builtinMVP = !ScreenAlignedMV(mvMat) || !OrthoProjection(projMat);
 
 	// incomplete texture: FF draws the flat current color, the shader would
-	// sample black -- see MipIncompleteTexture2D
-	if (MipIncompleteTexture2D()) {
-		CountFallback(LuaImmFallback::REASON_TEX_MIP_INCOMPLETE, TEX_RECT_VERTS);
-		FlushTexRectLegacy();
-		return;
-	}
+	// With FF texturing OFF -- no GL_TEXTURE_2D enable, or one bound to an
+	// INCOMPLETE texture, which disables the whole unit (GL 2.1 3.8.15) -- the
+	// legacy quad rasterizes the flat current colour and samples nothing. The
+	// UNTEXTURED program reproduces exactly that, so these cases go modern
+	// instead of falling back; only the texcoords become irrelevant.
+	const bool sampleTexture = (glIsEnabled(GL_TEXTURE_2D) == GL_TRUE) && !MipIncompleteTexture2D();
 
 	// fogged shader variant for LINEAR fog only; other modes keep legacy (see
 	// FlushModern); saturated fog stays on the proven fogless program
@@ -779,13 +779,15 @@ void LuaImmediateBuffer::FlushTexRectModern() const
 
 	const CMatrix44f mvp = projMat * mvMat;
 
-	Shader::IProgramObject* shader = GetModernTexShader(fogged, builtinMVP);
+	Shader::IProgramObject* shader = sampleTexture ? GetModernTexShader(fogged, builtinMVP)
+	                                               : GetModernShader(fogged, builtinMVP);
 	shader->Enable();
 	if (!builtinMVP)
 		shader->SetUniformMatrix4x4("uMVP", false, static_cast<const float*>(mvp));
 	if (fogged)
 		shader->SetUniformMatrix4x4("uMV", false, static_cast<const float*>(mvMat));
-	shader->SetUniform("tex", 0);
+	if (sampleTexture)
+		shader->SetUniform("tex", 0);
 	immStream.Draw(GL_TRIANGLES, data);
 	shader->Disable();
 
