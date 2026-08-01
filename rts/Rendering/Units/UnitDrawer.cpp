@@ -1072,7 +1072,7 @@ void CUnitDrawerGLSL::DrawUnitModelBeingBuiltShadow(const CUnit* unit, bool noLu
 
 	GL::ShadowPushAttrib(GL_CURRENT_BIT);
 	GL::AttribSnapshot savedCurA;
-	savedCurA.Capture();
+	savedCurA.Capture(GL_CURRENT_BIT);
 
 	glEnable(GL_CLIP_PLANE0);
 	glEnable(GL_CLIP_PLANE1);
@@ -1177,7 +1177,7 @@ void CUnitDrawerGLSL::DrawUnitModelBeingBuiltOpaque(const CUnit* unit, bool noLu
 
 	GL::ShadowPushAttrib(GL_CURRENT_BIT);
 	GL::AttribSnapshot savedCurB;
-	savedCurB.Capture();
+	savedCurB.Capture(GL_CURRENT_BIT);
 	glEnable(GL_CLIP_PLANE0);
 	glEnable(GL_CLIP_PLANE1);
 
@@ -1263,7 +1263,7 @@ void CUnitDrawerGLSL::PushIndividualOpaqueState(const S3DModel* model, int teamI
 	// easier to assume they no longer have the correct
 	// values at this point
 	GL::ShadowPushAttrib(GL_DEPTH_BUFFER_BIT | GL_ENABLE_BIT);
-	savedIndividualOpaqueAttribs.Capture();
+	savedIndividualOpaqueAttribs.Capture(GL_DEPTH_BUFFER_BIT | GL_ENABLE_BIT);
 	glDepthMask(GL_TRUE);
 	glEnable(GL_DEPTH_TEST);
 
@@ -1965,7 +1965,7 @@ void CUnitDrawerGL4::DrawUnitModelBeingBuiltShadow(const CUnit* unit, bool noLua
 
 	GL::ShadowPushAttrib(GL_POLYGON_BIT);
 	GL::AttribSnapshot savedPolyA;
-	savedPolyA.Capture();
+	savedPolyA.Capture(GL_POLYGON_BIT);
 
 	glEnable(GL_CLIP_DISTANCE0);
 	glEnable(GL_CLIP_DISTANCE1);
@@ -2057,7 +2057,7 @@ void CUnitDrawerGL4::DrawUnitModelBeingBuiltOpaque(const CUnit* unit, bool noLua
 
 	GL::ShadowPushAttrib(GL_POLYGON_BIT);
 	GL::AttribSnapshot savedPolyB;
-	savedPolyB.Capture();
+	savedPolyB.Capture(GL_POLYGON_BIT);
 
 	glEnable(GL_CLIP_DISTANCE0);
 	glEnable(GL_CLIP_DISTANCE1);

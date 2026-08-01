@@ -285,7 +285,7 @@ void CSMFGroundDrawer::DrawForwardPass(const DrawPass::e& drawPass, bool alphaTe
 	const GLbitfield attribMask = (GL_ENABLE_BIT * alphaTest) | (GL_POLYGON_BIT * wireframe);
 	GL::ShadowPushAttrib(attribMask);
 	GL::AttribSnapshot savedAttribs;
-	savedAttribs.Capture();
+	savedAttribs.Capture(attribMask);
 
 	if (wireframe)
 		glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);

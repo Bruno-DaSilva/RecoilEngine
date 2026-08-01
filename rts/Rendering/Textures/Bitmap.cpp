@@ -1770,7 +1770,7 @@ uint32_t CBitmap::CreateDDSTexture(const GL::TextureCreationParams& tcp) const
 	RECOIL_DETAILED_TRACY_ZONE;
 	GL::ShadowPushAttrib(GL_TEXTURE_BIT);
 	GL::AttribSnapshot savedTexAttribs;
-	savedTexAttribs.Capture();
+	savedTexAttribs.Capture(GL_TEXTURE_BIT);
 
 	auto texID = tcp.texID;
 

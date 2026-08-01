@@ -649,7 +649,7 @@ int LuaFBOs::ActiveFBO(lua_State* L)
 
 	GL::ShadowPushAttrib(GL_VIEWPORT_BIT);
 	GL::AttribSnapshot savedAttribs;
-	savedAttribs.Capture();
+	savedAttribs.Capture(GL_VIEWPORT_BIT);
 	glViewport(0, 0, fbo->xsize, fbo->ysize);
 	if (identities) {
 		glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity();

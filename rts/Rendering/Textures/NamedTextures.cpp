@@ -343,7 +343,7 @@ namespace CNamedTextures {
 
 		GL::ShadowPushAttrib(GL_TEXTURE_BIT);
 		GL::AttribSnapshot savedTexAttribs;
-		savedTexAttribs.Capture();
+		savedTexAttribs.Capture(GL_TEXTURE_BIT);
 
 		for (const std::string& texString: waitingTextures) {
 			const auto mit = texInfoMap.find(texString);

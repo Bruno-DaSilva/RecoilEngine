@@ -1362,7 +1362,7 @@ void CMiniMap::DrawForReal(bool useNormalizedCoors, bool updateTex, bool luaCall
 
 	GL::ShadowPushAttrib(GL_DEPTH_BUFFER_BIT);
 	GL::AttribSnapshot savedDrawAttribs;
-	savedDrawAttribs.Capture();
+	savedDrawAttribs.Capture(GL_DEPTH_BUFFER_BIT);
 	glEnable(GL_BLEND);
 	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 	glDisable(GL_DEPTH_TEST);
@@ -1795,7 +1795,7 @@ bool CMiniMap::RenderCachedTexture(bool useNormalizedCoors)
 
 	GL::ShadowPushAttrib(GL_COLOR_BUFFER_BIT);
 	GL::AttribSnapshot savedCacheAttribs;
-	savedCacheAttribs.Capture();
+	savedCacheAttribs.Capture(GL_COLOR_BUFFER_BIT);
 	glBindTexture(GL_TEXTURE_2D, minimapTex);
 	glEnable(GL_TEXTURE_2D);
 	glDisable(GL_BLEND);

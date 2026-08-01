@@ -12,13 +12,23 @@ constexpr GLenum GL::AttribSnapshot::UNIT_CAPS[];
 constexpr GLenum GL::AttribSnapshot::TEX_TARGETS[];
 constexpr GLenum GL::AttribSnapshot::TEX_BINDINGS[];
 
-void GL::AttribSnapshot::Capture()
+void GL::AttribSnapshot::Capture(GLbitfield mask)
 {
-	for (int i = 0; i < NUM_CAPS; ++i)
-		caps[i] = glIsEnabled(CAPS[i]);
+	capturedMask = mask;
+
+	const bool wantEnables = (mask & (GL_ENABLE_BIT | GL_TEXTURE_BIT | GL_COLOR_BUFFER_BIT |
+	                                  GL_DEPTH_BUFFER_BIT | GL_POLYGON_BIT | GL_FOG_BIT |
+	                                  GL_LINE_BIT | GL_POINT_BIT | GL_SCISSOR_BIT |
+	                                  GL_STENCIL_BUFFER_BIT)) != 0;
+	const bool wantUnits = (mask & (GL_ENABLE_BIT | GL_TEXTURE_BIT)) != 0;
+
+	if (wantEnables) {
+		for (int i = 0; i < NUM_CAPS; ++i)
+			caps[i] = glIsEnabled(CAPS[i]);
+	}
 
 	glGetIntegerv(GL_ACTIVE_TEXTURE, &activeUnit);
-	for (int u = 0; u < NUM_UNITS; ++u) {
+	for (int u = 0; wantUnits && u < NUM_UNITS; ++u) {
 		glActiveTexture(GL_TEXTURE0 + u);
 		for (int i = 0; i < NUM_UNIT_CAPS; ++i)
 			unitCaps[u][i] = glIsEnabled(UNIT_CAPS[i]);
@@ -29,39 +39,63 @@ void GL::AttribSnapshot::Capture()
 	}
 	glActiveTexture(activeUnit);
 
-	glGetIntegerv(GL_BLEND_SRC_RGB, &blendSrcRGB);
-	glGetIntegerv(GL_BLEND_DST_RGB, &blendDstRGB);
-	glGetIntegerv(GL_BLEND_SRC_ALPHA, &blendSrcAlpha);
-	glGetIntegerv(GL_BLEND_DST_ALPHA, &blendDstAlpha);
-	glGetIntegerv(GL_BLEND_EQUATION_RGB, &blendEquationRGB);
-	glGetIntegerv(GL_BLEND_EQUATION_ALPHA, &blendEquationAlpha);
-	glGetBooleanv(GL_COLOR_WRITEMASK, colorMask);
-	glGetIntegerv(GL_ALPHA_TEST_FUNC, &alphaTestFunc);
-	glGetFloatv(GL_ALPHA_TEST_REF, &alphaTestRef);
-	glGetBooleanv(GL_DEPTH_WRITEMASK, &depthMask);
-	glGetIntegerv(GL_DEPTH_FUNC, &depthFunc);
-	glGetIntegerv(GL_POLYGON_MODE, polygonModeFB);
-	glGetIntegerv(GL_CULL_FACE_MODE, &cullFaceMode);
-	glGetIntegerv(GL_FRONT_FACE, &frontFace);
-	glGetIntegerv(GL_VIEWPORT, viewport);
-	glGetFloatv(GL_DEPTH_RANGE, depthRange);
-	glGetFloatv(GL_LINE_WIDTH, &lineWidth);
-	glGetFloatv(GL_POINT_SIZE, &pointSize);
-	glGetFloatv(GL_CURRENT_COLOR, currentColor);
-	glGetFloatv(GL_FOG_COLOR, fogColor);
-	glGetIntegerv(GL_FOG_MODE, &fogMode);
-	glGetFloatv(GL_FOG_DENSITY, &fogDensity);
-	glGetFloatv(GL_FOG_START, &fogStart);
-	glGetFloatv(GL_FOG_END, &fogEnd);
+	if (mask & GL_COLOR_BUFFER_BIT) {
+		glGetIntegerv(GL_BLEND_SRC_RGB, &blendSrcRGB);
+		glGetIntegerv(GL_BLEND_DST_RGB, &blendDstRGB);
+		glGetIntegerv(GL_BLEND_SRC_ALPHA, &blendSrcAlpha);
+		glGetIntegerv(GL_BLEND_DST_ALPHA, &blendDstAlpha);
+		glGetIntegerv(GL_BLEND_EQUATION_RGB, &blendEquationRGB);
+		glGetIntegerv(GL_BLEND_EQUATION_ALPHA, &blendEquationAlpha);
+		glGetBooleanv(GL_COLOR_WRITEMASK, colorMask);
+		glGetIntegerv(GL_ALPHA_TEST_FUNC, &alphaTestFunc);
+		glGetFloatv(GL_ALPHA_TEST_REF, &alphaTestRef);
+		glGetFloatv(GL_COLOR_CLEAR_VALUE, clearColor);
+		glGetIntegerv(GL_DRAW_BUFFER, &drawBuffer);
+		glGetFloatv(GL_BLEND_COLOR, blendColor);
+	}
+
+	if (mask & GL_DEPTH_BUFFER_BIT) {
+		glGetBooleanv(GL_DEPTH_WRITEMASK, &depthMask);
+		glGetIntegerv(GL_DEPTH_FUNC, &depthFunc);
+		glGetFloatv(GL_DEPTH_CLEAR_VALUE, &depthClearValue);
+	}
+
+	if (mask & GL_POLYGON_BIT) {
+		glGetIntegerv(GL_POLYGON_MODE, polygonModeFB);
+		glGetIntegerv(GL_CULL_FACE_MODE, &cullFaceMode);
+		glGetIntegerv(GL_FRONT_FACE, &frontFace);
+		glGetFloatv(GL_POLYGON_OFFSET_FACTOR, &polygonOffsetFactor);
+		glGetFloatv(GL_POLYGON_OFFSET_UNITS, &polygonOffsetUnits);
+	}
+
+	if (mask & GL_VIEWPORT_BIT) {
+		glGetIntegerv(GL_VIEWPORT, viewport);
+		glGetFloatv(GL_DEPTH_RANGE, depthRange);
+	}
+
+	if (mask & GL_LINE_BIT) {
+		glGetFloatv(GL_LINE_WIDTH, &lineWidth);
+		glGetIntegerv(GL_LINE_STIPPLE_PATTERN, &lineStipplePattern);
+		glGetIntegerv(GL_LINE_STIPPLE_REPEAT, &lineStippleRepeat);
+	}
+
+	if (mask & GL_POINT_BIT)
+		glGetFloatv(GL_POINT_SIZE, &pointSize);
+
+	if (mask & GL_CURRENT_BIT)
+		glGetFloatv(GL_CURRENT_COLOR, currentColor);
+
+	if (mask & GL_FOG_BIT) {
+		glGetFloatv(GL_FOG_COLOR, fogColor);
+		glGetIntegerv(GL_FOG_MODE, &fogMode);
+		glGetFloatv(GL_FOG_DENSITY, &fogDensity);
+		glGetFloatv(GL_FOG_START, &fogStart);
+		glGetFloatv(GL_FOG_END, &fogEnd);
+	}
+
+	// detect-only, and cheap enough to always take: it is the tripwire for
+	// "nothing writes fixed-function lighting state any more"
 	glGetIntegerv(GL_SHADE_MODEL, &shadeModel);
-	glGetFloatv(GL_COLOR_CLEAR_VALUE, clearColor);
-	glGetIntegerv(GL_DRAW_BUFFER, &drawBuffer);
-	glGetFloatv(GL_BLEND_COLOR, blendColor);
-	glGetFloatv(GL_DEPTH_CLEAR_VALUE, &depthClearValue);
-	glGetIntegerv(GL_LINE_STIPPLE_PATTERN, &lineStipplePattern);
-	glGetIntegerv(GL_LINE_STIPPLE_REPEAT, &lineStippleRepeat);
-	glGetFloatv(GL_POLYGON_OFFSET_FACTOR, &polygonOffsetFactor);
-	glGetFloatv(GL_POLYGON_OFFSET_UNITS, &polygonOffsetUnits);
 
 	// verify-only: these getters are unsupported functions themselves
 	if (GL::ffMirror.shadowCompare) {
@@ -300,13 +334,19 @@ void GL::VerifyAttribRestore(const char* where)
 	if (!GL::ffMirror.shadowCompare)
 		return;
 
+	// Verification captures EVERYTHING regardless of the bracket's mask -- it
+	// only runs under shadowCompare, so its cost does not matter, and a
+	// mask-scoped capture would leave uncompared fields holding stale values.
+	static constexpr GLbitfield ALL = GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT |
+	                                  GL_POLYGON_BIT | GL_VIEWPORT_BIT | GL_LINE_BIT |
+	                                  GL_POINT_BIT | GL_CURRENT_BIT | GL_FOG_BIT | GL_TEXTURE_BIT;
 	AttribSnapshot afterExplicit;
-	afterExplicit.Capture();
+	afterExplicit.Capture(ALL);
 
 	glPopAttrib();
 
 	AttribSnapshot afterPop;
-	afterPop.Capture();
+	afterPop.Capture(ALL);
 
 	if (const char* diff = afterExplicit.FirstDifference(afterPop)) {
 		LOG_L(L_ERROR, "[AttribVerify] %s: explicit restore differs from glPopAttrib at %s",

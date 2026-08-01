@@ -189,7 +189,7 @@ void CubeMapHandler::CreateReflectionFace(unsigned int glFace, bool skyOnly)
 
 	GL::ShadowPushAttrib(GL_FOG_BIT | GL_DEPTH_BUFFER_BIT);
 	GL::AttribSnapshot savedAttribs;
-	savedAttribs.Capture();
+	savedAttribs.Capture(GL_FOG_BIT | GL_DEPTH_BUFFER_BIT);
 	const auto& sky = ISky::GetSky();
 	glClearColor(sky->fogColor.x, sky->fogColor.y, sky->fogColor.z, 1.0f);
 	glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);

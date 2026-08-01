@@ -72,6 +72,8 @@ namespace GL {
 		GLint texBinding[NUM_UNITS][4] = {};
 		GLint texEnvMode[NUM_UNITS] = {};
 		GLint activeUnit = GL_TEXTURE0;
+		// what Capture() was asked for; FirstDifference only compares within it
+		GLbitfield capturedMask = 0;
 
 		// non-enable state from the bits the engine's brackets actually push
 		GLint blendSrcRGB = 0, blendDstRGB = 0, blendSrcAlpha = 0, blendDstAlpha = 0;
@@ -111,7 +113,12 @@ namespace GL {
 		GLfloat light1Ambient[4] = {}, light1Diffuse[4] = {}, light1Specular[4] = {};
 		GLint lightModelLocalViewer = 0, lightModelTwoSide = 0;
 
-		void Capture();
+		// Capture only what `mask` covers. glPushAttrib was ONE call; a full
+		// capture is ~146 queries plus ~94 sets on restore, and doing that
+		// unconditionally made a meter run take 7 minutes instead of 1. Scoping
+		// to the mask takes the common cases back down -- GL_VIEWPORT_BIT is two
+		// queries, and RenderToTexture alone does 34k brackets a run.
+		void Capture(GLbitfield mask);
 
 		// Restores exactly the states covered by `mask`, mirroring glPopAttrib
 		// semantics. Capturing everything and restoring by mask is what makes a

@@ -73,7 +73,7 @@ void ShowSplashScreen(
 
 	GL::ShadowPushAttrib(GL_ENABLE_BIT);
 	GL::AttribSnapshot savedAttribs;
-	savedAttribs.Capture();
+	savedAttribs.Capture(GL_ENABLE_BIT);
 	glEnable(GL_TEXTURE_2D);
 
 	for (spring_time t0 = spring_now(), t1 = t0; !testDoneFunc(); t1 = spring_now()) {

@@ -92,7 +92,7 @@ void CBasicWater::Draw()
 
 	GL::ShadowPushAttrib(GL_FOG_BIT | GL_POLYGON_BIT | GL_ENABLE_BIT);
 	GL::AttribSnapshot savedAttribs;
-	savedAttribs.Capture();
+	savedAttribs.Capture(GL_FOG_BIT | GL_POLYGON_BIT | GL_ENABLE_BIT);
 
 	glDisable(GL_ALPHA_TEST);
 	glDepthMask(GL_FALSE);

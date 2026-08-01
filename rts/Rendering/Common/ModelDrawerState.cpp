@@ -44,7 +44,7 @@ void IModelDrawerState::SetupOpaqueDrawing(bool deferredPass) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	GL::ShadowPushAttrib(GL_ENABLE_BIT | GL_POLYGON_BIT);
-	savedOpaqueAttribs.Capture();
+	savedOpaqueAttribs.Capture(GL_ENABLE_BIT | GL_POLYGON_BIT);
 
 	glPolygonMode(GL_FRONT_AND_BACK, GL_LINE * CModelDrawerConcept::WireFrameModeRef() + GL_FILL * (1 - CModelDrawerConcept::WireFrameModeRef()));
 
@@ -76,7 +76,7 @@ void IModelDrawerState::SetupAlphaDrawing(bool deferredPass) const
 	RECOIL_DETAILED_TRACY_ZONE;
 	savedAlphaMask = GL_ENABLE_BIT | GL_DEPTH_BUFFER_BIT | GL_POLYGON_BIT | (GL_COLOR_BUFFER_BIT * IsLegacy());
 	GL::ShadowPushAttrib(savedAlphaMask);
-	savedAlphaAttribs.Capture();
+	savedAlphaAttribs.Capture(savedAlphaMask);
 
 	glPolygonMode(GL_FRONT_AND_BACK, GL_LINE * CModelDrawerConcept::WireFrameModeRef() + GL_FILL * (1 - CModelDrawerConcept::WireFrameModeRef()));
 

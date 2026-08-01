@@ -2638,7 +2638,7 @@ void CGuiHandler::Draw()
 
 	GL::ShadowPushAttrib(GL_ENABLE_BIT);
 	GL::AttribSnapshot savedGuiAttribs;
-	savedGuiAttribs.Capture();
+	savedGuiAttribs.Capture(GL_ENABLE_BIT);
 
 	glDisable(GL_FOG);
 	glDisable(GL_DEPTH_TEST);

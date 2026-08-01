@@ -440,7 +440,7 @@ void CShadowHandler::DrawShadowPasses()
 
 	GL::ShadowPushAttrib(GL_POLYGON_BIT | GL_ENABLE_BIT);
 	GL::AttribSnapshot savedAttribs;
-	savedAttribs.Capture();
+	savedAttribs.Capture(GL_POLYGON_BIT | GL_ENABLE_BIT);
 	glEnable(GL_CULL_FACE);
 	glCullFace(GL_BACK);
 

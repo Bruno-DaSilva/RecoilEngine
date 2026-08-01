@@ -691,9 +691,16 @@ static void CmdListMaterialize(const char* fnName)
 	assert(!cap.materialized);
 	CmdListRestorePointers();
 
+	// Report the CALL SITE too, not just the function: "which gl.CreateList body
+	// forces a real display list" is the actionable question, and one offending
+	// function can mask the next (glTexParameteri hid glTexImage2D until it was
+	// made capturable). Keyed per (function, site) so each pair is named once.
 	static std::unordered_set<std::string> cmdMatWarned;
-	if (cmdMatWarned.insert(fnName).second)
-		LOG_L(L_INFO, "gl.CreateList: %s is not command-list capturable; materializing as a GL display list", fnName);
+	const std::string matKey = std::string(fnName) + "@" + cap.cl->createSite;
+	if (cmdMatWarned.insert(matKey).second) {
+		LOG_L(L_INFO, "gl.CreateList: %s is not command-list capturable; materializing as a GL display list (body at %s)",
+			fnName, cap.cl->createSite.empty() ? "<unknown: LuaImmediateFallbackStats off>" : cap.cl->createSite.c_str());
+	}
 
 	cap.materializeList = glGenLists(1);
 	glNewList(cap.materializeList, GL_COMPILE);
@@ -1569,7 +1576,7 @@ void LuaOpenGL::EnableCommon(DrawMode mode)
 		// and the snapshot captures/diffs it under shadowCompare so the verifier
 		// reports it if that ever stops being true.
 		GL::ShadowPushAttrib(AttribBits);
-		savedCallinAttribs.Capture();
+		savedCallinAttribs.Capture(AttribBits);
 		GL::ffResetState.NotePushAttrib(AttribBits);
 		ResetGLState();
 	}
