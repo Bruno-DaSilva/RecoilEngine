@@ -2,15 +2,21 @@
 
 
 #include "glExtra.h"
+#include "FFStandIn.h"
 #include "RenderBuffers.h"
 #include "VertexArray.h"
 
 #include "Map/Ground.h"
 #include "Game/Camera.h"
+#include "Rendering/Shaders/Shader.h"
 #include "Sim/Weapons/Weapon.h"
 #include "Sim/Weapons/WeaponDef.h"
+#include "System/Log/ILog.h"
 #include "System/SpringMath.h"
 #include "System/Threading/ThreadPool.h"
+
+#include <string>
+#include <unordered_set>
 
 #include "System/Misc/TracyDefs.h"
 
@@ -31,7 +37,81 @@ namespace {
 			func(std::forward<float3>(pos), col);
 		}
 	}
+
+	// The Lua circle entry points below are drawn by FIXED FUNCTION -- the caller
+	// is a widget that bound no program of its own -- and are the only reason the
+	// client-array family is still in a frame that draws build-placement range
+	// circles. (The engine's own variants have always drawn through a shader; the
+	// Lua ones kept fixed function so that a game shader bound around the call
+	// would receive them, which is still honoured below.)
+	bool DrawCircleFFStandIn(const float3* verts, size_t numVerts, const SColor& col, GLenum drawMode)
+	{
+		static GLuint vao = 0;
+		static GLuint vbo = 0;
+
+		GLint boundProgram = 0;
+		glGetIntegerv(GL_CURRENT_PROGRAM, &boundProgram);
+
+		// A game's own shader is drawing this, not fixed function; it expects the
+		// fixed-function vertex channels and this stand-in is not what it wants.
+		if (boundProgram != 0)
+			return false;
+
+		bool textured = false;
+		bool fogged = false;
+		const char* reject = GL::FFStandIn::StateReproducible(textured, fogged);
+
+		// A rejected state falls back silently and reads exactly like a converted
+		// one, so report which way it went, and for a rejection report WHY.
+		static std::array<bool, 2> reportedTaken = {};
+		static std::unordered_set<std::string> reportedRejects;
+		if (reject == nullptr) {
+			if (bool& seen = reportedTaken[size_t(fogged)]; !seen) {
+				seen = true;
+				LOG_L(L_INFO, "[glExtra] FF-equivalent circle shader ACTIVE (fogged=%d)", int(fogged));
+			}
+		} else if (reportedRejects.insert(reject).second) {
+			LOG_L(L_INFO, "[glExtra] FF-equivalent circle shader REJECTED (%s); client arrays retained", reject);
+		}
+
+		if (reject != nullptr)
+			return false;
+
+		// Textured is rejected above, so the sampler is never read; the circle is
+		// a flat line loop in the fixed-function current colour's place.
+		Shader::IProgramObject* shader = GL::FFStandIn::GetShader(fogged);
+		if (!shader->IsValid())
+			return false;
+
+		if (vao == 0) {
+			glGenVertexArrays(1, &vao);
+			glGenBuffers(1, &vbo);
+		}
+
+		GLint prevVAO = 0;
+		glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &prevVAO);
+
+		glBindVertexArray(vao);
+		glBindBuffer(GL_ARRAY_BUFFER, vbo);
+		glBufferData(GL_ARRAY_BUFFER, numVerts * sizeof(float3), verts, GL_STREAM_DRAW);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(float3), nullptr);
+
+		const float4 fColor = col;
+
+		shader->Enable();
+		shader->SetUniform("uTextured", 0);
+		shader->SetUniform4v("uColor", &fColor.x);
+		glDrawArrays(drawMode, 0, static_cast<GLsizei>(numVerts));
+		shader->Disable();
+
+		glDisableVertexAttribArray(0);
+		glBindBuffer(GL_ARRAY_BUFFER, 0);
+		glBindVertexArray(prevVAO);
+		return true;
+	}
 }
+
 void glSurfaceCircle(const float3& center, float radius, const SColor& col, uint32_t res)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
@@ -59,14 +139,20 @@ void glSurfaceCircle(const float3& center, float radius, const SColor& col, uint
 void glSurfaceCircleLua(const float3& center, float radius, const SColor& col, uint32_t res)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	// reused across calls; Lua GL calls are serial on the render thread
+	static std::vector<float3> points;
+	points.clear();
+
+	glSurfaceCircleImpl(center, radius, col, res, [](auto&& pos, const auto&) { points.push_back(pos); });
+
+	if (DrawCircleFFStandIn(points.data(), points.size(), col, GL_LINE_LOOP))
+		return;
+
 	CVertexArray* va = GetVertexArray();
 	va->Initialize();
 
-	const auto addFunc = [va](auto&& pos, const auto& col) {
+	for (const float3& pos : points)
 		va->AddVertexC(pos, col);
-	};
-
-	glSurfaceCircleImpl(center, radius, col, res, addFunc);
 
 	va->DrawArrayC(GL_LINE_LOOP);
 }
@@ -170,11 +256,16 @@ void glBallisticCircle(const CWeapon* weapon, const WeaponDef* weaponDef, const 
 void glBallisticCircleLua(const CWeapon* weapon, const WeaponDef* weaponDef, const SColor& color, uint32_t resolution, const float3& center, const float3& params)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	auto vertices = glBallisticCircleImpl(weapon, weaponDef, resolution, center, params);
+
+	static_assert(sizeof(VA_TYPE_0) == sizeof(float3), "the stand-in feeds VA_TYPE_0 as bare positions");
+	if (DrawCircleFFStandIn(reinterpret_cast<const float3*>(vertices.data()), vertices.size(), color, GL_LINE_LOOP))
+		return;
+
 	CVertexArray* va = GetVertexArray();
 	va->Initialize();
 	va->EnlargeArrays(resolution, 0, VA_SIZE_C);
 
-	auto vertices = glBallisticCircleImpl(weapon, weaponDef, resolution, center, params);
 	auto* vaVertices = va->GetTypedVertexArray<VA_TYPE_C>(resolution);
 
 	for (auto&& vert : vertices) {

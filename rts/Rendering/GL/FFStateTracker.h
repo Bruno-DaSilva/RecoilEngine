@@ -113,7 +113,11 @@ namespace GL {
 	// dropping tex units 1/5/6 (688 frames, 0 px -- but only once
 	// ab_unitshape_driver.lua raised the path from ~31 binds/run to 6845; the
 	// same experiment on stock content was a vacuous zero); 4 = LuaOpenGL's
-	// fixed-function light setup (746 frames, 0 px).
+	// fixed-function light setup (746 frames, 0 px); 7 = gl.DrawGroundCircle's
+	// two entry points onto GL::FFStandIn instead of client arrays (420 frames,
+	// 0 px). Experiment 7 needed content that PLACES a building: the offender
+	// meter's watertest never draws a range circle, which is why the
+	// client-array family read as retired there while idletest still had it.
 	//
 	// Refuted so far -- a candidate that measures NON-zero is settled too, and
 	// costs less to record than to re-derive: 5 = ISky::SetupFog's
