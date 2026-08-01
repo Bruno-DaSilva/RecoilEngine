@@ -18,8 +18,14 @@ class CLuaDisplayLists {
 			//   it is not an error to delete a list with id=0, but we might
 			//   be called from ~LuaParser which can run in multiple threads
 			//   and the null-list is always present (even after Clear())
+			//
+			//   ...and while GL treats it as a no-op, RenderDoc does not: one
+			//   call to glDeleteLists silently disables capture for the whole
+			//   process. Under LuaCommandLists every captured list has id 0, so
+			//   this loop was making that call once per list while creating none.
 			for (size_t i = 1; i < active.size(); i++) {
-				glDeleteLists(active[i].id, 1);
+				if (active[i].id != 0)
+					glDeleteLists(active[i].id, 1);
 			}
 		}
 

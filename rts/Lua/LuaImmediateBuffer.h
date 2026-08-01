@@ -8,6 +8,7 @@
 #include <functional>
 #include <vector>
 
+#include "Lua/LuaCommandList.h"
 #include "Rendering/GL/VertexArrayTypes.h"
 #include "System/Color.h"
 #include "System/Matrix44f.h"
@@ -164,6 +165,17 @@ public:
 	const float* GetLastColorF() const { return lastColorF; }
 	const std::vector<float>& GetVertColorsF() const { return vertColorsF; }
 
+	// Point the next FlushModern at a persistent GL_STATIC_DRAW buffer instead of
+	// the shared stream buffer. A captured stream is immutable, so the
+	// interleaved data the flush builds is identical every replay -- build and
+	// upload it once, and later replays become bind + glDrawArrays. Every gate in
+	// FlushModern still runs per replay (they read live GL state), so this
+	// changes only where the geometry comes from, never which program draws it.
+	//
+	// Null to go back to the shared stream buffer. The caller owns the bake and
+	// must not set one for a stream whose content is not fixed at capture time.
+	void SetActiveBake(LuaCommandList::StreamBake* b) const { activeBake = b; }
+
 	// rebuild the accumulated stream from baked data (posUV = 5 floats/vertex
 	// pos3+st2, colors = 4 floats/vertex); after this a Flush(backend) renders
 	// exactly what the captured body accumulated
@@ -185,6 +197,8 @@ public:
 	}
 
 private:
+	mutable LuaCommandList::StreamBake* activeBake = nullptr;
+
 	struct TexRectData {
 		float x0, y0, x1, y1;
 		float s0, t0, s1, t1;

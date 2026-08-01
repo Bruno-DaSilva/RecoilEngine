@@ -76,6 +76,34 @@ struct LuaCommandList {
 		std::vector<float> ext; // MultMatrix/LoadMatrix payload
 	};
 
+	// A captured stream is immutable, so the interleaved buffer the modern flush
+	// builds from it is the same every replay -- and for a big list that rebuild
+	// plus a GL_STREAM_DRAW upload is the entire reason gl.CreateList compiles
+	// oversized captures into a real GL display list instead (which costs
+	// RenderDoc capture for the whole process). Build and upload once into a
+	// GL_STATIC_DRAW buffer, then replay is bind + glDrawArrays.
+	//
+	// Not usable for every stream: seed-class vertices take the REPLAY-time
+	// current colour, so a stream with any of those has content that is not
+	// fixed at capture, so the replay only sets a bake when seedVertCount is 0.
+	struct StreamBake {
+		uint32_t vao = 0;
+		uint32_t vbo = 0;
+		int32_t vertCount = -1; // <0 = not built yet
+		uint32_t drawMode = 0;
+
+		bool IsBuilt() const { return vertCount >= 0; }
+		// data is the 9-floats-per-vertex interleave FlushModern builds
+		void Upload(uint32_t mode, const std::vector<float>& data);
+		void Draw() const;
+		void Release();
+
+		StreamBake() = default;
+		~StreamBake() { Release(); }
+		StreamBake(const StreamBake&) = delete;
+		StreamBake& operator=(const StreamBake&) = delete;
+	};
+
 	// a captured glBegin..glEnd run, replayable through LuaImmediateBuffer
 	// (either backend). Vertices emitted before the LIST's first glColor are
 	// seed-class: real display lists give them the CALL-time current color, so
@@ -94,6 +122,10 @@ struct LuaCommandList {
 		std::vector<float> colorsF;    // 4 floats per vertex (exact floats)
 		float lastColorF[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
 		float lastS = 0.0f, lastT = 0.0f;
+
+		// built on first replay; shared_ptr only so ImmStreamData stays copyable
+		// and movable inside the streams vector, which grows during capture
+		std::shared_ptr<StreamBake> bake = std::make_shared<StreamBake>();
 	};
 
 	// a captured font call (gl.Text / font:Print / font:Begin / ...): fonts

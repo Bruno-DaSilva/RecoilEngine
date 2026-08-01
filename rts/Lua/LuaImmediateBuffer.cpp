@@ -586,6 +586,60 @@ void LuaImmediateBuffer::FlushLegacy() const
 	glColor4fv(sawColor ? lastColorF : seedColorF);
 }
 
+// Persistent twin of ImmFloatStream: same attribute layout, GL_STATIC_DRAW, and
+// uploaded once. Kept here rather than in LuaCommandList.cpp so the layout can
+// only ever be changed in one place alongside the shaders that consume it.
+void LuaCommandList::StreamBake::Upload(uint32_t mode, const std::vector<float>& data)
+{
+	constexpr GLsizei STRIDE = 9 * sizeof(float);
+
+	if (vao == 0) {
+		glGenVertexArrays(1, &vao);
+		glGenBuffers(1, &vbo);
+		glBindVertexArray(vao);
+		glBindBuffer(GL_ARRAY_BUFFER, vbo);
+		glEnableVertexAttribArray(0);
+		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, STRIDE, reinterpret_cast<void*>( 0));
+		glEnableVertexAttribArray(1);
+		glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, STRIDE, reinterpret_cast<void*>(12));
+		glEnableVertexAttribArray(2);
+		glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, STRIDE, reinterpret_cast<void*>(20));
+		glBindVertexArray(0);
+		glBindBuffer(GL_ARRAY_BUFFER, 0);
+	}
+
+	glBindBuffer(GL_ARRAY_BUFFER, vbo);
+	glBufferData(GL_ARRAY_BUFFER, data.size() * sizeof(float), data.data(), GL_STATIC_DRAW);
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+	drawMode = mode;
+	vertCount = static_cast<int32_t>(data.size() / 9);
+}
+
+void LuaCommandList::StreamBake::Draw() const
+{
+	if (vertCount <= 0)
+		return;
+
+	glBindVertexArray(vao);
+	glDrawArrays(drawMode, 0, static_cast<GLsizei>(vertCount));
+	glBindVertexArray(0);
+}
+
+void LuaCommandList::StreamBake::Release()
+{
+	// Runs from ~LuaCommandList, i.e. when the owning Lua handle drops the list.
+	// That is on the draw thread with a live context; a null vao means the list
+	// was never replayed and nothing was ever created.
+	if (vao == 0)
+		return;
+
+	glDeleteVertexArrays(1, &vao);
+	glDeleteBuffers(1, &vbo);
+	vao = vbo = 0;
+	vertCount = -1;
+}
+
 void LuaImmediateBuffer::FlushModern() const
 {
 	if (verts.empty())
@@ -661,14 +715,20 @@ void LuaImmediateBuffer::FlushModern() const
 	// unclamped only in the CURRENT-color state, restored below)
 	const auto c01 = [](float v) { return std::clamp(v, 0.0f, 1.0f); };
 	std::vector<float> data;
-	data.reserve(idx.size() * 9);
-	for (const uint32_t k : idx) {
-		const VA_TYPE_TC& v = verts[k];
-		data.insert(data.end(), {
-			v.pos.x, v.pos.y, v.pos.z, v.s, v.t,
-			c01(vertColorsF[k * 4 + 0]), c01(vertColorsF[k * 4 + 1]),
-			c01(vertColorsF[k * 4 + 2]), c01(vertColorsF[k * 4 + 3]),
-		});
+	// already uploaded by an earlier replay of this same captured stream: the
+	// interleave below is the expensive part for a big list, and its input is
+	// immutable, so skip straight to the draw
+	const bool haveBaked = (activeBake != nullptr) && activeBake->IsBuilt();
+	if (!haveBaked) {
+		data.reserve(idx.size() * 9);
+		for (const uint32_t k : idx) {
+			const VA_TYPE_TC& v = verts[k];
+			data.insert(data.end(), {
+				v.pos.x, v.pos.y, v.pos.z, v.s, v.t,
+				c01(vertColorsF[k * 4 + 0]), c01(vertColorsF[k * 4 + 1]),
+				c01(vertColorsF[k * 4 + 2]), c01(vertColorsF[k * 4 + 3]),
+			});
+		}
 	}
 
 	const CMatrix44f mvp = projMat * mvMat;
@@ -682,7 +742,13 @@ void LuaImmediateBuffer::FlushModern() const
 		shader->SetUniformMatrix4x4("uMV", false, static_cast<const float*>(mvMat));
 	if (sampleTexture)
 		shader->SetUniform("tex", 0);
-	immStream.Draw(drawMode, data);
+	if (activeBake != nullptr) {
+		if (!haveBaked)
+			activeBake->Upload(drawMode, data);
+		activeBake->Draw();
+	} else {
+		immStream.Draw(drawMode, data);
+	}
 	shader->Disable();
 
 	// Exact legacy end-state. glBegin/glEnd leaves the FF current color at the

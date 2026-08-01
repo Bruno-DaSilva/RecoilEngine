@@ -107,6 +107,9 @@ CONFIG(bool, SetupLegacyFFLighting).defaultValue(false)
 CONFIG(bool, LuaCommandLists).defaultValue(false).headlessValue(false).safemodeValue(false)
 	.description("Capture gl.CreateList bodies as replayable command lists instead of compiling GL display lists, so list content renders through the live (optionally modern) backend at gl.CallList. Phase 2 of the modern-GL migration; off => legacy display lists unchanged.");
 
+CONFIG(bool, LuaCmdListBakedStreams).defaultValue(false).headlessValue(false).safemodeValue(false)
+	.description("Replay a captured gl.CreateList stream from a persistent GL_STATIC_DRAW buffer built once, instead of re-interleaving and re-uploading it every frame. Removes the reason CMDLIST_MAX_CAPTURED_VERTS compiles oversized captures into real GL display lists, which is the last thing keeping the display-list family on RenderDoc's unsupported list.");
+
 CONFIG(bool, LuaCmdListSuspendOnObjectCreate).defaultValue(false).headlessValue(false).safemodeValue(false)
 	.description("Let GL-object construction reached from a gl.CreateList body (a first gl.Texture of an unloaded name) run for real instead of materializing the capture into a display list. Removes 12 of BAR's 14 real display lists, but converts those lists to the command-list replay, which currently diverges from the legacy backend on them -- off until that is fixed.");
 
@@ -856,7 +859,11 @@ static void CmdListReplayStream(const LuaCommandList::ImmStreamData& s)
 	const bool modernOK = LuaOpenGL::GetModernImmediate() && NoShaderBound() && PolygonModeFill();
 	if (modernOK) {
 		SetImmBufferFixedFunctionMatrices();
+		// Seed-class vertices take the REPLAY-time current colour, so their
+		// interleave is not fixed at capture and must not be cached.
+		luaImmBuffer.SetActiveBake((s.seedVertCount == 0) ? s.bake.get() : nullptr);
 		luaImmBuffer.FlushModern(); // internal gates (dense MV, texenv, fog) fall back to the exact legacy replay
+		luaImmBuffer.SetActiveBake(nullptr);
 	} else {
 		luaImmBuffer.FlushLegacy();
 	}
@@ -7516,10 +7523,13 @@ int LuaOpenGL::CreateList(lua_State* L)
 		// creation: identical legacy rendering, driver-side replay. UI-scale
 		// lists (the modern-flushable content) stay far below the threshold.
 		constexpr size_t CMDLIST_MAX_CAPTURED_VERTS = 4096;
+		static const bool bakedReplayEnabled = configHandler->GetBool("LuaCmdListBakedStreams");
 		if (cl != nullptr) {
 			size_t totalVerts = 0;
 			for (const auto& s : cl->streams)
 				totalVerts += s.posUV.size() / 5;
+			if (bakedReplayEnabled)
+				totalVerts = 0; // the per-stream bake removes the cost the cap exists for
 			if (totalVerts > CMDLIST_MAX_CAPTURED_VERTS) {
 				// This conversion is SILENT, unlike CmdListMaterialize's report,
 				// and it is now the last thing in a BAR run that creates a real
