@@ -17,6 +17,7 @@
 #include "System/StringUtil.h"
 #include "System/TypeToStr.h"
 #include "Rendering/GlobalRendering.h"
+#include "Rendering/GL/FFShaderRewrite.h"
 #include "Rendering/Models/ModelsMemStorage.h"
 #include "Rendering/Models/ModelsMemStorageDefs.h"
 #include "Rendering/UniformConstants.h"
@@ -425,21 +426,73 @@ namespace {
 			return 0;
 		}
 
-		std::vector<const GLchar*> text(defs.size() + sources.size());
+		// the engine's second GLSL compile funnel (the other is
+		// GLSLShaderObject::CompileShaderObject); rewriting here reaches a
+		// game's OWN shaders, which is what lets an unmodified game take the
+		// modern feed without a content change. Joined first because a builtin
+		// could straddle two entries of the source table, and only when the
+		// rewrite actually fires -- otherwise the strings GL sees are exactly
+		// the ones it sees today, error string-indices included.
+		std::string joined;
+		if (type == GL_VERTEX_SHADER) {
+			// the #version may live in either block -- BAR's CUS shaders carry
+			// theirs in "defines" ("shader version is added via widget"), and
+			// guessing 110 from its absence emits `attribute`, a reserved word
+			// at the version it actually compiles at
+			std::string defsText;
+			for (const std::string& s : defs)
+				defsText += s;
 
-		for (uint32_t i = 0; i < defs.size(); i++)
-			text[i] = defs[i].c_str();
-		for (uint32_t i = 0; i < sources.size(); i++)
-			text[defs.size() + i] = sources[i].c_str();
+			for (const std::string& s : sources)
+				joined += s;
 
-		glShaderSource(obj, text.size(), &text[0], nullptr);
-		glCompileShader(obj);
+			int version = GL::ParseGlslVersion(defsText);
+			if (version == 0)
+				version = GL::ParseGlslVersion(joined);
 
-		GLint result;
-		glGetShaderiv(obj, GL_COMPILE_STATUS, &result);
+			if (!GL::RewriteFFVertexBuiltins(joined, version))
+				joined.clear();
+		}
+
+		GLint result = GL_FALSE;
 		GLchar log[4096];
-		GLsizei logSize = sizeof(log);
-		glGetShaderInfoLog(obj, logSize, &logSize, log);
+
+		const auto compile = [&]() {
+			const size_t numSrcs = joined.empty() ? sources.size() : 1;
+			std::vector<const GLchar*> text(defs.size() + numSrcs);
+
+			for (uint32_t i = 0; i < defs.size(); i++)
+				text[i] = defs[i].c_str();
+
+			if (joined.empty()) {
+				for (uint32_t i = 0; i < sources.size(); i++)
+					text[defs.size() + i] = sources[i].c_str();
+			} else {
+				text[defs.size()] = joined.c_str();
+			}
+
+			glShaderSource(obj, text.size(), &text[0], nullptr);
+			glCompileShader(obj);
+
+			glGetShaderiv(obj, GL_COMPILE_STATUS, &result);
+			GLsizei logSize = sizeof(log);
+			glGetShaderInfoLog(obj, logSize, &logSize, log);
+		};
+
+		compile();
+
+		// The rewrite must not be able to break a shader that compiled before --
+		// that is what makes "a game nobody updated keeps working" structural
+		// rather than argued, and it is also how the failure gets NOTICED. A dead
+		// shader renders nothing in every pass alike, so the pixel gate reports a
+		// clean run over a broken frame: measured, 646 frames 0/0 with BAR's unit
+		// materials failing to compile because a commented-out gl_MultiTexCoord0
+		// had triggered a declaration.
+		if (result != GL_TRUE && !joined.empty()) {
+			LOG_L(L_ERROR, "[LuaShaders] FFVertexAttribRewrite broke a vertex shader; recompiling the original. Log:\n%s", log);
+			joined.clear();
+			compile();
+		}
 
 		LuaShaders& shaders = CLuaHandle::GetActiveShaders(L);
 		shaders.errorLog = log;

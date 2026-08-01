@@ -5,6 +5,7 @@
 #include "Rendering/Shaders/LuaShaderContainer.h"
 #include "Rendering/Shaders/GLSLCopyState.h"
 #include "Rendering/GL/myGL.h"
+#include "Rendering/GL/FFShaderRewrite.h"
 #include "Rendering/GlobalRendering.h"
 
 #include "System/SafeUtil.h"
@@ -187,23 +188,47 @@ namespace Shader {
 		if (!versionStr.empty()) EnsureEndsWith(&versionStr, "\n");
 		if (!defFlags.empty())   EnsureEndsWith(&defFlags,   "\n");
 
-		std::vector<const GLchar*> sources = {
-			"// SHADER VERSION\n",
-			versionStr.c_str(),
-			"// SHADER FLAGS\n",
-			defFlags.c_str(),
-			"// SHADER SOURCE\n",
-			"#line 1\n",
-			sourceStr.c_str()
+		// one of the engine's two GLSL compile funnels (the other is LuaShaders'
+		// CompileObject); rewriting here reaches every engine-shipped shader
+		const bool rewritten = (type == GL_VERTEX_SHADER) &&
+			GL::RewriteFFVertexBuiltins(sourceStr, GL::ParseGlslVersion(versionStr));
+
+		std::vector<const GLchar*> sources(7);
+		const auto compile = [&]() {
+			sources = {
+				"// SHADER VERSION\n",
+				versionStr.c_str(),
+				"// SHADER FLAGS\n",
+				defFlags.c_str(),
+				"// SHADER SOURCE\n",
+				"#line 1\n",
+				sourceStr.c_str()
+			};
+			glShaderSource(res->id, sources.size(), &sources[0], NULL);
+			glCompileShader(res->id);
+
+			res->valid = glslIsValid(res->id);
+			res->log   = glslGetLog(res->id);
 		};
 
 		res->id = glCreateShader(type);
+		compile();
 
-		glShaderSource(res->id, sources.size(), &sources[0], NULL);
-		glCompileShader(res->id);
+		// The rewrite must not be able to break a shader that compiled before --
+		// that is what makes "a game nobody updated keeps working" structural
+		// rather than argued. It is also how this failure gets NOTICED: a dead
+		// shader renders nothing in every pass alike, so the pixel gate reports a
+		// clean run over a broken frame (measured: 646 frames 0/0 with BAR's unit
+		// materials failing to compile).
+		if (!res->valid && rewritten) {
+			LOG_L(L_ERROR, "[GLSL-SO::%s] FFVertexAttribRewrite broke \"%s\"; recompiling the original. Log:\n%s",
+				__FUNCTION__, srcFile.c_str(), res->log.c_str());
 
-		res->valid = glslIsValid(res->id);
-		res->log   = glslGetLog(res->id);
+			std::string discard;
+			sourceStr = srcText;
+			ExtractGlslVersion(&sourceStr, &discard);
+			compile();
+		}
 
 		if (!res->valid && logReporting) {
 			const std::string& name = srcFile.find("void main()") != std::string::npos ? "unknown" : srcFile;
