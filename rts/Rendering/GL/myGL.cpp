@@ -560,7 +560,7 @@ void ClearScreen()
 	glEnable(GL_BLEND);
 	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 	glEnable(GL_TEXTURE_2D);
-	// No caller reads the fixed-function current colour, so the glColor3f(1,1,1)
+	// No caller reads the fixed-function current colour, so the GL::ffColor.Set(1,1,1)
 	// that used to close this function only cost the process its RenderDoc
 	// capture. CPreGame::Draw draws nothing but font text and sets its own colour
 	// via SetTextColor (the font emits per-vertex colours); CLoadScreen::Draw and

@@ -161,7 +161,7 @@ static void ResetAlphaFeatureDrawState(unsigned int modelType, bool deferredPass
 // shadow-pass state management funcs
 // FIXME: setup face culling for S3O?
 static void SetupShadowUnitDrawState(unsigned int modelType, bool deferredPass) {
-	glColor3f(1.0f, 1.0f, 1.0f);
+	GL::ffColor.Set(1.0f, 1.0f, 1.0f);
 	glDisable(GL_TEXTURE_2D);
 
 	glPolygonOffset(1.0f, 1.0f);

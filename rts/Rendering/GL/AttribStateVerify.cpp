@@ -83,7 +83,7 @@ void GL::AttribSnapshot::Capture(GLbitfield mask)
 		glGetFloatv(GL_POINT_SIZE, &pointSize);
 
 	if (mask & GL_CURRENT_BIT)
-		glGetFloatv(GL_CURRENT_COLOR, currentColor);
+		std::copy_n(GL::ffColor.Get(), 4, currentColor);
 
 	if (mask & GL_FOG_BIT) {
 		glGetFloatv(GL_FOG_COLOR, fogColor);
@@ -250,7 +250,7 @@ void GL::AttribSnapshot::Restore(GLbitfield mask) const
 	}
 
 	if ((mask & GL_CURRENT_BIT) && !std::equal(currentColor, currentColor + 4, cur.currentColor))
-		glColor4fv(currentColor);
+		GL::ffColor.Set(currentColor);
 
 	if (mask & GL_LINE_BIT) {
 		glLineWidth(lineWidth);

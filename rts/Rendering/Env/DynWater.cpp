@@ -328,7 +328,7 @@ void CDynWater::Draw()
 	shadowHandler.SetupShadowTexSampler(GL_TEXTURE7);
 	glActiveTextureARB(GL_TEXTURE0_ARB);
 
-	glColor4f(1, 1, 1, 0.5f);
+	GL::ffColor.Set(1, 1, 1, 0.5f);
 
 	glBindProgramARB(GL_FRAGMENT_PROGRAM_ARB, waterFP);
 	glEnable(GL_FRAGMENT_PROGRAM_ARB);

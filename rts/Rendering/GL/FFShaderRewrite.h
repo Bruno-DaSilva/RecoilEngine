@@ -16,22 +16,40 @@
 // engine compiles reaches a game's own shaders too, so an unmodified game gets
 // the modern feed without touching its content or the gl.* API.
 //
-// The attributes are selected per draw by `recoil_ff_useAttrs`, a uniform that
-// defaults to false. A program compiled through here therefore renders exactly
-// as it does today until a caller opts in, which is what keeps every existing
-// draw path -- and every game nobody has updated -- unchanged.
+// The position and texcoord attributes are selected per draw by
+// `recoil_ff_useAttrs`, a uniform that defaults to false, so a program compiled
+// through here renders exactly as it does today until a caller feeds it a
+// stream. gl_Color has no such switch: it is a global CURRENT value rather than
+// something a draw supplies, so it is replaced unconditionally and fed through
+// the pinned attribute's current value instead (see GL::ffColor).
 //
 // #define of a gl_ name is illegal in GLSL, so this is textual substitution of
 // the identifier plus a generated declaration block.
 namespace GL {
+	// The colour attribute's location is PINNED, unlike the other two. An
+	// attribute's current value lives in a context slot, not in the program, so
+	// the one thing a per-program queried location cannot express is "set the
+	// colour now, for whichever program is bound later" -- which is exactly what
+	// gl.Color does. 15 is the last slot GL guarantees; the engine binds up to 6
+	// and BAR up to 10.
+	constexpr int FF_COLOR_ATTRIB_LOC = 15;
+	constexpr const char* FF_COLOR_ATTRIB_NAME = "recoil_ff_aColor";
+
+	// Pin FF_COLOR_ATTRIB_NAME in `prog` ahead of linking it. Binding a name the
+	// program does not declare is a no-op, so this is unconditional at each link
+	// site rather than conditional on the rewrite having fired.
+	void BindFFColorAttribLocation(uint32_t prog);
+
 	// Vertex shaders only: in a fragment shader gl_Color is the interpolated
 	// varying rather than the attribute, and gl_MultiTexCoord0 does not exist.
 	//
-	// Returns true when `src` was rewritten. Declines -- leaving `src` untouched
-	// -- when the shader reads a fixed-function vertex builtin this does not
-	// feed (gl_Normal, gl_SecondaryColor, gl_FogCoord, gl_MultiTexCoord1..7).
-	// Half-feeding one of those would silently zero it, so such a shader keeps
-	// the fixed-function path and its draws keep the legacy fallback.
+	// Returns true when `src` was rewritten. The POSITION and TEXCOORD channels
+	// are declined -- left as the builtins -- when the shader reads a
+	// fixed-function vertex builtin this does not feed (gl_Normal,
+	// gl_SecondaryColor, gl_FogCoord, gl_MultiTexCoord1..7): half-feeding a
+	// stream would silently zero one of them, so such a shader keeps the
+	// fixed-function path and its draws keep the legacy fallback. gl_Color is
+	// replaced either way, since its channel is complete on its own.
 	//
 	// glslVersion is the effective #version (0 when none was given, i.e. 110),
 	// which decides `attribute` vs `in`.
@@ -40,9 +58,10 @@ namespace GL {
 	// Parses a leading "#version <n>" out of `text`; 0 when absent.
 	int ParseGlslVersion(const std::string& text);
 
-	// Where the rewritten program takes its vertex inputs from. Locations are
-	// QUERIED rather than pinned, so an injected attribute cannot collide with
-	// one the shader declares itself.
+	// Where the rewritten program takes its vertex inputs from. Position and
+	// texcoord locations are QUERIED rather than pinned, so an injected attribute
+	// cannot collide with one the shader declares itself; colour is the pinned
+	// one and is here only so a stream draw can fill the same slot it reads.
 	struct FFAttribBinding {
 		int32_t vertex = -1;
 		int32_t color = -1;

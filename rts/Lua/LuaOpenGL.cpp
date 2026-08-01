@@ -649,12 +649,12 @@ static void CmdListEmitStreamIntoCompile(const LuaCommandList::ImmStreamData& s,
 		if (i >= s.texSeedVertCount)
 			glTexCoord2f(v[3], v[4]);
 		if (i >= s.seedVertCount)
-			glColor4fv(&s.colorsF[i * 4]);
+			GL::ffColor.Set(&s.colorsF[i * 4]);
 		glVertex3f(v[0], v[1], v[2]);
 	}
 	if (leaveOpen) {
 		if (cap->sawColorInList)
-			glColor4fv(cap->curColor);
+			GL::ffColor.Set(cap->curColor);
 		if (cap->sawTexInStream)
 			glTexCoord2f(cap->curS, cap->curT);
 		return;
@@ -663,7 +663,7 @@ static void CmdListEmitStreamIntoCompile(const LuaCommandList::ImmStreamData& s,
 	// exact end-state inside the compile: a body color/texcoord after the last
 	// vertex must still be the recorded current state
 	if (s.sawColor)
-		glColor4fv(s.lastColorF);
+		GL::ffColor.Set(s.lastColorF);
 	if (s.textured)
 		glTexCoord2f(s.lastS, s.lastT);
 }
@@ -698,7 +698,7 @@ static void CmdListEmitIntoCompile(const LuaCommandList& cl)
 			case Op::Fogf:              glFogf(c.u0, c.f[0]); break;
 			case Op::Fogi:              glFogi(c.u0, (GLint)c.u1); break;
 			case Op::Fogfv:             glFogfv(c.u0, c.f); break;
-			case Op::Color:             glColor4fv(c.f); break;
+			case Op::Color:             GL::ffColor.Set(c.f); break;
 			case Op::TexCoord:          glTexCoord2f(c.f[0], c.f[1]); break;
 			case Op::MatrixMode:        glMatrixMode(c.u0); break;
 			case Op::PushMatrix:        glPushMatrix(); break;
@@ -822,7 +822,7 @@ static void CmdListInline(const LuaCommandList& src)
 static void DrawRectModern(float x1, float y1, float x2, float y2)
 {
 	GLfloat cc[4];
-	glGetFloatv(GL_CURRENT_COLOR, cc);
+	std::copy_n(GL::ffColor.Get(), 4, cc);
 	luaImmBuffer.SetBackend(LuaImmediateBuffer::Backend::Modern);
 	SetImmBufferFixedFunctionMatrices();
 	luaImmBuffer.Begin(GL_TRIANGLES);
@@ -843,7 +843,7 @@ static void CmdListReplayStream(const LuaCommandList::ImmStreamData& s)
 	// REPLAY-time current color: real display lists give pre-first-glColor
 	// vertices the call-time color
 	GLfloat cc[4];
-	glGetFloatv(GL_CURRENT_COLOR, cc);
+	std::copy_n(GL::ffColor.Get(), 4, cc);
 
 	const size_t n = s.posUV.size() / 5;
 	const float* colors = s.colorsF.data();
@@ -914,7 +914,7 @@ static void CmdListReplayLive(const LuaCommandList& cl)
 			case Op::Fogf:              glFogf(c.u0, c.f[0]); break;
 			case Op::Fogi:              glFogi(c.u0, (GLint)c.u1); break;
 			case Op::Fogfv:             glFogfv(c.u0, c.f); break;
-			case Op::Color:             glColor4fv(c.f); break;
+			case Op::Color:             GL::ffColor.Set(c.f); break;
 			case Op::TexCoord:          glTexCoord2f(c.f[0], c.f[1]); break;
 			case Op::MatrixMode: {
 				glMatrixMode(c.u0);
@@ -1247,6 +1247,7 @@ void LuaOpenGL::Init()
 		deprecatedGLWarned.reserve(4096); // deprecated calls are logged along with caller information
 
 	modernImmediate = configHandler->GetBool("LuaModernGLBackend");
+	GL::ffColor.writeThrough = !modernImmediate;
 	glCompareMode = configHandler->GetBool("LuaGLCompareMode");
 	cmdListsEnabled = configHandler->GetBool("LuaCommandLists");
 	// the modern backend needs a CPU-side MVP; force matrix tracking on with it.
@@ -1604,12 +1605,8 @@ void LuaOpenGL::ResetGLState()
 	glPointParameterf(GL_POINT_SIZE_MAX, 1.0e9f); // FIXME?
 	glPointParameterf(GL_POINT_FADE_THRESHOLD_SIZE, 1.0f);
 
-	// glColor4fv, not glColor4f: both are on RenderDoc's unsupported list, and
-	// the target is zero DISTINCT functions, so a spelling that duplicates one
-	// already unavoidable elsewhere (gl.Color, 84k calls a run) is one fewer
-	// entry to retire separately. Same value, same call.
 	static constexpr float opaqueWhite[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
-	glColor4fv(opaqueWhite);
+	GL::ffColor.Set(opaqueWhite);
 	if (GL::ffResetState.materialTouched) {
 		const float ambient[4] = { 0.2f, 0.2f, 0.2f, 1.0f };
 		const float diffuse[4] = { 0.8f, 0.8f, 0.8f, 1.0f };
@@ -1622,6 +1619,7 @@ void LuaOpenGL::ResetGLState()
 	}
 
 	GL::ffResetState.Verify(__func__);
+	GL::ffColor.Verify(__func__);
 
 	if (IS_GL_FUNCTION_AVAILABLE(glUseProgram)) {
 		glUseProgram(0);
@@ -3226,7 +3224,7 @@ int LuaOpenGL::DrawGroundCircle(lua_State* L)
 
 #if 0
 		std::array<float,4> currentColor;
-		glGetFloatv(GL_CURRENT_COLOR, currentColor.data());
+		std::copy_n(GL::ffColor.Get(), 4, currentColor.data());
 #else
 		const std::array<float, 4>& currentColor = color;
 #endif
@@ -3234,7 +3232,7 @@ int LuaOpenGL::DrawGroundCircle(lua_State* L)
 	} else {
 #if 0
 		std::array<float, 4> currentColor;
-		glGetFloatv(GL_CURRENT_COLOR, currentColor.data());
+		std::copy_n(GL::ffColor.Get(), 4, currentColor.data());
 #else
 		const std::array<float, 4>& currentColor = color;
 #endif
@@ -3504,7 +3502,7 @@ int LuaOpenGL::Shape(lua_State* L)
 		ReportImmLegacy(L, __func__, compilingDisplayList);
 		glBegin(type);
 		for (const VertexData& vd : shape) {
-			if (vd.hasColor) { glColor4fv(vd.color);   }
+			if (vd.hasColor) { GL::ffColor.Set(vd.color);   }
 			if (vd.hasTxcd)  { glTexCoord2fv(vd.txcd); }
 			if (vd.hasNorm)  { glNormal3fv(vd.norm);   }
 			if (vd.hasVert)  { glVertex3fv(vd.vert);   } // always last
@@ -3514,7 +3512,7 @@ int LuaOpenGL::Shape(lua_State* L)
 	}
 
 	GLfloat cc[4];
-	glGetFloatv(GL_CURRENT_COLOR, cc);
+	std::copy_n(GL::ffColor.Get(), 4, cc);
 
 	luaImmBuffer.Begin(type);
 	luaImmBuffer.SeedColor(cc);
@@ -3596,7 +3594,7 @@ int LuaOpenGL::BeginEnd(lua_State* L)
 	// up as whole-element tints under the A/B gate (gui_pip wash class).
 	{
 		GLfloat cc[4];
-		glGetFloatv(GL_CURRENT_COLOR, cc);
+		std::copy_n(GL::ffColor.Get(), 4, cc);
 		luaImmBuffer.SeedColor(cc);
 	}
 	SetImmBufferFixedFunctionMatrices();
@@ -4167,7 +4165,7 @@ int LuaOpenGL::TexRect(lua_State* L)
 		// overbright -- current color state untouched; the flush clamps for the
 		// modulation and restores the exact float state afterwards
 		GLfloat cc[4];
-		glGetFloatv(GL_CURRENT_COLOR, cc);
+		std::copy_n(GL::ffColor.Get(), 4, cc);
 		SetImmBufferFixedFunctionMatrices();
 		SetImmFallbackCallSite(L);
 		luaImmBuffer.SetTexRect(x1, y1, x2, y2, s1, t1, s2, t2, cc);
@@ -4308,7 +4306,7 @@ int LuaOpenGL::Color(lua_State* L)
 		return 0;
 	}
 
-	glColor4fv(color.data());
+	GL::ffColor.Set(color.data());
 
 	return 0;
 }
@@ -7176,6 +7174,7 @@ int LuaOpenGL::PushAttrib(lua_State* L)
 	}
 	glPushAttrib((GLbitfield)mask);
 	GL::ffResetState.NotePushAttrib((GLbitfield)mask);
+	GL::ffColor.NotePushAttrib((GLbitfield)mask);
 	return 0;
 }
 
@@ -7189,6 +7188,7 @@ int LuaOpenGL::PopAttrib(lua_State* L)
 	CondWarnDeprecatedGL(L, __func__);
 	glPopAttrib();
 	GL::ffResetState.NotePopAttrib();
+	GL::ffColor.NotePopAttrib();
 	return 0;
 }
 

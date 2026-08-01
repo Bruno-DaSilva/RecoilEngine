@@ -273,7 +273,7 @@ void CAdvWater::UpdateWater(const CGame* game)
 		glMatrixMode(GL_MODELVIEW);
 		glLoadIdentity();
 
-		glColor3f(0.2f, 0.2f, 0.2f);
+		GL::ffColor.Set(0.2f, 0.2f, 0.2f);
 
 		CVertexArray* va = GetVertexArray();
 		va->Initialize();
@@ -322,7 +322,7 @@ void CAdvWater::UpdateWater(const CGame* game)
 
 		// this fixes a memory leak on ATI cards
 		glBindTexture(GL_TEXTURE_2D, 0);
-		glColor3f(1.0f, 1.0f, 1.0f);
+		GL::ffColor.Set(1.0f, 1.0f, 1.0f);
 	}
 
 

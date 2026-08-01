@@ -89,7 +89,7 @@ void HAPFSPathDrawer::DrawInMiniMap()
 		glScalef(1.0f / mapDims.mapx, -1.0f / mapDims.mapy, 1.0f);
 
 	glDisable(GL_TEXTURE_2D);
-	glColor4f(1.0f, 1.0f, 0.0f, 0.7f);
+	GL::ffColor.Set(1.0f, 1.0f, 0.0f, 0.7f);
 
 	for (const int2& sb: ps->GetUpdatedBlocks()) {
 		const int blockIdxX = sb.x * ps->GetBlockSize();
@@ -97,7 +97,7 @@ void HAPFSPathDrawer::DrawInMiniMap()
 		glRectf(blockIdxX, blockIdxY, blockIdxX + ps->GetBlockSize(), blockIdxY + ps->GetBlockSize());
 	}
 
-	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+	GL::ffColor.Set(1.0f, 1.0f, 1.0f, 1.0f);
 	glEnable(GL_TEXTURE_2D);
 
 	glMatrixMode(GL_PROJECTION);
@@ -302,19 +302,19 @@ void HAPFSPathDrawer::Draw() const {
 		glBegin(GL_LINE_STRIP);
 
 			// draw low-res segments of <path> (blue)
-			glColor4f(0.0f, 0.0f, 1.0f, 1.0f);
+			GL::ffColor.Set(0.0f, 0.0f, 1.0f, 1.0f);
 			for (auto pvi = multiPath.lowResPath.path.begin(); pvi != multiPath.lowResPath.path.end(); ++pvi) {
 				float3 pos = *pvi; pos.y += 5; glVertexf3(pos);
 			}
 
 			// draw med-res segments of <path> (green)
-			glColor4f(0.0f, 1.0f, 0.0f, 1.0f);
+			GL::ffColor.Set(0.0f, 1.0f, 0.0f, 1.0f);
 			for (auto pvi = multiPath.medResPath.path.begin(); pvi != multiPath.medResPath.path.end(); ++pvi) {
 				float3 pos = *pvi; pos.y += 5; glVertexf3(pos);
 			}
 
 			// draw max-res segments of <path> (red)
-			glColor4f(1.0f, 0.0f, 0.0f, 1.0f);
+			GL::ffColor.Set(1.0f, 0.0f, 0.0f, 1.0f);
 			for (auto pvi = multiPath.maxResPath.path.begin(); pvi != multiPath.maxResPath.path.end(); ++pvi) {
 				float3 pos = *pvi; pos.y += 5; glVertexf3(pos);
 			}
@@ -387,7 +387,7 @@ void HAPFSPathDrawer::Draw(const HAPFS::CPathEstimator* pe) const {
 		return;
 
 	glDisable(GL_TEXTURE_2D);
-	glColor3f(1.0f, 1.0f, 0.0f);
+	GL::ffColor.Set(1.0f, 1.0f, 0.0f);
 
 	#if (PE_EXTRA_DEBUG_OVERLAYS == 1)
 	const int overlayPeriod = GAME_SPEED * 5;
@@ -419,7 +419,7 @@ void HAPFSPathDrawer::Draw(const HAPFS::CPathEstimator* pe) const {
 				if (!camera->InView(p1))
 					continue;
 
-				glColor3f(1.0f, 1.0f, 0.75f * drawLowResPE);
+				GL::ffColor.Set(1.0f, 1.0f, 0.75f * drawLowResPE);
 				glVertexf3(p1);
 				glVertexf3(p1 - UpVector * 10.0f);
 
@@ -446,7 +446,7 @@ void HAPFSPathDrawer::Draw(const HAPFS::CPathEstimator* pe) const {
 						p2.z = (blockStates.peNodeOffsets[md->pathType][obBlockNr].y) * SQUARE_SIZE;
 						p2.y = CGround::GetHeightAboveWater(p2.x, p2.z, false) + 10.0f;
 
-					glColor3f(1.0f / std::sqrt(nrmCost), 1.0f / nrmCost, 0.75f * drawLowResPE);
+					GL::ffColor.Set(1.0f / std::sqrt(nrmCost), 1.0f / nrmCost, 0.75f * drawLowResPE);
 					glVertexf3(p1);
 					glVertexf3(p2);
 				}
@@ -532,7 +532,7 @@ void HAPFSPathDrawer::Draw(const HAPFS::CPathEstimator* pe) const {
 	const SColor colors[2] = {SColor(0.2f, 0.7f, 0.7f, 1.0f), SColor(0.7f, 0.2f, 0.7f, 1.0f)};
 	const SColor& color = colors[pe == pm->GetMedResPE()];
 
-	glColor3ub(color.r, color.g, color.b);
+	GL::ffColor.SetUB(color.r, color.g, color.b);
 
 	for (int i = 0; i < pm->GetPathFinderGroups(); i++)
 	{

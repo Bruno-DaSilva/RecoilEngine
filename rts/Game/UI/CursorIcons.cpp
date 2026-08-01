@@ -155,7 +155,7 @@ void CCursorIcons::DrawTexts() const
 	if (texts.empty())
 		return;
 
-	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+	GL::ffColor.Set(1.0f, 1.0f, 1.0f, 1.0f);
 
 	const float fontScale = 1.0f;
 	const float yOffset = 50.0f * globalRendering->pixelY;

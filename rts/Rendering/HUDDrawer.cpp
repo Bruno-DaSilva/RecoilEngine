@@ -70,7 +70,7 @@ void HUDDrawer::DrawModel(const CUnit* unit)
 			glMultMatrixf(m.m);
 		}
 
-		glColor4f(1.0f, 1.0f, 1.0f, 0.25f);
+		GL::ffColor.Set(1.0f, 1.0f, 1.0f, 0.25f);
 		unit->localModel.Draw();
 	glPopMatrix();
 }
@@ -85,7 +85,7 @@ void HUDDrawer::DrawUnitDirectionArrow(const CUnit* unit)
 			glScalef(0.33f, 0.33f * globalRendering->aspectRatio, 0.33f);
 			glRotatef(unit->heading * 180.0f / 32768 + 180, 0.0f, 0.0f, 1.0f);
 
-			glColor4f(0.3f, 0.9f, 0.3f, 0.4f);
+			GL::ffColor.Set(0.3f, 0.9f, 0.3f, 0.4f);
 			glBegin(GL_TRIANGLE_FAN);
 				glVertex2f(-0.2f, -0.3f);
 				glVertex2f(-0.2f,  0.3f);
@@ -112,7 +112,7 @@ void HUDDrawer::DrawCameraDirectionArrow(const CUnit* unit)
 			);
 			glScalef(0.4f, 0.4f, 0.3f);
 
-			glColor4f(0.4f, 0.4f, 1.0f, 0.6f);
+			GL::ffColor.Set(0.4f, 0.4f, 1.0f, 0.6f);
 			glBegin(GL_TRIANGLE_FAN);
 				glVertex2f(-0.2f, -0.3f);
 				glVertex2f(-0.2f,  0.3f);
@@ -132,7 +132,7 @@ void HUDDrawer::DrawWeaponStates(const CUnit* unit)
 	glMatrixMode(GL_MODELVIEW);
 
 	glEnable(GL_TEXTURE_2D);
-	glColor4f(0.2f, 0.8f, 0.2f, 0.8f);
+	GL::ffColor.Set(0.2f, 0.8f, 0.2f, 0.8f);
 	font->glFormat(-0.9f, 0.35f, 1.0f, FONT_SCALE | FONT_NORM, "Health: %.0f / %.0f", (float) unit->health, (float) unit->maxHealth);
 
 	if (playerHandler.Player(gu->myPlayerNum)->fpsController.mouse2)
@@ -165,21 +165,21 @@ void HUDDrawer::DrawWeaponStates(const CUnit* unit)
 
 				if (wd->stockpile && !w->numStockpiled) {
 					if (w->numStockpileQued) {
-						glColor4f(0.8f, 0.2f, 0.2f, 0.8f);
+						GL::ffColor.Set(0.8f, 0.2f, 0.2f, 0.8f);
 						font->glFormat(-0.9f, yPos, fontSize, FONT_SCALE | FONT_NORM, "%s: Stockpiling (%i%%)", wd->description.c_str(), int(100.0f * w->buildPercent + 0.5f));
 					}
 					else {
-						glColor4f(0.8f, 0.2f, 0.2f, 0.8f);
+						GL::ffColor.Set(0.8f, 0.2f, 0.2f, 0.8f);
 						font->glFormat(-0.9f, yPos, fontSize, FONT_SCALE | FONT_NORM, "%s: No ammo", wd->description.c_str());
 					}
 				} else if (w->reloadStatus > gs->frameNum) {
-					glColor4f(0.8f, 0.2f, 0.2f, 0.8f);
+					GL::ffColor.Set(0.8f, 0.2f, 0.2f, 0.8f);
 					font->glFormat(-0.9f, yPos, fontSize, FONT_SCALE | FONT_NORM, "%s: Reloading (%i%%)", wd->description.c_str(), 100 - int(100.0f * (w->reloadStatus - gs->frameNum) / int(w->reloadTime / unit->reloadSpeed) + 0.5f));
 				} else if (!w->angleGood) {
-					glColor4f(0.6f, 0.6f, 0.2f, 0.8f);
+					GL::ffColor.Set(0.6f, 0.6f, 0.2f, 0.8f);
 					font->glFormat(-0.9f, yPos, fontSize, FONT_SCALE | FONT_NORM, "%s: Aiming", wd->description.c_str());
 				} else {
-					glColor4f(0.2f, 0.8f, 0.2f, 0.8f);
+					GL::ffColor.Set(0.2f, 0.8f, 0.2f, 0.8f);
 					font->glFormat(-0.9f, yPos, fontSize, FONT_SCALE | FONT_NORM, "%s: Ready", wd->description.c_str());
 				}
 			}
@@ -209,13 +209,13 @@ void HUDDrawer::DrawTargetReticle(const CUnit* unit)
 			}
 			switch (a) {
 				case 0:
-					glColor4f(0.0f, 1.0f, 0.0f, 0.7f);
+					GL::ffColor.Set(0.0f, 1.0f, 0.0f, 0.7f);
 					break;
 				case 1:
-					glColor4f(1.0f, 0.0f, 0.0f, 0.7f);
+					GL::ffColor.Set(1.0f, 0.0f, 0.0f, 0.7f);
 					break;
 				default:
-					glColor4f(0.0f, 0.0f, 1.0f, 0.7f);
+					GL::ffColor.Set(0.0f, 0.0f, 1.0f, 0.7f);
 			}
 
 			if (w->HaveTarget()) {

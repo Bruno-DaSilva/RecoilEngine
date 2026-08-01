@@ -239,7 +239,7 @@ void CglShaderFontRenderer::DrawTraingleElementsRecordable()
 		if (!verts.empty()) {
 			glBegin(GL_QUADS);
 			for (const auto& v : verts) {
-				glColor4ub(v.c.r, v.c.g, v.c.b, v.c.a);
+				GL::ffColor.SetUB(v.c.r, v.c.g, v.c.b, v.c.a);
 				glTexCoord2f(v.s, v.t);
 				glVertex3f(v.pos.x, v.pos.y, v.pos.z);
 			}

@@ -71,9 +71,9 @@ void LineEdit::DrawSelf()
 		float cw = font->GetSize() * font->GetCharacterWidth(c) /float(screensize[0]);
 		float csx = pos[0] + 0.01 + caretWidth;
 		float f = 0.5f * (1.0f + fastmath::sin(spring_now().toMilliSecsf() * 0.015f));
-		glColor4f(f, f, f, opacity);
+		GL::ffColor.Set(f, f, f, opacity);
 		glRectf(csx, textCenter + cursorHeight/2, csx + cw, textCenter - cursorHeight/2);
-		glColor4f(0.0f, 0.0f, 0.0f, 1.0f); // black
+		GL::ffColor.Set(0.0f, 0.0f, 0.0f, 1.0f); // black
 	}
 
 	font->SetTextColor(); //default

@@ -2438,9 +2438,9 @@ void CGame::DrawSkip(bool blackscreen) {
 		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 		glClear(GL_COLOR_BUFFER_BIT);
 	}
-	glColor3f(0.5f, 1.0f, 0.5f);
+	GL::ffColor.Set(0.5f, 1.0f, 0.5f);
 	font->glFormat(0.5f, 0.55f, 2.5f, FONT_CENTER | FONT_SCALE | FONT_NORM, "Skipping %.1f game seconds", skipSeconds);
-	glColor3f(1.0f, 1.0f, 1.0f);
+	GL::ffColor.Set(1.0f, 1.0f, 1.0f);
 	font->glFormat(0.5f, 0.45f, 2.0f, FONT_CENTER | FONT_SCALE | FONT_NORM, "(%i frames left)", framesLeft);
 
 	const float ff = (float)framesLeft / (float)skipTotalFrames;
@@ -2448,9 +2448,9 @@ void CGame::DrawSkip(bool blackscreen) {
 	const float b = 0.004f; // border
 	const float yn = 0.35f;
 	const float yp = 0.38f;
-	glColor3f(0.2f, 0.2f, 1.0f);
+	GL::ffColor.Set(0.2f, 0.2f, 1.0f);
 	glRectf(0.25f - b, yn - b, 0.75f + b, yp + b);
-	glColor3f(0.25f + (0.75f * ff), 1.0f - (0.75f * ff), 0.0f);
+	GL::ffColor.Set(0.25f + (0.75f * ff), 1.0f - (0.75f * ff), 0.0f);
 	glRectf(0.5 - (0.25f * ff), yn, 0.5f + (0.25f * ff), yp);
 	#endif
 }

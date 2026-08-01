@@ -17,7 +17,6 @@ CONFIG(bool, FFVertexAttribRewrite).defaultValue(false).safemodeValue(false)
 
 namespace {
 	constexpr const char* ATTR_VERTEX = "recoil_ff_aVertex";
-	constexpr const char* ATTR_COLOR  = "recoil_ff_aColor";
 	constexpr const char* ATTR_TEXCRD = "recoil_ff_aTexCoord0";
 	constexpr const char* UNIFORM_USE = "recoil_ff_useAttrs";
 
@@ -156,21 +155,30 @@ bool GL::RewriteFFVertexBuiltins(std::string& src, int glslVersion)
 	// triggers a rewrite nor gets one
 	const std::string code = MaskComments(src);
 
-	const bool usesFtransform = HasIdent(code, "ftransform");
-	const bool usesVertex = usesFtransform || HasIdent(code, "gl_Vertex");
-	const bool usesColor  = HasIdent(code, "gl_Color");
-	const bool usesTexCrd = HasIdent(code, "gl_MultiTexCoord0");
+	const bool usesColor = HasIdent(code, "gl_Color");
+	bool usesFtransform = HasIdent(code, "ftransform");
+	bool usesVertex = usesFtransform || HasIdent(code, "gl_Vertex");
+	bool usesTexCrd = HasIdent(code, "gl_MultiTexCoord0");
 
 	if (!usesVertex && !usesColor && !usesTexCrd)
 		return false;
 
+	// The stream channels come as a set -- half-feeding one of the builtins this
+	// has no channel for would silently zero it -- so a shader that reads one of
+	// those keeps fixed function for its position and texcoords. Its colour still
+	// converts: that channel is a global current value, complete on its own, and
+	// nothing about it depends on a draw supplying vertices.
 	for (const char* b : UNFED_BUILTINS) {
 		if (!HasIdent(code, b))
 			continue;
 
-		LOG_L(L_DEBUG, "[FFRewrite] declining: shader reads %s, which has no attribute channel", b);
-		return false;
+		LOG_L(L_DEBUG, "[FFRewrite] stream channels declined: shader reads %s, which has no attribute channel", b);
+		usesFtransform = usesVertex = usesTexCrd = false;
+		break;
 	}
+
+	if (!usesVertex && !usesColor && !usesTexCrd)
+		return false;
 
 	// Collect every site against the mask, then rewrite `src` once from the back,
 	// so each replacement lands at a position the mask still describes. Doing it
@@ -204,7 +212,9 @@ bool GL::RewriteFFVertexBuiltins(std::string& src, int glslVersion)
 
 	// one physical line, so a compile error in the game's own source still
 	// reports the line the author wrote (see the #line re-anchor below)
-	std::string decl = "uniform bool " + std::string(UNIFORM_USE) + ";";
+	std::string decl;
+	if (usesVertex || usesTexCrd)
+		decl += "uniform bool " + std::string(UNIFORM_USE) + ";";
 	if (usesVertex) {
 		decl += std::string(in) + " vec4 " + ATTR_VERTEX + ";";
 		decl += " vec4 recoil_ff_Vertex() { return " + std::string(UNIFORM_USE) + " ? " + ATTR_VERTEX + " : gl_Vertex; }";
@@ -215,8 +225,13 @@ bool GL::RewriteFFVertexBuiltins(std::string& src, int glslVersion)
 		decl += " vec4 recoil_ff_Transform() { return gl_ModelViewProjectionMatrix * recoil_ff_Vertex(); }";
 	}
 	if (usesColor) {
-		decl += std::string(in) + " vec4 " + ATTR_COLOR + ";";
-		decl += " vec4 recoil_ff_Color() { return " + std::string(UNIFORM_USE) + " ? " + ATTR_COLOR + " : gl_Color; }";
+		// No useAttrs branch, unlike the two above: the pinned slot's CURRENT
+		// value is the fixed-function current colour (GL::ffColor writes it there
+		// instead of to GL), and a stream draw overrides it per vertex the same
+		// way a colour array overrode gl_Color. Both cases are already right, so
+		// there is nothing for a per-draw switch to select.
+		decl += std::string(in) + " vec4 " + GL::FF_COLOR_ATTRIB_NAME + ";";
+		decl += " vec4 recoil_ff_Color() { return " + std::string(GL::FF_COLOR_ATTRIB_NAME) + "; }";
 	}
 	if (usesTexCrd) {
 		decl += std::string(in) + " vec4 " + ATTR_TEXCRD + ";";
@@ -225,6 +240,14 @@ bool GL::RewriteFFVertexBuiltins(std::string& src, int glslVersion)
 
 	src.insert(at, decl + "\n#line " + std::to_string(nextLine) + "\n");
 	return true;
+}
+
+void GL::BindFFColorAttribLocation(uint32_t prog)
+{
+	if (!FFRewriteEnabled() || prog == 0)
+		return;
+
+	glBindAttribLocation(prog, FF_COLOR_ATTRIB_LOC, FF_COLOR_ATTRIB_NAME);
 }
 
 uint32_t GL::CurrentProgram()
@@ -251,7 +274,7 @@ const GL::FFAttribBinding* GL::GetFFAttribBinding(uint32_t prog)
 		return nullptr;
 
 	b.vertex    = glGetAttribLocation(prog, ATTR_VERTEX);
-	b.color     = glGetAttribLocation(prog, ATTR_COLOR);
+	b.color     = glGetAttribLocation(prog, GL::FF_COLOR_ATTRIB_NAME);
 	b.texCoord0 = glGetAttribLocation(prog, ATTR_TEXCRD);
 
 	return b.Usable() ? &b : nullptr;

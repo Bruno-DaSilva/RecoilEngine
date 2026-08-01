@@ -406,7 +406,7 @@ inline void CModelDrawerBase<TDrawerData, TDrawer>::DrawShadowPassImpl() const
 	assert((CCameraHandler::GetActiveCamera())->GetCamType() == CCamera::CAMTYPE_SHADOW);
 
 	if constexpr (legacy) {
-		glColor3f(1.0f, 1.0f, 1.0f);
+		GL::ffColor.Set(1.0f, 1.0f, 1.0f);
 		glPolygonOffset(1.0f, 1.0f);
 		glEnable(GL_POLYGON_OFFSET_FILL);
 

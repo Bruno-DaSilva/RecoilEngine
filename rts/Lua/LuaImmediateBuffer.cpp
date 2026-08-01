@@ -599,7 +599,7 @@ void LuaImmediateBuffer::FlushLegacy() const
 		const VA_TYPE_TC& v = verts[i];
 		if (textured)
 			glTexCoord2f(v.s, v.t);
-		glColor4fv(&vertColorsF[i * 4]);
+		GL::ffColor.Set(&vertColorsF[i * 4]);
 		glVertex3f(v.pos.x, v.pos.y, v.pos.z);
 	}
 	glEnd();
@@ -608,7 +608,7 @@ void LuaImmediateBuffer::FlushLegacy() const
 	// (= the inherited seed) when the body never called one -- the per-vertex
 	// glColor replay above would otherwise leave the last vertex's quantized
 	// color. Float precision so unclamped/overbright current colors round-trip.
-	glColor4fv(sawColor ? lastColorF : seedColorF);
+	GL::ffColor.Set(sawColor ? lastColorF : seedColorF);
 }
 
 // Persistent twin of ImmFloatStream: same attribute layout, GL_STATIC_DRAW, and
@@ -805,7 +805,7 @@ void LuaImmediateBuffer::FlushModern() const
 	// longer produces. Hence the knob: with it off, nothing moves at all.
 	if (textured && !GL::FFRewriteEnabled())
 		glTexCoord2f(verts.back().s, verts.back().t);
-	glColor4fv(sawColor ? lastColorF : seedColorF);
+	GL::ffColor.Set(sawColor ? lastColorF : seedColorF);
 }
 
 bool LuaImmediateBuffer::FlushIntoBoundShader(bool isTexRect) const
@@ -872,7 +872,7 @@ bool LuaImmediateBuffer::FlushIntoBoundShader(bool isTexRect) const
 	// function current color a glBegin/glEnd body would have left behind, which
 	// later inheriting draws still read. This path only exists under the source
 	// rewrite, so the current texcoord is never primed here -- see FlushModern.
-	glColor4fv(isTexRect ? texRect.cf : (sawColor ? lastColorF : seedColorF));
+	GL::ffColor.Set(isTexRect ? texRect.cf : (sawColor ? lastColorF : seedColorF));
 
 	return true;
 }
@@ -884,7 +884,7 @@ void LuaImmediateBuffer::FlushTexRectLegacy() const
 
 	// caller has bound the texture and enabled GL_TEXTURE_2D; FF MODULATE
 	// gives texture * glColor (exact float color).
-	glColor4fv(texRect.cf);
+	GL::ffColor.Set(texRect.cf);
 	glBegin(GL_QUADS);
 		glTexCoord2f(texRect.s0, texRect.t0); glVertex2f(texRect.x0, texRect.y0);
 		glTexCoord2f(texRect.s1, texRect.t0); glVertex2f(texRect.x1, texRect.y0);
@@ -982,7 +982,7 @@ void LuaImmediateBuffer::FlushTexRectModern() const
 	// (s0, t1) is no longer primed here -- see FlushModern.
 	if (!GL::FFRewriteEnabled())
 		glTexCoord2f(texRect.s0, texRect.t1);
-	glColor4fv(texRect.cf);
+	GL::ffColor.Set(texRect.cf);
 }
 
 

@@ -570,7 +570,7 @@ void CGrassDrawer::Draw()
 		return;
 
 	glPushAttrib(GL_CURRENT_BIT);
-	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+	GL::ffColor.Set(1.0f, 1.0f, 1.0f, 1.0f);
 
 	if (!blockDrawer.inviewGrass.empty()) {
 		SetupGlStateNear();
@@ -897,7 +897,7 @@ void CGrassDrawer::CreateFarTex()
 	glEnable(GL_CLIP_PLANE0);
 	glEnable(GL_DEPTH_TEST);
 	glDepthMask(GL_TRUE);
-	glColor4f(1,1,1,1);
+	GL::ffColor.Set(1,1,1,1);
 
 	glViewport(0,0,texSizeX*sizeMod, texSizeY*sizeMod);
 	glClearColor(mapInfo->grass.color.r,mapInfo->grass.color.g,mapInfo->grass.color.b,0.f);

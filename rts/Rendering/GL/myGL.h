@@ -45,10 +45,12 @@ struct TextureParameters {
 };
 
 static inline void glVertexf3(const float3& v)    { glVertex3f(v.r, v.g, v.b); }
-static inline void glColorf3(const float3& v)     { glColor3f(v.r, v.g, v.b); }
-static inline void glColorf4(const float4& v)     { glColor4f(v.r, v.g, v.b, v.a); }
+#include "Rendering/GL/FFColor.h"
+
+static inline void glColorf3(const float3& v)     { GL::ffColor.Set(v.r, v.g, v.b); }
+static inline void glColorf4(const float4& v)     { GL::ffColor.Set(v.r, v.g, v.b, v.a); }
 static inline void glTranslatef3(const float3& v) { glTranslatef(v.r, v.g, v.b); }
-static inline void glColorf4(const float3& v, const float alpha) { glColor4f(v.r, v.g, v.b, alpha); }
+static inline void glColorf4(const float3& v, const float alpha) { GL::ffColor.Set(v.r, v.g, v.b, alpha); }
 
 typedef   void   (*   glOrthoFuncPtr) (GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdouble near, GLdouble far);
 typedef   void   (*gluOrtho2DFuncPtr) (GLdouble left, GLdouble right, GLdouble bottom, GLdouble top);

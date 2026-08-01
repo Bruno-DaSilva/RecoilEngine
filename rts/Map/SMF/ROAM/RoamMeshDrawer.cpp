@@ -522,12 +522,12 @@ void CRoamMeshDrawer::DrawInMiniMap()
 		glTranslatef3(UpVector);
 		glScalef(1.0f / mapDims.mapx, -1.0f / mapDims.mapy, 1.0f);
 
-	glColor4f(0.0f, 0.0f, 0.0f, 0.5f);
+	GL::ffColor.Set(0.0f, 0.0f, 0.0f, 0.5f);
 
 
 	int pi = 0;
 	for (const Patch& p: patchMeshGrid[MESH_NORMAL]) {
-		glColor4f(debugColors[pi].x, debugColors[pi].y, debugColors[pi].z ,0.5f);
+		GL::ffColor.Set(debugColors[pi].x, debugColors[pi].y, debugColors[pi].z ,0.5f);
 		pi++;
 		glRectf(p.coors.x, p.coors.y, p.coors.x + PATCH_SIZE, p.coors.y + PATCH_SIZE);
 	}

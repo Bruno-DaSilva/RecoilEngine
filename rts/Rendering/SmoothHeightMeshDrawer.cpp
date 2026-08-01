@@ -56,7 +56,7 @@ void SmoothHeightMeshDrawer::DrawInMiniMap()
 		glScalef(1.0f / mapDims.mapx, -1.0f / mapDims.mapy, 1.0f);
 
 	glDisable(GL_TEXTURE_2D);
-	glColor4f(1.0f, 1.0f, 0.0f, 0.7f);
+	GL::ffColor.Set(1.0f, 1.0f, 0.0f, 0.7f);
 
 	const SmoothHeightMesh::MapChangeTrack& mapChangeTrack = smoothGround.mapChangeTrack;
 	const float tileSize = SAMPLES_PER_QUAD * smoothGround.resolution;
@@ -70,7 +70,7 @@ void SmoothHeightMeshDrawer::DrawInMiniMap()
 		i++;
 	}
 
-	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+	GL::ffColor.Set(1.0f, 1.0f, 1.0f, 1.0f);
 	glEnable(GL_TEXTURE_2D);
 
 	glMatrixMode(GL_PROJECTION);

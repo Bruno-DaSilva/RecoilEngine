@@ -2692,7 +2692,7 @@ void CGuiHandler::DrawCustomButton(const IconInfo& icon, bool highlight)
 	if (usedTexture)
 		return;
 
-	glColor4f(1.0f, 1.0f, 1.0f, 0.1f);
+	GL::ffColor.Set(1.0f, 1.0f, 1.0f, 0.1f);
 	DrawIconFrame(icon);
 }
 
@@ -2708,7 +2708,7 @@ bool CGuiHandler::DrawUnitBuildIcon(const IconInfo& icon, int unitDefID)
 	const Box& b = icon.visual;
 
 	glEnable(GL_TEXTURE_2D);
-	glColor4f(1.0f, 1.0f, 1.0f, textureAlpha);
+	GL::ffColor.Set(1.0f, 1.0f, 1.0f, textureAlpha);
 	glBindTexture(GL_TEXTURE_2D, CUnitDrawer::GetUnitDefImage(ud));
 	glBegin(GL_QUADS);
 		glTexCoord2f(0.0f, 0.0f); glVertex2f(b.x1, b.y1);
@@ -2892,7 +2892,7 @@ bool CGuiHandler::DrawTexture(const IconInfo& icon, const std::string& texName)
 	}
 
 	glEnable(GL_TEXTURE_2D);
-	glColor4f(1.0f, 1.0f, 1.0f, textureAlpha);
+	GL::ffColor.Set(1.0f, 1.0f, 1.0f, textureAlpha);
 
 	// draw the full size quad
 	const Box& b = icon.visual;
@@ -2966,7 +2966,7 @@ void CGuiHandler::DrawName(const IconInfo& icon, const std::string& text, bool o
 	const float xCenter = 0.5f * (b.x1 + b.x2);
 	const float yCenter = 0.5f * (b.y1 + b.y2 + yShrink);
 
-	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+	GL::ffColor.Set(1.0f, 1.0f, 1.0f, 1.0f);
 	font->glPrint(xCenter, yCenter, fontScale, (dropShadows ? FONT_SHADOW : 0) | FONT_CENTER | FONT_VCENTER | FONT_SCALE | FONT_NORM, text);
 }
 
@@ -3039,11 +3039,11 @@ void CGuiHandler::DrawHilightQuad(const IconInfo& icon)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (icon.commandsID == inCommand) {
-		glColor4f(0.3f, 0.0f, 0.0f, 1.0f);
+		GL::ffColor.Set(0.3f, 0.0f, 0.0f, 1.0f);
 	} else if (mouse->buttons[SDL_BUTTON_LEFT].pressed) {
-		glColor4f(0.2f, 0.0f, 0.0f, 1.0f);
+		GL::ffColor.Set(0.2f, 0.0f, 0.0f, 1.0f);
 	} else {
-		glColor4f(0.0f, 0.0f, 0.2f, 1.0f);
+		GL::ffColor.Set(0.0f, 0.0f, 0.2f, 1.0f);
 	}
 	const Box& b = icon.visual;
 	glDisable(GL_TEXTURE_2D);
@@ -3067,7 +3067,7 @@ void CGuiHandler::DrawButtons() // Only called by Draw
 	// frame box
 	const float alpha = (frameAlpha < 0.0f) ? guiAlpha : frameAlpha;
 	if (alpha > 0.0f) {
-		glColor4f(0.2f, 0.2f, 0.2f, alpha);
+		GL::ffColor.Set(0.2f, 0.2f, 0.2f, alpha);
 		glBegin(GL_QUADS);
 			glVertex2f(buttonBox.x1, buttonBox.y1);
 			glVertex2f(buttonBox.x1, buttonBox.y2);
@@ -3135,9 +3135,9 @@ void CGuiHandler::DrawButtons() // Only called by Draw
 				if ((cmdDesc.type == CMDTYPE_PREV) || (cmdDesc.type == CMDTYPE_NEXT)) {
 					// pick the color for the arrow
 					if (highlight) {
-						glColor4f(1.0f, 1.0f, 0.0f, 1.0f); // selected
+						GL::ffColor.Set(1.0f, 1.0f, 0.0f, 1.0f); // selected
 					} else {
-						glColor4f(0.7f, 0.7f, 0.7f, 1.0f); // normal
+						GL::ffColor.Set(0.7f, 0.7f, 0.7f, 1.0f); // normal
 					}
 					if (cmdDesc.type == CMDTYPE_PREV) {
 						DrawPrevArrow(icon);
@@ -3147,7 +3147,7 @@ void CGuiHandler::DrawButtons() // Only called by Draw
 				}
 				else if (!usedTexture) {
 					// no texture, no arrow, ... draw a frame
-					glColor4f(1.0f, 1.0f, 1.0f, 0.1f);
+					GL::ffColor.Set(1.0f, 1.0f, 1.0f, 0.1f);
 					DrawIconFrame(icon);
 				}
 
@@ -3174,7 +3174,7 @@ void CGuiHandler::DrawButtons() // Only called by Draw
 		if (cmdDesc.disabled) {
 			glDisable(GL_TEXTURE_2D);
 			glBlendFunc(GL_DST_COLOR, GL_ZERO);
-			glColor4f(0.5f, 0.5f, 0.5f, 0.5f);
+			GL::ffColor.Set(0.5f, 0.5f, 0.5f, 0.5f);
 			const Box& vb = icon.visual;
 			glRectf(vb.x1, vb.y1, vb.x2, vb.y2);
 			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -3183,12 +3183,12 @@ void CGuiHandler::DrawButtons() // Only called by Draw
 		// highlight outline
 		if (highlight) {
 			if (icon.commandsID == inCommand) {
-				glColor4f(1.0f, 1.0f, 0.0f, 0.75f);
+				GL::ffColor.Set(1.0f, 1.0f, 0.0f, 0.75f);
 			} else if (mouse->buttons[SDL_BUTTON_LEFT].pressed ||
 			           mouse->buttons[SDL_BUTTON_RIGHT].pressed) {
-				glColor4f(1.0f, 0.0f, 0.0f, 0.50f);
+				GL::ffColor.Set(1.0f, 0.0f, 0.0f, 0.50f);
 			} else {
-				glColor4f(1.0f, 1.0f, 1.0f, 0.50f);
+				GL::ffColor.Set(1.0f, 1.0f, 1.0f, 0.50f);
 			}
 			glLineWidth(1.49f);
 			DrawIconFrame(icon);
@@ -3199,9 +3199,9 @@ void CGuiHandler::DrawButtons() // Only called by Draw
 	// active page indicator
 	if (luaUI == NULL) {
 		if (selectedUnitsHandler.BuildIconsFirst()) {
-			glColor4fv(cmdColors.build);
+			GL::ffColor.Set(cmdColors.build);
 		} else {
-			glColor4f(0.7f, 0.7f, 0.7f, 1.0f);
+			GL::ffColor.Set(0.7f, 0.7f, 0.7f, 1.0f);
 		}
 		const float textSize = 1.2f;
 		font->glFormat(xBpos, yBpos, textSize, FONT_CENTER | FONT_VCENTER | FONT_SCALE | FONT_NORM, "%i", activePage + 1);
@@ -3232,7 +3232,7 @@ void CGuiHandler::DrawMenuName() // Only called by drawbuttons
 	if (!outlineFonts) {
 		const float textHeight = fontScale * font->GetTextHeight(menuName) * globalRendering->pixelY;
 		glDisable(GL_TEXTURE_2D);
-		glColor4f(0.2f, 0.2f, 0.2f, guiAlpha);
+		GL::ffColor.Set(0.2f, 0.2f, 0.2f, guiAlpha);
 		glRectf(buttonBox.x1,
 		        buttonBox.y2,
 		        buttonBox.x2,
@@ -3268,12 +3268,12 @@ void CGuiHandler::DrawSelectionInfo()
 			textHeight -= textDescender;
 
 			glDisable(GL_TEXTURE_2D);
-			glColor4f(0.2f, 0.2f, 0.2f, guiAlpha);
+			GL::ffColor.Set(0.2f, 0.2f, 0.2f, guiAlpha);
 			glRectf(xSelectionPos - frameBorder,
 			        ySelectionPos - frameBorder,
 			        xSelectionPos + frameBorder + textWidth,
 			        ySelectionPos + frameBorder + textHeight);
-			glColor4f(1.0f, 1.0f, 1.0f, 0.8f);
+			GL::ffColor.Set(1.0f, 1.0f, 1.0f, 0.8f);
 			smallFont->glPrint(xSelectionPos, ySelectionPos - textDescender, fontSize, FONT_BASELINE | FONT_NORM, buf.str());
 		} else {
 			smallFont->SetColors(); // default
@@ -3293,17 +3293,17 @@ void CGuiHandler::DrawNumberInput() // Only called by drawbuttons
 		if (cd.type == CMDTYPE_NUMBER) {
 			const float value = GetNumberInput(cd);
 			glDisable(GL_TEXTURE_2D);
-			glColor4f(1.0f, 1.0f, 1.0f, 0.8f);
+			GL::ffColor.Set(1.0f, 1.0f, 1.0f, 0.8f);
 			const float mouseX = (float)mouse->lastx / (float)globalRendering->viewSizeX;
 			const float slideX = std::min(std::max(mouseX, 0.25f), 0.75f);
 			//const float mouseY = 1.0f - (float)(mouse->lasty - 16) / (float)globalRendering->viewSizeY;
-			glColor4f(1.0f, 1.0f, 0.0f, 0.8f);
+			GL::ffColor.Set(1.0f, 1.0f, 0.0f, 0.8f);
 			glRectf(0.235f, 0.45f, 0.25f, 0.55f);
 			glRectf(0.75f, 0.45f, 0.765f, 0.55f);
-			glColor4f(0.0f, 0.0f, 1.0f, 0.8f);
+			GL::ffColor.Set(0.0f, 0.0f, 1.0f, 0.8f);
 			glRectf(0.25f, 0.49f, 0.75f, 0.51f);
 			glBegin(GL_TRIANGLES);
-				glColor4f(1.0f, 0.0f, 0.0f, 1.0f);
+				GL::ffColor.Set(1.0f, 0.0f, 0.0f, 1.0f);
 				glVertex2f(slideX + 0.015f, 0.55f);
 				glVertex2f(slideX - 0.015f, 0.55f);
 				glVertex2f(slideX, 0.50f);
@@ -3311,7 +3311,7 @@ void CGuiHandler::DrawNumberInput() // Only called by drawbuttons
 				glVertex2f(slideX + 0.015f, 0.45f);
 				glVertex2f(slideX, 0.50f);
 			glEnd();
-			glColor4f(1.0f, 1.0f, 1.0f, 0.9f);
+			GL::ffColor.Set(1.0f, 1.0f, 1.0f, 0.9f);
 			font->glFormat(slideX, 0.56f, 2.0f, FONT_CENTER | FONT_SCALE | FONT_NORM, "%i", (int)value);
 		}
 	}
@@ -3379,24 +3379,24 @@ void CGuiHandler::DrawOptionLEDs(const IconInfo& icon)
 
 	for (int x = 0; x < pCount; x++) {
 		if (x != option) {
-			glColor4f(0.25f, 0.25f, 0.25f, 0.50f); // dark
+			GL::ffColor.Set(0.25f, 0.25f, 0.25f, 0.50f); // dark
 		} else {
 			if (pCount == 2) {
 				if (option == 0) {
-					glColor4f(1.0f, 0.0f, 0.0f, 0.75f); // red
+					GL::ffColor.Set(1.0f, 0.0f, 0.0f, 0.75f); // red
 				} else {
-					glColor4f(0.0f, 1.0f, 0.0f, 0.75f); // green
+					GL::ffColor.Set(0.0f, 1.0f, 0.0f, 0.75f); // green
 				}
 			} else if (pCount == 3) {
 				if (option == 0) {
-					glColor4f(1.0f, 0.0f, 0.0f, 0.75f); // red
+					GL::ffColor.Set(1.0f, 0.0f, 0.0f, 0.75f); // red
 				} else if (option == 1) {
-					glColor4f(1.0f, 1.0f, 0.0f, 0.75f); // yellow
+					GL::ffColor.Set(1.0f, 1.0f, 0.0f, 0.75f); // yellow
 				} else {
-					glColor4f(0.0f, 1.0f, 0.0f, 0.75f); // green
+					GL::ffColor.Set(0.0f, 1.0f, 0.0f, 0.75f); // green
 				}
 			} else {
-				glColor4f(0.75f, 0.75f, 0.75f, 0.75f); // light
+				GL::ffColor.Set(0.75f, 0.75f, 0.75f, 0.75f); // light
 			}
 		}
 
@@ -3406,7 +3406,7 @@ void CGuiHandler::DrawOptionLEDs(const IconInfo& icon)
 		glRectf(startx, starty, startx + xs, starty + ys);
 
 		glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
-		glColor4f(1.0f, 1.0f, 1.0f, 0.5f);
+		GL::ffColor.Set(1.0f, 1.0f, 1.0f, 0.5f);
 		glRectf(startx, starty, startx + xs, starty + ys);
 		glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 	}
@@ -3510,11 +3510,11 @@ static void DrawWeaponCone(const float3& pos, float len, float hrads, float head
 	glEnable(GL_CULL_FACE);
 
 	glCullFace(GL_FRONT);
-	glColor4f(1.0f, 0.0f, 0.0f, 0.25f);
+	GL::ffColor.Set(1.0f, 0.0f, 0.0f, 0.25f);
 	glCallList(GetConeList());
 
 	glCullFace(GL_BACK);
-	glColor4f(0.0f, 1.0f, 0.0f, 0.25f);
+	GL::ffColor.Set(0.0f, 1.0f, 0.0f, 0.25f);
 	glCallList(GetConeList());
 
 	glDisable(GL_CULL_FACE);
@@ -3665,7 +3665,7 @@ void CGuiHandler::DrawMapStuff(bool onMiniMap)
 						if (!onMiniMap) {
 							DrawArea(innerPos, radius, color);
 						} else {
-							glColor4f(color[0], color[1], color[2], 0.5f);
+							GL::ffColor.Set(color[0], color[1], color[2], 0.5f);
 							glBegin(GL_TRIANGLE_FAN);
 
 							constexpr int divs = 256;
@@ -3702,7 +3702,7 @@ void CGuiHandler::DrawMapStuff(bool onMiniMap)
 						if (!onMiniMap) {
 							DrawSelectBox(innerPos, outerPos, tracePos);
 						} else {
-							glColor4f(1.0f, 0.0f, 0.0f, 0.5f);
+							GL::ffColor.Set(1.0f, 0.0f, 0.0f, 0.5f);
 							glBegin(GL_QUADS);
 							glVertex3f(innerPos.x, 0.0f, innerPos.z);
 							glVertex3f(outerPos.x, 0.0f, innerPos.z);
@@ -3875,9 +3875,9 @@ void CGuiHandler::DrawMapStuff(bool onMiniMap)
 					}
 
 					if (unitDrawer->ShowUnitBuildSquare(bi, buildCommands)) {
-						glColor4f(0.7f, 1.0f, 1.0f, 0.4f);
+						GL::ffColor.Set(0.7f, 1.0f, 1.0f, 0.4f);
 					} else {
-						glColor4f(1.0f, 0.5f, 0.5f, 0.4f);
+						GL::ffColor.Set(1.0f, 0.5f, 0.5f, 0.4f);
 					}
 
 					if (!onMiniMap) {
@@ -3981,18 +3981,18 @@ void CGuiHandler::DrawMiniMapMarker(const float3& cameraPos)
 	glBegin(GL_TRIANGLE_FAN);
 		                       glVertex3f(0.0f, 0.0f, 0.0f);
 		                       glVertex3f(  +w,   +h, 0.0f);
-		glColor4fv(colors[4]); glVertex3f(0.0f,   +h,   +w);
-		glColor4fv(colors[5]); glVertex3f(  -w,   +h, 0.0f);
-		glColor4fv(colors[6]); glVertex3f(0.0f,   +h,   -w);
-		glColor4fv(colors[7]); glVertex3f(  +w,   +h, 0.0f);
+		GL::ffColor.Set(colors[4]); glVertex3f(0.0f,   +h,   +w);
+		GL::ffColor.Set(colors[5]); glVertex3f(  -w,   +h, 0.0f);
+		GL::ffColor.Set(colors[6]); glVertex3f(0.0f,   +h,   -w);
+		GL::ffColor.Set(colors[7]); glVertex3f(  +w,   +h, 0.0f);
 	glEnd();
 	glBegin(GL_TRIANGLE_FAN);
 		                       glVertex3f(0.0f, h * 2.0f, 0.0f);
 		                       glVertex3f(  +w,   +h, 0.0f);
-		glColor4fv(colors[3]); glVertex3f(0.0f,   +h,   -w);
-		glColor4fv(colors[2]); glVertex3f(  -w,   +h, 0.0f);
-		glColor4fv(colors[1]); glVertex3f(0.0f,   +h,   +w);
-		glColor4fv(colors[0]); glVertex3f(  +w,   +h, 0.0f);
+		GL::ffColor.Set(colors[3]); glVertex3f(0.0f,   +h,   -w);
+		GL::ffColor.Set(colors[2]); glVertex3f(  -w,   +h, 0.0f);
+		GL::ffColor.Set(colors[1]); glVertex3f(0.0f,   +h,   +w);
+		GL::ffColor.Set(colors[0]); glVertex3f(  +w,   +h, 0.0f);
 	glEnd();
 	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 	glShadeModel(GL_SMOOTH);
@@ -4066,7 +4066,7 @@ void CGuiHandler::DrawArea(float3 pos, float radius, const float* color)
 	glDisable(GL_TEXTURE_2D);
 	glEnable(GL_BLEND);
 	glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
-	glColor4f(color[0], color[1], color[2], 0.25f);
+	GL::ffColor.Set(color[0], color[1], color[2], 0.25f);
 
 	glDisable(GL_DEPTH_TEST);
 	glDisable(GL_FOG);
@@ -4118,7 +4118,7 @@ void CGuiHandler::DrawFormationFrontOrder(
 		pos2.y = CGround::GetHeightAboveWater(pos2.x, pos2.z, false);
 	}
 
-	glColor4f(0.5f, 1.0f, 0.5f, 0.5f);
+	GL::ffColor.Set(0.5f, 1.0f, 0.5f, 0.5f);
 
 	if (onMinimap) {
 		pos1 += (pos1 - pos2);
@@ -4233,11 +4233,11 @@ static void DrawCornerPosts(const float3& pos0, const float3& pos1)
 	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 	glLineWidth(2.0f);
 	glBegin(GL_LINES);
-		glColor4f(1.0f, 1.0f, 0.0f, 0.9f);
+		GL::ffColor.Set(1.0f, 1.0f, 0.0f, 0.9f);
 		glVertexf3(corner0); glVertexf3(corner0 + lineVector);
-		glColor4f(0.0f, 1.0f, 0.0f, 0.9f);
+		GL::ffColor.Set(0.0f, 1.0f, 0.0f, 0.9f);
 		glVertexf3(corner1); glVertexf3(corner1 + lineVector);
-		glColor4f(0.0f, 0.0f, 1.0f, 0.9f);
+		GL::ffColor.Set(0.0f, 0.0f, 1.0f, 0.9f);
 		glVertexf3(corner2); glVertexf3(corner2 + lineVector);
 		glVertexf3(corner3); glVertexf3(corner3 + lineVector);
 	glEnd();
@@ -4259,7 +4259,7 @@ static void StencilDrawSelectBox(const float3& pos0, const float3& pos1,
 
 	if (!invColorSelect) {
 		glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-		glColor4f(1.0f, 0.0f, 0.0f, 0.25f);
+		GL::ffColor.Set(1.0f, 0.0f, 0.0f, 0.25f);
 		glDrawVolume(DrawBoxShape, &boxData);
 	} else {
 		glEnable(GL_COLOR_LOGIC_OP);
@@ -4422,13 +4422,13 @@ void CGuiHandler::DrawSelectCircle(const float3& pos, float radius,
 	glDisable(GL_FOG);
 	glEnable(GL_BLEND);
 	glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-	glColor4f(color[0], color[1], color[2], 0.25f);
+	GL::ffColor.Set(color[0], color[1], color[2], 0.25f);
 
 	glDrawVolume(DrawCylinderShape, &cylData);
 
 	// draw the center line
 	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-	glColor4f(color[0], color[1], color[2], 0.9f);
+	GL::ffColor.Set(color[0], color[1], color[2], 0.9f);
 	glLineWidth(2.0f);
 	const float3 base(pos.x, CGround::GetHeightAboveWater(pos.x, pos.z, false), pos.z);
 	glBegin(GL_LINES);

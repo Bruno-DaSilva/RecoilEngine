@@ -493,11 +493,11 @@ void QTPFSPathDrawer::DrawInMiniMap()
 		const int blockIdxX = (i % width) * blockSize;
 		const int blockIdxY = (i / width) * blockSize;
 		const float drawStrength = 0.2f + 0.55f*(mapDamageStrength[i] / maxStrength);
-		glColor4f(1.0f, 1.0f, 0.0f, drawStrength);
+		GL::ffColor.Set(1.0f, 1.0f, 0.0f, drawStrength);
 		glRectf(blockIdxX, blockIdxY, blockIdxX + blockSize, blockIdxY + blockSize);
 	}
 
-	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+	GL::ffColor.Set(1.0f, 1.0f, 1.0f, 1.0f);
 	glEnable(GL_TEXTURE_2D);
 
 	glMatrixMode(GL_PROJECTION);

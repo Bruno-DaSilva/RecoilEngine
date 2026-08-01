@@ -692,14 +692,14 @@ void CSelectedUnitsHandler::Draw()
 					(guihandler->commands[guihandler->inCommand].id < 0)))) {
 
 			bool myColor = true;
-			glColor4fv(cmdColors.buildBox);
+			GL::ffColor.Set(cmdColors.buildBox);
 
 			for (const auto& [bid, builderCAI] : unitHandler.GetBuilderCAIs()) {
 				const CUnit* builder = builderCAI->owner;
 
 				if (builder->team == gu->myTeam) {
 					if (!myColor) {
-						glColor4fv(cmdColors.buildBox);
+						GL::ffColor.Set(cmdColors.buildBox);
 						myColor = true;
 					}
 					commandDrawer->DrawQuedBuildingSquares(builderCAI);
@@ -707,7 +707,7 @@ void CSelectedUnitsHandler::Draw()
 
 				else if (teamHandler.AlliedTeams(builder->team, gu->myTeam)) {
 					if (myColor) {
-						glColor4fv(cmdColors.allyBuildBox);
+						GL::ffColor.Set(cmdColors.allyBuildBox);
 						myColor = false;
 					}
 					commandDrawer->DrawQuedBuildingSquares(builderCAI);

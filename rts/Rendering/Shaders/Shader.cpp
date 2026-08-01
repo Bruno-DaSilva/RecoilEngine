@@ -697,6 +697,7 @@ namespace Shader {
 				glBindFragDataLocation(objID, index, name.c_str());
 			}
 
+			GL::BindFFColorAttribLocation(objID);
 			glLinkProgram(objID);
 
 			valid = glslIsValid(objID);

@@ -508,7 +508,7 @@ void CWorldDrawer::DrawBelowWaterOverlay() const
 
 		glDepthMask(GL_FALSE);
 		glDisable(GL_TEXTURE_2D);
-		glColor4f(0.0f, 0.5f, 0.3f, 0.50f);
+		GL::ffColor.Set(0.0f, 0.5f, 0.3f, 0.50f);
 
 		{
 			const float3 verts[] = {
@@ -550,7 +550,7 @@ void CWorldDrawer::DrawBelowWaterOverlay() const
 
 		glEnableClientState(GL_VERTEX_ARRAY);
 		glDisable(GL_TEXTURE_2D);
-		glColor4f(0.0f, 0.2f, 0.8f, 0.333f);
+		GL::ffColor.Set(0.0f, 0.2f, 0.8f, 0.333f);
 
 		const float3 verts[] = {
 			float3(0.0f, 0.0f, -1.0f),

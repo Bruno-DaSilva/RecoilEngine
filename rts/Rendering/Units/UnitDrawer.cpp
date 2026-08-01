@@ -867,7 +867,7 @@ void CUnitDrawerGLSL::DrawGhostedBuildings(int modelType) const
 	const auto& deadGhostedBuildings = modelDrawerData->GetDeadGhostBuildings(gu->myAllyTeam, modelType);
 	const auto& liveGhostedBuildings = modelDrawerData->GetLiveGhostBuildings(gu->myAllyTeam, modelType);
 
-	glColor4f(0.6f, 0.6f, 0.6f, IModelDrawerState::alphaValues.y);
+	GL::ffColor.Set(0.6f, 0.6f, 0.6f, IModelDrawerState::alphaValues.y);
 
 	// buildings that died while ghosted
 	for (GhostSolidObject* dgb : deadGhostedBuildings) {
@@ -933,10 +933,10 @@ void CUnitDrawerGLSL::DrawAlphaUnit(CUnit* unit, int modelType, uint8_t thisPass
 
 		// ghosted enemy units
 		if (losStatus & LOS_CONTRADAR) {
-			glColor4f(0.9f, 0.9f, 0.9f, IModelDrawerState::alphaValues.z);
+			GL::ffColor.Set(0.9f, 0.9f, 0.9f, IModelDrawerState::alphaValues.z);
 		}
 		else {
-			glColor4f(0.6f, 0.6f, 0.6f, IModelDrawerState::alphaValues.y);
+			GL::ffColor.Set(0.6f, 0.6f, 0.6f, IModelDrawerState::alphaValues.y);
 		}
 
 		glPushMatrix();
@@ -953,7 +953,7 @@ void CUnitDrawerGLSL::DrawAlphaUnit(CUnit* unit, int modelType, uint8_t thisPass
 		model->DrawStatic();
 		glPopMatrix();
 
-		glColor4f(1.0f, 1.0f, 1.0f, IModelDrawerState::alphaValues.x);
+		GL::ffColor.Set(1.0f, 1.0f, 1.0f, IModelDrawerState::alphaValues.x);
 		return;
 	}
 
@@ -1041,7 +1041,7 @@ void CUnitDrawerGLSL::DrawAlphaAIUnitBorder(const CUnitDrawerData::TempDrawUnit&
 	if (progID > 0)
 		glUseProgram(progID);
 
-	glColor4f(1.0f, 1.0f, 1.0f, IModelDrawerState::alphaValues.x);
+	GL::ffColor.Set(1.0f, 1.0f, 1.0f, IModelDrawerState::alphaValues.x);
 	glEnable(GL_TEXTURE_2D);
 }
 
@@ -1537,7 +1537,7 @@ void CUnitDrawerGLSL::DrawBuildIcons(const std::vector<CCursorIcons::BuildIcon>&
 		return;
 
 	glEnable(GL_DEPTH_TEST);
-	glColor4f(1.0f, 1.0f, 1.0f, 0.3f);
+	GL::ffColor.Set(1.0f, 1.0f, 1.0f, 0.3f);
 
 	for (const auto& buildIcon : buildIcons) {
 		const auto* unitDef = unitDefHandler->GetUnitDefByID(-(buildIcon.cmd));

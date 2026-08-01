@@ -343,7 +343,7 @@ void S3DModelVAO::BindLegacyVertexAttribsAndVBOs() const
 				Shader::IProgramObject* shader = GL::FFStandIn::GetShader(fogged);
 				if (shader->IsValid()) {
 					float curColor[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
-					glGetFloatv(GL_CURRENT_COLOR, curColor);
+					std::copy_n(GL::ffColor.Get(), 4, curColor);
 					for (float& c : curColor)
 						c = std::clamp(c, 0.0f, 1.0f);
 

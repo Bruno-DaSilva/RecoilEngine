@@ -72,7 +72,7 @@ void GameControllerTextInput::Draw() {
 		const float caretIllum = 0.5f * (1.0f + fastmath::sin(spring_now().toMilliSecsf() * 0.015f));
 
 		glDisable(GL_TEXTURE_2D);
-		glColor4f(caretIllum, caretIllum, caretIllum, 0.75f);
+		GL::ffColor.Set(caretIllum, caretIllum, caretIllum, 0.75f);
 		glRectf(caretScrPos, inputTextPosY, caretScrPos + caretWidth, inputTextPosY + caretHeight);
 		glEnable(GL_TEXTURE_2D);
 	}

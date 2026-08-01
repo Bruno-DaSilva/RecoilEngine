@@ -805,6 +805,7 @@ int LuaShaders::CreateShader(lua_State* L)
 	GLint linkStatus;
 	GLint validStatus;
 
+	GL::BindFFColorAttribLocation(prog);
 	glLinkProgram(prog);
 	glGetProgramiv(prog, GL_LINK_STATUS, &linkStatus);
 
