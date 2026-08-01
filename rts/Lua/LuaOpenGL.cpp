@@ -1554,12 +1554,22 @@ const GLbitfield AttribBits =
 	GL_VIEWPORT_BIT;
 
 
+// Non-nesting by construction: EnableCommon asserts drawMode == DRAW_NONE, so at
+// most one callin bracket is open at a time.
+static GL::AttribSnapshot savedCallinAttribs;
+
 void LuaOpenGL::EnableCommon(DrawMode mode)
 {
 	assert(drawMode == DRAW_NONE);
 	drawMode = mode;
 	if (safeMode) {
-		glPushAttrib(AttribBits);
+		// AttribBits includes GL_LIGHTING_BIT, which this snapshot deliberately
+		// does not restore -- doing so would need glShadeModel/glMaterial*/
+		// glLight*, all retired. Safe because nothing writes that state any more,
+		// and the snapshot captures/diffs it under shadowCompare so the verifier
+		// reports it if that ever stops being true.
+		GL::ShadowPushAttrib(AttribBits);
+		savedCallinAttribs.Capture();
 		GL::ffResetState.NotePushAttrib(AttribBits);
 		ResetGLState();
 	}
@@ -1576,7 +1586,8 @@ void LuaOpenGL::DisableCommon(DrawMode mode)
 	FFLightModeli(GL_LIGHT_MODEL_COLOR_CONTROL, GL_SINGLE_COLOR);
 	drawMode = DRAW_NONE;
 	if (safeMode) {
-		glPopAttrib();
+		savedCallinAttribs.Restore(AttribBits);
+		GL::VerifyAttribRestore("LuaOpenGL::DisableCommon");
 		GL::ffResetState.NotePopAttrib();
 	}
 	if (IS_GL_FUNCTION_AVAILABLE(glUseProgram)) {

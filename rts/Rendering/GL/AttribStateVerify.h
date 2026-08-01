@@ -78,6 +78,23 @@ namespace GL {
 		GLint fogMode = 0;
 		GLfloat fogDensity = 0.0f, fogStart = 0.0f, fogEnd = 0.0f;
 		GLint shadeModel = 0;
+		GLfloat clearColor[4] = {};
+		GLint drawBuffer = 0;
+		GLfloat blendColor[4] = {};
+		GLfloat depthClearValue = 0.0f;
+		GLint lineStipplePattern = 0, lineStippleRepeat = 0;
+		GLfloat polygonOffsetFactor = 0.0f, polygonOffsetUnits = 0.0f;
+
+		// GL_LIGHTING_BIT content, captured ONLY under shadowCompare: the getters
+		// (glGetMaterialfv, glGetLightfv) are unsupported functions, so they must
+		// not run in a normal frame. Detect-only -- never restored, because the
+		// setters are four functions this programme already retired. Their whole
+		// purpose is to let the verifier prove the "nothing writes lighting state
+		// any more" assumption instead of asserting it.
+		GLfloat matAmbient[4] = {}, matDiffuse[4] = {}, matSpecular[4] = {}, matEmission[4] = {};
+		GLfloat matShininess = 0.0f;
+		GLfloat light1Ambient[4] = {}, light1Diffuse[4] = {}, light1Specular[4] = {};
+		GLint lightModelLocalViewer = 0, lightModelTwoSide = 0;
 
 		void Capture();
 

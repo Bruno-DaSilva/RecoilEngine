@@ -48,6 +48,28 @@ void GL::AttribSnapshot::Capture()
 	glGetFloatv(GL_FOG_START, &fogStart);
 	glGetFloatv(GL_FOG_END, &fogEnd);
 	glGetIntegerv(GL_SHADE_MODEL, &shadeModel);
+	glGetFloatv(GL_COLOR_CLEAR_VALUE, clearColor);
+	glGetIntegerv(GL_DRAW_BUFFER, &drawBuffer);
+	glGetFloatv(GL_BLEND_COLOR, blendColor);
+	glGetFloatv(GL_DEPTH_CLEAR_VALUE, &depthClearValue);
+	glGetIntegerv(GL_LINE_STIPPLE_PATTERN, &lineStipplePattern);
+	glGetIntegerv(GL_LINE_STIPPLE_REPEAT, &lineStippleRepeat);
+	glGetFloatv(GL_POLYGON_OFFSET_FACTOR, &polygonOffsetFactor);
+	glGetFloatv(GL_POLYGON_OFFSET_UNITS, &polygonOffsetUnits);
+
+	// verify-only: these getters are unsupported functions themselves
+	if (GL::ffMirror.shadowCompare) {
+		glGetMaterialfv(GL_FRONT, GL_AMBIENT,   matAmbient);
+		glGetMaterialfv(GL_FRONT, GL_DIFFUSE,   matDiffuse);
+		glGetMaterialfv(GL_FRONT, GL_SPECULAR,  matSpecular);
+		glGetMaterialfv(GL_FRONT, GL_EMISSION,  matEmission);
+		glGetMaterialfv(GL_FRONT, GL_SHININESS, &matShininess);
+		glGetLightfv(GL_LIGHT1, GL_AMBIENT,  light1Ambient);
+		glGetLightfv(GL_LIGHT1, GL_DIFFUSE,  light1Diffuse);
+		glGetLightfv(GL_LIGHT1, GL_SPECULAR, light1Specular);
+		glGetIntegerv(GL_LIGHT_MODEL_LOCAL_VIEWER, &lightModelLocalViewer);
+		glGetIntegerv(GL_LIGHT_MODEL_TWO_SIDE, &lightModelTwoSide);
+	}
 }
 
 // Several attrib bits own enables of their own, so restoring a bit means
@@ -77,6 +99,16 @@ void GL::AttribSnapshot::Restore(GLbitfield mask) const
 				glDisable(CAPS[i]);
 		}
 
+		// glPushAttrib(GL_ENABLE_BIT) does not save the active unit -- that is
+		// GL_TEXTURE_BIT -- so the selector must come back exactly as the CALLER
+		// left it. Read it BEFORE the walk: reading it afterwards just returns
+		// the last unit the loop selected, which silently parks every subsequent
+		// draw on unit 7 (measured: 463/463 frames wrong, max delta 255, and
+		// invisible to the state verifier because the active unit is not part of
+		// the snapshot being compared).
+		GLint callerActive = GL_TEXTURE0;
+		glGetIntegerv(GL_ACTIVE_TEXTURE, &callerActive);
+
 		for (int u = 0; u < NUM_UNITS; ++u) {
 			glActiveTexture(GL_TEXTURE0 + u);
 			for (int i = 0; i < NUM_UNIT_CAPS; ++i) {
@@ -86,12 +118,8 @@ void GL::AttribSnapshot::Restore(GLbitfield mask) const
 					glDisable(UNIT_CAPS[i]);
 			}
 		}
-		// glPushAttrib(GL_ENABLE_BIT) does not save the active unit -- that is
-		// GL_TEXTURE_BIT -- so put back whatever the caller had, not the captured
-		// one, and leave the selector otherwise untouched.
-		GLint nowActive = GL_TEXTURE0;
-		glGetIntegerv(GL_ACTIVE_TEXTURE, &nowActive);
-		glActiveTexture(nowActive);
+
+		glActiveTexture(callerActive);
 	}
 
 	if (mask & GL_COLOR_BUFFER_BIT) {
@@ -104,11 +132,15 @@ void GL::AttribSnapshot::Restore(GLbitfield mask) const
 		glAlphaFunc(alphaTestFunc, alphaTestRef);
 		RestoreCap(GL_ALPHA_TEST); RestoreCap(GL_BLEND);
 		RestoreCap(GL_DITHER);     RestoreCap(GL_COLOR_LOGIC_OP);
+		glClearColor(clearColor[0], clearColor[1], clearColor[2], clearColor[3]);
+		glBlendColor(blendColor[0], blendColor[1], blendColor[2], blendColor[3]);
+		glDrawBuffer(drawBuffer);
 	}
 
 	if (mask & GL_DEPTH_BUFFER_BIT) {
 		glDepthMask(depthMask);
 		glDepthFunc(depthFunc);
+		glClearDepth(depthClearValue);
 		RestoreCap(GL_DEPTH_TEST);
 	}
 
@@ -121,6 +153,7 @@ void GL::AttribSnapshot::Restore(GLbitfield mask) const
 		RestoreCap(GL_CULL_FACE);           RestoreCap(GL_POLYGON_SMOOTH);
 		RestoreCap(GL_POLYGON_OFFSET_FILL); RestoreCap(GL_POLYGON_OFFSET_LINE);
 		RestoreCap(GL_POLYGON_OFFSET_POINT);
+		glPolygonOffset(polygonOffsetFactor, polygonOffsetUnits);
 	}
 
 	if (mask & GL_VIEWPORT_BIT) {
@@ -142,6 +175,8 @@ void GL::AttribSnapshot::Restore(GLbitfield mask) const
 
 	if (mask & GL_LINE_BIT) {
 		glLineWidth(lineWidth);
+		// glLineStipple is unsupported too, same already-reachable trade as glFog*
+		glLineStipple(lineStippleRepeat, static_cast<GLushort>(lineStipplePattern));
 		RestoreCap(GL_LINE_SMOOTH); RestoreCap(GL_LINE_STIPPLE);
 	}
 
@@ -196,6 +231,15 @@ const char* GL::AttribSnapshot::FirstDifference(const AttribSnapshot& o) const
 	DIFF_ARRAY(fogColor, 4)
 	DIFF_SCALAR(fogMode) DIFF_SCALAR(fogDensity) DIFF_SCALAR(fogStart) DIFF_SCALAR(fogEnd)
 	DIFF_SCALAR(shadeModel)
+	DIFF_ARRAY(clearColor, 4) DIFF_SCALAR(drawBuffer) DIFF_ARRAY(blendColor, 4)
+	DIFF_SCALAR(depthClearValue)
+	DIFF_SCALAR(lineStipplePattern) DIFF_SCALAR(lineStippleRepeat)
+	DIFF_SCALAR(polygonOffsetFactor) DIFF_SCALAR(polygonOffsetUnits)
+	DIFF_ARRAY(matAmbient, 4)  DIFF_ARRAY(matDiffuse, 4)
+	DIFF_ARRAY(matSpecular, 4) DIFF_ARRAY(matEmission, 4)
+	DIFF_SCALAR(matShininess)
+	DIFF_ARRAY(light1Ambient, 4) DIFF_ARRAY(light1Diffuse, 4) DIFF_ARRAY(light1Specular, 4)
+	DIFF_SCALAR(lightModelLocalViewer) DIFF_SCALAR(lightModelTwoSide)
 
 	#undef DIFF_SCALAR
 	#undef DIFF_ARRAY
