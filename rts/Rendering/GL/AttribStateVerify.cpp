@@ -131,6 +131,21 @@ void GL::AttribSnapshot::RestoreCap(GLenum cap) const
 
 void GL::AttribSnapshot::Restore(GLbitfield mask) const
 {
+	// This is the glPopAttrib replacement, so it runs on every draw callin, and
+	// restoring unconditionally made it the single largest producer of several
+	// RenderDoc-unsupported functions in a run: glAlphaFunc 19,122 calls,
+	// glLineStipple 8,465, glFogfv/glFogi 2,664 each -- more than every other
+	// site for those functions combined. Writing a state the value it already
+	// holds cannot change any rendering, so read the current values back and
+	// skip those writes. The reads (glGet*/glIsEnabled) are supported functions;
+	// the writes are not, which is what makes the trade worth making.
+	//
+	// Only the unsupported setters below are guarded. The rest stay
+	// unconditional: they cost nothing at the capture gate, and every guard is
+	// another chance to mismodel a state.
+	AttribSnapshot cur;
+	cur.Capture(mask);
+
 	if (mask & GL_ENABLE_BIT) {
 		for (int i = 0; i < NUM_CAPS; ++i) {
 			if (caps[i])
@@ -169,7 +184,8 @@ void GL::AttribSnapshot::Restore(GLbitfield mask) const
 		glBlendFuncSeparate(blendSrcRGB, blendDstRGB, blendSrcAlpha, blendDstAlpha);
 		glBlendEquationSeparate(blendEquationRGB, blendEquationAlpha);
 		glColorMask(colorMask[0], colorMask[1], colorMask[2], colorMask[3]);
-		glAlphaFunc(alphaTestFunc, alphaTestRef);
+		if (cur.alphaTestFunc != alphaTestFunc || cur.alphaTestRef != alphaTestRef)
+			glAlphaFunc(alphaTestFunc, alphaTestRef);
 		RestoreCap(GL_ALPHA_TEST); RestoreCap(GL_BLEND);
 		RestoreCap(GL_DITHER);     RestoreCap(GL_COLOR_LOGIC_OP);
 		glClearColor(clearColor[0], clearColor[1], clearColor[2], clearColor[3]);
@@ -224,21 +240,22 @@ void GL::AttribSnapshot::Restore(GLbitfield mask) const
 	}
 
 	if (mask & GL_FOG_BIT) {
-		glFogfv(GL_FOG_COLOR, fogColor);
-		glFogi(GL_FOG_MODE, fogMode);
-		glFogf(GL_FOG_DENSITY, fogDensity);
-		glFogf(GL_FOG_START, fogStart);
-		glFogf(GL_FOG_END, fogEnd);
+		if (!std::equal(fogColor, fogColor + 4, cur.fogColor))
+			glFogfv(GL_FOG_COLOR, fogColor);
+		if (cur.fogMode    != fogMode)    glFogi(GL_FOG_MODE, fogMode);
+		if (cur.fogDensity != fogDensity) glFogf(GL_FOG_DENSITY, fogDensity);
+		if (cur.fogStart   != fogStart)   glFogf(GL_FOG_START, fogStart);
+		if (cur.fogEnd     != fogEnd)     glFogf(GL_FOG_END, fogEnd);
 		RestoreCap(GL_FOG);
 	}
 
-	if (mask & GL_CURRENT_BIT)
+	if ((mask & GL_CURRENT_BIT) && !std::equal(currentColor, currentColor + 4, cur.currentColor))
 		glColor4fv(currentColor);
 
 	if (mask & GL_LINE_BIT) {
 		glLineWidth(lineWidth);
-		// glLineStipple is unsupported too, same already-reachable trade as glFog*
-		glLineStipple(lineStippleRepeat, static_cast<GLushort>(lineStipplePattern));
+		if (cur.lineStippleRepeat != lineStippleRepeat || cur.lineStipplePattern != lineStipplePattern)
+			glLineStipple(lineStippleRepeat, static_cast<GLushort>(lineStipplePattern));
 		RestoreCap(GL_LINE_SMOOTH); RestoreCap(GL_LINE_STIPPLE);
 	}
 
