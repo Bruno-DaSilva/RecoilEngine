@@ -1,6 +1,7 @@
 #pragma once
 
 #include "RenderBuffers.inl"
+#include "Rendering/GL/FFMatrixTracking.h"
 #include "StreamBuffer.h"
 #include "VertexArrayTypes.h"
 #include "VAO.h"
@@ -931,8 +932,7 @@ inline Shader::IProgramObject* TypedRenderBuffer<T>::ApplyMVPUniform()
 
 	CMatrix44f proj;
 	CMatrix44f modelView;
-	glGetFloatv(GL_PROJECTION_MATRIX, static_cast<float*>(proj));
-	glGetFloatv(GL_MODELVIEW_MATRIX, static_cast<float*>(modelView));
+	GL::ReadFFMatrices(proj, modelView);
 
 	// only under a screen-aligned (no rotation/shear) modelview: on dense
 	// matrices the CPU float P*MV can differ from the driver's own builtin

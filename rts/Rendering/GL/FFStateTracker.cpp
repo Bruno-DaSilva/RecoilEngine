@@ -5,6 +5,7 @@
 #include "Rendering/GL/FFColor.h"
 #include "Rendering/GL/FFShaderRewrite.h"
 #include "Rendering/GL/FFFog.h"
+#include "Rendering/GL/FFMatrixTracking.h"
 #include "Rendering/GL/FFRasterState.h"
 #include "Rendering/GL/MatrixStateTracker.h"
 #include "System/Log/ILog.h"
@@ -20,6 +21,7 @@ void GL::MaterializeFFState()
 	glColor4fv(ffColor.Get());
 	ffFog.MaterializeIntoGL();
 	ffRaster.MaterializeIntoGL();
+	MaterializeFFMatrices();
 }
 
 void GL::FFResetState::Verify(const char* where) const

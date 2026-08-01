@@ -12,10 +12,17 @@
 
 #include "Rendering/GL/FFShaderRewrite.h"
 #include "Rendering/GL/MatrixStateTracker.h"
+#include "System/Config/ConfigHandler.h"
 #include "System/Log/ILog.h"
 
 namespace {
 	bool installed = false;
+	bool suppressed = false;
+
+	// while set, the calls below are OUR OWN restore of the mirrored state: they
+	// must reach GL and must not be mirrored back, or the mirror would drift by
+	// its own replay every time a draw fell back
+	bool materializing = false;
 
 	GLenum ModeMatrixEnum(GLenum mode)
 	{
@@ -28,7 +35,12 @@ namespace {
 
 	// A gl.CreateList body's matrix ops are recorded rather than executed, so the
 	// mirror must not see them -- the same reason FFMirrorOps() stood down there.
-	bool Tracking() { return !GL::ffListBodyOpen; }
+	bool Tracking() { return !GL::ffListBodyOpen && !materializing; }
+
+	// With the family suppressed the call is mirrored and then NOT made. A list
+	// body is the exception: there the call is being recorded for a replay that
+	// still runs through fixed function, so it has to reach GL.
+	bool IssueToGL() { return !suppressed || GL::ffListBodyOpen || materializing; }
 
 	#define FFMAT_ENTRIES(X) \
 		X(glMatrixMode,   (GLenum a), (a)) \
@@ -78,7 +90,9 @@ namespace {
 	// rather than what the caller asked for.
 	void APIENTRY Trk_glMatrixMode(GLenum mode)
 	{
-		orig_glMatrixMode(mode);
+		if (IssueToGL())
+			orig_glMatrixMode(mode);
+
 		if (!Tracking())
 			return;
 		GL::ffMirror.tracker.SetMatrixMode(mode);
@@ -86,94 +100,127 @@ namespace {
 
 	void APIENTRY Trk_glPushMatrix()
 	{
-		orig_glPushMatrix();
+		if (IssueToGL())
+			orig_glPushMatrix();
+
 		if (Tracking()) { GL::ffMirror.tracker.PushMatrix(); GL::VerifyFFMatrixMirror("glPushMatrix"); }
 	}
 
 	void APIENTRY Trk_glPopMatrix()
 	{
-		orig_glPopMatrix();
+		if (IssueToGL())
+			orig_glPopMatrix();
+
 		if (Tracking()) { GL::ffMirror.tracker.PopMatrix(); GL::VerifyFFMatrixMirror("glPopMatrix"); }
 	}
 
 	void APIENTRY Trk_glLoadIdentity()
 	{
-		orig_glLoadIdentity();
+		if (IssueToGL())
+			orig_glLoadIdentity();
+
 		if (Tracking()) { GL::ffMirror.tracker.LoadIdentity(); GL::VerifyFFMatrixMirror("glLoadIdentity"); }
 	}
 
 	void APIENTRY Trk_glLoadMatrixf(const GLfloat* m)
 	{
-		orig_glLoadMatrixf(m);
+		if (IssueToGL())
+			orig_glLoadMatrixf(m);
+
 		if (Tracking()) { GL::ffMirror.tracker.LoadMatrix(FromFloats(m)); GL::VerifyFFMatrixMirror("glLoadMatrixf"); }
 	}
 
 	void APIENTRY Trk_glMultMatrixf(const GLfloat* m)
 	{
-		orig_glMultMatrixf(m);
+		if (IssueToGL())
+			orig_glMultMatrixf(m);
+
 		if (Tracking()) { GL::ffMirror.tracker.MultMatrix(FromFloats(m)); GL::VerifyFFMatrixMirror("glMultMatrixf"); }
 	}
 
 	void APIENTRY Trk_glLoadMatrixd(const GLdouble* m)
 	{
-		orig_glLoadMatrixd(m);
+		if (IssueToGL())
+			orig_glLoadMatrixd(m);
+
 		if (Tracking()) { GL::ffMirror.tracker.LoadMatrix(FromDoubles(m)); GL::VerifyFFMatrixMirror("glLoadMatrixd"); }
 	}
 
 	void APIENTRY Trk_glMultMatrixd(const GLdouble* m)
 	{
-		orig_glMultMatrixd(m);
+		if (IssueToGL())
+			orig_glMultMatrixd(m);
+
 		if (Tracking()) { GL::ffMirror.tracker.MultMatrix(FromDoubles(m)); GL::VerifyFFMatrixMirror("glMultMatrixd"); }
 	}
 
 	void APIENTRY Trk_glTranslatef(GLfloat x, GLfloat y, GLfloat z)
 	{
-		orig_glTranslatef(x, y, z);
+		if (IssueToGL())
+			orig_glTranslatef(x, y, z);
+
 		if (Tracking()) { GL::ffMirror.tracker.Translate(x, y, z); GL::VerifyFFMatrixMirror("glTranslatef"); }
 	}
 
 	void APIENTRY Trk_glScalef(GLfloat x, GLfloat y, GLfloat z)
 	{
-		orig_glScalef(x, y, z);
+		if (IssueToGL())
+			orig_glScalef(x, y, z);
+
 		if (Tracking()) { GL::ffMirror.tracker.Scale(x, y, z); GL::VerifyFFMatrixMirror("glScalef"); }
 	}
 
 	void APIENTRY Trk_glRotatef(GLfloat a, GLfloat x, GLfloat y, GLfloat z)
 	{
-		orig_glRotatef(a, x, y, z);
+		if (IssueToGL())
+			orig_glRotatef(a, x, y, z);
+
 		if (Tracking()) { GL::ffMirror.tracker.Rotate(a, x, y, z); GL::VerifyFFMatrixMirror("glRotatef"); }
 	}
 
 	void APIENTRY Trk_glTranslated(GLdouble x, GLdouble y, GLdouble z)
 	{
-		orig_glTranslated(x, y, z);
+		if (IssueToGL())
+			orig_glTranslated(x, y, z);
+
 		if (Tracking()) { GL::ffMirror.tracker.Translate(x, y, z); GL::VerifyFFMatrixMirror("glTranslated"); }
 	}
 
 	void APIENTRY Trk_glScaled(GLdouble x, GLdouble y, GLdouble z)
 	{
-		orig_glScaled(x, y, z);
+		if (IssueToGL())
+			orig_glScaled(x, y, z);
+
 		if (Tracking()) { GL::ffMirror.tracker.Scale(x, y, z); GL::VerifyFFMatrixMirror("glScaled"); }
 	}
 
 	void APIENTRY Trk_glRotated(GLdouble a, GLdouble x, GLdouble y, GLdouble z)
 	{
-		orig_glRotated(a, x, y, z);
+		if (IssueToGL())
+			orig_glRotated(a, x, y, z);
+
 		if (Tracking()) { GL::ffMirror.tracker.Rotate(a, x, y, z); GL::VerifyFFMatrixMirror("glRotated"); }
 	}
 
 	void APIENTRY Trk_glOrtho(GLdouble l, GLdouble r, GLdouble b, GLdouble t, GLdouble n, GLdouble f)
 	{
-		orig_glOrtho(l, r, b, t, n, f);
+		if (IssueToGL())
+			orig_glOrtho(l, r, b, t, n, f);
+
 		if (Tracking()) { GL::ffMirror.tracker.Ortho(l, r, b, t, n, f, false); GL::VerifyFFMatrixMirror("glOrtho"); }
 	}
 
 	void APIENTRY Trk_glFrustum(GLdouble l, GLdouble r, GLdouble b, GLdouble t, GLdouble n, GLdouble f)
 	{
-		orig_glFrustum(l, r, b, t, n, f);
+		if (IssueToGL())
+			orig_glFrustum(l, r, b, t, n, f);
+
 		if (Tracking()) { GL::ffMirror.tracker.Frustum(l, r, b, t, n, f, false); GL::VerifyFFMatrixMirror("glFrustum"); }
 	}
 }
+
+CONFIG(bool, FFMatrixSuppress).defaultValue(false).safemodeValue(false)
+	.description("Stop issuing the fixed-function matrix calls (glMatrixMode, glPushMatrix, glLoadMatrixf, ...) and serve every consumer from the CPU mirror instead. Requires FFVertexAttribRewrite, which is what redirects the shader builtins. These ten are the last RenderDoc-unsupported functions a BAR frame makes.");
 
 void GL::InstallFFMatrixTracking()
 {
@@ -181,6 +228,7 @@ void GL::InstallFFMatrixTracking()
 		return;
 
 	installed = true;
+	suppressed = configHandler->GetBool("FFMatrixSuppress");
 
 	#define FFMAT_SWAP(name, params, args) \
 		orig_##name = glad_##name; \
@@ -188,7 +236,8 @@ void GL::InstallFFMatrixTracking()
 	FFMAT_ENTRIES(FFMAT_SWAP)
 	#undef FFMAT_SWAP
 
-	LOG_L(L_WARNING, "[FFMatrixTracking] ACTIVE: GL::ffMirror is fed from the glad entry points");
+	LOG_L(L_WARNING, "[FFMatrixTracking] ACTIVE: GL::ffMirror is fed from the glad entry points%s",
+		suppressed ? ", and the calls are NOT issued" : "");
 }
 
 bool GL::FFMatrixTrackingInstalled()
@@ -196,9 +245,49 @@ bool GL::FFMatrixTrackingInstalled()
 	return installed;
 }
 
+void GL::MaterializeFFMatrices()
+{
+	if (!suppressed)
+		return;
+
+	materializing = true;
+
+	const int savedMode = ffMirror.tracker.GetMatrixState().mode;
+	for (const GLenum mode : { GL_PROJECTION, GL_MODELVIEW, GL_TEXTURE }) {
+		glMatrixMode(mode);
+		glLoadMatrixf(static_cast<const float*>(ffMirror.tracker.GetMatrix(mode)));
+	}
+	glMatrixMode(static_cast<GLenum>(savedMode));
+
+	materializing = false;
+}
+
+void GL::ReadFFMatrix(unsigned int mode, CMatrix44f& out)
+{
+	if (FFMatrixSuppressed()) {
+		out = ffMirror.tracker.GetMatrix(mode);
+		return;
+	}
+
+	glGetFloatv(ModeMatrixEnum(static_cast<GLenum>(mode)), static_cast<float*>(out));
+}
+
+void GL::ReadFFMatrices(CMatrix44f& proj, CMatrix44f& modelView)
+{
+	ReadFFMatrix(GL_PROJECTION, proj);
+	ReadFFMatrix(GL_MODELVIEW, modelView);
+}
+
+bool GL::FFMatrixSuppressed()
+{
+	return suppressed;
+}
+
 void GL::VerifyFFMatrixMirror(const char* op)
 {
-	if (!ffMirror.shadowCompare || !installed)
+	// Once the calls are suppressed GL holds an identity and is no longer an
+	// oracle for anything; the mirror IS the state.
+	if (!ffMirror.shadowCompare || !installed || suppressed)
 		return;
 
 	static bool reported = false;

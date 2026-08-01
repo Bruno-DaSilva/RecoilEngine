@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "FFShaderRewrite.h"
+#include "Rendering/GL/FFMatrixTracking.h"
 
 #include <algorithm>
 #include <array>
@@ -12,6 +13,7 @@
 
 #include "Rendering/GL/FFFog.h"
 #include "Rendering/GL/FFRasterState.h"
+#include "Rendering/GL/FFMatrixTracking.h"
 #include "Rendering/GL/MatrixStateTracker.h"
 #include "System/Matrix44f.h"
 #include "Rendering/GL/FFStateTracker.h"
@@ -543,7 +545,9 @@ namespace {
 		if (it == progUniforms.end() || it->second.mvpSelect < 0)
 			return;
 
-		const bool fromMirror = GL::ffExperiment.Active(GL::FFExperiment::MatrixUniformFromMirror);
+		// Suppression is the shipping case: the builtins have nothing behind them
+		// any more, so every rewritten program takes the uniform on every pass.
+		const bool fromMirror = GL::FFMatrixSuppressed() || GL::ffExperiment.Active(GL::FFExperiment::MatrixUniformFromMirror);
 		const int32_t select = (fromMirror || GL::ffExperiment.Active(GL::FFExperiment::MatrixUniform)) ? 1 : 0;
 		glUniform1i(it->second.mvpSelect, select);
 
@@ -554,18 +558,25 @@ namespace {
 		// them, so the mirror can be tainted. Falling back keeps the frame
 		// rendering, but a tainted push is a phase-C blocker in its own right and
 		// has to be counted rather than absorbed.
-		const bool useMirror = fromMirror && GL::ffMirror.Valid();
+		// Once the calls are suppressed there IS no glGetFloatv to fall back to --
+		// it returns the identity GL was left holding -- so a tainted mirror is
+		// still the best description of the state there is, and the taint becomes
+		// a reported hole rather than a switch. What a real display list's own
+		// matrix ops did is lost either way: they replayed into a stack nothing
+		// reads.
+		const bool useMirror = fromMirror && (GL::FFMatrixSuppressed() || GL::ffMirror.Valid());
 
-		if (fromMirror && !useMirror) {
+		if (fromMirror && !GL::ffMirror.Valid()) {
 			static int tainted = 0;
-			if (tainted++ == 0)
-				LOG_L(L_WARNING, "[FFUniformFeed] mirror TAINTED at a draw; this push fell back to glGetFloatv");
+			if (tainted++ == 0) {
+				LOG_L(L_WARNING, "[FFUniformFeed] mirror TAINTED at a draw (a real display list replayed matrix ops); %s",
+					GL::FFMatrixSuppressed() ? "using it anyway, nothing else describes the state" : "falling back to glGetFloatv");
+			}
 		}
 
 		CMatrix44f proj;
 		CMatrix44f modelView;
-		glGetFloatv(GL_PROJECTION_MATRIX, static_cast<float*>(proj));
-		glGetFloatv(GL_MODELVIEW_MATRIX, static_cast<float*>(modelView));
+		GL::ReadFFMatrices(proj, modelView);
 
 		const CMatrix44f mvp = useMirror ? GL::ffMirror.GetMVP() : (proj * modelView);
 
@@ -628,7 +639,12 @@ namespace {
 		X(glDrawRangeElements,      (GLenum a, GLuint b, GLuint c, GLsizei d, GLenum e, const void* f), (a, b, c, d, e, f)) \
 		X(glDrawElementsBaseVertex, (GLenum a, GLsizei b, GLenum c, const void* d, GLint e), (a, b, c, d, e)) \
 		X(glDrawArraysInstanced,    (GLenum a, GLint b, GLsizei c, GLsizei d), (a, b, c, d)) \
-		X(glDrawElementsInstanced,  (GLenum a, GLsizei b, GLenum c, const void* d, GLsizei e), (a, b, c, d, e))
+		X(glDrawElementsInstanced,  (GLenum a, GLsizei b, GLenum c, const void* d, GLsizei e), (a, b, c, d, e)) \
+		X(glMultiDrawArrays,        (GLenum a, const GLint* b, const GLsizei* c, GLsizei d), (a, b, c, d)) \
+		X(glMultiDrawElements,      (GLenum a, const GLsizei* b, GLenum c, const void* const* d, GLsizei e), (a, b, c, d, e)) \
+		X(glDrawArraysIndirect,     (GLenum a, const void* b), (a, b)) \
+		X(glDrawElementsIndirect,   (GLenum a, GLenum b, const void* c), (a, b, c)) \
+		X(glMultiDrawElementsIndirect, (GLenum a, GLenum b, const void* c, GLsizei d, GLsizei e), (a, b, c, d, e))
 
 	#define FFMVP_DECL_ORIG(name, params, args) decltype(glad_##name) origMVP_##name = nullptr;
 	FFMVP_DRAWS(FFMVP_DECL_ORIG)
@@ -743,6 +759,7 @@ void GL::InstallFFUniformFeed()
 	// Only while an experiment is selected: the per-draw readback is a
 	// measurement cost, not something a shipping frame should pay.
 	if (const int e = configHandler->GetInt("GLFFRemovalExperiment");
+	    FFMatrixSuppressed() ||
 	    e == static_cast<int>(FFExperiment::MatrixUniform) || e == static_cast<int>(FFExperiment::MatrixUniformFromMirror)) {
 		#define FFMVP_SWAP(name, params, args) \
 			origMVP_##name = glad_##name; \

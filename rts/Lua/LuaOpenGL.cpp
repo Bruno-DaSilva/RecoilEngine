@@ -155,8 +155,7 @@ static void SetImmBufferFixedFunctionMatrices()
 {
 	CMatrix44f proj;
 	CMatrix44f modelView;
-	glGetFloatv(GL_PROJECTION_MATRIX, static_cast<float*>(proj));
-	glGetFloatv(GL_MODELVIEW_MATRIX, static_cast<float*>(modelView));
+	GL::ReadFFMatrices(proj, modelView);
 	luaImmBuffer.SetMatrices(proj, modelView);
 
 	if (GL::ffMirror.Valid() && GL::ffMirror.shadowCompare) {
@@ -7149,17 +7148,17 @@ int LuaOpenGL::GetMatrixData(lua_State* L)
 
 	if (luaType == LUA_TNUMBER) {
 		const GLenum type = (GLenum)lua_tonumber(L, 1);
-		GLenum pname = 0;
 		switch (type) {
-			case GL_PROJECTION: { pname = GL_PROJECTION_MATRIX; break; }
-			case GL_MODELVIEW:  { pname = GL_MODELVIEW_MATRIX;  break; }
-			case GL_TEXTURE:    { pname = GL_TEXTURE_MATRIX;    break; }
+			case GL_PROJECTION:
+			case GL_MODELVIEW:
+			case GL_TEXTURE: break;
 			default: {
 				luaL_error(L, "Incorrect arguments to gl.GetMatrixData(id)");
 			}
 		}
-		GLfloat matrix[16];
-		glGetFloatv(pname, matrix);
+		CMatrix44f matrix44;
+		GL::ReadFFMatrix(type, matrix44);
+		const GLfloat* matrix = static_cast<const float*>(matrix44);
 
 		if (lua_isnumber(L, 2)) {
 			const int index = lua_toint(L, 2);

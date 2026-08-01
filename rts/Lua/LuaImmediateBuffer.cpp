@@ -6,6 +6,7 @@
 #include "Rendering/GL/myGL.h"
 #include "Rendering/GL/FFStateTracker.h"
 #include "Rendering/GL/FFFog.h"
+#include "Rendering/GL/FFMatrixTracking.h"
 #include "Rendering/GL/FFShaderRewrite.h"
 #include "Rendering/GlobalRendering.h"
 #include "Rendering/Shaders/ShaderHandler.h"
@@ -441,7 +442,7 @@ namespace {
 		// FF transforms texcoords by the texture matrix; the shader does not
 		static const CMatrix44f identity;
 		CMatrix44f texMat;
-		glGetFloatv(GL_TEXTURE_MATRIX, static_cast<float*>(texMat));
+		GL::ReadFFMatrix(GL_TEXTURE, texMat);
 		for (int i = 0; i < 16; ++i) {
 			if (texMat.m[i] != identity.m[i])
 				return REASON_TEX_MATRIX;

@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "System/Matrix44f.h"
+
 namespace GL {
 	// Feed GL::ffMirror from the glad entry points, so it mirrors the WHOLE
 	// fixed-function matrix state rather than the part LuaOpenGL happens to
@@ -33,4 +35,24 @@ namespace GL {
 	// the op that diverged, since which one it is decides where the tracker is
 	// wrong.
 	void VerifyFFMatrixMirror(const char* op);
+
+	// The fixed-function matrices, from wherever they currently live: GL while
+	// the set-calls still reach it, the mirror once they no longer do. Every
+	// glGetFloatv(GL_*_MATRIX) in the engine goes through here, because after
+	// suppression that query returns whatever GL was last left holding -- an
+	// identity, in most cases -- and reads exactly like a working one.
+	void ReadFFMatrix(unsigned int mode, CMatrix44f& out);
+	void ReadFFMatrices(CMatrix44f& proj, CMatrix44f& modelView);
+
+	// Stop issuing the fixed-function matrix calls entirely. Only under the
+	// migration knob, and only once every consumer above is on the mirror: with
+	// it on, the ten matrix functions are the last RenderDoc-unsupported calls a
+	// BAR frame makes, and this is what removes them.
+	bool FFMatrixSuppressed();
+
+	// Load the mirrored matrices back into the fixed-function stack, for a draw
+	// that fell back to fixed function and will be transformed by it. Those draws
+	// are issuing glBegin or client-array calls anyway, so the matrix calls this
+	// costs are on a path the capture had already lost.
+	void MaterializeFFMatrices();
 }

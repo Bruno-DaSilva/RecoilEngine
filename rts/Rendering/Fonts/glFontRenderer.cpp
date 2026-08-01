@@ -1,4 +1,5 @@
 #include "glFontRenderer.h"
+#include "Rendering/GL/FFMatrixTracking.h"
 
 #include "glFont.h"
 #include "glFontRendererShaders.h"
@@ -310,8 +311,7 @@ static CMatrix44f GetCurrentFixedFunctionFontMVP()
 {
 	CMatrix44f proj;
 	CMatrix44f modelView;
-	glGetFloatv(GL_PROJECTION_MATRIX, static_cast<float*>(proj));
-	glGetFloatv(GL_MODELVIEW_MATRIX, static_cast<float*>(modelView));
+	GL::ReadFFMatrices(proj, modelView);
 	return proj * modelView;
 }
 
