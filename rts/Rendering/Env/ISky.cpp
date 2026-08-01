@@ -12,6 +12,7 @@
 #include "Rendering/GlobalRendering.h"
 #include "Rendering/Env/DebugCubeMapTexture.h"
 #include "Rendering/GL/myGL.h"
+#include "Rendering/GL/FFStateTracker.h"
 #include "System/Config/ConfigHandler.h"
 #include "System/Exceptions.h"
 #include "System/SafeUtil.h"
@@ -75,8 +76,14 @@ void ISky::SetupFog() {
 
 	if (!std::equal(curFogColor, curFogColor + 4, static_cast<const float*>(fogColor)))
 		glFogfv(GL_FOG_COLOR, fogColor);
-	if (curFogMode != GL_LINEAR)
-		glFogi(GL_FOG_MODE, GL_LINEAR);
+	// The candidate pass has to hold GL_EXP -- the value a deleted call would
+	// leave behind -- not merely skip the write. GL_FOG_MODE is sticky, so with
+	// the write skipped the pass would inherit the GL_LINEAR an earlier pass
+	// already set and the experiment would report a vacuous zero. The guard
+	// above restores GL_LINEAR on the next pass, so this needs no teardown.
+	const GLint wantFogMode = GL::ffExperiment.Active(GL::FFExperiment::FogMode) ? GL_EXP : GL_LINEAR;
+	if (curFogMode != wantFogMode)
+		glFogi(GL_FOG_MODE, wantFogMode);
 	if (curFogStart != fogStartDist)
 		glFogf(GL_FOG_START, fogStartDist);
 	if (curFogEnd != fogEndDist)
