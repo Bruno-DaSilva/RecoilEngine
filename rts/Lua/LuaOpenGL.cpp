@@ -680,6 +680,7 @@ LuaCmdListCapture::SuspendScope::~SuspendScope()
 static void CmdListEmitStreamIntoCompile(const LuaCommandList::ImmStreamData& s, bool leaveOpen, const CmdListCapture* cap)
 {
 	const size_t n = s.posUV.size() / 5;
+	GL::MaterializeFFState();
 	glBegin(s.mode);
 	for (size_t i = 0; i < n; ++i) {
 		const float* v = &s.posUV[i * 5];
@@ -746,7 +747,7 @@ static void CmdListEmitIntoCompile(const LuaCommandList& cl)
 			case Op::Rotate:            glRotatef(c.f[0], c.f[1], c.f[2], c.f[3]); break;
 			case Op::MultMatrix:        glMultMatrixf(c.ext.data()); break;
 			case Op::LoadMatrix:        glLoadMatrixf(c.ext.data()); break;
-			case Op::Rect:              glRectf(c.f[0], c.f[1], c.f[2], c.f[3]); break;
+			case Op::Rect:              GL::MaterializeFFState(); glRectf(c.f[0], c.f[1], c.f[2], c.f[3]); break;
 			case Op::CallGLList:        glCallList(c.u0); break;
 			case Op::ImmStream:         CmdListEmitStreamIntoCompile(cl.streams[c.u0], false, nullptr); break;
 			case Op::Font:              CmdListExecFontCmd(cl.fontCmds[c.u0]); break;
@@ -1010,6 +1011,7 @@ static void CmdListReplayLive(const LuaCommandList& cl)
 				if (modernOK) {
 					DrawRectModern(c.f[0], c.f[1], c.f[2], c.f[3]);
 				} else {
+					GL::MaterializeFFState();
 					glRectf(c.f[0], c.f[1], c.f[2], c.f[3]);
 				}
 			} break;
@@ -3365,7 +3367,7 @@ int LuaOpenGL::DrawGroundQuad(lua_State* L)
 			const int xit = xib + 1;
 			const float xb = xib * SQUARE_SIZE;
 			const float xt = xb + SQUARE_SIZE;
-			glBegin(GL_TRIANGLE_STRIP);
+			GL::MaterializeFFState(); glBegin(GL_TRIANGLE_STRIP);
 			for (int zi = zis; zi <= zie; zi++) {
 				const int ziOff = zi * mapxi;
 				const float yb = heightmap[ziOff + xib];
@@ -3388,7 +3390,7 @@ int LuaOpenGL::DrawGroundQuad(lua_State* L)
 			const float xt = xb + SQUARE_SIZE;
 			const float tut = tub + tuStep;
 			float tv = tv0;
-			glBegin(GL_TRIANGLE_STRIP);
+			GL::MaterializeFFState(); glBegin(GL_TRIANGLE_STRIP);
 			for (int zi = zis; zi <= zie; zi++) {
 				const int ziOff = zi * mapxi;
 				const float yb = heightmap[ziOff + xib];
@@ -3544,7 +3546,7 @@ int LuaOpenGL::Shape(lua_State* L)
 
 	if (!modernOK) {
 		ReportImmLegacy(L, __func__, compilingDisplayList);
-		glBegin(type);
+		GL::MaterializeFFState(); glBegin(type);
 		for (const VertexData& vd : shape) {
 			if (vd.hasColor) { GL::ffColor.Set(vd.color);   }
 			if (vd.hasTxcd)  { glTexCoord2fv(vd.txcd); }
@@ -3616,7 +3618,7 @@ int LuaOpenGL::BeginEnd(lua_State* L)
 	// representation, so always compile that.
 	if (!((modernImmediate || glCompareMode) && ModernFeedable() && PolygonModeFill()) || compilingDisplayList) {
 		ReportImmLegacy(L, __func__, compilingDisplayList);
-		glBegin(primMode);
+		GL::MaterializeFFState(); glBegin(primMode);
 		const int error = lua_pcall(L, (args - 2), 0, 0);
 		glEnd();
 
@@ -4105,7 +4107,7 @@ int LuaOpenGL::Rect(lua_State* L)
 
 	const bool noShader = ModernFeedable();
 
-	const auto drawLegacy = [&]() { glRectf(x1, y1, x2, y2); };
+	const auto drawLegacy = [&]() { GL::MaterializeFFState(); glRectf(x1, y1, x2, y2); };
 	// glRectf fills with the FF CURRENT color (which dlist replays/fonts can
 	// move without gl.Color) and leaves it untouched; DrawRectModern's
 	// seed-not-Color gives the flush the same fill and the same (unchanged)
@@ -4195,7 +4197,7 @@ int LuaOpenGL::TexRect(lua_State* L)
 	const bool noShader = ModernFeedable();
 
 	const auto drawLegacy = [&]() {
-		glBegin(GL_QUADS); {
+		GL::MaterializeFFState(); glBegin(GL_QUADS); {
 			glTexCoord2f(s1, t1); glVertex2f(x1, y1);
 			glTexCoord2f(s2, t1); glVertex2f(x2, y1);
 			glTexCoord2f(s2, t2); glVertex2f(x2, y2);

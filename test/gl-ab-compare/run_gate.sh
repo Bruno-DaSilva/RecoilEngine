@@ -22,6 +22,8 @@ forceLegacy=0
 # next run measures a different configuration. Reported rather than asserted:
 # gating a knob deliberately OFF is a legitimate run.
 migrationKnobs=(LuaModernGLBackend LuaCmdListBakedStreams LuaCmdListSuspendOnObjectCreate ModernModelAttribs ModernModelFFShader FFVertexAttribRewrite FFMatrixSuppress)
+# knobs whose default is ON, so an absent config line means enabled
+defaultOnKnobs=(FFMatrixSuppress)
 ffExperiment=0
 mixedOK=0
 content=
@@ -139,6 +141,12 @@ knobState=
 for k in "${migrationKnobs[@]}"; do
 	if grep -qE "^\[[^]]*\]  *$k = 1\$|  $k = 1\$" "$infolog"; then
 		knobState+=" $k=1"
+	elif grep -qE "^\[[^]]*\]  *$k = 0\$|  $k = 0\$" "$infolog"; then
+		knobState+=" $k=0"
+	elif [[ " ${defaultOnKnobs[*]} " == *" $k "* ]]; then
+		# absent means "at its default", which for these is ON -- reporting that
+		# as off would be worse than not reporting it
+		knobState+=" $k=default-on"
 	else
 		knobState+=" $k=off"
 	fi

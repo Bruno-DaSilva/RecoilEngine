@@ -219,8 +219,8 @@ namespace {
 	}
 }
 
-CONFIG(bool, FFMatrixSuppress).defaultValue(false).safemodeValue(false)
-	.description("Stop issuing the fixed-function matrix calls (glMatrixMode, glPushMatrix, glLoadMatrixf, ...) and serve every consumer from the CPU mirror instead. Requires FFVertexAttribRewrite, which is what redirects the shader builtins. These ten are the last RenderDoc-unsupported functions a BAR frame makes.");
+CONFIG(bool, FFMatrixSuppress).defaultValue(true).safemodeValue(false)
+	.description("Stop issuing the fixed-function matrix calls (glMatrixMode, glPushMatrix, glLoadMatrixf, ...) and serve every consumer from the CPU mirror instead. These ten are the last RenderDoc-unsupported functions a BAR frame makes, so with this and FFVertexAttribRewrite on the count is zero. Defaults ON because it is INERT without FFVertexAttribRewrite -- the tracking that feeds the mirror is not even installed then -- so a game that has not enabled the migration is untouched either way.");
 
 void GL::InstallFFMatrixTracking()
 {
