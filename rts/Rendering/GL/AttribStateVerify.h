@@ -50,12 +50,27 @@ namespace GL {
 		};
 		static constexpr int NUM_UNIT_CAPS = sizeof(UNIT_CAPS) / sizeof(UNIT_CAPS[0]);
 
+		static constexpr GLenum TEX_TARGETS[]  = { GL_TEXTURE_1D, GL_TEXTURE_2D, GL_TEXTURE_3D, GL_TEXTURE_CUBE_MAP };
+		static constexpr GLenum TEX_BINDINGS[] = { GL_TEXTURE_BINDING_1D, GL_TEXTURE_BINDING_2D,
+		                                           GL_TEXTURE_BINDING_3D, GL_TEXTURE_BINDING_CUBE_MAP };
+
 		// The engine's legacy paths reach unit 6 at most (S3DModelVAO's tangent
 		// channels); 8 covers that with headroom without paying for 32.
 		static constexpr int NUM_UNITS = 8;
 
 		GLboolean caps[NUM_CAPS] = {};
 		GLboolean unitCaps[NUM_UNITS][NUM_UNIT_CAPS] = {};
+
+		// GL_TEXTURE_BIT: the bindings are what its users here actually protect
+		// (both remaining brackets wrap texture creation and want the caller's
+		// binding back). Texture-env is NOT restored -- that would need glTexEnvi,
+		// already retired, and nothing writes texenv any more; it is captured and
+		// diffed under shadowCompare instead so the verifier says so if that
+		// changes. Texture-object parameters are not modelled either: glPushAttrib
+		// only saves them for objects bound AT PUSH TIME, and a texture created
+		// inside the bracket is not among them, which is why these call sites work.
+		GLint texBinding[NUM_UNITS][4] = {};
+		GLint texEnvMode[NUM_UNITS] = {};
 		GLint activeUnit = GL_TEXTURE0;
 
 		// non-enable state from the bits the engine's brackets actually push

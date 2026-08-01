@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include <algorithm>
+#include "Rendering/GL/AttribStateVerify.h"
 #include <bit>
 #include <utility>
 #include <cstring>
@@ -1767,7 +1768,9 @@ static void HandleDDSMipmap(GLenum target, int32_t numEmbeddedLevels, uint32_t m
 uint32_t CBitmap::CreateDDSTexture(const GL::TextureCreationParams& tcp) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	glPushAttrib(GL_TEXTURE_BIT);
+	GL::ShadowPushAttrib(GL_TEXTURE_BIT);
+	GL::AttribSnapshot savedTexAttribs;
+	savedTexAttribs.Capture();
 
 	auto texID = tcp.texID;
 
@@ -1837,7 +1840,8 @@ uint32_t CBitmap::CreateDDSTexture(const GL::TextureCreationParams& tcp) const
 			break;
 	}
 
-	glPopAttrib();
+	savedTexAttribs.Restore(GL_TEXTURE_BIT);
+	GL::VerifyAttribRestore("CBitmap::CreateDDSTexture");
 	return texID;
 }
 #else  // !HEADLESS

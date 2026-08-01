@@ -2,6 +2,7 @@
 
 // must be included before streflop! else we get streflop/cmath resolve conflicts in its hash implementation files
 #include <bit>
+#include "Rendering/GL/AttribStateVerify.h"
 #include <vector>
 #include "NamedTextures.h"
 
@@ -340,7 +341,9 @@ namespace CNamedTextures {
 
 		const std::lock_guard<spring::recursive_mutex> lck(mutex);
 
-		glPushAttrib(GL_TEXTURE_BIT);
+		GL::ShadowPushAttrib(GL_TEXTURE_BIT);
+		GL::AttribSnapshot savedTexAttribs;
+		savedTexAttribs.Capture();
 
 		for (const std::string& texString: waitingTextures) {
 			const auto mit = texInfoMap.find(texString);
@@ -351,7 +354,8 @@ namespace CNamedTextures {
 			Load(texString, texInfoVec[mit->second].id);
 		}
 
-		glPopAttrib();
+		savedTexAttribs.Restore(GL_TEXTURE_BIT);
+		GL::VerifyAttribRestore("CNamedTextures::Update");
 		waitingTextures.clear();
 	}
 

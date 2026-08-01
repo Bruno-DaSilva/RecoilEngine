@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "UnitDrawer.h"
+#include "Rendering/GL/AttribStateVerify.h"
 
 #include "Game/Camera.h"
 #include "Game/CameraHandler.h"
@@ -1069,7 +1070,9 @@ void CUnitDrawerGLSL::DrawUnitModelBeingBuiltShadow(const CUnit* unit, bool noLu
 		{0.0f,  0.0f, 0.0f,                                                           0.0f },
 	};
 
-	glPushAttrib(GL_CURRENT_BIT);
+	GL::ShadowPushAttrib(GL_CURRENT_BIT);
+	GL::AttribSnapshot savedCurA;
+	savedCurA.Capture();
 
 	glEnable(GL_CLIP_PLANE0);
 	glEnable(GL_CLIP_PLANE1);
@@ -1092,7 +1095,8 @@ void CUnitDrawerGLSL::DrawUnitModelBeingBuiltShadow(const CUnit* unit, bool noLu
 		DrawModelFillBuildStageShadow(unit, upperPlanes[BUILDSTAGE_FILL], lowerPlanes[BUILDSTAGE_FILL], noLuaCall);
 	}
 
-	glPopAttrib();
+	savedCurA.Restore(GL_CURRENT_BIT);
+	GL::VerifyAttribRestore("CUnitDrawer::DrawIndividual");
 }
 
 void CUnitDrawerGLSL::DrawModelWireBuildStageShadow(const CUnit* unit, const double* upperPlane, const double* lowerPlane, bool noLuaCall) const
@@ -1171,7 +1175,9 @@ void CUnitDrawerGLSL::DrawUnitModelBeingBuiltOpaque(const CUnit* unit, bool noLu
 		{0.0f,  0.0f, 0.0f,                                                           0.0f },
 	};
 
-	glPushAttrib(GL_CURRENT_BIT);
+	GL::ShadowPushAttrib(GL_CURRENT_BIT);
+	GL::AttribSnapshot savedCurB;
+	savedCurB.Capture();
 	glEnable(GL_CLIP_PLANE0);
 	glEnable(GL_CLIP_PLANE1);
 
@@ -1197,7 +1203,8 @@ void CUnitDrawerGLSL::DrawUnitModelBeingBuiltOpaque(const CUnit* unit, bool noLu
 
 	SetNanoColor(float4(1.0f, 1.0f, 1.0f, 0.0f)); // turn off in any case
 	glDisable(GL_CLIP_PLANE0);
-	glPopAttrib();
+	savedCurB.Restore(GL_CURRENT_BIT);
+	GL::VerifyAttribRestore("CUnitDrawer::DrawIndividualDef");
 }
 
 void CUnitDrawerGLSL::DrawModelWireBuildStageOpaque(const CUnit* unit, const double* upperPlane, const double* lowerPlane, bool noLuaCall) const
@@ -1245,13 +1252,18 @@ void CUnitDrawerGLSL::DrawModelFillBuildStageOpaque(const CUnit* unit, const dou
 }
 
 void CUnitDrawerGLSL::PushIndividualOpaqueState(const CUnit* unit, bool deferredPass) const { PushIndividualOpaqueState(unit->model, unit->team, deferredPass); }
+// Push/PopIndividualOpaqueState are a matched pair around a single individual
+// draw and do not nest, so file scope is enough.
+static GL::AttribSnapshot savedIndividualOpaqueAttribs;
+
 void CUnitDrawerGLSL::PushIndividualOpaqueState(const S3DModel* model, int teamID, bool deferredPass) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	// these are not handled by Setup*Drawing but CGame
 	// easier to assume they no longer have the correct
 	// values at this point
-	glPushAttrib(GL_DEPTH_BUFFER_BIT | GL_ENABLE_BIT);
+	GL::ShadowPushAttrib(GL_DEPTH_BUFFER_BIT | GL_ENABLE_BIT);
+	savedIndividualOpaqueAttribs.Capture();
 	glDepthMask(GL_TRUE);
 	glEnable(GL_DEPTH_TEST);
 
@@ -1275,7 +1287,8 @@ void CUnitDrawerGLSL::PopIndividualOpaqueState(const S3DModel* model, int teamID
 	CModelDrawerHelper::PopModelRenderState(model);
 	ResetOpaqueDrawing(deferredPass);
 
-	glPopAttrib();
+	savedIndividualOpaqueAttribs.Restore(GL_DEPTH_BUFFER_BIT | GL_ENABLE_BIT);
+	GL::VerifyAttribRestore("CUnitDrawerGLSL::PopIndividualOpaqueState");
 }
 
 void CUnitDrawerGLSL::PopIndividualAlphaState(const S3DModel* model, int teamID, bool deferredPass) const
@@ -1950,7 +1963,9 @@ void CUnitDrawerGL4::DrawUnitModelBeingBuiltShadow(const CUnit* unit, bool noLua
 	assert(po);
 	assert(po->IsBound());
 
-	glPushAttrib(GL_POLYGON_BIT);
+	GL::ShadowPushAttrib(GL_POLYGON_BIT);
+	GL::AttribSnapshot savedPolyA;
+	savedPolyA.Capture();
 
 	glEnable(GL_CLIP_DISTANCE0);
 	glEnable(GL_CLIP_DISTANCE1);
@@ -1999,7 +2014,8 @@ void CUnitDrawerGL4::DrawUnitModelBeingBuiltShadow(const CUnit* unit, bool noLua
 		smv.SubmitImmediately(unit, GL_TRIANGLES);
 	}
 
-	glPopAttrib();
+	savedPolyA.Restore(GL_POLYGON_BIT);
+	GL::VerifyAttribRestore("CUnitDrawerGL4::DrawUnitsShadow");
 }
 
 void CUnitDrawerGL4::DrawUnitModelBeingBuiltOpaque(const CUnit* unit, bool noLuaCall) const
@@ -2039,7 +2055,9 @@ void CUnitDrawerGL4::DrawUnitModelBeingBuiltOpaque(const CUnit* unit, bool noLua
 		{0.0f,  0.0f, 0.0f,                                                           0.0f },
 	};
 
-	glPushAttrib(GL_POLYGON_BIT);
+	GL::ShadowPushAttrib(GL_POLYGON_BIT);
+	GL::AttribSnapshot savedPolyB;
+	savedPolyB.Capture();
 
 	glEnable(GL_CLIP_DISTANCE0);
 	glEnable(GL_CLIP_DISTANCE1);
@@ -2083,6 +2101,7 @@ void CUnitDrawerGL4::DrawUnitModelBeingBuiltOpaque(const CUnit* unit, bool noLua
 	modelDrawerState->SetClipPlane(0); //default
 	glDisable(GL_CLIP_DISTANCE0);
 
-	glPopAttrib();
+	savedPolyB.Restore(GL_POLYGON_BIT);
+	GL::VerifyAttribRestore("CUnitDrawerGL4::DrawObjectsShadow");
 }
 

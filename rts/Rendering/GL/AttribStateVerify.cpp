@@ -9,6 +9,8 @@
 
 constexpr GLenum GL::AttribSnapshot::CAPS[];
 constexpr GLenum GL::AttribSnapshot::UNIT_CAPS[];
+constexpr GLenum GL::AttribSnapshot::TEX_TARGETS[];
+constexpr GLenum GL::AttribSnapshot::TEX_BINDINGS[];
 
 void GL::AttribSnapshot::Capture()
 {
@@ -20,6 +22,10 @@ void GL::AttribSnapshot::Capture()
 		glActiveTexture(GL_TEXTURE0 + u);
 		for (int i = 0; i < NUM_UNIT_CAPS; ++i)
 			unitCaps[u][i] = glIsEnabled(UNIT_CAPS[i]);
+		for (int t = 0; t < 4; ++t)
+			glGetIntegerv(TEX_BINDINGS[t], &texBinding[u][t]);
+		if (GL::ffMirror.shadowCompare)
+			glGetTexEnviv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, &texEnvMode[u]);
 	}
 	glActiveTexture(activeUnit);
 
@@ -161,6 +167,28 @@ void GL::AttribSnapshot::Restore(GLbitfield mask) const
 		glDepthRange(depthRange[0], depthRange[1]);
 	}
 
+	if (mask & GL_TEXTURE_BIT) {
+		GLint callerActive = GL_TEXTURE0;
+		glGetIntegerv(GL_ACTIVE_TEXTURE, &callerActive);
+		for (int u = 0; u < NUM_UNITS; ++u) {
+			glActiveTexture(GL_TEXTURE0 + u);
+			for (int t = 0; t < 4; ++t)
+				glBindTexture(TEX_TARGETS[t], texBinding[u][t]);
+
+			// GL_TEXTURE_BIT saves the per-unit texture ENABLES as well as the
+			// bindings -- they live in both it and GL_ENABLE_BIT. Restoring only
+			// the bindings left GL_TEXTURE_2D wrong on unit 0, which the verifier
+			// reported 183 times in one run while the pixel gate passed.
+			for (int i = 0; i < NUM_UNIT_CAPS; ++i) {
+				if (unitCaps[u][i])
+					glEnable(UNIT_CAPS[i]);
+				else
+					glDisable(UNIT_CAPS[i]);
+			}
+		}
+		glActiveTexture(callerActive);
+	}
+
 	if (mask & GL_FOG_BIT) {
 		glFogfv(GL_FOG_COLOR, fogColor);
 		glFogi(GL_FOG_MODE, fogMode);
@@ -211,6 +239,18 @@ const char* GL::AttribSnapshot::FirstDifference(const AttribSnapshot& o) const
 				snprintf(buf, sizeof(buf), "unit %d enable 0x%04x", u, UNIT_CAPS[i]);
 				return buf;
 			}
+		}
+		for (int t = 0; t < 4; ++t) {
+			if (texBinding[u][t] != o.texBinding[u][t]) {
+				static char buf[64];
+				snprintf(buf, sizeof(buf), "unit %d binding 0x%04x", u, TEX_TARGETS[t]);
+				return buf;
+			}
+		}
+		if (texEnvMode[u] != o.texEnvMode[u]) {
+			static char buf[64];
+			snprintf(buf, sizeof(buf), "unit %d texenv mode", u);
+			return buf;
 		}
 	}
 

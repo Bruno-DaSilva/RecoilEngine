@@ -1,6 +1,7 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
 #include "GuiHandler.h"
+#include "Rendering/GL/AttribStateVerify.h"
 
 #include <Rml/Backends/RmlUi_Backend.h>
 #include "CommandColors.h"
@@ -2635,7 +2636,9 @@ void CGuiHandler::Draw()
 	if ((iconsCount <= 0) && (luaUI == nullptr))
 		return;
 
-	glPushAttrib(GL_ENABLE_BIT);
+	GL::ShadowPushAttrib(GL_ENABLE_BIT);
+	GL::AttribSnapshot savedGuiAttribs;
+	savedGuiAttribs.Capture();
 
 	glDisable(GL_FOG);
 	glDisable(GL_DEPTH_TEST);
@@ -2649,7 +2652,8 @@ void CGuiHandler::Draw()
 	if (iconsCount > 0)
 		DrawButtons();
 
-	glPopAttrib();
+	savedGuiAttribs.Restore(GL_ENABLE_BIT);
+	GL::VerifyAttribRestore("CGuiHandler::Draw");
 }
 
 
