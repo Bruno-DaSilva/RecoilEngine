@@ -17,11 +17,13 @@
 #
 # (XCB off avoids needing libxcb-keysyms1-dev; xlib/GLX is what the engine uses.)
 #
-# NOTE ON RUNTIME. This is described elsewhere as a ~1-minute meter; that assumes
-# a RELEASE build. build/ here is CMAKE_BUILD_TYPE=Debug, and the run is also
-# under LD_PRELOAD=librenderdoc.so, which intercepts every GL call -- the same
-# content takes 10+ minutes. Any performance conclusion drawn from a run in this
-# configuration is worthless; measure in Release.
+# NOTE ON RUNTIME. ~1 minute on the canonical RELWITHDEBINFO build. If a run
+# takes many minutes instead, check CMAKE_BUILD_TYPE before suspecting anything
+# else: a Debug build takes 10-20+ minutes for this same content, because the
+# run is also under LD_PRELOAD=librenderdoc.so and every GL call is intercepted.
+# A Debug build additionally aborts on the startscript's NullAI assert. Draw no
+# performance conclusion without checking the cache first -- this cost a whole
+# false "the conversions are too expensive" investigation.
 #
 # Companions, both reading the log this leaves in the write-dir:
 #   rdoc_offender_sites.sh  resolves each function's FIRST-USE backtrace to source
@@ -40,7 +42,7 @@ root=$(cd -- "$here/../.." && pwd)
 writeDir=${AB_WRITE_DIR:-}
 springBin=$root/build/spring
 rdocLib=${RDOC_LIB:-/www/projects/renderdoc/build/lib/librenderdoc.so}
-runTimeout=1200
+runTimeout=420
 content=$here/watertest_startscript.txt
 
 die() { printf '\n[rdoc] FAIL: %s\n' "$*" >&2; exit 1; }
