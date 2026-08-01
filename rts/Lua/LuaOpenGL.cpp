@@ -1082,6 +1082,13 @@ bool  LuaOpenGL::canUseShaders = false;
 int  LuaOpenGL::deprecatedGLWarnLevel = 0;
 bool  LuaOpenGL::trackMatrices = false;
 bool  LuaOpenGL::modernImmediate = false;
+
+void LuaOpenGL::SetModernImmediate(bool value)
+{
+	modernImmediate = value;
+	trackMatrices = trackMatrices || value;
+	GL::ffDrawsPossible = !value;
+}
 bool  LuaOpenGL::glCompareMode = false;
 
 std::unordered_set<std::string> LuaOpenGL::deprecatedGLWarned = {};
@@ -1247,7 +1254,7 @@ void LuaOpenGL::Init()
 		deprecatedGLWarned.reserve(4096); // deprecated calls are logged along with caller information
 
 	modernImmediate = configHandler->GetBool("LuaModernGLBackend");
-	GL::ffColor.writeThrough = !modernImmediate;
+	GL::ffDrawsPossible = !modernImmediate;
 	glCompareMode = configHandler->GetBool("LuaGLCompareMode");
 	cmdListsEnabled = configHandler->GetBool("LuaCommandLists");
 	// the modern backend needs a CPU-side MVP; force matrix tracking on with it.

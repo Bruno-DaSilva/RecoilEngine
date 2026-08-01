@@ -47,7 +47,10 @@ class LuaOpenGL {
 		// Runtime toggle of the modern immediate-mode backend (default from config
 		// LuaModernGLBackend); read per-call at dispatch, so the whole-frame A/B
 		// compare can flip it between passes. Enables matrix tracking when on.
-		static void SetModernImmediate(bool value) { modernImmediate = value; trackMatrices = trackMatrices || value; GL::ffColor.writeThrough = !value; }
+		// out of line: the definition touches GL::ffDrawsPossible, and
+		// FFStateTracker.h cannot be included here -- X11 defines None, which
+		// collides with the experiment enum it also carries
+		static void SetModernImmediate(bool value);
 		static bool GetModernImmediate() { return modernImmediate; }
 
 		#define NOOP_STATE_FUNCS(Name)    \

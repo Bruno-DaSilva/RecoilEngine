@@ -102,6 +102,25 @@ namespace GL {
 
 	inline FFResetState ffResetState;
 
+	// Can anything in this process still be rasterized by FIXED FUNCTION -- i.e.
+	// drawn with no program bound? That decides whether the fixed-function state
+	// families can be dropped rather than merely rerouted: alpha test, fog, clip
+	// planes, line stipple and the current colour are read by the pipeline itself
+	// on such a draw, where no shader-side substitution reaches them.
+	//
+	// Set from LuaOpenGL::SetModernImmediate. The legacy immediate backend
+	// transforms and shades through fixed function and is the only reachable
+	// producer of such draws left -- measured, see GL::FFDrawCensus, which reports
+	// zero sites on both gate scripts with the modern backend on. It is also what
+	// the whole-frame A/B gate renders on three of its four passes, so this stays
+	// true there and the gate keeps its oracle.
+	//
+	// The engine's own glBegin drawers (HUDDrawer, HAPFSPathDrawer, DynWater,
+	// GuiHandler's build menu) would make it true as well, and are not tracked:
+	// the census reaches none of them, and any that is ever reached blocks capture
+	// through glBegin first, so the meter names it before this matters.
+	inline bool ffDrawsPossible = true;
+
 	// Which fixed-function call the removal experiment is testing this run. Add an
 	// enumerator plus its Active() call site for a candidate, prove it inert, then
 	// delete the call outright and retire the enumerator -- so an empty list here
@@ -125,9 +144,11 @@ namespace GL {
 	// gl_Fog.mode (they take .end/.scale, which derive from GL_FOG_START/END
 	// under either mode), so it looked dead; holding GL_EXP on the candidate
 	// pass instead diverged 2/747 frames at up to 46 levels, reproducibly, in
-	// the shipped configuration as well as under forced legacy. Something still
-	// rasterizes fog through fixed function, and glFogi goes only with the rest
-	// of the family.
+	// the shipped configuration as well as under forced legacy. It is re-armed
+	// as 8, because that was measured while the legacy model path was still
+	// issuing 436k fixed-function draws a run, and the draw census now reads
+	// zero -- a candidate refuted against a board that then moves is not
+	// settled.
 	enum class FFExperiment : int {
 		None = 0,
 		// 6: S3DModelVAO's legacy bind standing in for fixed function with an
@@ -139,6 +160,18 @@ namespace GL {
 		// generation -- experiment 3 on this same function was a vacuous zero
 		// until that driver existed.
 		ModelFFShader = 6,
+		// 8: experiment 5 re-armed, see above -- and now measured INERT (667
+		// frames, 0 px, shipped configuration, knobs echoed back). The write
+		// stays anyway, because GL::FFStandIn::StateReproducible rejects a
+		// non-LINEAR fog mode: a rejected draw falls back to fixed function, and
+		// that draw would then fog exponentially where it used to fog linearly.
+		// So the mode still goes with the rest of the fog family, but for a
+		// reason about the FALLBACK rather than about anything reading it.
+		//
+		// The write is HELD at GL_EXP rather than skipped, since the state is
+		// sticky and written once a run -- skipping it inherits the GL_LINEAR an
+		// earlier pass set and measures nothing at all.
+		FogMode = 8,
 	};
 
 	// Proving that deleting a fixed-function call changes no pixel needs a

@@ -17,6 +17,11 @@ springBin=$root/build/spring
 minCompares=400
 runTimeout=420
 forceLegacy=0
+# The engine REWRITES springsettings.cfg on exit and drops every key sitting at
+# its default value, so a knob set to its default silently disappears and the
+# next run measures a different configuration. Reported rather than asserted:
+# gating a knob deliberately OFF is a legitimate run.
+migrationKnobs=(LuaModernGLBackend LuaCmdListBakedStreams LuaCmdListSuspendOnObjectCreate ModernModelAttribs ModernModelFFShader FFVertexAttribRewrite)
 ffExperiment=0
 mixedOK=0
 content=
@@ -126,6 +131,19 @@ case $rc in
 esac
 
 [[ -s $infolog ]] || die "empty infolog: $infolog"
+
+# The engine echoes only explicitly-set, non-default keys, so a knob missing here
+# is one that reverted between runs -- which reads as a result rather than as an
+# error, and is how a meter reading jumped 16 -> 26 once.
+knobState=
+for k in "${migrationKnobs[@]}"; do
+	if grep -qE "^\[[^]]*\]  *$k = 1\$|  $k = 1\$" "$infolog"; then
+		knobState+=" $k=1"
+	else
+		knobState+=" $k=off"
+	fi
+done
+printf '[gate] knobs:%s\n' "$knobState"
 
 # A shader that failed to compile draws nothing in EVERY pass alike, so the
 # compare below reports a clean run over a broken frame -- measured: 646 frames

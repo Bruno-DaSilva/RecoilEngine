@@ -7,6 +7,7 @@
 #include <algorithm>
 
 #include "Rendering/GL/FFShaderRewrite.h"
+#include "Rendering/GL/FFStateTracker.h"
 #include "Rendering/GL/MatrixStateTracker.h"
 #include "System/Log/ILog.h"
 
@@ -17,7 +18,7 @@ void GL::FFColorMirror::Set(float r, float g, float b, float a)
 	current[2] = b;
 	current[3] = a;
 
-	if (!FFRewriteEnabled() || writeThrough)
+	if (!FFRewriteEnabled() || GL::ffDrawsPossible)
 		glColor4fv(current);
 
 	if (!FFRewriteEnabled())

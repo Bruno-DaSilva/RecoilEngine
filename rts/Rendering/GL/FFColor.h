@@ -22,22 +22,10 @@ namespace GL {
 	//
 	// With the rewrite off this still calls glColor4fv, so a game that never
 	// enables it is byte-for-byte unaffected, mirror and GL agree, and Verify()
-	// can prove the mirror sees every writer.
+	// can prove the mirror sees every writer. It also still calls it while
+	// GL::ffDrawsPossible -- a fixed-function draw reads the colour out of GL,
+	// and those draws are issuing glBegin anyway.
 	struct FFColorMirror {
-		// Write the colour into GL as well, because a fixed-function draw may
-		// still read it there. Set from LuaOpenGL::SetModernImmediate: the legacy
-		// immediate backend transforms and shades through fixed function, so it
-		// is the one remaining reader, and it is also what the whole-frame A/B
-		// gate renders on three of its four passes. Those paths issue glBegin
-		// anyway, so the glColor4fv costs a capture that was already lost.
-		//
-		// The engine's own glBegin drawers (HUDDrawer, HAPFSPathDrawer, DynWater,
-		// GuiHandler's build menu) would need the same, and do not get it: the
-		// fixed-function draw census reaches none of them, and any that is ever
-		// reached blocks capture through glBegin first, so the meter names it
-		// before the colour matters.
-		bool writeThrough = true;
-
 		void Set(float r, float g, float b, float a = 1.0f);
 		void Set(const float* rgba) { Set(rgba[0], rgba[1], rgba[2], rgba[3]); }
 		// the glColor3ub/glColor4ub spellings: unsigned bytes are the [0,1] range
