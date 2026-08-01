@@ -635,13 +635,21 @@ namespace {
 		}
 		glUniformMatrix4fv(it->second.mvp, 1, GL_FALSE, static_cast<const float*>(mvp));
 
-		// how many distinct programs the measurement actually covered; a 0-pixel
-		// result over two of them would say very little
+		// how many distinct programs the measurement actually covered, and WHAT
+		// they were fed: an identity here is the shape of a blank world, and it
+		// says the mirror was empty rather than that a consumer was missed.
 		static std::unordered_map<uint32_t, bool> fedPrograms;
 		if (bool& seen = fedPrograms[prog]; !seen) {
 			seen = true;
-			LOG_L(L_WARNING, "[FFUniformFeed] CPU-composed MVP FED to program %u (%d distinct so far)",
-				prog, static_cast<int>(fedPrograms.size()));
+			const CMatrix44f id;
+			float dev = 0.0f;
+			for (int i = 0; i < 16; ++i)
+				dev = std::max(dev, std::fabs(mvp.m[i] - id.m[i]));
+
+			LOG_L(L_WARNING, "[FFUniformFeed] MVP fed to program %u (%d distinct): %s, m0=%g m5=%g m10=%g m12=%g m15=%g",
+				prog, static_cast<int>(fedPrograms.size()),
+				(dev < 1e-6f) ? "IDENTITY" : "non-identity",
+				mvp.m[0], mvp.m[5], mvp.m[10], mvp.m[12], mvp.m[15]);
 		}
 	}
 
