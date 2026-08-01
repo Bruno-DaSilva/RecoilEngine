@@ -7411,6 +7411,17 @@ int LuaOpenGL::CreateList(lua_State* L)
 	// nesting -- an inner gl.CreateList inside an active capture compiles a
 	// REAL list below, with the capture suspended for its duration)
 	const bool capture = cmdListsEnabled && (cmdCapture == nullptr) && CmdListBeginCapture();
+	// Before the body runs, not after: materialization happens DURING it, and the
+	// one question its report has to answer is which gl.CreateList body forced a
+	// real display list. Assigned at end-of-capture this was always still empty,
+	// so every report read "<unknown: LuaImmediateFallbackStats off>" with the
+	// setting on.
+	if (capture && LuaImmFallback::Enabled()) {
+		lua_Debug info;
+		cmdCapture->cl->createSite = (lua_getstack(L, 1, &info) && lua_getinfo(L, "Sl", &info))
+				? fmt::format("{}:{}", info.short_src, info.currentline)
+				: "<unknown>";
+	}
 	const bool suspend = !capture && (cmdCapture != nullptr) && !cmdCapture->materialized;
 	if (suspend && (cmdCapture->suspendDepth++ == 0))
 		CmdListRestorePointers();
@@ -7462,12 +7473,6 @@ int LuaOpenGL::CreateList(lua_State* L)
 		// creation: identical legacy rendering, driver-side replay. UI-scale
 		// lists (the modern-flushable content) stay far below the threshold.
 		constexpr size_t CMDLIST_MAX_CAPTURED_VERTS = 4096;
-		if (cl != nullptr && LuaImmFallback::Enabled()) {
-			lua_Debug info;
-			cl->createSite = (lua_getstack(L, 1, &info) && lua_getinfo(L, "Sl", &info))
-					? fmt::format("{}:{}", info.short_src, info.currentline)
-					: "<unknown>";
-		}
 		if (cl != nullptr) {
 			size_t totalVerts = 0;
 			for (const auto& s : cl->streams)
