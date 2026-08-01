@@ -1548,7 +1548,12 @@ void LuaOpenGL::ResetGLState()
 	glPointParameterf(GL_POINT_SIZE_MAX, 1.0e9f); // FIXME?
 	glPointParameterf(GL_POINT_FADE_THRESHOLD_SIZE, 1.0f);
 
-	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+	// glColor4fv, not glColor4f: both are on RenderDoc's unsupported list, and
+	// the target is zero DISTINCT functions, so a spelling that duplicates one
+	// already unavoidable elsewhere (gl.Color, 84k calls a run) is one fewer
+	// entry to retire separately. Same value, same call.
+	static constexpr float opaqueWhite[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+	glColor4fv(opaqueWhite);
 	if (GL::ffResetState.materialTouched) {
 		const float ambient[4] = { 0.2f, 0.2f, 0.2f, 1.0f };
 		const float diffuse[4] = { 0.8f, 0.8f, 0.8f, 1.0f };

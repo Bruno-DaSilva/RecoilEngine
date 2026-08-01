@@ -646,7 +646,11 @@ void CShadowHandler::CreateShadows()
 	// only governs interpolation of the fixed-function gl_Color -- never reached a
 	// fragment. Measured, not reasoned: GLFFRemovalExperiment 1 rendered the pass
 	// both ways in the same frame, 785 frames, 0 pixels different.
-	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+	// glColor4fv rather than glColor4f -- see LuaOpenGL::ResetGLState; these two
+	// were the only glColor4f calls a BAR run reaches, so spelling them as the
+	// glColor4fv already used everywhere takes a whole function off the list.
+	static constexpr float opaqueWhite[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+	glColor4fv(opaqueWhite);
 	glDepthMask(GL_TRUE);
 	glEnable(GL_DEPTH_TEST);
 	glClear(GL_DEPTH_BUFFER_BIT);

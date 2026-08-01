@@ -267,7 +267,12 @@ CGrassDrawer::~CGrassDrawer()
 	eventHandler.RemoveClient(this);
 	configHandler->RemoveObserver(this);
 
-	glDeleteLists(grassDL, 1);
+	// grassDL stays 0 when the drawer never got as far as CreateGrassDispList
+	// (no grass on the map). glDeleteLists(0, 1) is a no-op to GL but still a
+	// call to a function RenderDoc does not support, which silently disables
+	// capture for the whole process.
+	if (grassDL != 0)
+		glDeleteLists(grassDL, 1);
 	glDeleteTextures(1, &grassBladeTex);
 	glDeleteTextures(1, &farTex);
 	shaderHandler->ReleaseProgramObjects("[GrassDrawer]");

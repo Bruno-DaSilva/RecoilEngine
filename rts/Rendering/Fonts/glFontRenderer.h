@@ -95,9 +95,17 @@ private:
 	TypedRenderBuffer<VA_TYPE_TC> primaryBufferTC;
 	TypedRenderBuffer<VA_TYPE_TC> outlineBufferTC;
 
+	// 0 until the recordable flush is first needed. That flush only runs inside
+	// an open display-list compile, so a run that compiles none -- the target
+	// state for RenderDoc capturability, where one glGenLists anywhere is enough
+	// to keep the whole display-list family on the unsupported list -- must not
+	// pay for this list at all.
 	uint32_t ffTextureSpaceMatrix = 0u;
+	bool wantTextureSpaceMatrix = false;
 	// atlas size the list was last compiled for: recompiling it on EVERY
-	// HandleTextureUpdate was ~190 glNewList compiles per frame of BAR UI
+	// HandleTextureUpdate was ~190 glNewList compiles per frame of BAR UI.
+	// Tracked even while the list does not exist, so the first recordable flush
+	// has a scale to fall back on.
 	int texMatListW = 0, texMatListH = 0;
 
 	static inline size_t fontShaderRefs = 0;

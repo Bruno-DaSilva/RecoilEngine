@@ -111,11 +111,10 @@ CglShaderFontRenderer::CglShaderFontRenderer()
 
 	useMVPUniform = configHandler->GetBool("FontUseMVPUniform");
 
-	// texel->UV texture-space matrix for the recordable (display-list) flush;
-	// recompiled on atlas resize in HandleTextureUpdate, like the no-shader renderer's
-	ffTextureSpaceMatrix = glGenLists(1);
-	glNewList(ffTextureSpaceMatrix, GL_COMPILE);
-	glEndList();
+	// The texel->UV texture-space matrix list is NOT created here: see the
+	// declaration. It is only reachable from the recordable flush, and creating
+	// it up front spends a glGenLists/glNewList/glEndList in every run including
+	// the ones that compile no display list at all.
 
 	++fontShaderRefs;
 
@@ -167,7 +166,8 @@ CglShaderFontRenderer::CglShaderFontRenderer()
 CglShaderFontRenderer::~CglShaderFontRenderer()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	glDeleteLists(ffTextureSpaceMatrix, 1);
+	if (ffTextureSpaceMatrix != 0)
+		glDeleteLists(ffTextureSpaceMatrix, 1);
 
 	--fontShaderRefs;
 	if (fontShaderRefs > 0)
@@ -215,7 +215,18 @@ void CglShaderFontRenderer::DrawTraingleElementsRecordable()
 	// through the shared texture-space-matrix list so atlas resizes keep working
 	glMatrixMode(GL_TEXTURE);
 	glPushMatrix();
-	glCallList(ffTextureSpaceMatrix);
+	wantTextureSpaceMatrix = true;
+	if (ffTextureSpaceMatrix != 0) {
+		glCallList(ffTextureSpaceMatrix);
+	} else if (texMatListW > 0 && texMatListH > 0) {
+		// First recordable flush of the run: the shared list cannot be created
+		// from here (glGenLists/glNewList are illegal inside the compile this
+		// runs in), so bake the scale into THIS list and let the next
+		// HandleTextureUpdate build the shared one for every flush after. Only
+		// this one list stops tracking atlas resizes, and only until whatever
+		// rebuilds it does so.
+		glScalef(1.0f / texMatListW, 1.0f / texMatListH, 1.0f);
+	}
 	glMatrixMode(GL_MODELVIEW);
 
 	// FF sampling; inside PushGLState's glPushAttrib(GL_ENABLE_BIT) bracket
@@ -253,20 +264,37 @@ void CglShaderFontRenderer::HandleTextureUpdate(CFontTexture& fnt, bool onlyUplo
 
 	GLint dl = 0;
 	glGetIntegerv(GL_LIST_INDEX, &dl);
-	if (dl == 0) {
-		fnt.UploadGlyphAtlasTextureImpl();
+	if (dl != 0)
+		return;
 
-		// keep the recordable-flush texture-space matrix in sync with the atlas size
-		// (this affects already compiled dlists too, like the no-shader renderer's);
-		// only recompile when the size actually changed -- unconditional recompiles
-		// were ~190 glNewList calls per frame of BAR UI
-		if (texMatListW != (int)fnt.GetTextureWidth() || texMatListH != (int)fnt.GetTextureHeight()) {
-			texMatListW = (int)fnt.GetTextureWidth();
-			texMatListH = (int)fnt.GetTextureHeight();
-			glNewList(ffTextureSpaceMatrix, GL_COMPILE);
-			glScalef(1.0f / fnt.GetTextureWidth(), 1.0f / fnt.GetTextureHeight(), 1.0f);
-			glEndList();
-		}
+	fnt.UploadGlyphAtlasTextureImpl();
+
+	const int w = (int)fnt.GetTextureWidth();
+	const int h = (int)fnt.GetTextureHeight();
+	const bool resized = (texMatListW != w || texMatListH != h);
+
+	texMatListW = w;
+	texMatListH = h;
+
+	// Nothing has needed the recordable flush yet, so the list does not exist
+	// and must not be brought into being: this is the only place that CAN create
+	// it (outside any compile), but doing so unconditionally is what kept
+	// glGenLists/glNewList/glEndList alive in runs with no display lists at all.
+	if (!wantTextureSpaceMatrix)
+		return;
+
+	const bool created = (ffTextureSpaceMatrix == 0);
+	if (created)
+		ffTextureSpaceMatrix = glGenLists(1);
+
+	// keep the recordable-flush texture-space matrix in sync with the atlas size
+	// (this affects already compiled dlists too, like the no-shader renderer's);
+	// only recompile when the size actually changed -- unconditional recompiles
+	// were ~190 glNewList calls per frame of BAR UI
+	if (resized || created) {
+		glNewList(ffTextureSpaceMatrix, GL_COMPILE);
+		glScalef(1.0f / w, 1.0f / h, 1.0f);
+		glEndList();
 	}
 }
 
