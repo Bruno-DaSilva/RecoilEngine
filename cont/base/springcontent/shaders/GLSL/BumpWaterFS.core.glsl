@@ -4,6 +4,7 @@
 #define texture2DLod textureLod
 #define textureCube texture
 #define shadow2DProj(s, c) vec4(textureProj(s, c))
+in float recoil_fogFragCoord;
 out vec4 recoil_fragColor;
 /**
  * @project Spring RTS
@@ -354,6 +355,6 @@ void main()
     recoil_fragColor.rgb += shadowOcc * specular * SpecularColor;
 
   // FOG
-    float fog = clamp( (gl_Fog.end - abs(gl_FogFragCoord)) * gl_Fog.scale ,0.0,1.0);
+    float fog = clamp( (gl_Fog.end - abs(recoil_fogFragCoord)) * gl_Fog.scale ,0.0,1.0);
     recoil_fragColor.rgb = mix(gl_Fog.color.rgb, recoil_fragColor.rgb, fog );
 }

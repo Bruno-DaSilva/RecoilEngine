@@ -4,6 +4,7 @@
 #define texture2DLod textureLod
 #define textureCube texture
 #define shadow2DProj(s, c) vec4(textureProj(s, c))
+out float recoil_fogFragCoord;
 /**
  * @project Spring RTS
  * @file bumpWaterVS.glsl
@@ -109,7 +110,7 @@ void main()
 
 	// FOG
 	worldPos = waveVertex.xyz;
-	gl_FogFragCoord = (gl_ModelViewMatrix * waveVertex).z;
+	recoil_fogFragCoord = (gl_ModelViewMatrix * waveVertex).z;
 
 	gl_Position = gl_ModelViewProjectionMatrix * waveVertex;
 
