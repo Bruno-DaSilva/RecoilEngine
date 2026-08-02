@@ -109,6 +109,12 @@ for k in "${migrationKnobs[@]}"; do cfgSet "$k" "$want"; done
 # turns the capture into a picture of nothing.
 cfgSet ABUnitShapeDriver 0
 
+# The gate sets FFRewriteBuiltinArm so its forced-legacy passes render rewritten
+# shaders correctly, and the knob PERSISTS in the config. A capture must not
+# inherit it: the arm re-names gl_Vertex/gl_MultiTexCoord0, which pins those
+# shaders to the compatibility profile and re-breaks RenderDoc's core replay.
+cfgSet FFRewriteBuiltinArm 0
+
 rm -f "$capture"*.rdc
 : > "$writeDir/infolog.txt"
 

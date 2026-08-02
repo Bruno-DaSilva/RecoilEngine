@@ -160,4 +160,10 @@ namespace GL {
 
 	// Config FFVertexAttribRewrite. Off leaves every shader source untouched.
 	bool FFRewriteEnabled();
+
+	// Config FFRewriteBuiltinArm: the A/B gate's measurement configuration, where
+	// rewritten shaders keep a gl_Vertex/gl_MultiTexCoord0 arm behind the per-draw
+	// recoil_ff_useAttrs selector so forced-legacy passes render them correctly.
+	// Off (shipped) emits attribute-only sources, which are core-clean.
+	bool FFRewriteKeepsBuiltinArm();
 }

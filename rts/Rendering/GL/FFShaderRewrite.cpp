@@ -24,6 +24,9 @@
 CONFIG(bool, FFVertexAttribRewrite).defaultValue(false).safemodeValue(false)
 	.description("Rewrite the fixed-function vertex builtins (gl_Vertex, gl_Color, gl_MultiTexCoord0, ftransform) in compiled GLSL to generic attributes, so shader-bound immediate-mode draws can be fed without glBegin/glVertex. Off leaves every shader source byte-identical.");
 
+CONFIG(bool, FFRewriteBuiltinArm).defaultValue(false).safemodeValue(false)
+	.description("Keep the gl_Vertex/gl_MultiTexCoord0 arm in rewritten shaders, selected per draw by recoil_ff_useAttrs, so a legacy immediate-mode submission through a rewritten program still reads the builtins it feeds. This is the whole-frame A/B gate's measurement configuration: without it the gate's forced-legacy passes drive rewritten programs with unfed attributes and the reference frame is wrong, which reads as a modern-backend divergence. Shipped runs leave it off, which keeps the generated sources core-clean for RenderDoc.");
+
 namespace {
 	bool usesFtransformEarly(const std::string& code);
 
@@ -274,6 +277,12 @@ bool GL::FFRewriteEnabled()
 {
 	static const bool enabled = configHandler->GetBool("FFVertexAttribRewrite");
 	return enabled;
+}
+
+bool GL::FFRewriteKeepsBuiltinArm()
+{
+	static const bool keep = configHandler->GetBool("FFRewriteBuiltinArm");
+	return keep;
 }
 
 int GL::ParseGlslVersion(const std::string& text)
@@ -541,9 +550,22 @@ bool GL::RewriteFFBuiltinsImpl(std::string& src, int glslVersion, uint32_t stage
 		// Location 0 by default, which is where gl_FragColor went.
 		decl += "out vec4 recoil_ff_FragColor;";
 	}
+	// The builtin arm exists only under the gate's measurement knob (see the
+	// CONFIG): the forced-legacy passes submit through glBegin/glTexCoord, which
+	// feeds the builtins and NOT the generic attributes, so without the arm the
+	// reference frame renders these programs from stale attribute state. Shipped
+	// runs leave the knob off and the generated source names no vertex builtin.
+	const bool keepStreamArm = GL::FFRewriteKeepsBuiltinArm() && (usesVertex || usesTexCrd);
+	if (keepStreamArm)
+		decl += " uniform bool " + std::string(UNIFORM_USE) + ";";
+
 	if (usesVertex) {
 		decl += std::string(in) + " vec4 " + ATTR_VERTEX + ";";
-		decl += " vec4 recoil_ff_Vertex() { return " + std::string(ATTR_VERTEX) + "; }";
+		if (keepStreamArm) {
+			decl += " vec4 recoil_ff_Vertex() { return " + std::string(UNIFORM_USE) + " ? " + std::string(ATTR_VERTEX) + " : gl_Vertex; }";
+		} else {
+			decl += " vec4 recoil_ff_Vertex() { return " + std::string(ATTR_VERTEX) + "; }";
+		}
 	}
 	if (usesFtransform) {
 		// ftransform() is gl_ModelViewProjectionMatrix * gl_Vertex, so it takes
@@ -561,7 +583,11 @@ bool GL::RewriteFFBuiltinsImpl(std::string& src, int glslVersion, uint32_t stage
 	}
 	if (usesTexCrd) {
 		decl += std::string(in) + " vec4 " + ATTR_TEXCRD + ";";
-		decl += " vec4 recoil_ff_MultiTexCoord0() { return " + std::string(ATTR_TEXCRD) + "; }";
+		if (keepStreamArm) {
+			decl += " vec4 recoil_ff_MultiTexCoord0() { return " + std::string(UNIFORM_USE) + " ? " + std::string(ATTR_TEXCRD) + " : gl_MultiTexCoord0; }";
+		} else {
+			decl += " vec4 recoil_ff_MultiTexCoord0() { return " + std::string(ATTR_TEXCRD) + "; }";
+		}
 	}
 
 	// WHETHER THE BUILTIN IS EMITTED AT ALL.
@@ -773,7 +799,11 @@ namespace {
 					prog, ATTR_VERTEX, static_cast<int>(seenProg.size()));
 			}
 
-			if (!inAttribStream) {
+			// Under the gate's measurement knob the builtin arm exists and
+			// recoil_ff_useAttrs selects it for exactly these draws, so an
+			// outside-stream draw is the legacy reference working as intended
+			// rather than unfed geometry.
+			if (!inAttribStream && !GL::FFRewriteKeepsBuiltinArm()) {
 				static std::unordered_map<uint32_t, bool> armed;
 				if (bool& hit = armed[prog]; !hit) {
 					hit = true;
@@ -1141,9 +1171,8 @@ void GL::DrawFFAttribStream(uint32_t drawMode, const float* data, size_t vertCou
 	bind(b.texCoord0, 2, 12, 1);
 	bind(b.color,     4, 20, 2);
 
-	// The selector is gone from generated sources, so this only still runs for a
-	// program compiled before the change (or by something else entirely) that
-	// happens to declare the name.
+	// The selector exists only under FFRewriteBuiltinArm (the gate's measurement
+	// configuration); shipped sources drop the arm and the location is -1.
 	if (b.useAttrs >= 0)
 		glUniform1i(b.useAttrs, 1);
 

@@ -21,7 +21,7 @@ forceLegacy=0
 # its default value, so a knob set to its default silently disappears and the
 # next run measures a different configuration. Reported rather than asserted:
 # gating a knob deliberately OFF is a legitimate run.
-migrationKnobs=(LuaModernGLBackend LuaCmdListBakedStreams LuaCmdListSuspendOnObjectCreate ModernModelAttribs ModernModelFFShader FFVertexAttribRewrite FFMatrixSuppress)
+migrationKnobs=(LuaModernGLBackend LuaCmdListBakedStreams LuaCmdListSuspendOnObjectCreate ModernModelAttribs ModernModelFFShader FFVertexAttribRewrite FFMatrixSuppress FFRewriteBuiltinArm)
 # knobs whose default is ON, so an absent config line means enabled
 defaultOnKnobs=(FFMatrixSuppress)
 ffExperiment=0
@@ -92,8 +92,14 @@ infolog=$writeDir/infolog.txt
 # leaks GL state and leaves the world white (measured: 100% of the world region,
 # bisected to it out of 117 widgets), and a gate comparing repeat renders of a
 # white frame reports 0/0 over nothing. Owned here rather than inherited.
+# FFRewriteBuiltinArm: the gate's forced-legacy passes submit immediate-mode
+# geometry through rewritten Lua shaders; without the builtin arm those programs
+# read stale generic attributes and the LEGACY reference renders wrong (measured:
+# gfx_guishader's stencil-masked blur became a fullscreen constant-texcoord wash,
+# 3M px of "signal" that was actually reference corruption). Capture runs must
+# NOT set this -- the arm re-names vertex builtins, which pins `compatibility`.
 touch "$cfg"
-for kv in "GLFrameABCompare = 1" "GLFrameABCompareDump = 1" "GLFrameABCompareInterval = 1" "GLFFRemovalExperiment = $ffExperiment" "ABUnitShapeDriver = 0"; do
+for kv in "GLFrameABCompare = 1" "GLFrameABCompareDump = 1" "GLFrameABCompareInterval = 1" "GLFFRemovalExperiment = $ffExperiment" "ABUnitShapeDriver = 0" "FFRewriteBuiltinArm = 1"; do
 	k=${kv%% =*}
 	if grep -q "^$k = " "$cfg"; then
 		sed -i "s|^$k = .*|$kv|" "$cfg"
