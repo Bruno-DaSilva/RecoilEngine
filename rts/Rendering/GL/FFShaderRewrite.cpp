@@ -48,6 +48,38 @@ namespace {
 
 	bool HasIdent(const std::string& s, const std::string& id) { return FindIdent(s, id, 0) != std::string::npos; }
 
+	// Highest literal index used with gl_FragData, or -1 when it is indexed by
+	// anything else. The replacement is a declared array and an array has to have
+	// a size, so a computed index is a decline rather than a guess.
+	int MaxFragDataIndex(const std::string& code)
+	{
+		int maxIdx = -1;
+
+		for (size_t p = FindIdent(code, "gl_FragData", 0); p != std::string::npos; p = FindIdent(code, "gl_FragData", p + 11)) {
+			size_t q = p + 11;
+			while (q < code.size() && (code[q] == ' ' || code[q] == '\t'))
+				++q;
+			if (q >= code.size() || code[q] != '[')
+				return -1;
+
+			++q;
+			while (q < code.size() && (code[q] == ' ' || code[q] == '\t'))
+				++q;
+
+			int idx = 0;
+			size_t digits = 0;
+			for (; q < code.size() && std::isdigit(static_cast<unsigned char>(code[q])); ++q, ++digits)
+				idx = idx * 10 + (code[q] - '0');
+
+			if (digits == 0)
+				return -1;
+
+			maxIdx = std::max(maxIdx, idx);
+		}
+
+		return maxIdx;
+	}
+
 	// ftransform() expands to the same transform, so it counts as a reader of it
 	bool usesFtransformEarly(const std::string& code) { return HasIdent(code, "ftransform"); }
 
@@ -378,12 +410,53 @@ bool GL::RewriteFFBuiltinsImpl(std::string& src, int glslVersion, uint32_t stage
 	usesAnyMatrix |= usesNormalMatrix;
 
 	const bool usesMVP = usesAnyMatrix;
+
+	// gl_FragColor / gl_FragData are not fixed-function STATE -- they are the
+	// pre-130 way of naming a fragment output, and core removed them. Replacing
+	// them is a declaration plus a rename, with no engine side at all, which makes
+	// them the cheapest of the constructs still pinning shaders to the
+	// compatibility profile.
+	//
+	// `out` itself only exists from 130, so below that there is nothing to rewrite
+	// TO and the shader keeps the builtin. A shader mixing the two is left alone
+	// entirely: GLSL forbids writing both, so one of them is already dead code and
+	// guessing which would be a rendering change rather than a rename.
+	const bool fs = (stage == GL_FRAGMENT_SHADER);
+	const bool hasFragColor = fs && HasIdent(code, "gl_FragColor");
+	const bool hasFragData = fs && HasIdent(code, "gl_FragData");
+
+	// A shader naming BOTH is normal rather than illegal: writing both is
+	// forbidden, but the two live in different #ifdef branches of the same
+	// deferred-shading source and only one is ever compiled. So both are declared
+	// through ONE array -- gl_FragColor is output 0 and so is gl_FragData[0], and
+	// declaring a scalar alongside the array would put two outputs on location 0.
+	const int fragDataCount = hasFragData ? MaxFragDataIndex(code) + 1 : 0;
+	const bool usesFragData = hasFragData && fragDataCount > 0 && glslVersion >= 130;
+	const bool usesFragColor = hasFragColor && glslVersion >= 130 && (usesFragData || !hasFragData);
+
+	if ((hasFragColor && !usesFragColor) || (hasFragData && !usesFragData)) {
+		static std::unordered_map<int, bool> declined;
+		if (bool& seen = declined[glslVersion]; !seen) {
+			seen = true;
+			// An excerpt, because "some shader" is not something anyone can act on
+			// and the rewrite never sees a filename.
+			std::string head = src.substr(0, 160);
+			for (char& c : head) {
+				if (c == '\n' || c == '\r')
+					c = ' ';
+			}
+			LOG_L(L_WARNING, "[FFCompat] fragment outputs NOT rewritten (glslVersion=%d, fragDataCount=%d): %s -- source starts: %s",
+				glslVersion, fragDataCount,
+				(glslVersion < 130) ? "`out` does not exist before 130" : "gl_FragData is indexed by something other than a literal",
+				head.c_str());
+		}
+	}
 	const bool usesColor = vs && HasIdent(code, "gl_Color");
 	bool usesFtransform = vs && HasIdent(code, "ftransform");
 	bool usesVertex = usesFtransform || (vs && HasIdent(code, "gl_Vertex"));
 	bool usesTexCrd = vs && HasIdent(code, "gl_MultiTexCoord0");
 
-	if (!usesVertex && !usesColor && !usesTexCrd && !usesFog && !usesMVP)
+	if (!usesVertex && !usesColor && !usesTexCrd && !usesFog && !usesMVP && !usesFragColor && !usesFragData)
 		return false;
 
 	// The stream channels come as a set -- half-feeding one of the builtins this
@@ -400,7 +473,7 @@ bool GL::RewriteFFBuiltinsImpl(std::string& src, int glslVersion, uint32_t stage
 		break;
 	}
 
-	if (!usesVertex && !usesColor && !usesTexCrd && !usesFog && !usesMVP)
+	if (!usesVertex && !usesColor && !usesTexCrd && !usesFog && !usesMVP && !usesFragColor && !usesFragData)
 		return false;
 
 	// Collect every site against the mask, then rewrite `src` once from the back,
@@ -429,6 +502,8 @@ bool GL::RewriteFFBuiltinsImpl(std::string& src, int glslVersion, uint32_t stage
 	for (const MatrixBuiltin& mb : matrices)
 		collect(mb.used, mb.builtin, mb.accessor);
 	collect(usesNormalMatrix, "gl_NormalMatrix", "recoil_ff_N()");
+	collect(usesFragData, "gl_FragData", "recoil_ff_FragData");
+	collect(usesFragColor, "gl_FragColor", usesFragData ? "recoil_ff_FragData[0]" : "recoil_ff_FragColor");
 
 	// the insertion point is taken before any of this, off the same mask; every
 	// site is below the #version line, so the offset survives the rewrite
@@ -443,6 +518,12 @@ bool GL::RewriteFFBuiltinsImpl(std::string& src, int glslVersion, uint32_t stage
 	// one physical line, so a compile error in the game's own source still
 	// reports the line the author wrote (see the #line re-anchor below)
 	std::string decl;
+	if (usesFragData) {
+		decl += "out vec4 recoil_ff_FragData[" + std::to_string(fragDataCount) + "];";
+	} else if (usesFragColor) {
+		// Location 0 by default, which is where gl_FragColor went.
+		decl += "out vec4 recoil_ff_FragColor;";
+	}
 	if (usesVertex) {
 		decl += std::string(in) + " vec4 " + ATTR_VERTEX + ";";
 		decl += " vec4 recoil_ff_Vertex() { return " + std::string(ATTR_VERTEX) + "; }";
