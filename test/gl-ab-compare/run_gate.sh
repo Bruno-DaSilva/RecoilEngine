@@ -85,8 +85,15 @@ infolog=$writeDir/infolog.txt
 # The engine rewrites springsettings.cfg on exit and drops GLFrameABCompare, so
 # these are re-applied per run rather than once. Interval is pinned to 1 so the
 # compare count below equals the number of compared frames.
+#
+# ABUnitShapeDriver belongs to the offender meter, which enables it to manufacture
+# coverage of the legacy model path -- and it PERSISTS in this same config file,
+# so a gate run following a meter run inherits it. That matters because the driver
+# leaks GL state and leaves the world white (measured: 100% of the world region,
+# bisected to it out of 117 widgets), and a gate comparing repeat renders of a
+# white frame reports 0/0 over nothing. Owned here rather than inherited.
 touch "$cfg"
-for kv in "GLFrameABCompare = 1" "GLFrameABCompareDump = 1" "GLFrameABCompareInterval = 1" "GLFFRemovalExperiment = $ffExperiment"; do
+for kv in "GLFrameABCompare = 1" "GLFrameABCompareDump = 1" "GLFrameABCompareInterval = 1" "GLFFRemovalExperiment = $ffExperiment" "ABUnitShapeDriver = 0"; do
 	k=${kv%% =*}
 	if grep -q "^$k = " "$cfg"; then
 		sed -i "s|^$k = .*|$kv|" "$cfg"

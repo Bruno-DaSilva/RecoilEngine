@@ -22,6 +22,17 @@ end
 -- driver of this path is UI state, not combat. So the coverage has to be
 -- manufactured deliberately.
 
+-- KNOWN DEFECT: this widget leaves the world WHITE. Measured at 100% of the
+-- world region and bisected to this widget out of 117 enabled ones, with the
+-- migration knobs both on and off, so it is this harness and not the engine. The
+-- rawState row below hands fixed function a model draw and owns none of the state
+-- around it, which is the point of the row and also the likeliest leak.
+--
+-- It does not affect what the offender meter measures -- the draws still happen,
+-- and the meter counts functions reached, not pixels -- but anything that looks
+-- at the IMAGE has to keep this widget off, or it is looking at a white frame:
+-- run_gate.sh forces the knob to 0 rather than inheriting it, and
+-- run_rdoc_capture.sh dies if the widget activated.
 local enabled = (Spring.GetConfigInt("ABUnitShapeDriver", 0) == 1)
 
 local shapes = {}
