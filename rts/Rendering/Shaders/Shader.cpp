@@ -7,6 +7,7 @@
 #include "Rendering/GL/myGL.h"
 #include "Rendering/GL/FFShaderRewrite.h"
 #include "Rendering/GL/FFStateTracker.h"
+#include "GLSLCopyState.h"
 #include "Rendering/GlobalRendering.h"
 
 #include "System/SafeUtil.h"
@@ -520,8 +521,15 @@ namespace Shader {
 
 		if (useID != lastBoundID) {
 			// Only when the variant actually changes; with no twin this never fires.
-			if (lastBoundID != 0 || coreObjID != 0)
+			if (coreObjID != 0) {
+				// Uniform VALUES are per-program, so the twin has never been given
+				// any -- it would draw with every uniform at zero, which is a
+				// whole-frame difference that says nothing about the port. Copy the
+				// live values across, then re-resolve the location cache, which the
+				// linker assigned independently for each variant.
+				GLSLCopyState(useID, (useID == coreObjID) ? objID : coreObjID, &uniformStates);
 				RefreshUniformLocations(useID);
+			}
 
 			lastBoundID = useID;
 		}
