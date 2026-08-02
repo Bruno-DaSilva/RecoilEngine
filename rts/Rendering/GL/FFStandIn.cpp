@@ -41,8 +41,15 @@ namespace {
 			s += "vFogF = (gl_Fog.end - abs((gl_ModelViewMatrix * vec4(apos, 1.0)).z)) * gl_Fog.scale; ";
 		// User clip planes are applied to a fixed-function draw against eye space
 		// automatically; a shader-bound draw in the compatibility profile only
-		// gets them if the vertex stage says where the vertex is.
-		s += "gl_ClipVertex = gl_ModelViewMatrix * vec4(apos, 1.0); ";
+		// gets them if the vertex stage says where the vertex is. gl_ClipVertex
+		// exists only in that profile: under the rewrite the #version drops the
+		// compatibility token and naming it fails the whole compile, which
+		// REJECTS the stand-in and retains the fixed-function client arrays --
+		// the exact draws the capture gate cannot afford. Clip planes are also
+		// suppressed state under the rewrite (measured inert in BAR), so the
+		// core-clean variant simply goes unclipped.
+		if (!GL::FFRewriteEnabled())
+			s += "gl_ClipVertex = gl_ModelViewMatrix * vec4(apos, 1.0); ";
 		s += "gl_Position = gl_ModelViewProjectionMatrix * vec4(apos, 1.0); }\n";
 		return s;
 	}
