@@ -16,12 +16,24 @@
 // engine compiles reaches a game's own shaders too, so an unmodified game gets
 // the modern feed without touching its content or the gl.* API.
 //
-// The position and texcoord attributes are selected per draw by
-// `recoil_ff_useAttrs`, a uniform that defaults to false, so a program compiled
-// through here renders exactly as it does today until a caller feeds it a
-// stream. gl_Color has no such switch: it is a global CURRENT value rather than
-// something a draw supplies, so it is replaced unconditionally and fed through
-// the pinned attribute's current value instead (see GL::ffColor).
+// The builtins are replaced OUTRIGHT rather than selected against by a uniform.
+// A shader that still names one obliges its source to declare `#version ...
+// compatibility`, and RenderDoc replays captures on a CORE-profile context where
+// such a source cannot be compiled at all -- so it cannot be reflected, which is
+// most of the point of capturing. Zero rejected CALLS is necessary but not
+// sufficient; the text has to be core-clean too.
+//
+// For fog and the matrices the engine decides the source once at startup, so
+// dropping the builtin arm is a reasoning step. For position and texcoord it is a
+// MEASUREMENT: those arrive per draw, and a submission that reached a rewritten
+// program without going through DrawFFAttribStream would read an unfed attribute.
+// Measured zero across watertest and idletest with the control firing, and the
+// census in PushMVPUniform stays in permanently so the case announces itself
+// rather than corrupting geometry quietly.
+//
+// gl_Color never had a switch: it is a global CURRENT value rather than something
+// a draw supplies, so it is fed through the pinned attribute's current value
+// instead (see GL::ffColor).
 //
 // #define of a gl_ name is illegal in GLSL, so this is textual substitution of
 // the identifier plus a generated declaration block.
@@ -82,9 +94,13 @@ namespace GL {
 		int32_t vertex = -1;
 		int32_t color = -1;
 		int32_t texCoord0 = -1;
-		int32_t useAttrs = -1; // the uniform; -1 means "not a rewritten program"
+		// The generated ATTRIBUTE is what identifies a rewritten program now. The
+		// selector uniform is gone from the generated source, and a uniform nothing
+		// references is dropped by the linker, so keying on it would reject every
+		// program the rewrite just converted.
+		int32_t useAttrs = -1; // legacy selector; -1 is normal, not an error
 
-		bool Usable() const { return useAttrs >= 0 && vertex >= 0; }
+		bool Usable() const { return vertex >= 0; }
 	};
 
 	// Introspects `prog` once and caches the result. Returns nullptr for 0, for

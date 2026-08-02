@@ -370,11 +370,9 @@ bool GL::RewriteFFBuiltins(std::string& src, int glslVersion, uint32_t stage)
 	// one physical line, so a compile error in the game's own source still
 	// reports the line the author wrote (see the #line re-anchor below)
 	std::string decl;
-	if (usesVertex || usesTexCrd)
-		decl += "uniform bool " + std::string(UNIFORM_USE) + ";";
 	if (usesVertex) {
 		decl += std::string(in) + " vec4 " + ATTR_VERTEX + ";";
-		decl += " vec4 recoil_ff_Vertex() { return " + std::string(UNIFORM_USE) + " ? " + ATTR_VERTEX + " : gl_Vertex; }";
+		decl += " vec4 recoil_ff_Vertex() { return " + std::string(ATTR_VERTEX) + "; }";
 	}
 	if (usesFtransform) {
 		// ftransform() is gl_ModelViewProjectionMatrix * gl_Vertex, so it takes
@@ -392,8 +390,27 @@ bool GL::RewriteFFBuiltins(std::string& src, int glslVersion, uint32_t stage)
 	}
 	if (usesTexCrd) {
 		decl += std::string(in) + " vec4 " + ATTR_TEXCRD + ";";
-		decl += " vec4 recoil_ff_MultiTexCoord0() { return " + std::string(UNIFORM_USE) + " ? " + ATTR_TEXCRD + " : gl_MultiTexCoord0; }";
+		decl += " vec4 recoil_ff_MultiTexCoord0() { return " + std::string(ATTR_TEXCRD) + "; }";
 	}
+
+	// WHETHER THE BUILTIN IS EMITTED AT ALL.
+	//
+	// Both sources were compiled in behind a selector because the whole-frame gate
+	// compares Lua backends within ONE build and is otherwise blind to an
+	// engine-side substitution. That was a measurement device, and it is not free:
+	// naming a builtin obliges the shader to declare `#version ... compatibility`,
+	// and RenderDoc replays captures on a CORE-profile context, where such a shader
+	// cannot be compiled at all -- so it cannot be reflected, and on Mesa a warm
+	// shader cache turns that into a linker segfault. Zero rejected CALLS is
+	// necessary but not sufficient; the shader text has to be core-clean too.
+	//
+	// So the arm is emitted exactly when the engine can still select it. For both
+	// families below that is decided once at startup, not per draw: under
+	// suppression the engine no longer issues the fixed-function calls, so the
+	// builtin holds an identity and selecting it would be wrong rather than merely
+	// unused.
+	const bool keepMatrixArm = !GL::FFMatrixSuppressed();
+	const bool keepFogArm = GL::ffExperiment.Active(GL::FFExperiment::FogUniform);
 
 	if (usesFog) {
 		// The member set and its meanings are the builtin's, so a shader reading
@@ -408,29 +425,40 @@ bool GL::RewriteFFBuiltins(std::string& src, int glslVersion, uint32_t stage)
 		// selector costs one bool once the answer is in.
 		decl += " struct recoil_ff_FogParameters { vec4 color; float density; float start; float end; float scale; };";
 		decl += " uniform recoil_ff_FogParameters " + std::string(FF_FOG_UNIFORM_NAME) + ";";
-		decl += " uniform bool " + std::string(FF_FOG_SELECT_NAME) + ";";
-		decl += " recoil_ff_FogParameters recoil_ff_Fog() { return " + std::string(FF_FOG_SELECT_NAME) + " ? " +
-		        std::string(FF_FOG_UNIFORM_NAME) +
-		        " : recoil_ff_FogParameters(gl_Fog.color, gl_Fog.density, gl_Fog.start, gl_Fog.end, gl_Fog.scale); }";
+
+		if (keepFogArm) {
+			decl += " uniform bool " + std::string(FF_FOG_SELECT_NAME) + ";";
+			decl += " recoil_ff_FogParameters recoil_ff_Fog() { return " + std::string(FF_FOG_SELECT_NAME) + " ? " +
+			        std::string(FF_FOG_UNIFORM_NAME) +
+			        " : recoil_ff_FogParameters(gl_Fog.color, gl_Fog.density, gl_Fog.start, gl_Fog.end, gl_Fog.scale); }";
+		} else {
+			decl += " recoil_ff_FogParameters recoil_ff_Fog() { return " + std::string(FF_FOG_UNIFORM_NAME) + "; }";
+		}
 	}
 
 	if (usesAnyMatrix) {
 		// One selector for the whole set: they are fed together and there is no
 		// case where a shader should take some from the engine and some from the
 		// driver.
+		// The selector uniform stays declared either way: PushMVPUniform locates it
+		// to decide whether a program is one of ours, and a program that lost it
+		// would go unfed rather than uniform-only.
 		decl += " uniform bool " + std::string(FF_MVP_SELECT_NAME) + ";";
 
 		for (const MatrixBuiltin& mb : matrices) {
 			if (!mb.used)
 				continue;
 			decl += " uniform mat4 " + std::string(mb.uniform) + ";";
-			decl += " mat4 " + std::string(mb.accessor).substr(0, std::strlen(mb.accessor) - 2) +
-			        "() { return " + std::string(FF_MVP_SELECT_NAME) + " ? " + mb.uniform + " : " + mb.builtin + "; }";
+			decl += " mat4 " + std::string(mb.accessor).substr(0, std::strlen(mb.accessor) - 2) + "() { return ";
+			decl += keepMatrixArm ? (std::string(FF_MVP_SELECT_NAME) + " ? " + mb.uniform + " : " + mb.builtin) : std::string(mb.uniform);
+			decl += "; }";
 		}
 
 		if (usesNormalMatrix) {
 			decl += " uniform mat3 recoil_ff_Nu;";
-			decl += " mat3 recoil_ff_N() { return " + std::string(FF_MVP_SELECT_NAME) + " ? recoil_ff_Nu : gl_NormalMatrix; }";
+			decl += " mat3 recoil_ff_N() { return ";
+			decl += keepMatrixArm ? (std::string(FF_MVP_SELECT_NAME) + " ? recoil_ff_Nu : gl_NormalMatrix") : std::string("recoil_ff_Nu");
+			decl += "; }";
 		}
 	}
 
@@ -445,10 +473,18 @@ namespace {
 		int32_t mvp = -1, mvpSelect = -1;
 		int32_t mv = -1, proj = -1, normal = -1;
 		int32_t mvpInv = -1, mvInv = -1, projInv = -1;
+		int32_t attrVertex = -1;    // the generated position attribute; census key
 		uint32_t fedGeneration = 0; // 0 = never fed
 		int32_t fedSelect = -1;     // the selector value this program last saw
 		bool anything = false;
 	};
+
+	// Set only while DrawFFAttribStream's own draw is in flight. Every other draw
+	// through a rewritten program leaves recoil_ff_useAttrs at 0 and therefore
+	// reads gl_Vertex / gl_MultiTexCoord0 -- which is the one selector the engine
+	// does NOT decide once at startup, and so the one whose builtin arm cannot be
+	// dropped on reasoning alone. See NoteBuiltinArmDraw.
+	bool inAttribStream = false;
 
 	// Keyed by program id, and the ids are RECYCLED -- an entry that outlives its
 	// program would hand the next one the previous layout -- so glLinkProgram and
@@ -542,7 +578,50 @@ namespace {
 			it = progUniforms.find(prog);
 		}
 
-		if (it == progUniforms.end() || it->second.mvpSelect < 0) {
+		// CENSUS: draws that would take the gl_Vertex / gl_MultiTexCoord0 arm.
+		//
+		// The fog and matrix selectors are decided by the engine once (suppression
+		// on, or an experiment armed), so those builtin arms are provably dead in
+		// the shipping configuration and are simply not emitted. useAttrs is
+		// per-draw, so the same claim has to be MEASURED: a shader reading gl_Vertex
+		// is fed by a fixed-function submission, and if any submission still reaches
+		// one without going through DrawFFAttribStream, removing the arm would draw
+		// it from an unfed attribute -- a silent geometry corruption, not an error.
+		//
+		// Reported per program rather than counted, so an empty log means zero such
+		// draws and a non-empty one names what to convert first. The POSITIVE
+		// CONTROL matters as much as the count: if no program in the run has the
+		// uniform at all, "no draw took the arm" is true and worthless, so both are
+		// logged and the absence of the control line invalidates the absence of the
+		// census line.
+		if (it != progUniforms.end() && it->second.attrVertex >= 0) {
+			static std::unordered_map<uint32_t, bool> seenProg;
+			if (bool& seen = seenProg[prog]; !seen) {
+				seen = true;
+				LOG_L(L_WARNING, "[FFBuiltinArm] CONTROL: program %u takes its position from %s, so the census below can observe it (%d distinct)",
+					prog, ATTR_VERTEX, static_cast<int>(seenProg.size()));
+			}
+
+			if (!inAttribStream) {
+				static std::unordered_map<uint32_t, bool> armed;
+				if (bool& hit = armed[prog]; !hit) {
+					hit = true;
+					LOG_L(L_ERROR, "[FFBuiltinArm] draw through rewritten program %u from OUTSIDE the attribute stream -- its position attribute is unfed, so this geometry is wrong (%d distinct)",
+						prog, static_cast<int>(armed.size()));
+				}
+			}
+		}
+
+		// Keyed on the matrix UNIFORMS, never on the selector. A uniform nothing
+		// references is dropped by the linker, and with the builtin arm gone the
+		// selector is exactly that -- so testing it would classify every rewritten
+		// program as unfed and feed none of them. That is a whole-frame divergence,
+		// and it is what this check did when it read mvpSelect.
+		const bool fed = (it != progUniforms.end()) &&
+			(it->second.mvp >= 0 || it->second.mv >= 0 || it->second.proj >= 0 || it->second.normal >= 0 ||
+			 it->second.mvpInv >= 0 || it->second.mvInv >= 0 || it->second.projInv >= 0);
+
+		if (!fed) {
 			// This draw's program has no engine-fed transform: either nothing was
 			// rewritten into it (it uses its own uniforms) or it reads a builtin
 			// the rewrite never saw. Under suppression the second kind gets an
@@ -561,9 +640,16 @@ namespace {
 		// any more, so every rewritten program takes the uniform on every pass.
 		const bool fromMirror = GL::FFMatrixSuppressed() || GL::ffExperiment.Active(GL::FFExperiment::MatrixUniformFromMirror);
 		const int32_t select = (fromMirror || GL::ffExperiment.Active(GL::FFExperiment::MatrixUniform)) ? 1 : 0;
-		glUniform1i(it->second.mvpSelect, select);
 
-		if (select == 0 || it->second.mvp < 0)
+		// Present only while the builtin arm is emitted, i.e. while an experiment
+		// can still select it.
+		if (it->second.mvpSelect >= 0)
+			glUniform1i(it->second.mvpSelect, select);
+
+		// Only the selector short-circuits. Gating on mvp too would skip a shader
+		// that reads gl_ModelViewMatrix without reading the composed MVP, leaving
+		// ITS uniform unfed; every upload below is location-guarded already.
+		if (select == 0)
 			return;
 
 		// gl.CallList replays matrix ops inside the driver, where glad cannot see
@@ -633,7 +719,7 @@ namespace {
 				LOG_L(L_WARNING, "[FFUniformFeed] mirror MVP differs from the glGetFloatv product by %g relative", d);
 			}
 		}
-		glUniformMatrix4fv(it->second.mvp, 1, GL_FALSE, static_cast<const float*>(mvp));
+		upload(u.mvp, mvp);
 
 		// how many distinct programs the measurement actually covered, and WHAT
 		// they were fed: an identity here is the shape of a blank world, and it
@@ -721,7 +807,8 @@ void GL::PushFFUniforms(uint32_t prog)
 		u.mvpInv     = glGetUniformLocation(prog, "recoil_ff_MVPinvU");
 		u.mvInv      = glGetUniformLocation(prog, "recoil_ff_MVinvU");
 		u.projInv    = glGetUniformLocation(prog, "recoil_ff_PinvU");
-		u.anything = (u.fogColor >= 0 || u.fogDensity >= 0 || u.fogStart >= 0 || u.fogEnd >= 0 || u.fogScale >= 0 || u.fogSelect >= 0);
+		u.attrVertex = glGetAttribLocation(prog, ATTR_VERTEX);
+		u.anything =(u.fogColor >= 0 || u.fogDensity >= 0 || u.fogStart >= 0 || u.fogEnd >= 0 || u.fogScale >= 0 || u.fogSelect >= 0);
 		it = progUniforms.emplace(prog, u).first;
 	}
 
@@ -827,11 +914,11 @@ const GL::FFAttribBinding* GL::GetFFAttribBinding(uint32_t prog)
 	if (prog == 0 || !FFRewriteEnabled())
 		return nullptr;
 
-	b.useAttrs  = glGetUniformLocation(prog, UNIFORM_USE);
-	if (b.useAttrs < 0)
+	b.vertex    = glGetAttribLocation(prog, ATTR_VERTEX);
+	if (b.vertex < 0)
 		return nullptr;
 
-	b.vertex    = glGetAttribLocation(prog, ATTR_VERTEX);
+	b.useAttrs  = glGetUniformLocation(prog, UNIFORM_USE);
 	b.color     = glGetAttribLocation(prog, GL::FF_COLOR_ATTRIB_NAME);
 	b.texCoord0 = glGetAttribLocation(prog, ATTR_TEXCRD);
 
@@ -883,9 +970,18 @@ void GL::DrawFFAttribStream(uint32_t drawMode, const float* data, size_t vertCou
 	bind(b.texCoord0, 2, 12, 1);
 	bind(b.color,     4, 20, 2);
 
-	glUniform1i(b.useAttrs, 1);
+	// The selector is gone from generated sources, so this only still runs for a
+	// program compiled before the change (or by something else entirely) that
+	// happens to declare the name.
+	if (b.useAttrs >= 0)
+		glUniform1i(b.useAttrs, 1);
+
+	inAttribStream = true;
 	glDrawArrays(drawMode, 0, static_cast<GLsizei>(vertCount));
-	glUniform1i(b.useAttrs, 0);
+	inAttribStream = false;
+
+	if (b.useAttrs >= 0)
+		glUniform1i(b.useAttrs, 0);
 
 	glBindBuffer(GL_ARRAY_BUFFER, 0);
 	glBindVertexArray(prevVAO);
