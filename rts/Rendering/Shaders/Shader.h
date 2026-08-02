@@ -48,6 +48,7 @@ namespace Shader {
 		bool IsValid() const { return valid; }
 		void SetReloadComplete() { reloadRequested = false; }
 		bool IsReloadRequested() const { return reloadRequested;  }
+		const std::string& GetSrcFile() const { return srcFile; }
 
 		unsigned int GetObjID() const { return objID; }
 		unsigned int GetType() const { return type; }
@@ -432,8 +433,26 @@ namespace Shader {
 		void Release() override;
 		void Reload(bool reloadFromDisk, bool validate) override;
 
+	private:
+		void BuildCoreVariant();
+		void ReleaseCoreVariant();
+		// Uniform locations are resolved against ONE program and cached in
+		// uniformStates, so switching which variant is bound has to re-resolve
+		// them -- the linker assigns locations independently and they will not
+		// match. Only ever paid when the bound variant actually changes, i.e. on
+		// the harness's candidate pass.
+		void RefreshUniformLocations(unsigned int progID);
+
+		unsigned int coreObjID = 0;
+		unsigned int lastBoundID = 0;
+
 	public:
 		void SetUniformLocation(const std::string&) override;
+
+		// The migrated twin, linked from `<name>.core.glsl` siblings when the
+		// migration knob is on and EVERY attached shader object has one. 0 means
+		// there is no twin, which is the normal case and costs nothing.
+		unsigned int GetCoreObjID() const { return coreObjID; }
 
 		void SetUniform1i(int idx, int   v0) override;
 		void SetUniform2i(int idx, int   v0, int   v1) override;

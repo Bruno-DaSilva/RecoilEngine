@@ -6,6 +6,7 @@
 #include "Rendering/Shaders/GLSLCopyState.h"
 #include "Rendering/GL/myGL.h"
 #include "Rendering/GL/FFShaderRewrite.h"
+#include "Rendering/GL/FFStateTracker.h"
 #include "Rendering/GlobalRendering.h"
 
 #include "System/SafeUtil.h"
@@ -510,8 +511,103 @@ namespace Shader {
 
 	void GLSLProgramObject::EnableRaw() {
 		RECOIL_DETAILED_TRACY_ZONE;
-		glUseProgram(objID);
+
+		// The candidate pass binds the MIGRATED twin, so the whole-frame harness
+		// measures the port against the original within one frame instead of
+		// across two runs, which does not reproduce itself here.
+		const unsigned int useID = (coreObjID != 0 && GL::ffExperiment.Active(GL::FFExperiment::CoreShaderVariant))
+			? coreObjID : objID;
+
+		if (useID != lastBoundID) {
+			// Only when the variant actually changes; with no twin this never fires.
+			if (lastBoundID != 0 || coreObjID != 0)
+				RefreshUniformLocations(useID);
+
+			lastBoundID = useID;
+		}
+
+		glUseProgram(useID);
 		IProgramObject::Enable();
+	}
+
+	void GLSLProgramObject::RefreshUniformLocations(unsigned int progID) {
+		RECOIL_DETAILED_TRACY_ZONE;
+		for (auto& p : uniformStates)
+			p.second.SetLocation(glGetUniformLocation(progID, p.second.GetName()));
+	}
+
+	void GLSLProgramObject::BuildCoreVariant() {
+		RECOIL_DETAILED_TRACY_ZONE;
+
+		if (coreObjID != 0) {
+			glDeleteProgram(coreObjID);
+			coreObjID = 0;
+		}
+
+		lastBoundID = 0;
+
+		// Knob-gated, so a game that has not opted into the migration compiles
+		// exactly what it compiles today and cannot pay for this at all.
+		if (!GL::FFRewriteEnabled() || shaderObjs.empty())
+			return;
+
+		// All or nothing: a program half-migrated would be neither the thing being
+		// proven nor the thing it is proven against.
+		std::vector<std::string> coreFiles;
+		for (const IShaderObject* so: shaderObjs) {
+			const std::string& src = so->GetSrcFile();
+			const size_t dot = src.rfind(".glsl");
+
+			if (dot == std::string::npos)
+				return;
+
+			const std::string coreFile = src.substr(0, dot) + ".core.glsl";
+
+			if (!CFileHandler::FileExists(coreFile, SPRING_VFS_ALL))
+				return;
+
+			coreFiles.push_back(coreFile);
+		}
+
+		const unsigned int prog = glCreateProgram();
+		bool ok = true;
+
+		for (size_t i = 0; i < shaderObjs.size() && ok; ++i) {
+			GLSLShaderObject cso(shaderObjs[i]->GetType(), coreFiles[i], shaderFlags.GetString());
+			cso.SetLogReporting(true);
+			cso.ReloadFromDisk();
+
+			auto obj = cso.CompileShaderObject();
+			ok = obj->valid;
+
+			if (ok)
+				glAttachShader(prog, obj->id);
+			else
+				LOG_L(L_ERROR, "[Shader] core variant %s failed to compile: %s", coreFiles[i].c_str(), obj->log.c_str());
+		}
+
+		if (ok) {
+			glLinkProgram(prog);
+
+			GLint linked = 0;
+			glGetProgramiv(prog, GL_LINK_STATUS, &linked);
+			ok = (linked != 0);
+
+			if (!ok)
+				LOG_L(L_ERROR, "[Shader] core variant of \"%s\" failed to link", name.c_str());
+		}
+
+		if (!ok) {
+			glDeleteProgram(prog);
+			return;
+		}
+
+		coreObjID = prog;
+
+		// A migration that is never BOUND reports a clean 0 px over nothing, which
+		// is the failure mode this whole harness keeps running into, so say which
+		// programs have a twin and let the gate check the count.
+		LOG_L(L_WARNING, "[CoreVariant] \"%s\" has a migrated twin (program %u)", name.c_str(), coreObjID);
 	}
 	void GLSLProgramObject::DisableRaw() {
 		RECOIL_DETAILED_TRACY_ZONE;
@@ -615,7 +711,17 @@ namespace Shader {
 		return ReturnHelper(__func__);
 	}
 
+	void GLSLProgramObject::ReleaseCoreVariant() {
+		if (coreObjID == 0)
+			return;
+
+		glDeleteProgram(coreObjID);
+		coreObjID = 0;
+		lastBoundID = 0;
+	}
+
 	void GLSLProgramObject::Release() {
+		ReleaseCoreVariant();
 		RECOIL_DETAILED_TRACY_ZONE;
 		IProgramObject::Release();
 		glDeleteProgram(objID);
@@ -777,6 +883,11 @@ namespace Shader {
 		// delete old program when not further used
 		if (deleteOldShader)
 			glDeleteProgram(oldProgID);
+
+		// after the real program, so a twin is always built against the same defs
+		// and can be compared to what was just linked
+		if (IsValid())
+			BuildCoreVariant();
 	}
 
 	int GLSLProgramObject::GetUniformType(const int idx) {

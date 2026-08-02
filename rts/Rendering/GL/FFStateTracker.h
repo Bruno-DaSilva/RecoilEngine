@@ -215,6 +215,14 @@ namespace GL {
 		// sticky and written once a run -- skipping it inherits the GL_LINEAR an
 		// earlier pass set and measures nothing at all.
 		FogMode = 8,
+		// 15: a shader compiled from its migrated `.core.glsl` sibling instead of
+		// the legacy source. The candidate pass binds the MIGRATED program, so a
+		// signal means the port changed a pixel. This is the only pixel-exact way
+		// to prove a shader migration here: the in-frame harness renders one frame
+		// four times with the clock and RNG pinned, whereas comparing two runs of
+		// different builds does not even reproduce itself (measured -- two runs of
+		// the SAME configuration differ by thousands of pixels).
+		CoreShaderVariant = 15,
 	};
 
 	// Proving that deleting a fixed-function call changes no pixel needs a
