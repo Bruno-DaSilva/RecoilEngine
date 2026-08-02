@@ -1743,6 +1743,20 @@ bool CGame::Draw() {
 	// One complete render of the visible frame, from scratch: FBO/viewport restore,
 	// DrawGenesis, shadow-map render, world + screen. A/B test mode runs this three
 	// times per iteration with the backend constant per pass; normal play runs it once.
+	// investigation aid (env-gated, not for shipping): read one pixel inside the
+	// bottom-left 128x128 box after each phase of a pass, so a pass-varying
+	// artifact there attributes to the phase that painted it.
+	static const bool abCornerProbe = getenv("AB_CORNER_PROBE") != nullptr;
+	int abProbePass = 0;
+	const auto cornerProbe = [&](const char* stage) {
+		if (!abCornerProbe)
+			return;
+		uint8_t px[4] = {0, 0, 0, 0};
+		glReadPixels(64, 64, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+		LOG_L(L_WARNING, "[CornerProbe] pass=%d stage=%s px=%u,%u,%u,%u",
+			abProbePass, stage, px[0], px[1], px[2], px[3]);
+	};
+
 	const auto drawOnePass = [&]() {
 		// restore back to the default FBO / Viewport (minimap/IBL leave them dirty, and
 		// repeat A/B passes start right after the previous pass's shadow render + readback)
@@ -1754,6 +1768,7 @@ bool CGame::Draw() {
 			SCOPED_TIMER("Draw::DrawGenesis");
 			eventHandler.DrawGenesis();
 		}
+		cornerProbe("genesis");
 
 		// shadow map from scratch each pass; leaves its FBO bound (restored below)
 		worldDrawer.CreateShadowTextures();
@@ -1763,6 +1778,7 @@ bool CGame::Draw() {
 
 		worldDrawer.Draw();
 		worldDrawer.ResetMVPMatrices();
+		cornerProbe("world");
 
 		{
 			SCOPED_TIMER("Draw::Screen");
@@ -1771,17 +1787,20 @@ bool CGame::Draw() {
 				unitDrawer->DrawUnitIconsScreen();
 
 			eventHandler.DrawScreenEffects();
+			cornerProbe("screenfx");
 
 			hudDrawer->Draw((gu->GetMyPlayer())->fpsController.GetControllee());
 			debugDrawerAI->Draw();
 
 			DrawInputReceivers();
+			cornerProbe("inputrecv");
 			DrawInputText();
 			DrawInterfaceWidgets();
 			RmlGui::RenderFrame();
 			mouse->DrawCursor();
 
 			eventHandler.DrawScreenPost();
+			cornerProbe("screenpost");
 		}
 	};
 
@@ -1806,6 +1825,7 @@ bool CGame::Draw() {
 		GL::ffExperiment.selected = static_cast<GL::FFExperiment>(ffExpCfg);
 
 		for (int pass = 0; pass < 4; ++pass) {
+			abProbePass = pass;
 			LuaUnsyncedRead::SetABPassIndex(pass);
 			if (pass == 0) {
 				// snapshot the draw entropy + wall clock the settle pass consumes ...

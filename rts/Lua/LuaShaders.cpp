@@ -839,6 +839,32 @@ int LuaShaders::CreateShader(lua_State* L)
 	lua_pushnumber(L, shaders.AddProgram(p));
 	// also push the program ID
 	lua_pushnumber(L, prog);
+
+	// investigation aid: map GL program ids to their sources, so the FFUniformFeed /
+	// FFBuiltinArm warnings (which can only name program ids) become attributable
+	// to a widget. Env-gated; not for shipping.
+	if (getenv("AB_SHADER_MAP") != nullptr) {
+		const auto head = [](const std::vector<std::string>& srcs) {
+			std::string h;
+			for (const std::string& s : srcs) {
+				h += s;
+				if (h.size() > 200)
+					break;
+			}
+			std::string out;
+			for (char c : h) {
+				if (c == '\n' || c == '\r' || c == '\t')
+					c = ' ';
+				if (!out.empty() || c != ' ')
+					out += c;
+				if (out.size() >= 120)
+					break;
+			}
+			return out;
+		};
+		LOG_L(L_WARNING, "[ShaderMap] program %u VS: %s", prog, head(vertSrcs).c_str());
+		LOG_L(L_WARNING, "[ShaderMap] program %u FS: %s", prog, head(fragSrcs).c_str());
+	}
 	return 2;
 }
 

@@ -811,6 +811,13 @@ void LuaImmediateBuffer::FlushModern() const
 
 bool LuaImmediateBuffer::FlushIntoBoundShader(bool isTexRect) const
 {
+	// investigation aid: declining here sends every bound-shader stream to the
+	// exact legacy replay, which isolates this flush as the divergence source.
+	// Env-gated; not for shipping.
+	static const bool abDecline = getenv("AB_BOUNDSHADER_LEGACY") != nullptr;
+	if (abDecline)
+		return false;
+
 	const uint32_t prog = GL::CurrentProgram();
 	const GL::FFAttribBinding* ffb = GL::GetFFAttribBinding(prog);
 
@@ -1090,6 +1097,34 @@ namespace LuaGLCompare {
 		int maxDelta = 0;
 		for (size_t i = 0; i < a.size(); ++i)
 			maxDelta = std::max(maxDelta, std::abs(int(a[i]) - int(b[i])));
+
+		// investigation aid (env-gated, not for shipping): dump the two arms of
+		// the first few diverging compares as PPMs, so what each arm actually
+		// drew is inspectable instead of inferred from a delta.
+		static const bool dump = getenv("AB_COMPARE_DUMP") != nullptr;
+		if (dump && maxDelta > 2) {
+			static int dumped = 0;
+			if (dumped < 6) {
+				const auto writePPM = [&](const char* tag, const std::vector<uint8_t>& px) {
+					char name[64];
+					snprintf(name, sizeof(name), "abcmp_%d_%s.ppm", dumped, tag);
+					FILE* f = fopen(name, "wb");
+					if (f == nullptr)
+						return;
+					fprintf(f, "P6\n%d %d\n255\n", w, h);
+					// glReadPixels rows are bottom-up; flip so the image views upright
+					for (int y = h - 1; y >= 0; --y) {
+						for (int x = 0; x < w; ++x)
+							fwrite(&px[(static_cast<size_t>(y) * w + x) * 4], 1, 3, f);
+					}
+					fclose(f);
+				};
+				writePPM("legacy", a);
+				writePPM("modern", b);
+				LOG_L(L_WARNING, "[LuaGLCompare] dumped abcmp_%d_{legacy,modern}.ppm (max delta %d)", dumped, maxDelta);
+				++dumped;
+			}
+		}
 		return maxDelta;
 	}
 }
