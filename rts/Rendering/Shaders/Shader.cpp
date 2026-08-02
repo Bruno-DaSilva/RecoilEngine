@@ -563,7 +563,10 @@ namespace Shader {
 
 			const std::string coreFile = src.substr(0, dot) + ".core.glsl";
 
-			if (!CFileHandler::FileExists(coreFile, SPRING_VFS_ALL))
+			// GetShaderSource prepends "shaders/", so the existence check has to
+			// look where the loader will actually look -- otherwise every twin is
+			// silently declined and the gate reports a clean 0 px over nothing.
+			if (!CFileHandler::FileExists("shaders/" + coreFile, SPRING_VFS_ALL))
 				return;
 
 			coreFiles.push_back(coreFile);
@@ -573,7 +576,12 @@ namespace Shader {
 		bool ok = true;
 
 		for (size_t i = 0; i < shaderObjs.size() && ok; ++i) {
-			GLSLShaderObject cso(shaderObjs[i]->GetType(), coreFiles[i], shaderFlags.GetString());
+			// rawDefStrs is constructor-only and modDefStrs comes from shaderFlags;
+			// the twin needs BOTH or it compiles against a different preprocessor
+			// than the shader it is supposed to be equivalent to. SMF_INTENSITY_MULT
+			// lives in the former and nothing else would have caught it.
+			GLSLShaderObject cso(shaderObjs[i]->GetType(), coreFiles[i], shaderObjs[i]->GetRawDefs());
+			cso.SetDefinitions(shaderFlags.GetString());
 			cso.SetLogReporting(true);
 			cso.ReloadFromDisk();
 

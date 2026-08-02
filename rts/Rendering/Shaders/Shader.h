@@ -49,6 +49,7 @@ namespace Shader {
 		void SetReloadComplete() { reloadRequested = false; }
 		bool IsReloadRequested() const { return reloadRequested;  }
 		const std::string& GetSrcFile() const { return srcFile; }
+		const std::string& GetRawDefs() const { return rawDefStrs; }
 
 		unsigned int GetObjID() const { return objID; }
 		unsigned int GetType() const { return type; }
