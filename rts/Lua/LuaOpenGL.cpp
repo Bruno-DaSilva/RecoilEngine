@@ -1081,6 +1081,30 @@ static void ReportImmLegacy(lua_State* L, const char* fn, bool compilingList)
 // per-Lua-caller dedup of LuaGLCompareMode results so the log isn't spammed.
 static std::unordered_set<std::string> glCompareLogged;
 
+// investigation aid (env-gated, not for shipping): AB_COMPARE_ONLY=<substr>
+// restricts LuaGLCompareMode comparisons to Lua call sites whose source path
+// contains <substr>, and logs EVERY occurrence rather than the first per site,
+// so a draw that matches in one program state and diverges in another is
+// visible when it happens.
+static const char* CompareOnlySite()
+{
+	static const char* s = getenv("AB_COMPARE_ONLY");
+	return s;
+}
+
+static bool CompareSiteEnabled(lua_State* L)
+{
+	const char* want = CompareOnlySite();
+	if (want == nullptr)
+		return true;
+
+	lua_Debug info;
+	if (!lua_getstack(L, 1, &info) || !lua_getinfo(L, "S", &info))
+		return false;
+
+	return strstr(info.short_src, want) != nullptr;
+}
+
 static void LogGLCompare(lua_State* L, const char* caller, int maxDelta)
 {
 	std::string luaCaller = "<unknown>";
@@ -1088,6 +1112,13 @@ static void LogGLCompare(lua_State* L, const char* caller, int maxDelta)
 	if (lua_getstack(L, 1, &info)) {
 		lua_getinfo(L, "nSl", &info);
 		luaCaller = fmt::format("[{}]:{} {}", info.short_src, info.currentline, (info.name ? info.name : "?"));
+	}
+
+	if (CompareOnlySite() != nullptr) {
+		// per-occurrence mode: always log, at one level, with the draw frame
+		LOG_L(L_WARNING, "LuaGLCompare[df=%d]: gl.%s in %s -- max byte delta = %d",
+			globalRendering->drawFrame, caller, luaCaller.c_str(), maxDelta);
+		return;
 	}
 
 	const std::string key = fmt::format("{}|{}", caller, luaCaller);
@@ -3658,7 +3689,7 @@ int LuaOpenGL::BeginEnd(lua_State* L)
 	// after the body ran: a nested gl.* draw inside it would have retagged
 	SetImmFallbackCallSite(L);
 
-	if (glCompareMode) {
+	if (glCompareMode && CompareSiteEnabled(L)) {
 		GLint vp[4]; glGetIntegerv(GL_VIEWPORT, vp);
 		LogGLCompare(L, __func__, LuaGLCompare::CompareDraws(vp[2], vp[3],
 			[]() { luaImmBuffer.FlushLegacy(); },
@@ -4122,7 +4153,7 @@ int LuaOpenGL::Rect(lua_State* L)
 	const bool modernOK = (modernImmediate || glCompareMode)
 			&& noShader && !compilingDisplayList && PolygonModeFill();
 
-	if (glCompareMode && modernOK) {
+	if (glCompareMode && modernOK && CompareSiteEnabled(L)) {
 		GLint vp[4]; glGetIntegerv(GL_VIEWPORT, vp);
 		LogGLCompare(L, __func__, LuaGLCompare::CompareDraws(vp[2], vp[3], drawLegacy, drawModern));
 	}
@@ -4226,7 +4257,7 @@ int LuaOpenGL::TexRect(lua_State* L)
 	const bool modernOK = (modernImmediate || glCompareMode)
 			&& noShader && !compilingDisplayList && PolygonModeFill();
 
-	if (glCompareMode && modernOK) {
+	if (glCompareMode && modernOK && CompareSiteEnabled(L)) {
 		GLint vp[4]; glGetIntegerv(GL_VIEWPORT, vp);
 		LogGLCompare(L, __func__, LuaGLCompare::CompareDraws(vp[2], vp[3], drawLegacy, drawModern));
 	}
@@ -5750,10 +5781,12 @@ int LuaOpenGL::RenderToTexture(lua_State* L)
 	if ((tex == nullptr) || (tex->fbo == 0))
 		return 0;
 
+	// Save unconditionally: restoring 0 breaks NESTED RenderToTexture -- the
+	// inner call rebinds the default framebuffer, and the outer body's remaining
+	// draws land on the screen at the outer texture's viewport (seen as BAR's
+	// pip-minimap LOS pipeline painting a texture-sized box into the corner).
 	GLint currentFBO = 0;
-	if (drawMode == DRAW_WORLD_SHADOW) {
-		glGetIntegerv(GL_FRAMEBUFFER_BINDING_EXT, &currentFBO);
-	}
+	glGetIntegerv(GL_FRAMEBUFFER_BINDING_EXT, &currentFBO);
 
 	glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, tex->fbo);
 
