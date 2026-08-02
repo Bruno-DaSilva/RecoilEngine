@@ -83,6 +83,13 @@ namespace GL {
 	// which decides `attribute` vs `in`.
 	bool RewriteFFBuiltins(std::string& src, int glslVersion, uint32_t stage);
 
+	// Report, once per identifier, every construct left in `src` that GLSL 150
+	// keeps only in the compatibility profile. RewriteFFBuiltins already does this
+	// for what passes through it; this is for the stages it does not rewrite, so
+	// the work list covers the whole frame rather than the vertex half of it.
+	// Read-only, and silent unless the migration knob is on.
+	void ReportFFCompatBlockers(const std::string& src, uint32_t stage);
+
 	// Parses a leading "#version <n>" out of `text`; 0 when absent.
 	int ParseGlslVersion(const std::string& text);
 

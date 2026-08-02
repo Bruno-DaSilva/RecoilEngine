@@ -261,10 +261,83 @@ int GL::ParseGlslVersion(const std::string& text)
 	return ver;
 }
 
+namespace {
+	// Every construct GLSL 150 keeps only in the compatibility profile. A source
+	// naming any of these cannot be compiled on a core context at all, which is
+	// where RenderDoc replays -- so this is the list that decides whether the
+	// `compatibility` token can come off a shader's #version line.
+	//
+	// Reported rather than acted on: which of these survive the rewrite is a
+	// question about the CONTENT a run actually compiles, and the answer is the
+	// work list. Logged once per identifier, so a run yields a histogram.
+	constexpr const char* COMPAT_ONLY[] = {
+		// vertex inputs the rewrite already replaces
+		"gl_Vertex", "gl_Color", "gl_MultiTexCoord0", "ftransform",
+		// vertex inputs it does not
+		"gl_Normal", "gl_SecondaryColor", "gl_FogCoord",
+		"gl_MultiTexCoord1", "gl_MultiTexCoord2", "gl_MultiTexCoord3",
+		"gl_MultiTexCoord4", "gl_MultiTexCoord5", "gl_MultiTexCoord6", "gl_MultiTexCoord7",
+		// cross-stage plumbing: needs a matching out/in pair, not a uniform
+		"gl_TexCoord", "gl_FrontColor", "gl_BackColor",
+		"gl_FrontSecondaryColor", "gl_BackSecondaryColor", "gl_FogFragCoord",
+		// fragment outputs: a single-stage `out` declaration
+		"gl_FragColor", "gl_FragData",
+		// fixed-function state
+		"gl_ModelViewMatrix", "gl_ProjectionMatrix", "gl_ModelViewProjectionMatrix",
+		"gl_NormalMatrix", "gl_TextureMatrix", "gl_Fog", "gl_ClipVertex",
+		"gl_LightSource", "gl_FrontMaterial", "gl_BackMaterial", "gl_LightModel",
+		"gl_FrontLightProduct", "gl_BackLightProduct",
+		// removed keywords
+		"attribute", "varying",
+	};
+
+	// Scans the FINAL text, after every substitution, so what it names is what is
+	// actually left to do rather than what the source happened to start with.
+	void ReportCompatBlockers(const std::string& src, uint32_t stage)
+	{
+		const std::string code = MaskDisabledBlocks(MaskComments(src));
+
+		for (const char* id : COMPAT_ONLY) {
+			if (!HasIdent(code, id))
+				continue;
+
+			static std::unordered_map<std::string, bool> seen;
+			if (bool& reported = seen[id]; !reported) {
+				reported = true;
+				LOG_L(L_WARNING, "[FFCompat] %s still names %s -- its #version cannot drop `compatibility`, so RenderDoc cannot reflect it (%d distinct)",
+					(stage == GL_VERTEX_SHADER) ? "a vertex shader" : "a shader", id, static_cast<int>(seen.size()));
+			}
+		}
+	}
+}
+
+namespace GL {
+	// Split out only so the census above runs on the FINAL text whichever of the
+	// body's several early returns fired.
+	static bool RewriteFFBuiltinsImpl(std::string& src, int glslVersion, uint32_t stage);
+}
+
 bool GL::RewriteFFBuiltins(std::string& src, int glslVersion, uint32_t stage)
 {
 	if (!FFRewriteEnabled())
 		return false;
+
+	const bool rewrote = RewriteFFBuiltinsImpl(src, glslVersion, stage);
+
+	ReportCompatBlockers(src, stage);
+	return rewrote;
+}
+
+void GL::ReportFFCompatBlockers(const std::string& src, uint32_t stage)
+{
+	if (!FFRewriteEnabled())
+		return;
+
+	ReportCompatBlockers(src, stage);
+}
+
+bool GL::RewriteFFBuiltinsImpl(std::string& src, int glslVersion, uint32_t stage)
+{
 
 	// every decision below reads the MASKED source, so commented-out code neither
 	// triggers a rewrite nor gets one

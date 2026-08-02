@@ -193,6 +193,11 @@ namespace Shader {
 		const bool rewritten = (type == GL_VERTEX_SHADER) &&
 			GL::RewriteFFBuiltins(sourceStr, GL::ParseGlslVersion(versionStr), type);
 
+		// The rewrite runs on vertex sources only, so without this the compat work
+		// list would describe the vertex half of a frame and read as complete.
+		if (!rewritten)
+			GL::ReportFFCompatBlockers(sourceStr, type);
+
 		std::vector<const GLchar*> sources(7);
 		const auto compile = [&]() {
 			sources = {
