@@ -190,11 +190,13 @@ namespace Shader {
 
 		// one of the engine's two GLSL compile funnels (the other is LuaShaders'
 		// CompileObject); rewriting here reaches every engine-shipped shader
-		const bool rewritten = (type == GL_VERTEX_SHADER) &&
-			GL::RewriteFFBuiltins(sourceStr, GL::ParseGlslVersion(versionStr), type);
+		// Every stage, not just vertex. gl_Fog and the matrices are fixed-function
+		// STATE, read identically from either one, and leaving fragment sources
+		// alone left them naming builtins the vertex half had already stopped
+		// naming -- which is enough on its own to pin the whole program to the
+		// compatibility profile. The vertex-only channels are gated inside.
+		const bool rewritten = GL::RewriteFFBuiltins(sourceStr, GL::ParseGlslVersion(versionStr), type);
 
-		// The rewrite runs on vertex sources only, so without this the compat work
-		// list would describe the vertex half of a frame and read as complete.
 		if (!rewritten)
 			GL::ReportFFCompatBlockers(sourceStr, type);
 
