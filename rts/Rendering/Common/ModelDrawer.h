@@ -271,7 +271,7 @@ inline void CModelDrawerBase<TDrawerData, TDrawer>::SelectImplementation(bool fo
 
 	if (preferedDrawerType < ModelDrawerTypes::MODEL_DRAWER_CNT) {
 		auto d = modelDrawers[preferedDrawerType];
-		auto s = IModelDrawerState::modelDrawerStates[preferedDrawerType];
+		auto s = IModelDrawerState::EnsureInstance(preferedDrawerType);
 		if (qualifyDrawerFunc(d, s)) {
 			LOG_L(L_INFO, "[%s::%s] Force-switching to %s(%s)", className, __func__, ModelDrawerNames[preferedDrawerType], mtModelDrawer ? "MT" : "ST");
 			SelectImplementation(preferedDrawerType);
@@ -286,7 +286,7 @@ inline void CModelDrawerBase<TDrawerData, TDrawer>::SelectImplementation(bool fo
 	int best = ModelDrawerTypes::MODEL_DRAWER_GLSL;
 	for (int t = ModelDrawerTypes::MODEL_DRAWER_GL4; t < ModelDrawerTypes::MODEL_DRAWER_CNT; ++t) {
 		auto d = modelDrawers[t];
-		auto s = IModelDrawerState::modelDrawerStates[t];
+		auto s = IModelDrawerState::EnsureInstance(t);
 		if (qualifyDrawerFunc(d, s)) {
 			best = t;
 		}
@@ -301,7 +301,9 @@ inline void CModelDrawerBase<TDrawerData, TDrawer>::SelectImplementation(int tar
 	modelDrawer = modelDrawers[targetImplementation];
 	assert(modelDrawer);
 
-	modelDrawerState = IModelDrawerState::modelDrawerStates[targetImplementation];
+	// EnsureInstance, not the array: `best` starts at MODEL_DRAWER_GLSL and is
+	// only ever upgraded, so a deferred legacy state reaches here unqualified.
+	modelDrawerState = IModelDrawerState::EnsureInstance(targetImplementation);
 	assert(modelDrawerState);
 #ifndef HEADLESS
 	assert(modelDrawerState->CanEnable());

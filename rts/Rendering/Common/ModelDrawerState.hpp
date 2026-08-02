@@ -3,6 +3,7 @@
 #pragma once
 
 #include <array>
+#include <functional>
 #include "Rendering/GL/AttribStateVerify.h"
 #include <string>
 
@@ -51,13 +52,36 @@ enum ShaderShadingModes {
 
 class IModelDrawerState {
 public:
+	// `defer` keeps the state constructible without constructing it. The legacy
+	// state COMPILES ITS SHADERS IN ITS CONSTRUCTOR, and those shaders are
+	// pre-core GLSL that RenderDoc cannot reflect -- they are compiled at load
+	// whether or not anything draws with them, and a live shader object blocks a
+	// capture exactly as a drawn one does. Deferring keeps the fallback intact
+	// (it constructs the moment anything asks for it) while a run that never
+	// falls back never creates them.
 	template<typename T>
-	static void InitInstance(int t) {
-		if (modelDrawerStates[t] == nullptr)
-			modelDrawerStates[t] = new T{};
+	static void InitInstance(int t, bool defer = false) {
+		if (modelDrawerStates[t] != nullptr)
+			return;
+
+		if (defer) {
+			modelDrawerCreators[t] = []() -> IModelDrawerState* { return new T{}; };
+			return;
+		}
+
+		modelDrawerStates[t] = new T{};
+	}
+	// Every path that reads a state has to come through here, or a deferred one
+	// reads as null/invalid and silently stops being a fallback.
+	static IModelDrawerState* EnsureInstance(int t) {
+		if (modelDrawerStates[t] == nullptr && modelDrawerCreators[t])
+			modelDrawerStates[t] = modelDrawerCreators[t]();
+
+		return modelDrawerStates[t];
 	}
 	static void KillInstance(int t) {
 		spring::SafeDelete(modelDrawerStates[t]);
+		modelDrawerCreators[t] = nullptr;
 	}
 public:
 	IModelDrawerState();
@@ -121,6 +145,7 @@ public:
 	void ResetAlphaDrawing(bool deferredPass) const;
 public:
 	inline static std::array<IModelDrawerState*, ModelDrawerTypes::MODEL_DRAWER_CNT> modelDrawerStates = {};
+	inline static std::array<std::function<IModelDrawerState*()>, ModelDrawerTypes::MODEL_DRAWER_CNT> modelDrawerCreators = {};
 public:
 	/// <summary>
 	/// .x := regular unit alpha
