@@ -4,6 +4,7 @@
 
 #include <array>
 #include <functional>
+#include "System/Log/ILog.h"
 #include "Rendering/GL/AttribStateVerify.h"
 #include <string>
 
@@ -74,8 +75,10 @@ public:
 	// Every path that reads a state has to come through here, or a deferred one
 	// reads as null/invalid and silently stops being a fallback.
 	static IModelDrawerState* EnsureInstance(int t) {
-		if (modelDrawerStates[t] == nullptr && modelDrawerCreators[t])
+		if (modelDrawerStates[t] == nullptr && modelDrawerCreators[t]) {
+			LOG_L(L_DEBUG, "[ModelDrawerState] constructing DEFERRED state %d on demand", t);
 			modelDrawerStates[t] = modelDrawerCreators[t]();
+		}
 
 		return modelDrawerStates[t];
 	}
