@@ -47,7 +47,7 @@ namespace {
 	// programs rather than a uniform branch.
 	std::string MakeFragmentSrc(bool textured, bool fogged)
 	{
-		std::string s = fogged ? "#version 150 compatibility\n" /* gl_Fog */ : "#version 150\n";
+		std::string s = "#version 150" + std::string(fogged ? GL::FFCompatToken() : "") + "\n";
 		if (textured) {
 			s += "uniform sampler2D tex;\n";
 			s += "in vec2 vuv;\n";
@@ -69,7 +69,7 @@ namespace {
 
 	std::string MakeVertexSrc(bool explicitAttribLoc, bool textured, bool fogged, bool builtinMVP)
 	{
-		std::string s = "#version 150 compatibility\n";
+		std::string s = "#version 150" + std::string(GL::FFCompatToken()) + "\n";
 		if (explicitAttribLoc) {
 			s += "#extension GL_ARB_explicit_attrib_location : require\n";
 			s += "layout(location = 0) in vec3 apos;\n";

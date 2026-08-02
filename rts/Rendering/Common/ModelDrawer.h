@@ -302,8 +302,17 @@ inline void CModelDrawerBase<TDrawerData, TDrawer>::SelectImplementation(int tar
 	assert(modelDrawer);
 
 	// EnsureInstance, not the array: `best` starts at MODEL_DRAWER_GLSL and is
-	// only ever upgraded, so a deferred legacy state reaches here unqualified.
+	// only ever upgraded, so a deferred legacy state reaches here unqualified --
+	// which is how it gets constructed at startup even when GL4 wins moments later.
 	modelDrawerState = IModelDrawerState::EnsureInstance(targetImplementation);
+
+	// ...and once a modern implementation HAS won, the legacy state is dead weight
+	// whose only trace is four pre-core shader objects RenderDoc cannot reflect.
+	// Drop it and keep its creator, so EnsureInstance rebuilds it the moment
+	// anything falls back. Only while implStack is empty: a pushed implementation
+	// holds a raw state pointer that popping would restore.
+	if (targetImplementation != ModelDrawerTypes::MODEL_DRAWER_GLSL && implStack.empty())
+		IModelDrawerState::DropDeferredInstance(ModelDrawerTypes::MODEL_DRAWER_GLSL);
 	assert(modelDrawerState);
 #ifndef HEADLESS
 	assert(modelDrawerState->CanEnable());

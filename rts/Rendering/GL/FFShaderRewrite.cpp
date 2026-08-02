@@ -349,6 +349,23 @@ namespace GL {
 	static bool RewriteFFBuiltinsImpl(std::string& src, int glslVersion, uint32_t stage);
 }
 
+bool GL::FFSourceIsCoreClean(const std::string& src)
+{
+	const std::string code = MaskDisabledBlocks(MaskComments(src));
+
+	for (const char* id : COMPAT_ONLY) {
+		if (HasIdent(code, id))
+			return false;
+	}
+
+	return true;
+}
+
+const char* GL::FFCompatToken()
+{
+	return FFRewriteEnabled() ? "" : " compatibility";
+}
+
 bool GL::RewriteFFBuiltins(std::string& src, int glslVersion, uint32_t stage)
 {
 	if (!FFRewriteEnabled())

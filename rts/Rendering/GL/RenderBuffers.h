@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Rendering/GL/FFShaderRewrite.h"
 #include "RenderBuffers.inl"
 #include "Rendering/GL/FFMatrixTracking.h"
 #include "StreamBuffer.h"
@@ -212,10 +213,10 @@ private:
 
 	static void GetShaderHeaders(std::string& vsHeader, std::string& fsHeader) {
 		if (globalRendering->supportExplicitAttribLoc) {
-			vsHeader = fmt::format("{}{}{}", "#version 150 compatibility", nl, "#extension GL_ARB_explicit_attrib_location : require");
+			vsHeader = fmt::format("#version 150{}{}{}", GL::FFCompatToken(), nl, "#extension GL_ARB_explicit_attrib_location : require");
 		}
 		else {
-			vsHeader = "#version 150 compatibility";
+			vsHeader = fmt::format("#version 150{}", GL::FFCompatToken());
 		}
 
 		fsHeader = "#version 150";

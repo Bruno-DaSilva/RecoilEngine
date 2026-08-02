@@ -1,5 +1,6 @@
 /* This file is part of the Spring engine (GPL v2 or later), see LICENSE.html */
 
+#include "Rendering/GL/FFShaderRewrite.h"
 #include "FFStandIn.h"
 
 #include <string>
@@ -18,7 +19,7 @@ namespace {
 		// the model path pushes a fresh matrix per piece between draws. Reading a
 		// builtin is not a GL call and costs nothing at the capture gate -- only
 		// the FF matrix SET-calls do, and they are a separate group.
-		std::string s = "#version 150 compatibility\n";
+		std::string s = "#version 150" + std::string(GL::FFCompatToken()) + "\n";
 		if (explicitAttribLoc) {
 			s += "#extension GL_ARB_explicit_attrib_location : require\n";
 			s += "layout(location = 0) in vec3 apos;\n";
@@ -51,7 +52,7 @@ namespace {
 		// GL_MODULATE against the fixed-function current colour, which the
 		// caller passes in already clamped -- fixed function clamps vertex
 		// colours at rasterization and an unclamped uniform would not.
-		std::string s = fogged ? "#version 150 compatibility\n" /* gl_Fog */ : "#version 150\n";
+		std::string s = "#version 150" + std::string(fogged ? GL::FFCompatToken() : "") + "\n";
 		s += "uniform sampler2D tex;\n";
 		s += "uniform vec4 uColor;\n";
 		s += "uniform bool uTextured;\n";

@@ -82,6 +82,15 @@ public:
 
 		return modelDrawerStates[t];
 	}
+	// Delete a state that came from a deferred creator, KEEPING the creator so it
+	// can come back. Not KillInstance: that clears the creator too, which would
+	// turn "not compiled yet" into "gone".
+	static void DropDeferredInstance(int t) {
+		if (modelDrawerCreators[t] == nullptr)
+			return;
+
+		spring::SafeDelete(modelDrawerStates[t]);
+	}
 	static void KillInstance(int t) {
 		spring::SafeDelete(modelDrawerStates[t]);
 		modelDrawerCreators[t] = nullptr;

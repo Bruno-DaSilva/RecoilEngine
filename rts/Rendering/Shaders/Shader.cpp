@@ -202,6 +202,19 @@ namespace Shader {
 		if (!rewritten)
 			GL::ReportFFCompatBlockers(sourceStr, type);
 
+		// Drop the profile token once nothing in the shader needs it. RenderDoc
+		// replays on a CORE context, where a source declaring `compatibility`
+		// cannot be compiled at all and so cannot be reflected -- and on Mesa a
+		// warm shader cache turns that into a linker segfault. Conditional on the
+		// FINAL text being clean, so a shader that still names a builtin keeps the
+		// token and keeps working.
+		if (GL::FFRewriteEnabled() && versionStr.find("compatibility") != std::string::npos &&
+		    GL::FFSourceIsCoreClean(sourceStr)) {
+			const size_t at = versionStr.find(" compatibility");
+			if (at != std::string::npos)
+				versionStr.erase(at, std::strlen(" compatibility"));
+		}
+
 		std::vector<const GLchar*> sources(7);
 		const auto compile = [&]() {
 			sources = {

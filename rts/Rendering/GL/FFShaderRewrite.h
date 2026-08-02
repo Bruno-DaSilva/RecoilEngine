@@ -83,6 +83,19 @@ namespace GL {
 	// which decides `attribute` vs `in`.
 	bool RewriteFFBuiltins(std::string& src, int glslVersion, uint32_t stage);
 
+	// The profile token an engine-generated shader still needs on its #version
+	// line: " compatibility", or nothing once the rewrite is on. Every builtin
+	// that obliged the profile is substituted away by then, and the token alone is
+	// enough to stop RenderDoc reflecting the shader -- it replays captures on a
+	// CORE context, where a compatibility source cannot be compiled at all.
+	const char* FFCompatToken();
+
+	// True when `src` names nothing GLSL 150 keeps only in the compatibility
+	// profile. Checked on the FINAL text, after every substitution, so it answers
+	// "can this shader's #version drop the token" rather than "was it authored
+	// without one".
+	bool FFSourceIsCoreClean(const std::string& src);
+
 	// Report, once per identifier, every construct left in `src` that GLSL 150
 	// keeps only in the compatibility profile. RewriteFFBuiltins already does this
 	// for what passes through it; this is for the stages it does not rewrite, so
