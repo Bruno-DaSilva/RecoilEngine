@@ -5,7 +5,12 @@
 # minimal stubs (GLEngineStubs.cpp) so we don't pull in the window system/VFS.
 remove_definitions(-DUNIT_TEST)
 
-if (TARGET SDL2::SDL2 AND TARGET glad)
+# Not on Windows: the dead-strip these tests depend on (--gc-sections dropping
+# Shader.cpp's file/Lua shader-loading paths) works on ELF but not on MinGW/PE,
+# where the vtable-referenced paths survive and the link fails on Lua/nowide
+# symbols the stub set deliberately omits. They are dev-box harness tests that
+# need a live GL context; a cross-built .exe of them would never run anyway.
+if (NOT WIN32 AND TARGET SDL2::SDL2 AND TARGET glad)
 	# shared engine rendering sources + stubs that every engine-GL test links.
 	# -DNOT_USING_CREG drops CMatrix44f's creg; --gc-sections (set per target
 	# below) strips Shader.cpp's file/Lua shader-loading paths that the inline
@@ -40,6 +45,9 @@ if (TARGET SDL2::SDL2 AND TARGET glad)
 		add_spring_test(${name} "${_src}" "${gl_engine_libs}" "${gl_engine_flags}")
 		target_link_options(test_${name} PRIVATE -Wl,--gc-sections)
 		target_include_directories(test_${name} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+		# LuaImmediateBuffer.cpp reaches LuaHashString.h -> LuaInclude.h, which
+		# lives with the bundled lua rather than under rts/Lua
+		target_include_directories(test_${name} PRIVATE "${ENGINE_SOURCE_DIR}/lib/lua/include")
 	endmacro()
 
 	add_engine_gl_test(GLRenderBufferCompare testGLRenderBufferCompare.cpp)

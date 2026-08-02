@@ -156,6 +156,14 @@ decltype(glad_glColor4ub) glad_glColor4ub = nullptr;
 decltype(glad_glColor4ubv) glad_glColor4ubv = nullptr;
 decltype(glad_glColorMask) glad_glColorMask = nullptr;
 decltype(glad_glColorPointer) glad_glColorPointer = nullptr;
+// referenced by the fixed-function tracking layer (FFStateTracker, FFColor,
+// FFShaderRewrite, AttribStateVerify)
+decltype(glad_glDrawArraysIndirect) glad_glDrawArraysIndirect = nullptr;
+decltype(glad_glGetLightfv) glad_glGetLightfv = nullptr;
+decltype(glad_glGetMaterialfv) glad_glGetMaterialfv = nullptr;
+decltype(glad_glMultiDrawArrays) glad_glMultiDrawArrays = nullptr;
+decltype(glad_glMultiDrawElements) glad_glMultiDrawElements = nullptr;
+decltype(glad_glVertexAttrib4fv) glad_glVertexAttrib4fv = nullptr;
 decltype(glad_glCompileShader) glad_glCompileShader = nullptr;
 decltype(glad_glCompressedTexImage2D) glad_glCompressedTexImage2D = nullptr;
 decltype(glad_glCompressedTexSubImage1D) glad_glCompressedTexSubImage1D = nullptr;
@@ -607,6 +615,12 @@ int gladLoadGL(void) {
     glad_glColor4ubv = MakeStubImpl(glad_glColor4ubv);
     glad_glColorMask = MakeStubImpl(glad_glColorMask);
     glad_glColorPointer = MakeStubImpl(glad_glColorPointer);
+    glad_glDrawArraysIndirect = MakeStubImpl(glad_glDrawArraysIndirect);
+    glad_glGetLightfv = MakeStubImpl(glad_glGetLightfv);
+    glad_glGetMaterialfv = MakeStubImpl(glad_glGetMaterialfv);
+    glad_glMultiDrawArrays = MakeStubImpl(glad_glMultiDrawArrays);
+    glad_glMultiDrawElements = MakeStubImpl(glad_glMultiDrawElements);
+    glad_glVertexAttrib4fv = MakeStubImpl(glad_glVertexAttrib4fv);
     glad_glCompileShader = MakeStubImpl(glad_glCompileShader);
     glad_glCompressedTexImage2D = MakeStubImpl(glad_glCompressedTexImage2D);
     glad_glCompressedTexSubImage1D = MakeStubImpl(glad_glCompressedTexSubImage1D);

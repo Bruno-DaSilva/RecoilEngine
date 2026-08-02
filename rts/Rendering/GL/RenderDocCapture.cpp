@@ -91,6 +91,10 @@ namespace {
 		device = nullptr;
 		window = nullptr;
 
+	// X11/GLX only. Elsewhere the handles stay null, which RenderDoc's API
+	// documents as "whichever device/window is current" -- SetActiveWindow is
+	// then skipped and StartFrameCapture(NULL, NULL) wildcards.
+	#ifndef _WIN32
 		SDL_Window* sdlWindow = (globalRendering != nullptr) ? globalRendering->GetWindow() : nullptr;
 		if (sdlWindow == nullptr)
 			return;
@@ -102,6 +106,7 @@ namespace {
 
 		device = info.info.x11.display;
 		window = reinterpret_cast<void*>(static_cast<uintptr_t>(info.info.x11.window));
+	#endif
 	}
 }
 
@@ -130,6 +135,9 @@ bool RenderDocCapture::BeginExplicit()
 	// glIsEnabled(GL_DEBUG_TOOL_EXT) from an early-out needing no wrapped
 	// context, so its presence proves nothing about hooking; the owner of a
 	// real entry point does. Logged once -- it is a property of the process.
+	// dladdr and the glX entry points are Linux-only; the diagnostic has no
+	// Windows equivalent worth carrying.
+#ifndef _WIN32
 	static bool loggedOwners = false;
 	if (!loggedOwners) {
 		loggedOwners = true;
@@ -142,6 +150,7 @@ bool RenderDocCapture::BeginExplicit()
 				LOG_L(L_WARNING, "[RenderDoc] %-28s -> %p (unresolved)", fn, p);
 		}
 	}
+#endif
 
 	api->StartFrameCapture(device, window);
 	LOG_L(L_WARNING, "[RenderDoc] explicit capture STARTED (device=%p window=%p curGLContext=%p capturing=%d)",
