@@ -30,7 +30,20 @@ Working document for moving Beyond-All-Reason (`/www/projects/Beyond-All-Reason`
     | `gl_ClipVertex` | `gl_ClipDistance` |
     | `attribute`, `varying` | keywords removed from core |
 
-  - **Gate throughout:** watertest 946 then 938 frames, control 0 / signal 0. Unchanged with the rewrite off, where `RewriteFFBuiltins` returns before touching the source.
+  - **The fragment-output builtins retire.** `gl_FragColor` / `gl_FragData` are not fixed-function state — they are the pre-130 spelling of a fragment output — so replacing them is a declaration plus a rename with no engine side at all. Both go through one array when a shader names both, which is normal rather than illegal: they sit in different `#ifdef` branches of the same deferred source, and declaring a scalar beside the array would put two outputs on location 0.
+  - **WHERE THE REST OF THE LIST LIVES, and it is not BAR.** Tracing the declines to a source excerpt put every remaining blocker in the engine's **own shipped GLSL**, `cont/base/springcontent/shaders/GLSL/`:
+
+    | file | `#version` | blockers |
+    |---|---|---|
+    | `ModelFragProg.glsl` | **none** (so 110) | `gl_FragColor` `gl_FragData` `gl_LightSource` `gl_TexCoord` `varying` |
+    | `ModelVertProg.glsl` | yes | `attribute` `gl_ClipVertex` `gl_Normal` `gl_TexCoord` `varying` |
+    | `ShadowGen{Vert,VertMap,Frag}Prog.glsl` | **none** | `gl_ClipVertex` `gl_TexCoord` `gl_Normal` |
+    | `Grass{Vert,Frag}Prog.glsl` | mixed | `gl_Normal` `gl_FragColor` `varying` |
+    | `SMF{Vert,Frag}Prog.glsl`, `BumpWaterFS.glsl` | yes | `gl_ClipVertex` `varying` `gl_FragColor` |
+
+    These are compiled at load whether or not BAR draws with them, and RenderDoc reflects every live shader object, so an unused-but-compiled one blocks capture reflection exactly as a drawn one does. The remaining work is therefore ~10 engine shader ports to core-clean GLSL 150, not a rewrite-side transpiler and not content work. Because those files ship to every game, the ports have to sit behind the migration knob (a core-clean variant selected when it is on) rather than replacing the originals — constraint 1 by construction, as everywhere else here.
+  - **The gate cannot see any of this, and screenshots cannot replace it.** An engine-side shader substitution moves all four in-frame passes together. A cross-configuration screenshot comparison was built to cover that and its **control failed**: two runs of the *same* configuration differ by thousands of pixels, so run-to-run screenshots gate nothing. What the remaining ports need is dual-variant programs — compile original and rewritten, and let the A/B harness bind the other one on the candidate pass — which is the program-level form of the both-sources pattern already used for fog and matrices.
+  - **Gate throughout:** watertest 946, 938, 949 frames, control 0 / signal 0. Unchanged with the rewrite off, where `RewriteFFBuiltins` returns before touching the source.
 
 - 2026-08-02 — **A capture exists. RenderDoc takes a frame of BAR, and its replay side opens it: 3053 draws, 13 clears.**
   - **The meter was a prediction; this is the experiment.** `run_rdoc_capture.sh` preloads `rdoc_trigger.so` next to librenderdoc and asks for a capture through RenderDoc's in-application API — the UI and F12 do not exist here, and a capture has to be *requested*. With the migration knobs on: `rdoc_capture_frame5005.rdc`, 787 MB, 0 unsupported functions. With `--legacy`: 32 unsupported functions and no file, so the harness demonstrably tells the two apart.
