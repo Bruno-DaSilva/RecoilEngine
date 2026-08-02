@@ -1,84 +1,71 @@
 # BAR → RenderDoc: handoff
 
-State as of 2026-08-02, branch `bruno/gl4-phase1-matrix-tracker`. Nothing pushed.
-The living plan is `doc/bar-gl4-immediate-mode-inventory.md`; this file is the short version plus the open problem.
+State as of 2026-08-02, branch `bruno/gl4-phase1-matrix-tracker` (engine) + `bruno/ab-compare-widget-guards` (BAR checkout at /www/projects/Beyond-All-Reason, symlinked as the loaded game). Nothing pushed.
+The living plan is `doc/bar-gl4-immediate-mode-inventory.md`; this file is the short version.
 
-## Where it actually stands
+## Where it stands
 
-**Constraint 1 — games that are not updated keep working. MET.** Every mechanism is behind config knobs that default to off, and with `FFVertexAttribRewrite = 0` the rewrite returns before touching a byte of shader source. `run_rdoc_capture.sh --legacy` still reports 32 rejected functions and produces no capture, which is the same reading as before any of this work.
+**Constraint 1 — games that are not updated keep working. MET.** Every mechanism is behind config knobs that default to off, and with `FFVertexAttribRewrite = 0` the rewrite returns before touching a byte of shader source. `run_rdoc_capture.sh --legacy` still reports 32 rejected functions and produces no capture, re-verified after everything below.
 
-**Constraint 2 — BAR is RenderDoc-capturable. NOT MET.** It looked met for several hours and it was not; see the correction below. Rejected GL calls really are at 0, and a `.rdc` really is produced and really does open — but only for frames where BAR's UI is not drawing.
+**Constraint 2 — BAR is RenderDoc-capturable. MET, including the full UI.** With the migration knobs on and BAR's real 241-widget set loaded: zero rejected GL calls, a 1-frame capture is produced (`rdoc_capture_frame4291.rdc`, 874 MB), and RenderDoc opens and replays it — 3154 actions, 3034 draws, degraded=0, thumbnail shows the complete UI. The replay side runs with `MESA_SHADER_CACHE_DISABLE=true`, which remains the documented workaround for the Mesa cache-vs-profile bug (`mesa_compat_cache_repro.c`).
 
-## The open problem, and it is the critical path
+**The gate is green at full coverage.** watertest 742 frames and idletest 485 frames, control 0 / signal 0, with all 241 widgets loaded. Check `grep -c "Loading widget" infolog.txt` before believing any gate result; 241 is right for this profile.
 
-With BAR's real widget set enabled, **the modern Lua backend renders differently from the legacy one**:
+## The widget-set divergence: what it actually was
 
-| widgets loaded | control (L↔L) | signal (L↔M) |
-|---|---|---|
-| 149 | 0 px | **0 px** over 842 frames |
-| 241 | 0 px | **3,062,000 / 3,686,400 px**, every frame, max delta ~140 |
+The 3M-px-per-frame "modern backend divergence" with the full widget set was **the gate's legacy reference rendering wrong, not the modern backend**. The dumps showed the legacy passes hazed fullscreen and the modern pass crisp; per-draw comparison (`LuaGLCompareMode` + `AB_COMPARE_ONLY=guishader` + `AB_COMPARE_DUMP`) proved the modern arm drew gfx_guishader's stencil-masked blur correctly and the legacy arm drew a flat constant-texcoord wash.
 
-Same binary, same content (`watertest`), only the widget set differs. Control staying at 0 means the harness is sound and the widgets are pass-idempotent, so this is a real rendering difference and not a measurement artifact.
+Root cause: the vertex-attribute rewrite had dropped the `gl_Vertex`/`gl_MultiTexCoord0` arm from generated sources (needed for core-clean text), so a forced-legacy `glBegin`/`glTexCoord` submission through a rewritten Lua shader fed builtins the shader no longer read. Position survived only via the attribute-0 alias; texcoords collapsed to a stale constant.
 
-Everything else is downstream of this. Do not spend time on shader ports or capture plumbing until the modern backend matches legacy with the full UI up, because a capture of a frame that renders wrong is worth nothing.
+Fix: `FFRewriteBuiltinArm = 1` re-emits the arm behind the per-draw `recoil_ff_useAttrs` selector that `DrawFFAttribStream` already toggles. It is the gate's measurement configuration — `run_gate.sh` owns it on, `run_rdoc_capture.sh` owns it off (the knob persists in springsettings.cfg, and a capture inheriting it would re-pin shaders to the compatibility profile). Default off: shipped sources stay byte-identical and core-clean.
 
-**Why it went unnoticed.** A widget bisect earlier in the session used `luaui disablewidget`, which BAR **persists** to `LuaUI/Config/BYAR.lua`. 69 widgets were zeroed; a partial repair left 159 entries at 0 against 61 in an untouched sibling datadir. BAR's UI silently vanished — `attempt to index field 'fonts' (a nil value)` cascading through ~30 widgets, plus `GetPosition` / `resource_spot_finder` / `spotBuilder` nil, all of them BAR **API** widgets failing to load. The world still renders, so screenshots look plausible and the gate reports 0 px over content that is missing the most immediate-mode-heavy thing in the game.
+Consequence worth acting on: **every earlier gate verdict taken against rewritten Lua shaders under forced-legacy passes is suspect.** In particular the two reverted attempts to strip the `compatibility` token at the `LuaShaders.cpp` funnel were both "gated at 3M px" — the same signature, almost certainly the same reference corruption. Re-measure that with the fixed gate before writing off engine-side stripping; it may remove the need for BAR-side shader edits for the warm-cache path.
 
-**Always check `grep -c "Loading widget" infolog.txt` before believing a gate result.** 241 is right for this profile; ~149 means the config is damaged. Repair by copying order values from `/www/projects/bar-data2` for any name zeroed locally but positive there.
+## Also found and fixed on the way
 
-### First moves on it
+- **Nested `gl.RenderToTexture` restored FBO 0** instead of the caller's framebuffer (LuaOpenGL.cpp) — outer bodies' draws landed on screen at the outer texture's viewport.
+- **The FFStandIn circle shader could never compile under the rewrite** — it wrote `gl_ClipVertex`, which fails once the `compatibility` token is dropped, rejecting the stand-in and retaining exactly the FF client-array draws the capture cannot afford. The line is now emitted only in compat mode; clip planes are suppressed state under the rewrite (measured inert in BAR).
+- **BAR widget per-pass guards** (BAR branch `bruno/ab-compare-widget-guards`): `gui_cache_icons` advanced its icon-cache position per DrawScreen invocation (different icons per A/B pass); `gui_pip` throttles texture updates on `os.clock()` wall time, firing in whichever repeat pass crossed the interval. Both now update only on the non-duplicate pass, same pattern as gfx_guishader's stencil guard.
+- **Open BAR cosmetic bug (not gate-blocking, pass-stable now):** something in gui_pip's LOS/texture pipeline paints a ~128×128 box (LOS texture content: its clear colors and coverage blobs) at the screen's bottom-left corner every frame. It sits under the info panel so players don't see it. Found via `AB_CORNER_PROBE` + the corner-probe user widget; not root-caused to the exact draw.
 
-1. `GLFrameABCompareDump = 1` is already set by `run_gate.sh`; the dumps land in the write-dir as `ab*_f<frame>_1st.png` / `_2nd.png`. Diff them and look at **where** on screen the 3M pixels are. 83% of the frame at a moderate delta smells like a fullscreen post-process — `gfx_guishader` (blur), `gfx_bloom_shader_deferred`, or the PiP — rather than 92 widgets each being slightly wrong.
-2. If the dump does not name it, bisect the widget list **with a per-run restore of `BYAR.lua`** (`wbisect.sh` in the job tmp did this; the restore is mandatory or every iteration inherits the last one's disables and the search converges on noise). Snapshot `BYAR.lua` first.
-3. Whatever it is, the fix is either the modern backend or the widget; both are in scope.
+## Diagnostics built this session (all env-gated, committed)
 
-## What is genuinely proven
-
-- **Zero rejected GL calls** in a BAR frame with the migration on, on both the skirmish content and a real 12-player replay.
-- **Two shader ports**, `SMF{Vert,Frag}Prog` and `BumpWater{VS,FS}`, migrated to core GLSL 150 and measured **0 px** against the originals on two contents, via the dual-variant harness.
-- **A capture opens and replays with the Mesa shader cache on** — 3166 actions / 3070 draws — for frames without BAR's UI. With the UI it still segfaults, at the 47th shader, one of BAR's own Lua shaders declaring `#version 150 compatibility`.
-
-## Tooling built this session
-
-| tool | what it is for |
+| env | what it does |
 |---|---|
-| `test/gl-ab-compare/rdoc_trigger.c` | LD_PRELOAD shim that asks for a capture through RenderDoc's in-application API, since there is no UI and no F12 here |
-| `test/gl-ab-compare/run_rdoc_capture.sh` | takes a capture, and by default opens it again to prove it is one; `--legacy` is the control that must produce nothing |
-| `test/gl-ab-compare/rdoc_validate_capture.cpp` | links librenderdoc's replay side and opens a `.rdc` (thumbnail, driver, full action walk). Must export `REPLAY_PROGRAM_MARKER()` and build `-rdynamic` |
-| `test/gl-ab-compare/mesa_compat_cache_repro.c` | 40-line repro of the Mesa bug below |
-| `test/gl-ab-compare/ab_replay_shot.lua` | drives a replay unattended: fast-forward, screenshot, quit |
-| dual-variant programs | `FFExperiment::CoreShaderVariant` + a twin linked from `<name>.core.glsl`; the A/B harness binds the twin on the candidate pass, which is the only pixel-exact way to prove a shader migration here |
+| `AB_SHADER_MAP=1` | logs every Lua program id with VS/FS source heads, so program-id warnings become attributable to a widget |
+| `AB_BOUNDSHADER_LEGACY=1` | declines every bound-shader stream flush to the exact legacy replay — isolates that flush as a divergence source |
+| `AB_COMPARE_ONLY=substr` | restricts LuaGLCompareMode to matching call sites and logs every occurrence (no once-per-site dedup) |
+| `AB_COMPARE_DUMP=1` | writes both arms of the first diverging compares as PPMs |
+| `AB_CORNER_PROBE=1` | reads one corner pixel after each phase of each A/B pass |
 
-## Traps, all of them paid for
+Trap paid for twice this session: **`LuaGLCompareMode = 1` persists in springsettings.cfg** and without `AB_COMPARE_ONLY` it double-renders + glFinishes + reads back around every immediate draw — a ~30x draw slowdown that reads as "the gate barely compares any frames". Same persistence class as `ABUnitShapeDriver`. Delete the key after diagnostic runs.
 
-- **Mesa's GLSL disk cache is not keyed on GL profile.** A `#version 150 compatibility` shader compiled in the game's compatibility context is served back to RenderDoc's **core** replay context, past the rejection that should stop it, and the linker segfaults. `MESA_SHADER_CACHE_DISABLE=true` is the workaround; `mesa_compat_cache_repro.c` shows all three outcomes.
-- **Uniform *values* are per-program state.** A twin program has none, so it draws with everything at zero — that looked like a 3.4M-pixel bad port and was plumbing. `GLSLCopyState` on a variant switch fixes it.
-- **A uniform nothing references is dropped by the linker.** Keeping a selector "declared for identification" classified every rewritten program as unfed. Identify by the generated *attribute* instead.
-- **`gl_FogFragCoord` and `gl_TexCoord` are cross-stage plumbing**, needing a declared `out`/`in` pair with matching names — not the engine-fed uniform the matrices and fog get.
-- **`ninja base/springcontent.sdz` does not drop removed files.** `rm` the `.sdz` first or a deleted shader keeps being served.
-- **`luaui disablewidget` persists.** See above. It cost a wrong culprit twice and then the whole UI.
-- **A harness widget must never `widgetHandler:RemoveWidget()` itself** — BAR writes that back as `order = 0`, permanently disabling it. Go inert instead.
-- **Check `CMAKE_BUILD_TYPE` and the compiler in the cache, not the binary.** `build/` was found configured clang + Debug while `build/spring` was neither; building would have produced a slow, assert-armed, desync-prone binary. Canonical configure is in memory under `project_user_cmake_configure`.
-- **The demo desyncs from frame 0** against this engine build — it was recorded on `2026.06.06-80-gf898efc`. Present with the knobs off too, so it is a version mismatch, not the migration.
+## What is genuinely proven now
 
-## After the divergence is fixed
+- Zero rejected GL calls in a BAR frame with the migration on (skirmish + a real 12-player replay).
+- The modern Lua backend matches true legacy at **full BAR UI coverage** on two contents (742 + 485 frames, 0/0).
+- A capture **with the full UI** opens and replays (cache-off replay).
+- Two shader ports (`SMF{Vert,Frag}Prog`, `BumpWater{VS,FS}`) still 0 px via the dual-variant harness.
 
-1. Re-verify the capture with the UI present, warm Mesa cache.
-2. BAR's Lua shaders declare `#version 150 compatibility`. Stripping the token engine-side was tried at the `LuaShaders.cpp` funnel, gated at 3M px twice (unanchored and anchored to the `#version` line), and reverted. It needs BAR-side shader work, which the brief allows.
-3. The remaining pre-core engine shaders (`Model*`, `ShadowGen*`, `Grass*`) are cleanup, not blockers. `Model*` and `ShadowGen{Vert,Frag}Prog` cannot be ported as shaders at all — they read `gl_Vertex`/`gl_Normal` from fixed-function vertex arrays, so migrating them needs the drawer changed, and that drawer already exists as the GL4 path. `IModelDrawerState::EnsureInstance` / `DropDeferredInstance` is scaffolding toward not compiling them; it works but something still requests the legacy slot (an early `SelectImplementation` before the GL4 drawer exists, where `best` falls through to `MODEL_DRAWER_GLSL`).
+## Remaining work
+
+1. Re-measure the `LuaShaders.cpp` compatibility-token strip with the now-sound gate (see above). If clean, BAR-side shader edits may be unnecessary for the warm-cache replay path.
+2. BAR's own `#version 150 compatibility` Lua shaders keep the capture replay on the cache-off workaround; making them core-clean (BAR-side or via 1.) removes the Mesa-bug exposure entirely.
+3. The remaining pre-core engine shaders (`Model*`, `ShadowGen*`, `Grass*`) are cleanup, not blockers; `Model*`/`ShadowGen*` need the drawer change (`IModelDrawerState::EnsureInstance` scaffolding exists; an early `SelectImplementation` still requests the legacy slot).
 4. The knobs still default to off. Turning them on for everyone is a separate decision and has never been made.
+5. Root-cause the gui_pip corner artifact (BAR-side).
 
 ## Running things
 
 ```bash
-# gate (must be 0/0; check the widget count first)
+# gate (must be 0/0; check the widget count first — 241 for this profile)
 AB_WRITE_DIR=/www/projects/bar-data ./test/gl-ab-compare/run_gate.sh watertest
 AB_WRITE_DIR=/www/projects/bar-data ./test/gl-ab-compare/run_gate.sh idletest
 
 # prove a .core.glsl port
 AB_WRITE_DIR=/www/projects/bar-data ./test/gl-ab-compare/run_gate.sh watertest --ff-experiment 15 --mixed-ok
 
-# capture, and open it again
+# capture, and open it again (forces FFRewriteBuiltinArm=0 itself)
 AB_WRITE_DIR=/www/projects/bar-data ./test/gl-ab-compare/run_rdoc_capture.sh
 AB_WRITE_DIR=/www/projects/bar-data ./test/gl-ab-compare/run_rdoc_capture.sh --legacy   # must produce nothing
 
@@ -86,4 +73,17 @@ AB_WRITE_DIR=/www/projects/bar-data ./test/gl-ab-compare/run_rdoc_capture.sh --l
 AB_WRITE_DIR=/www/projects/bar-data ./test/gl-ab-compare/run_rdoc_offenders.sh
 ```
 
-The six migration knobs: `LuaModernGLBackend`, `LuaCmdListBakedStreams`, `LuaCmdListSuspendOnObjectCreate`, `ModernModelAttribs`, `ModernModelFFShader`, `FFVertexAttribRewrite`. `FFMatrixSuppress` defaults on and is inert without the last one.
+The migration knobs: `LuaModernGLBackend`, `LuaCmdListBakedStreams`, `LuaCmdListSuspendOnObjectCreate`, `ModernModelAttribs`, `ModernModelFFShader`, `FFVertexAttribRewrite`. `FFMatrixSuppress` defaults on and is inert without the last one. `FFRewriteBuiltinArm` is gate-only (see above).
+
+## Traps, all of them paid for (kept from the previous handoff)
+
+- **Mesa's GLSL disk cache is not keyed on GL profile** — `MESA_SHADER_CACHE_DISABLE=true` on the replay side; `mesa_compat_cache_repro.c` shows all three outcomes.
+- **Uniform values are per-program state** — a twin program has none; `GLSLCopyState` on variant switch.
+- **A uniform nothing references is dropped by the linker** — identify rewritten programs by the generated attribute.
+- **`gl_FogFragCoord`/`gl_TexCoord` are cross-stage plumbing** — declared out/in pair, not a uniform.
+- **`ninja base/springcontent.sdz` does not drop removed files** — `rm` the `.sdz` first.
+- **`luaui disablewidget` persists** to `LuaUI/Config/BYAR.lua`; repair against `/www/projects/bar-data2`. Bisects must restore BYAR.lua per run.
+- **A harness widget must never `widgetHandler:RemoveWidget()` itself** — BAR writes `order = 0` back.
+- **Check `CMAKE_BUILD_TYPE` and the compiler in the cache** — canonical configure in memory `project_user_cmake_configure`.
+- **The demo desyncs from frame 0** against this engine build (recorded on `2026.06.06-80-gf898efc`) — version mismatch, not the migration.
+- **New user widgets default to order 0** — enable them explicitly in BYAR.lua's order table or they silently do not load.
