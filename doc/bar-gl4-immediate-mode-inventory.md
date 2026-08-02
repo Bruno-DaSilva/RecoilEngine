@@ -14,7 +14,25 @@ Working document for moving Beyond-All-Reason (`/www/projects/Beyond-All-Reason`
 
 ## Status / changelog
 
-- 2026-08-02 (latest) — **A capture exists. RenderDoc takes a frame of BAR, and its replay side opens it: 3053 draws, 13 clears.**
+- 2026-08-02 (latest) — **The shaders stop naming the builtins, and the compatibility work list is measured: 11 constructs left.**
+  - **Definition #1 was not sufficient, and the capture is what showed it.** RenderDoc replays on a **core**-profile context, so a shader whose `#version` says `compatibility` cannot be compiled there at all and therefore cannot be *reflected* — which is most of why one captures. Zero rejected *calls* is necessary; core-clean shader **text** is the other half.
+  - **The both-sources selector is gone from generated sources.** For fog and the matrices that is a reasoning step — the engine picks the source once at startup, and under suppression it no longer issues the fixed-function calls at all, so selecting the builtin would read an identity rather than merely go unused. For position and texcoord it is a **measurement**: those arrive per draw, so a submission reaching a rewritten program outside `DrawFFAttribStream` would read an unfed attribute and corrupt geometry silently. Measured **zero** on watertest and idletest with a positive control, and the census stays in permanently at `L_ERROR`.
+  - **Two errors the gate caught that reading did not.** A uniform nothing references is dropped by the linker, so keeping the selector "declared for identification" classified every rewritten program as unfed and fed none of them — 250k px on every frame. Identification now keys on the generated attribute and on the matrix uniforms. And that same path gated its uploads behind `mvp >= 0`, skipping any shader that reads `gl_ModelViewMatrix` without the composed MVP.
+  - **The rewrite now runs on fragment sources too.** `gl_Fog` and the matrices are fixed-function state read identically from either stage, but `Shader.cpp` only ever handed it vertex sources — so fragment shaders kept naming builtins the vertex half had already dropped. Two blockers retired with no new machinery.
+  - **What still forces `compatibility` in a BAR frame** (measured on the text as compiled, both stages):
+
+    | blocker | what it needs |
+    |---|---|
+    | `gl_Normal` | a normal channel in the attribute stream — and it **cascades**: a shader reading it has its position and texcoord channels declined, which is the only reason `gl_Vertex` and `gl_MultiTexCoord0` are still listed |
+    | `gl_FragColor`, `gl_FragData` | a single-stage `out` declaration |
+    | `gl_TexCoord` | cross-stage: a matching `out`/`in` pair emitted at both funnels |
+    | `gl_TextureMatrix`, `gl_LightSource` | new uniform families, same shape as the matrix one |
+    | `gl_ClipVertex` | `gl_ClipDistance` |
+    | `attribute`, `varying` | keywords removed from core |
+
+  - **Gate throughout:** watertest 946 then 938 frames, control 0 / signal 0. Unchanged with the rewrite off, where `RewriteFFBuiltins` returns before touching the source.
+
+- 2026-08-02 — **A capture exists. RenderDoc takes a frame of BAR, and its replay side opens it: 3053 draws, 13 clears.**
   - **The meter was a prediction; this is the experiment.** `run_rdoc_capture.sh` preloads `rdoc_trigger.so` next to librenderdoc and asks for a capture through RenderDoc's in-application API — the UI and F12 do not exist here, and a capture has to be *requested*. With the migration knobs on: `rdoc_capture_frame5005.rdc`, 787 MB, 0 unsupported functions. With `--legacy`: 32 unsupported functions and no file, so the harness demonstrably tells the two apart.
   - **"A file appeared" is not the claim.** `rdoc_validate_capture.cpp` links librenderdoc's replay side and opens the capture: driver OpenGL, local replay supported, 2048×1152 thumbnail of a real BAR frame, then a full replay reporting **3148 actions / 3053 draws / 13 clears**. The runner does this on every capture.
   - **Opening it crashes on Mesa, and the cause is not ours.** Mesa's GLSL disk cache is not keyed on GL profile: the `#version 150 compatibility` shaders the capturing run just compiled in its compatibility context are served back to RenderDoc's **core**-profile replay context, bypassing the `compatibility profile is not supported` rejection, and the linker then segfaults on them. `mesa_compat_cache_repro.c` reproduces all three outcomes in 40 lines (compat ctx → links; core ctx warm cache → segfault; core ctx cold/disabled cache → clean rejection). `MESA_SHADER_CACHE_DISABLE=true` is the workaround the runner sets.
