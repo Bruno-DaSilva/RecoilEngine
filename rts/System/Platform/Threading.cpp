@@ -13,6 +13,7 @@
 	#include "System/Sync/FPUCheck.h"
 #endif
 
+#include <algorithm>
 #include <functional>
 #include <memory>
 #include <numeric>

@@ -15,7 +15,8 @@
 // We include thread before the test to make sure that _GLIBCXX_HAS_GTHREADS is/isn't defined
 #include <thread>
 
-#if defined(__MINGW32__) && !defined(_GLIBCXX_HAS_GTHREADS)
+// Only libstdc++ needs the hack; libc++ (llvm-mingw) ships a working <future>.
+#if defined(__MINGW32__) && defined(__GLIBCXX__) && !defined(_GLIBCXX_HAS_GTHREADS)
 	#include <mutex>
 	#include <atomic>
 	#include <condition_variable>
