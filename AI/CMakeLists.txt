@@ -33,10 +33,6 @@ set(CMAKE_C_FLAGS_PROFILE        "${CMAKE_CXX_FLAGS_PROFILE}")
 
 add_definitions(${PIC_FLAG} -D_REENTRANT -D_GNU_SOURCE=1)
 
-if    (MINGW)
-	set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -Wl,--kill-at -Wl,--add-stdcall-alias")
-endif (MINGW)
-
 
 # Assemble common additional native AI sources
 #list(APPEND ai_common_SRC "${rts}/Game/GameVersion.cpp")
