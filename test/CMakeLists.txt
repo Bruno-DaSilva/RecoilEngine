@@ -426,7 +426,9 @@ endif()
 	set(test_libs
 			${WINMM_LIBRARY}
 		)
-	if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
+	# Linux clang + libstdc++ needs libatomic; llvm-mingw's libc++ has atomics
+	# built in and ships no libatomic.
+	if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang" AND NOT MINGW)
 		list(APPEND test_libs atomic)
 	endif()
 	add_spring_test(${test_name} "${test_src}" "${test_libs}" "-DTHREADPOOL -DUNITSYNC")

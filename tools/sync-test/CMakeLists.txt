@@ -32,7 +32,14 @@ endif()
 
 # --- Build streflop library from source ---
 # We add it as a subdirectory, then override the auto-detected mode.
+# streflop carries its own libm; toolchain-injected force-includes (llvm-mingw's
+# -include cmath et al.) would drag system math.h macros into it, which collide
+# with the FP_* enum in streflop_libm_bridge.h.
+string(REGEX REPLACE "-include [^ ]+" "" NEW_CMAKE_FLAGS "${CMAKE_CXX_FLAGS}")
+set(SAVED_CMAKE_FLAGS ${CMAKE_CXX_FLAGS})
+set(CMAKE_CXX_FLAGS ${NEW_CMAKE_FLAGS})
 add_subdirectory("${STREFLOP_DIR}" "${CMAKE_BINARY_DIR}/streflop")
+set(CMAKE_CXX_FLAGS ${SAVED_CMAKE_FLAGS})
 
 # Remove any auto-set STREFLOP_* mode definitions from the streflop target
 foreach(_prop COMPILE_DEFINITIONS INTERFACE_COMPILE_DEFINITIONS)
