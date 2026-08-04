@@ -23,12 +23,6 @@ jobs:
     strategy:
       matrix:
         system:
-          - target: amd64-linux
-            runs-on: ubuntu-24.04
-          - target: arm64-linux
-            runs-on: ubuntu-24.04-arm
-          - target: amd64-windows
-            runs-on: ubuntu-24.04
           - target: llvm
             runs-on: ubuntu-24.04
     steps:
@@ -74,20 +68,13 @@ jobs:
           path: ${{ runner.temp }}/images
       - name: Push images and update digests
         run: |
-          for system in amd64-linux arm64-linux amd64-windows llvm; do
-            docker load --input ${{ runner.temp }}/images/build-image-$system/image.tar
-            docker tag recoil-build-$system:latest ghcr.io/${{ github.repository_owner }}/recoil-build-$system:latest
-            docker push ghcr.io/${{ github.repository_owner }}/recoil-build-$system:latest | tee ${{ runner.temp }}/push_output.txt
-            digest=$(tail -n 1 ${{ runner.temp }}/push_output.txt | cut -d' ' -f 3)
-            # The llvm image serves multiple platforms; stamp its digest on each.
-            if [[ "$system" == "llvm" ]]; then
-              platforms="amd64-windows-llvm amd64-linux-llvm arm64-linux-llvm"
-            else
-              platforms="$system"
-            fi
-            for platform in $platforms; do
-              sed -i -r "s/(image_version\[$platform\]=)(.*)/\1$digest/" docker-build-v2/images_versions.sh
-            done
+          docker load --input ${{ runner.temp }}/images/build-image-llvm/image.tar
+          docker tag recoil-build-llvm:latest ghcr.io/${{ github.repository_owner }}/recoil-build-llvm:latest
+          docker push ghcr.io/${{ github.repository_owner }}/recoil-build-llvm:latest | tee ${{ runner.temp }}/push_output.txt
+          digest=$(tail -n 1 ${{ runner.temp }}/push_output.txt | cut -d' ' -f 3)
+          # One image serves every platform; stamp its digest on each entry.
+          for platform in amd64-windows amd64-linux arm64-linux; do
+            sed -i -r "s/(image_version\[$platform\]=)(.*)/\1$digest/" docker-build-v2/images_versions.sh
           done
       - name: Commit and push
         uses: stefanzweifel/git-auto-commit-action@v7

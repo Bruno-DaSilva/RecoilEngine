@@ -94,14 +94,14 @@ will:
 > - Windows: [mklink](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/mklink) or third-party [Link Shell Extension (LSE)](https://schinagl.priv.at/nt/hardlinkshellext/linkshellextension.html).
 > - Linux: [`ln -s`](https://linuxize.com/post/how-to-create-symbolic-links-in-linux-using-the-ln-command/)
 
-### The llvm image: every platform from one toolchain
+### The build toolchain
 
-Next to the per-platform GCC images there is a single `llvm` image (`docker-build-v2/images/llvm/`) that cross-compiles **all** engine targets from one amd64 container using clang/lld from [llvm-mingw](https://github.com/mstorsjo/llvm-mingw):
+All platforms are built by one image (`docker-build-v2/images/llvm/`) that cross-compiles every engine target from an amd64 container using clang/lld from [llvm-mingw](https://github.com/mstorsjo/llvm-mingw):
 
 ```shell
-docker-build-v2/build.sh windows-llvm             # amd64 Windows 7+, native PDBs
-docker-build-v2/build.sh linux-llvm               # amd64 Linux, glibc 2.27+ (Ubuntu 18.04)
-docker-build-v2/build.sh --arch arm64 linux-llvm  # arm64 Linux, cross-compiled - no emulation or arm hardware needed
+docker-build-v2/build.sh windows             # amd64 Windows 7+, native PDBs
+docker-build-v2/build.sh linux               # amd64 Linux, glibc 2.27+ (Ubuntu 18.04)
+docker-build-v2/build.sh --arch arm64 linux  # arm64 Linux, cross-compiled - no emulation or arm hardware needed
 ```
 
 - **Windows**: emits native CodeView debug info - every `.exe`/`.dll` gets a matching `.pdb` usable directly by WinDbg, Visual Studio, and Windows crash tooling. PDBs are placed next to the binaries in the install directory, and `package.sh` routes them into the debug-symbols archive. The msvcrt CRT variant keeps binaries Windows 7 compatible and CRT-compatible with the prebuilt mingwlibs64 DLLs.
@@ -109,7 +109,7 @@ docker-build-v2/build.sh --arch arm64 linux-llvm  # arm64 Linux, cross-compiled 
 - One `LLVM_*` version pin in the Dockerfile drives the compiler, the Windows runtimes, and both Linux libc++ builds, so they cannot drift apart.
 
 > [!WARNING]
-> Sync compatibility between llvm and GCC builds has flag/unit-test level validation but not yet full replay-level validation. Do not distribute both as interchangeable playable builds.
+> clang and GCC engine builds are not sync-validated against each other at the replay level. All playable builds of a given engine version must come from the same toolchain.
 
 ### Custom build config
 
@@ -142,13 +142,13 @@ configuration phase takes precedent over the arguments.
 The official images are built as part of a CI workflow (see [Implementation Overview](#implementation-overview)), but if you want to adjust the Docker build image or test local changes, you can build it locally:
 
 ```shell
-docker-build-v2/images/amd64-windows/build.sh
+docker-build-v2/images/llvm/build.sh
 ```
 
 and then pass the custom image to the build script via the environment variable `CONTAINER_IMAGE`:
 
 ```shell
-CONTAINER_IMAGE=recoil-build-amd64-windows docker-build-v2/build.sh windows
+CONTAINER_IMAGE=recoil-build-llvm docker-build-v2/build.sh windows
 ```
 
 and `build.sh` will use it.
@@ -157,7 +157,7 @@ For details on private testing, check the wiki [here](https://github.com/beyond-
 
 ## Implementation Overview
 
-There are multiple separate build images, for Windows, for Linux, and each supported architecture. The Docker images are built as part of a [GitHub Actions workflow](../../.github/workflows/docker-images-build.yml) and stored in the GitHub Package repository. The images are relatively small (~300-400MiB compressed) and building them takes 2-3 minutes.
+There is one build image that cross-compiles every platform and architecture from an amd64 container. It is built as part of a [GitHub Actions workflow](../../.github/workflows/docker-images-build.yml) and stored in the GitHub Package repository. The bake assembles Ubuntu 18.04 sysroots and compiles the libc++ runtimes against them, then gates the result on the glibc-2.27 compatibility floor, so it takes ~15 minutes; images are rebuilt rarely.
 
 Each of the images contains a complete required build environment with all dependencies installed (including [mingwlibs](https://github.com/beyond-all-reason/mingwlibs64) etc.), configured for proper resolution from engine CMake configuration, and caching with [ccache](https://ccache.dev/).
 

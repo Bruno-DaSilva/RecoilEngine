@@ -11,7 +11,7 @@ if [[ $(id -u) -eq 0 && -z "${SKIP_ROOT_CHECK:-}" ]]; then
   exit 2
 fi
 
-USAGE="Usage: $0 [-h|--help] [--configure|--compile] [-j|--jobs {number_of_jobs}] [--arch {arm64|amd64}] {windows|windows-llvm|linux|linux-llvm} [cmake_flag...]"
+USAGE="Usage: $0 [-h|--help] [--configure|--compile] [-j|--jobs {number_of_jobs}] [--arch {arm64|amd64}] {windows|linux} [cmake_flag...]"
 export CONFIGURE=true
 export COMPILE=true
 export CMAKE_BUILD_PARALLEL_LEVEL=
@@ -64,7 +64,7 @@ while (( $# > 0 )); do
       CMAKE_BUILD_PARALLEL_LEVEL="$1"
       shift
       ;;
-    windows|windows-llvm|linux|linux-llvm)
+    windows|linux)
       OS="$1"
       shift
       break
@@ -79,14 +79,11 @@ if [[ -z $OS ]]; then
 fi
 
 PLATFORM="$ARCH-$OS"
-if ! [[ "$PLATFORM" =~ ^(amd64-windows|amd64-windows-llvm|amd64-linux|amd64-linux-llvm|arm64-linux|arm64-linux-llvm)$ ]]; then
+if ! [[ "$PLATFORM" =~ ^(amd64-windows|amd64-linux|arm64-linux)$ ]]; then
   echo "Target platform $PLATFORM is not supported, supported platforms are:"
   echo " - amd64-windows"
-  echo " - amd64-windows-llvm"
   echo " - amd64-linux"
-  echo " - amd64-linux-llvm"
   echo " - arm64-linux"
-  echo " - arm64-linux-llvm"
   echo ""
   echo "$USAGE"
   exit 1
@@ -95,14 +92,10 @@ fi
 cd "$(dirname "$(readlink -f "$0")")/.."
 mkdir -p build-$PLATFORM .cache/ccache-$PLATFORM
 
-# The llvm platforms share one image that cross-compiles every target from
-# amd64; it needs to be told which platform this run builds.
-CONTAINER_PLATFORM=linux/$ARCH
-PLATFORM_ENV=()
-if [[ "$PLATFORM" == *-llvm ]]; then
-  CONTAINER_PLATFORM=linux/amd64
-  PLATFORM_ENV=(-e "ENGINE_PLATFORM=$PLATFORM" -e "CMAKE_TOOLCHAIN_FILE=/build/toolchain-$PLATFORM.cmake")
-fi
+# One image cross-compiles every target from amd64 (including arm64-linux -
+# no emulation involved); it is told which platform this run builds.
+CONTAINER_PLATFORM=linux/amd64
+PLATFORM_ENV=(-e "ENGINE_PLATFORM=$PLATFORM" -e "CMAKE_TOOLCHAIN_FILE=/build/toolchain-$PLATFORM.cmake")
 
 # Build container image selection, allow overriding.
 if [[ -n "${CONTAINER_IMAGE:-}" ]]; then

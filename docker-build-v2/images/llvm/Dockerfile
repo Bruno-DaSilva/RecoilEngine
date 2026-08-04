@@ -1,9 +1,9 @@
 # One build image, every platform, one toolchain: clang/lld from llvm-mingw
 # cross-compiles all engine targets from a single amd64 ubuntu 24.04 image:
 #
-#   amd64-windows-llvm  clang + libc++ (msvcrt, Windows 7+), native CodeView PDBs
-#   amd64-linux-llvm    clang + libc++ built against glibc 2.27 (Ubuntu 18.04+)
-#   arm64-linux-llvm    same, cross-compiled - no emulation, no arm runners
+#   amd64-windows  clang + libc++ (msvcrt, Windows 7+), native CodeView PDBs
+#   amd64-linux    clang + libstdc++ against glibc 2.27 (Ubuntu 18.04+)
+#   arm64-linux    same, cross-compiled - no emulation, no arm runners
 #
 # Design constraints, and what forces each choice:
 # - No compilation of tooling: the toolchain is the official prebuilt llvm-mingw
@@ -159,9 +159,9 @@ RUN git clone --depth=1 https://github.com/beyond-all-reason/spring-static-libs.
 # One toolchain file per platform; build.sh selects via CMAKE_TOOLCHAIN_FILE.
 # (Unlike the single-platform images, ENGINE_PLATFORM is not baked here -
 # build.sh passes it per run.)
-COPY llvm/toolchain-amd64-windows-llvm.cmake /build/
-COPY llvm/toolchain-amd64-linux-llvm.cmake /build/
-COPY llvm/toolchain-arm64-linux-llvm.cmake /build/
+COPY llvm/toolchain-amd64-windows.cmake /build/
+COPY llvm/toolchain-amd64-linux.cmake /build/
+COPY llvm/toolchain-arm64-linux.cmake /build/
 
 # Configure ccache caching
 COPY all/ccache.conf .

@@ -1,5 +1,5 @@
 # Cross-compile to arm64 Linux with a glibc 2.27 (Ubuntu 18.04) floor.
-# Identical scheme to toolchain-amd64-linux-llvm.cmake (see comments there);
+# Identical scheme to toolchain-amd64-linux.cmake (see comments there);
 # runs on a plain amd64 host - no emulation, no arm runners.
 
 SET(CMAKE_SYSTEM_NAME Linux)

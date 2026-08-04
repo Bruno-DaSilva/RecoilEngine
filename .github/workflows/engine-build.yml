@@ -64,9 +64,11 @@ jobs:
           - target: amd64-linux
             runs-on-arch: amd64
             bazel-remote-sha256: 025d53aeb03a7fdd4a0e76262a5ae9eeee9f64d53ca510deff1c84cf3f276784
+          # arm64-linux is cross-compiled by the llvm image from amd64; no
+          # arm64 runner or emulation is involved.
           - target: arm64-linux
-            runs-on-arch: arm64
-            bazel-remote-sha256: b8b9456d669d45bb8c5480ce0529ca4fa9d445e0c33b3aeed779df802d8164db
+            runs-on-arch: amd64
+            bazel-remote-sha256: 025d53aeb03a7fdd4a0e76262a5ae9eeee9f64d53ca510deff1c84cf3f276784
           - target: amd64-windows
             runs-on-arch: amd64
             bazel-remote-sha256: 025d53aeb03a7fdd4a0e76262a5ae9eeee9f64d53ca510deff1c84cf3f276784
@@ -158,21 +160,22 @@ jobs:
         if: inputs.image-artifacts
         uses: actions/download-artifact@v8
         with:
-          name: build-image-${{ matrix.system.target }}
+          name: build-image-llvm
           path: ${{ runner.temp }}
       - name: Pull builder image
         id: resolve-image
         run: |
+          source src/docker-build-v2/images_versions.sh
+          image_name=${image_name[${{ matrix.system.target }}]:-recoil-build-${{ matrix.system.target }}}
+
           if [[ -f ${{ runner.temp }}/image.tar ]]; then
             docker load --input ${{ runner.temp }}/image.tar
-            echo "image=recoil-build-${{ matrix.system.target }}:latest" >> "$GITHUB_OUTPUT"
+            echo "image=$image_name:latest" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          source src/docker-build-v2/images_versions.sh
-
           digest=${image_version[${{ matrix.system.target }}]}
-          ghcr_image=ghcr.io/${{ github.repository_owner }}/recoil-build-${{ matrix.system.target }}
+          ghcr_image=ghcr.io/${{ github.repository_owner }}/$image_name
 
           docker version
           docker pull $ghcr_image@$digest
@@ -191,6 +194,8 @@ jobs:
             -v $(pwd)/remote_ccache.conf:/build/ccache.conf:ro \
             -v $(pwd)/artifacts:/build/artifacts:rw \
             -e CCACHE_${{ inputs.recache && 'RECACHE' || 'NORECACHE' }}=1 \
+            -e ENGINE_PLATFORM=${{ matrix.system.target }} \
+            -e CMAKE_TOOLCHAIN_FILE=/build/toolchain-${{ matrix.system.target }}.cmake \
             --network host \
             ${{ steps.resolve-image.outputs.image }} \
             bash <<EOF
