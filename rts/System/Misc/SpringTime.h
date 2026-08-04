@@ -19,9 +19,11 @@ namespace spring_clock {
 	//   ToSecs is inaccurate in that case
 	//   these cannot be written as integer divisions or tests
 	//   will fail because of intermediate conversions to FP32
-	template<typename T> static T ToSecs     (int64_t ns) { return static_cast<T>(ns * 1e-9); }
-	template<typename T> static T ToMilliSecs(int64_t ns) { return static_cast<T>(ns * 1e-6); }
-	template<typename T> static T ToMicroSecs(int64_t ns) { return static_cast<T>(ns * 1e-3); }
+	//   float-suffixed so the arithmetic stays FP32 with or without GCC's
+	//   -fsingle-precision-constant (clang has no equivalent flag)
+	template<typename T> static T ToSecs     (int64_t ns) { return static_cast<T>(ns * 1e-9f); }
+	template<typename T> static T ToMilliSecs(int64_t ns) { return static_cast<T>(ns * 1e-6f); }
+	template<typename T> static T ToMicroSecs(int64_t ns) { return static_cast<T>(ns * 1e-3f); }
 	template<typename T> static T ToNanoSecs (int64_t ns) { return static_cast<T>(ns       ); }
 
 	// specializations

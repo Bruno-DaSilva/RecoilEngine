@@ -168,7 +168,10 @@ void CResourceMapAnalyzer::GetResourcePoints() {
 	numSpotsFound = 0;
 
 	// if the map does not have any resource (quick test), just stop
-	if (totalResourcesDouble < 0.9)
+	// 0.9f, not 0.9: shipped builds demote this literal to float (GCC
+	// -fsingle-precision-constant), so the widened-float value is the
+	// compatible comparison constant
+	if (totalResourcesDouble < 0.9f)
 		return;
 
 	// Now work out how much resources each spot can make
