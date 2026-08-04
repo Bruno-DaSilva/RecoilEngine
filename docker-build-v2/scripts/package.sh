@@ -13,14 +13,14 @@ cd /build/out/install
 
 # Compute md5 hashes of all files in archive. We additionally gzip it as gzip adds
 # checksum to the list itself. To validate just `zcat files.md5.gz | md5sum -c -`
-find . -type f ! -name '*.dbg' ! -name files.md5.gz -exec md5sum {} \; | gzip > files.md5.gz
+find . -type f ! -name '*.dbg' ! -name '*.pdb' ! -name files.md5.gz -exec md5sum {} \; | gzip > files.md5.gz
 
 rm -f "/build/artifacts/$bin_name" "/build/artifacts/$dbg_name"
 
 # Trigger compression of main binaries and debug info concurrently
-7z a -t7z -m0=lzma -mx=9 -mfb=64 -md=32m -ms=on "/build/artifacts/$bin_name" ./* -xr\!*.dbg &
+7z a -t7z -m0=lzma -mx=9 -mfb=64 -md=32m -ms=on "/build/artifacts/$bin_name" ./* -xr\!*.dbg -xr\!*.pdb &
 
-DEBUG_SYMBOLS=$(find ./ -name '*.dbg')
+DEBUG_SYMBOLS=$(find ./ -name '*.dbg' -o -name '*.pdb')
 if [[ -n $DEBUG_SYMBOLS ]]; then
     tar cvf - $DEBUG_SYMBOLS | zstd -T0 > "/build/artifacts/$dbg_name" &
 fi

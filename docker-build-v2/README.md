@@ -94,6 +94,23 @@ will:
 > - Windows: [mklink](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/mklink) or third-party [Link Shell Extension (LSE)](https://schinagl.priv.at/nt/hardlinkshellext/linkshellextension.html).
 > - Linux: [`ln -s`](https://linuxize.com/post/how-to-create-symbolic-links-in-linux-using-the-ln-command/)
 
+### The llvm image: every platform from one toolchain
+
+Next to the per-platform GCC images there is a single `llvm` image (`docker-build-v2/images/llvm/`) that cross-compiles **all** engine targets from one amd64 container using clang/lld from [llvm-mingw](https://github.com/mstorsjo/llvm-mingw):
+
+```shell
+docker-build-v2/build.sh windows-llvm             # amd64 Windows 7+, native PDBs
+docker-build-v2/build.sh linux-llvm               # amd64 Linux, glibc 2.27+ (Ubuntu 18.04)
+docker-build-v2/build.sh --arch arm64 linux-llvm  # arm64 Linux, cross-compiled - no emulation or arm hardware needed
+```
+
+- **Windows**: emits native CodeView debug info - every `.exe`/`.dll` gets a matching `.pdb` usable directly by WinDbg, Visual Studio, and Windows crash tooling. PDBs are placed next to the binaries in the install directory, and `package.sh` routes them into the debug-symbols archive. The msvcrt CRT variant keeps binaries Windows 7 compatible and CRT-compatible with the prebuilt mingwlibs64 DLLs.
+- **Linux**: compiles against Ubuntu 18.04 sysroots (assembled from signature-verified bionic debs) with a libc++ built against glibc 2.27, so the compatibility floor is preserved without building *on* 18.04. The image bake refuses to produce an image whose output could reference glibc > 2.27.
+- One `LLVM_*` version pin in the Dockerfile drives the compiler, the Windows runtimes, and both Linux libc++ builds, so they cannot drift apart.
+
+> [!WARNING]
+> Sync compatibility between llvm and GCC builds has flag/unit-test level validation but not yet full replay-level validation. Do not distribute both as interchangeable playable builds.
+
 ### Custom build config
 
 The script accepts CMake arguments, so the compilation can be easily customized. For example to compile Linux release with Tracy support and skip building headless:
