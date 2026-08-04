@@ -11,7 +11,7 @@ if [[ $(id -u) -eq 0 && -z "${SKIP_ROOT_CHECK:-}" ]]; then
   exit 2
 fi
 
-USAGE="Usage: $0 [-h|--help] [--configure|--compile] [-j|--jobs {number_of_jobs}] [--arch {arm64|amd64}] {windows|linux} [cmake_flag...]"
+USAGE="Usage: $0 [-h|--help] [--configure|--compile] [-j|--jobs {number_of_jobs}] [--arch {arm64|amd64}] {windows|windows-llvm|linux|linux-llvm} [cmake_flag...]"
 export CONFIGURE=true
 export COMPILE=true
 export CMAKE_BUILD_PARALLEL_LEVEL=
@@ -64,7 +64,7 @@ while (( $# > 0 )); do
       CMAKE_BUILD_PARALLEL_LEVEL="$1"
       shift
       ;;
-    windows|linux)
+    windows|windows-llvm|linux|linux-llvm)
       OS="$1"
       shift
       break
@@ -79,50 +79,46 @@ if [[ -z $OS ]]; then
 fi
 
 PLATFORM="$ARCH-$OS"
-if ! [[ "$PLATFORM" =~ ^(amd64-windows|amd64-linux|arm64-linux)$ ]]; then
+if ! [[ "$PLATFORM" =~ ^(amd64-windows|amd64-windows-llvm|amd64-linux|amd64-linux-llvm|arm64-linux|arm64-linux-llvm)$ ]]; then
   echo "Target platform $PLATFORM is not supported, supported platforms are:"
   echo " - amd64-windows"
+  echo " - amd64-windows-llvm"
   echo " - amd64-linux"
+  echo " - amd64-linux-llvm"
   echo " - arm64-linux"
+  echo " - arm64-linux-llvm"
   echo ""
   echo "$USAGE"
   exit 1
 fi
 
 cd "$(dirname "$(readlink -f "$0")")/.."
-
-# The engine uses git submodules quite extensively and it's a common noob trap
-# that people forget to update and initialize them. Let's block the build when
-# we detect that it's the case and allow to continue after creation of escape
-# hatch file.
-UNSYNCED_SUBMODULES="$(git submodule status --recursive | { grep -E '^(\+|-)' || test $? = 1; } | awk '{ print " - " $2 }')"
-if [[ -n "$UNSYNCED_SUBMODULES" ]]; then
-  echo "WARNING: You have unsynced git submodules!"
-  echo ""
-  echo "$UNSYNCED_SUBMODULES"
-  echo ""
-  echo "Running following command should be sufficient to synchronize them:"
-  echo ""
-  echo "  git submodule update --init --recursive"
-  echo ""
-  if [[ -f ".i-understand-git-submodules.txt" ]]; then
-    echo "Continuing the build because .i-understand-git-submodules.txt file exists."
-  else
-    echo 'If that is intended and you know what you are doing create `.i-understand-git-submodules.txt` file to skip this warning.'
-    echo ""
-    echo "Exiting the build."
-    exit 1
-  fi
-fi
-
 mkdir -p build-$PLATFORM .cache/ccache-$PLATFORM
+
+# The llvm platforms share one image that cross-compiles every target from
+# amd64; it needs to be told which platform this run builds.
+CONTAINER_PLATFORM=linux/$ARCH
+PLATFORM_ENV=()
+if [[ "$PLATFORM" == *-llvm ]]; then
+  CONTAINER_PLATFORM=linux/amd64
+  PLATFORM_ENV=(-e "ENGINE_PLATFORM=$PLATFORM" -e "CMAKE_TOOLCHAIN_FILE=/build/toolchain-$PLATFORM.cmake")
+fi
 
 # Build container image selection, allow overriding.
 if [[ -n "${CONTAINER_IMAGE:-}" ]]; then
   IMAGE="$CONTAINER_IMAGE"
 else
   source docker-build-v2/images_versions.sh
-  IMAGE=ghcr.io/beyond-all-reason/recoil-build-$PLATFORM@${image_version[$PLATFORM]}
+  IMAGE_NAME=${image_name[$PLATFORM]:-recoil-build-$PLATFORM}
+  if [[ -z "${image_version[$PLATFORM]:-}" ]]; then
+    echo "There is no published container image for $PLATFORM yet."
+    echo "Build it locally:"
+    echo "  docker-build-v2/images/${image_dir[$PLATFORM]:-$PLATFORM}/build.sh"
+    echo "and re-run with:"
+    echo "  CONTAINER_IMAGE=$IMAGE_NAME $0 ..."
+    exit 1
+  fi
+  IMAGE=ghcr.io/beyond-all-reason/$IMAGE_NAME@${image_version[$PLATFORM]}
 fi
 
 source docker-build-v2/_resolve_container_runtime.sh
@@ -179,16 +175,7 @@ if [[ "$GIT_DIR" != "$GIT_COMMON_DIR" ]]; then
   WORKTREE_MOUNTS="-v $GIT_COMMON_DIR:$GIT_COMMON_DIR:ro"
 fi
 
-# Docker's -t requires stdin AND stdout to be TTYs; in CI, pipes, or agent
-# contexts one or both are missing and docker errors out with "the input
-# device is not a TTY". Only add -t when it's safe; -i is harmless either
-# way (non-interactive stdin just sees EOF).
-TTY_FLAG=
-if [[ -t 0 && -t 1 ]]; then
-  TTY_FLAG=-t
-fi
-
-$RUNTIME run --platform=linux/$ARCH -i $TTY_FLAG --rm \
+$RUNTIME run --platform=$CONTAINER_PLATFORM -it --rm \
     -v "$CWD${P}":/build/src:z,ro \
     -v "$CWD${P}.cache${P}ccache-$PLATFORM":/build/cache:z,rw \
     -v "$CWD${P}build-$PLATFORM":/build/out:z,rw \
@@ -197,6 +184,7 @@ $RUNTIME run --platform=linux/$ARCH -i $TTY_FLAG --rm \
     -e CONFIGURE \
     -e COMPILE \
     -e CMAKE_BUILD_PARALLEL_LEVEL \
+    "${PLATFORM_ENV[@]}" \
     "${EXTRA_ARGS[@]}" \
     $IMAGE \
     bash -c '
