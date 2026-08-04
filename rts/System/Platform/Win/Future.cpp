@@ -7,7 +7,7 @@
 // it is available under the following license:
 
 
-#if defined(__MINGW32__) && !defined(_GLIBCXX_HAS_GTHREADS)
+#if defined(__MINGW32__) && defined(__GLIBCXX__) && !defined(_GLIBCXX_HAS_GTHREADS)
 // Copyright (C) 2003-2014 Free Software Foundation, Inc.
 //
 // This file is part of the GNU ISO C++ Library.  This library is free
