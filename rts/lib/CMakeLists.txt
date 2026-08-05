@@ -48,7 +48,14 @@ ADD_SUBDIRECTORY(minizip)
 ADD_SUBDIRECTORY(nowide)
 ADD_SUBDIRECTORY(headlessStubs)
 if (ENABLE_STREFLOP)
+# streflop carries its own libm; toolchain-injected force-includes (llvm-mingw's
+# -include cmath et al.) would drag system math.h macros into it, which collide
+# with the FP_* enum in streflop_libm_bridge.h.
+string(REGEX REPLACE "-include [^ ]+" "" NEW_CMAKE_FLAGS "${CMAKE_CXX_FLAGS}")
+set(SAVED_CMAKE_FLAGS ${CMAKE_CXX_FLAGS})
+set(CMAKE_CXX_FLAGS ${NEW_CMAKE_FLAGS})
 ADD_SUBDIRECTORY(streflop)
+set(CMAKE_CXX_FLAGS ${SAVED_CMAKE_FLAGS})
 endif ()
 
 SET(GFLAGS_BUILD_SHARED_LIBS          FALSE)

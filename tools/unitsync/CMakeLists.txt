@@ -135,9 +135,6 @@ endif ()
 add_library(unitsync SHARED ${unitsync_files})
 add_dependencies(unitsync generateVersionFiles)
 target_link_libraries(unitsync ${unitsync_libs} ${unitsync_lib_flags})
-if (MINGW)
-	set_target_properties(unitsync PROPERTIES LINK_FLAGS -Wl,--add-stdcall-alias)
-endif (MINGW)
 fix_lib_name(unitsync)
 
 install (TARGETS unitsync
