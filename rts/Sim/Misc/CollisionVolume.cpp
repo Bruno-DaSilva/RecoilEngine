@@ -360,7 +360,9 @@ float CollisionVolume::GetCylinderDistance(const float3& pv, size_t axisA, size_
 }
 
 #define MAX_ITERATIONS 10
-#define THRESHOLD 0.001
+// float suffix: keeps the value identical whether or not the build demotes
+// unsuffixed literals (GCC -fsingle-precision-constant; clang has no such flag)
+#define THRESHOLD 0.001f
 
 //Newton's method according to http://wwwf.imperial.ac.uk/~rn/distance2ellipse.pdf
 float CollisionVolume::GetEllipsoidDistance(const float3& pv) const

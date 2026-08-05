@@ -63,7 +63,7 @@ void CModInfo::ResetState()
 	// }
 	{
 		constructionDecay      = true;
-		constructionDecayTime  = int(6.66 * GAME_SPEED);
+		constructionDecayTime  = int(6.66f * GAME_SPEED);
 		constructionDecaySpeed = 0.03f;
 		insertBuiltUnitMoveCommand = true;
 	}
@@ -135,7 +135,7 @@ void CModInfo::ResetState()
 		pfRawMoveSpeedThreshold = 0.f;
 		qtMaxNodesSearched = 8192;
 		qtRefreshPathMinDist = 512.f;
-		qtMaxNodesSearchedRelativeToMapOpenNodes = 0.25;
+		qtMaxNodesSearchedRelativeToMapOpenNodes = 0.25f;
 
 		enableSmoothMesh = true;
 		smoothMeshResDivider = 2;

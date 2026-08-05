@@ -258,7 +258,9 @@ bool RayAndPlaneIntersection(const float3& p0, const float3& p1, const float4& p
 	if (directional && denom > 0.0f)
 		return false;
 
-	if (std::fabs(denom) < 1e-4)
+	// 1e-4f, not 1e-4: shipped builds demote this literal to float (GCC
+	// -fsingle-precision-constant), keep the float comparison explicit
+	if (std::fabs(denom) < 1e-4f)
 		return false;
 
 	const float t = -(plane.dot(p0) + plane.w) / denom;
@@ -348,11 +350,11 @@ float3 GetTriangleBarycentric(const float3& p0, const float3& p1, const float3& 
 	const float dot11 = v1.dot(v1);
 	const float dot12 = v1.dot(v2);
 
-	const float invDenom = 1.0 / (dot00 * dot11 - dot01 * dot01);
+	const float invDenom = 1.0f / (dot00 * dot11 - dot01 * dot01);
 
 	const float s = (dot11 * dot02 - dot01 * dot12) * invDenom;
 	const float t = (dot00 * dot12 - dot01 * dot02) * invDenom;
-	const float q = 1.0 - s - t;
+	const float q = 1.0f - s - t;
 	return float3(s, t, q);
 }
 

@@ -503,9 +503,16 @@ elseif ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang" OR "${CMAKE_CXX_COMPILER_ID}
 	if (IS_ARM64_BUILD)
 		set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${FP_CONTRACT_FLAG}")
 	else()
-		# Clang on x86_64: use SSE like GCC
+		# Clang on x86_64: same arch baseline and ISA restrictions as the GCC
+		# fallback branch above, so both compilers select from the same
+		# instruction set in synced code.
 		if (NOT MARCH_FLAG OR MARCH_FLAG STREQUAL "" OR MARCH_FLAG STREQUAL "generic")
-			set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -msse -mfpmath=sse")
+			set(CLANG_SSE_FLAGS "-msse -mno-sse3 -mno-ssse3 -mno-sse4.1 -mno-sse4.2 -mno-sse4 -mno-sse4a")
+			set(CLANG_SSE_FLAGS "${CLANG_SSE_FLAGS} -mno-avx -mno-fma -mno-fma4 -mno-xop -mno-lwp -mno-avx2")
+			set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=x86-64 -mtune=generic ${CLANG_SSE_FLAGS} -mfpmath=sse")
+			# GCC cannot contract into FMA here (-mno-fma leaves it nothing to
+			# fuse into); clang defaults -ffp-contract=on, so make it explicit.
+			set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffp-contract=off")
 		else()
 			set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=${MARCH_FLAG} -mtune=${MARCH_FLAG}")
 		endif()
