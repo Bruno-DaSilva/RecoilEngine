@@ -673,7 +673,7 @@ size_t LuaVBOImpl::Upload(const sol::stack_table& luaTblData, sol::optional<int>
  * @param elementCount number? number of elements to download
  * @param forceGPURead boolean? (Default: `false`) force downloading the data from GPU buffer as opposed
  * to using shadow RAM buffer
- * @return [number, ...][] vboData
+ * @return number[] vboData
  */
 sol::as_table_t<std::vector<lua_Number>> LuaVBOImpl::Download(sol::optional<int> attribIdxOpt, sol::optional<int> elemOffsetOpt, sol::optional<int> elemCountOpt, sol::optional<bool> forceGPUReadOpt)
 {
@@ -1492,6 +1492,17 @@ bool LuaVBOImpl::CopyTo(const std::shared_ptr<LuaVBOImpl>& destVBO, int copySize
 		vbo->Bind();
 
 	auto result = vbo->CopyTo(*destVBO->vbo, static_cast<GLsizeiptr>(copySizeInBytes));
+
+	// VBO::CopyTo only moves GPU->GPU. We need to also copy over the CPU-side bufferData.
+	if (result && bufferData != nullptr && destVBO->bufferData != nullptr && copySizeInBytes > 0) {
+		const auto n = std::min({
+			static_cast<uint32_t>(copySizeInBytes),
+			bufferSizeInBytes,
+			destVBO->bufferSizeInBytes
+		});
+		if (n > 0)
+			memcpy(destVBO->bufferData, bufferData, n);
+	}
 
 	if (!wasBound)
 		vbo->Unbind();

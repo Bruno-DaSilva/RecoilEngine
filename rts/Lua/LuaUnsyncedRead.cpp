@@ -94,6 +94,7 @@
 #include <SDL_mouse.h>
 
 
+
 /******************************************************************************
  * Callouts to get state
  *
@@ -485,7 +486,7 @@ static size_t PushSparseUnitTallyByDef(lua_State *const L, const T &v)
  *
  * @function Spring.IsReplay
  *
- * @return boolean? isReplay
+ * @return boolean isReplay
  */
 int LuaUnsyncedRead::IsReplay(lua_State* L)
 {
@@ -4120,7 +4121,7 @@ int LuaUnsyncedRead::GetCurrentTooltip(lua_State* L)
 
 /***
  * @function Spring.GetKeyFromScanSymbol
- * @param scanSymbol string
+ * @param scanSymbol string?
  * @return string keyName
  */
 int LuaUnsyncedRead::GetKeyFromScanSymbol(lua_State* L)
@@ -5043,7 +5044,7 @@ int LuaUnsyncedRead::GetGroundDecalTextures(lua_State* L)
 
 /***
  *
- * @function Spring.SetGroundDecalTextureParams
+ * @function Spring.GetGroundDecalTextureParams
  * @param decalID integer
  * @return number? texWrapDistance If non-zero, sets the mode to repeat the texture along the left-right direction of the decal every texWrapFactor elmos.
  * @return number texTraveledDistance Shifts the texture repetition defined by texWrapFactor so the texture of a next line in the continuous multiline can start where the previous finished. For that it should collect all elmo lengths of the previously set multiline segments.

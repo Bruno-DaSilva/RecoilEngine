@@ -115,6 +115,7 @@
 #undef Yield
 
 
+
 /******************************************************************************
  * Callouts to set state
  *
@@ -467,12 +468,11 @@ static inline CUnit* ParseSelectUnit(lua_State* L, const char* caller, int index
  * @section console
 ******************************************************************************/
 
-
 /*** Send a ping request to the server
  *
  * @function Spring.Ping
  *
- * @param pingTag number
+ * @param pingTag number?
  *
  * @return nil
  */
@@ -798,14 +798,14 @@ int LuaUnsyncedCtrl::LoadSoundDef(lua_State* L)
 
 /*** @function Spring.PlaySoundFile
  * @param soundfile string
- * @param volume number? (Default: 1.0)
- * @param posx number?
+ * @param volume number? (Default: 1.0) optional; all following arguments are optional
+ * @param posx number? world position X (use with `posy` and `posz`, or omit all three)
  * @param posy number?
  * @param posz number?
- * @param speedx number?
+ * @param speedx number? velocity X (use with `speedy` and `speedz` after position, or omit all three)
  * @param speedy number?
  * @param speedz number?
- * @param channel SoundChannel? (Default: `0|"general"`)
+ * @param channel SoundChannel? (Default: `0|"general"`) optional; parsed from the last argument index after position and speed triples
  * @return boolean playSound
  */
 int LuaUnsyncedCtrl::PlaySoundFile(lua_State* L)
@@ -1212,7 +1212,10 @@ static CCameraController::StateMap ParseCamStateMap(lua_State* L, int tableIdx)
  * @param x number
  * @param y number
  * @param z number
- * @param transTime number?
+ * @param transTime number? (Default: `0.5`) transition duration; values below zero are clamped to zero
+ * @param dirX number? (Default: current camera direction X)
+ * @param dirY number? (Default: current camera direction Y)
+ * @param dirZ number? (Default: current camera direction Z)
  * @return nil
  */
 int LuaUnsyncedCtrl::SetCameraTarget(lua_State* L)
@@ -1330,7 +1333,7 @@ int LuaUnsyncedCtrl::RunDollyCamera(lua_State* L)
 /*** Pause Dolly Camera
  *
  * @function Spring.PauseDollyCamera
- * @param fraction number Fraction of the total runtime to pause at, 0 to 1 inclusive. A null value pauses at current percent
+ * @param fraction number? Fraction of the total runtime to pause at, 0 to 1 inclusive. A null value pauses at current percent
  * @return nil
  */
 int LuaUnsyncedCtrl::PauseDollyCamera(lua_State* L)
@@ -1922,8 +1925,8 @@ static bool AddLightTrackingTarget(lua_State* L, GL::Light* light, bool trackEna
  *
  * @param lightHandle number
  * @param unitOrProjectileID integer
- * @param enableTracking boolean
- * @param unitOrProjectile boolean
+ * @param enableTracking boolean?
+ * @param unitOrProjectile boolean?
  * @return boolean success
  */
 int LuaUnsyncedCtrl::SetMapLightTrackingState(lua_State* L)
@@ -1958,8 +1961,8 @@ int LuaUnsyncedCtrl::SetMapLightTrackingState(lua_State* L)
  *
  * @param lightHandle number
  * @param unitOrProjectileID integer
- * @param enableTracking boolean
- * @param unitOrProjectile boolean
+ * @param enableTracking boolean?
+ * @param unitOrProjectile boolean?
  * @return boolean success
  */
 int LuaUnsyncedCtrl::SetModelLightTrackingState(lua_State* L)
@@ -2340,7 +2343,6 @@ int LuaUnsyncedCtrl::SetUnitLeaveTracks(lua_State* L)
  *
  * @function Spring.SetUnitSelectionVolumeData
  * @param unitID integer
- * @param featureID integer
  * @param scaleX number
  * @param scaleY number
  * @param scaleZ number
@@ -2663,7 +2665,7 @@ int LuaUnsyncedCtrl::SetUnitDefIcon(lua_State* L)
  * @function Spring.SetUnitDefImage
  *
  * @param unitDefID integer
- * @param image string luaTexture|texFile
+ * @param image string? luaTexture|texFile
  *
  * @return nil
  */
@@ -2965,6 +2967,7 @@ int LuaUnsyncedCtrl::SetBoxSelectionByEngine(lua_State* L)
  * @param r number
  * @param g number
  * @param b number
+ * @param alpha number?
  * @return nil
  */
 int LuaUnsyncedCtrl::SetTeamColor(lua_State* L)
@@ -3529,7 +3532,7 @@ static bool CanGiveOrders(const lua_State* L)
  *
  * @function Spring.GiveOrder
  * @param cmdID CMD|integer The command ID.
- * @param params CreateCommandParams Parameters for the given command.
+ * @param params CreateCommandParams? Parameters for the given command.
  * @param options CreateCommandOptions?
  * @param timeout integer? Absolute frame number. The command will be discarded after this frame. Only respected by mobile units.
  * @return boolean
@@ -3798,7 +3801,7 @@ int LuaUnsyncedCtrl::SetBuildFacing(lua_State* L)
 
 /*** @function Spring.SendLuaUIMsg
  * @param message string
- * @param mode string "s"/"specs" | "a"/"allies"
+ * @param mode string? "s"/"specs" | "a"/"allies"
  * @return nil
  */
 int LuaUnsyncedCtrl::SendLuaUIMsg(lua_State* L)
@@ -4108,12 +4111,12 @@ int LuaUnsyncedCtrl::MarkerErasePosition(lua_State* L)
 /***
  * @class AtmosphereParams
  * @x_helper
- * @field fogStart number
- * @field fogEnd number
- * @field sunColor rgba
- * @field skyColor rgba
- * @field cloudColor rgba
- * @field skyAxisAngle xyzw rotation axis and angle in radians of skybox orientation
+ * @field fogStart number?
+ * @field fogEnd number?
+ * @field sunColor rgba?
+ * @field skyColor rgba?
+ * @field cloudColor rgba?
+ * @field skyAxisAngle xyzw? rotation axis and angle in radians of skybox orientation
  */
 
 /*** Set atmosphere parameters
@@ -4253,11 +4256,11 @@ int LuaUnsyncedCtrl::SetSunLighting(lua_State* L)
  *
  * @class MapRenderingParams
  * @x_helper
- * @field splatTexMults rgba
- * @field splatTexScales rgba
- * @field voidWater boolean
- * @field voidGround boolean
- * @field splatDetailNormalDiffuseAlpha boolean
+ * @field splatTexMults rgba?
+ * @field splatTexScales rgba?
+ * @field voidWater boolean?
+ * @field voidGround boolean?
+ * @field splatDetailNormalDiffuseAlpha boolean?
  */
 
 
@@ -4571,44 +4574,44 @@ int LuaUnsyncedCtrl::SetVideoCapturingTimeOffset(lua_State* L)
  *
  * @class WaterParams
  * @x_helper
- * @field absorb rgb
- * @field baseColor rgb
- * @field minColor rgb
- * @field surfaceColor rgb
- * @field diffuseColor rgb
- * @field specularColor rgb
- * @field planeColor rgb
- * @field texture string file
- * @field foamTexture string file
- * @field normalTexture string file
- * @field damage number
- * @field repeatX number
- * @field repeatY number
- * @field surfaceAlpha number
- * @field ambientFactor number
- * @field diffuseFactor number
- * @field specularFactor number
- * @field specularPower number
- * @field fresnelMin number
- * @field fresnelMax number
- * @field fresnelPower number
- * @field reflectionDistortion number
- * @field blurBase number
- * @field blurExponent number
- * @field perlinStartFreq number
- * @field perlinLacunarity number
- * @field perlinAmplitude number
- * @field windSpeed number
- * @field waveOffsetFactor number
- * @field waveLength number
- * @field waveFoamDistortion number
- * @field waveFoamIntensity number
- * @field causticsResolution number
- * @field causticsStrength number
- * @field numTiles integer
- * @field shoreWaves boolean
- * @field forceRendering boolean
- * @field hasWaterPlane boolean
+ * @field absorb rgb?
+ * @field baseColor rgb?
+ * @field minColor rgb?
+ * @field surfaceColor rgb?
+ * @field diffuseColor rgb?
+ * @field specularColor rgb?
+ * @field planeColor rgb?
+ * @field texture string? file
+ * @field foamTexture string? file
+ * @field normalTexture string? file
+ * @field damage number?
+ * @field repeatX number?
+ * @field repeatY number?
+ * @field surfaceAlpha number?
+ * @field ambientFactor number?
+ * @field diffuseFactor number?
+ * @field specularFactor number?
+ * @field specularPower number?
+ * @field fresnelMin number?
+ * @field fresnelMax number?
+ * @field fresnelPower number?
+ * @field reflectionDistortion number?
+ * @field blurBase number?
+ * @field blurExponent number?
+ * @field perlinStartFreq number?
+ * @field perlinLacunarity number?
+ * @field perlinAmplitude number?
+ * @field windSpeed number?
+ * @field waveOffsetFactor number?
+ * @field waveLength number?
+ * @field waveFoamDistortion number?
+ * @field waveFoamIntensity number?
+ * @field causticsResolution number?
+ * @field causticsStrength number?
+ * @field numTiles integer?
+ * @field shoreWaves boolean?
+ * @field forceRendering boolean?
+ * @field hasWaterPlane boolean?
  */
 
 /***
@@ -4885,7 +4888,7 @@ int LuaUnsyncedCtrl::PreloadSoundItem(lua_State* L)
 
 /*** @function Spring.LoadModelTextures
  *
- * @param modelName string
+ * @param modelName string?
  * @return boolean? success
  */
 int LuaUnsyncedCtrl::LoadModelTextures(lua_State* L)
@@ -5470,6 +5473,7 @@ int LuaUnsyncedCtrl::Start(lua_State* L)
  * Note: *.ico images are not supported.
  *
  * @param iconFileName string
+ * @param autoFree boolean?
  * @return nil
  */
 int LuaUnsyncedCtrl::SetWMIcon(lua_State* L)

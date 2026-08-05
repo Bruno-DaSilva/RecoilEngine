@@ -91,6 +91,7 @@ using std::max;
 static const LuaHashString hs_n("n");
 
 
+
 /******************************************************************************
  * Synced Read
  *
@@ -99,10 +100,13 @@ static const LuaHashString hs_n("n");
 
 bool LuaSyncedRead::PushEntries(lua_State* L)
 {
-	// allegiance constants
+	/*** @field Spring.ALL_UNITS number */
 	LuaPushNamedNumber(L, "ALL_UNITS", LuaUtils::AllUnits);
+	/*** @field Spring.MY_UNITS number */
 	LuaPushNamedNumber(L, "MY_UNITS", LuaUtils::MyUnits);
+	/*** @field Spring.ALLY_UNITS number */
 	LuaPushNamedNumber(L, "ALLY_UNITS", LuaUtils::AllyUnits);
+	/*** @field Spring.ENEMY_UNITS number */
 	LuaPushNamedNumber(L, "ENEMY_UNITS", LuaUtils::EnemyUnits);
 
 	// READ routines, sync safe
@@ -767,7 +771,6 @@ static int GetRulesParam(lua_State* L, const char* caller, int index,
  * @section gamestates
 ******************************************************************************/
 
-
 /***
  *
  * @function Spring.IsCheatingEnabled
@@ -1156,9 +1159,9 @@ int LuaSyncedRead::GetFeatureRulesParams(lua_State* L)
  *
  * @function Spring.GetGameRulesParam
  *
- * @param ruleRef number|string the rule index or name
+ * @param name string rules-parameter key (only this argument is read)
  *
- * @return number?|string value
+ * @return number|boolean|string|nil value
  */
 int LuaSyncedRead::GetGameRulesParam(lua_State* L)
 {
@@ -3072,6 +3075,7 @@ int LuaSyncedRead::GetUnitsInBox(lua_State* L)
  * @param x number
  * @param z number
  * @param radius number
+ * @param teamID integer? filter by team, defaults to all units
  * @return number[] unitIDs
  */
 int LuaSyncedRead::GetUnitsInCylinder(lua_State* L)
@@ -3683,6 +3687,9 @@ int LuaSyncedRead::ValidUnitID(lua_State* L)
  *
  * @function Spring.GetUnitStates
  * @param unitID integer
+ * @param retTable boolean?
+ * @param binState boolean?
+ * @param amtState boolean?
  * @return UnitState
  */
 int LuaSyncedRead::GetUnitStates(lua_State* L)
@@ -4053,8 +4060,8 @@ int LuaSyncedRead::GetUnitDefID(lua_State* L)
 * 
 * @param unitID integer
 *
-* @return integer|boolean|nil moveDefID
-* @return string? moveDefName
+* @return integer|false|nil moveDefID
+* @return string|nil moveDefName
 */
 
 int LuaSyncedRead::GetUnitMoveDefID(lua_State* L) 
@@ -5140,7 +5147,7 @@ int LuaSyncedRead::GetUnitMaxRange(lua_State* L)
  *
  * @param unitID integer
  * @param weaponNum number
- * @param stateName string
+ * @param stateName string?
  * @return number stateValue
  */
 int LuaSyncedRead::GetUnitWeaponState(lua_State* L)
@@ -5364,6 +5371,13 @@ int LuaSyncedRead::GetUnitWeaponDamages(lua_State* L)
  *
  * @function Spring.GetUnitWeaponVectors
  * @param unitID integer
+ * @param weaponNum integer 1-indexed weapon number
+ * @return number? posX
+ * @return number posY
+ * @return number posZ
+ * @return number dirX
+ * @return number dirY
+ * @return number dirZ
  */
 int LuaSyncedRead::GetUnitWeaponVectors(lua_State* L)
 {
@@ -5404,6 +5418,19 @@ int LuaSyncedRead::GetUnitWeaponVectors(lua_State* L)
  *
  * @function Spring.GetUnitWeaponTryTarget
  * @param unitID integer
+ * @param weaponNum integer
+ * @param targetID integer
+ * @return boolean canTarget
+ */
+/***
+ *
+ * @function Spring.GetUnitWeaponTryTarget
+ * @param unitID integer
+ * @param weaponNum integer
+ * @param posX number
+ * @param posY number
+ * @param posZ number
+ * @return boolean canTarget
  */
 int LuaSyncedRead::GetUnitWeaponTryTarget(lua_State* L)
 {
@@ -5449,6 +5476,19 @@ int LuaSyncedRead::GetUnitWeaponTryTarget(lua_State* L)
  *
  * @function Spring.GetUnitWeaponTestTarget
  * @param unitID integer
+ * @param weaponID integer weapon number (1-based Lua index)
+ * @param targetUnitID integer enemy unit to test (when fewer than five arguments)
+ * @return boolean validTarget
+ */
+/***
+ *
+ * @function Spring.GetUnitWeaponTestTarget
+ * @param unitID integer
+ * @param weaponID integer weapon number (1-based Lua index)
+ * @param targetX number world X to test (with `targetY`, `targetZ`; used when at least five arguments are passed)
+ * @param targetY number
+ * @param targetZ number
+ * @return boolean validTarget
  */
 int LuaSyncedRead::GetUnitWeaponTestTarget(lua_State* L)
 {
@@ -5487,6 +5527,19 @@ int LuaSyncedRead::GetUnitWeaponTestTarget(lua_State* L)
  *
  * @function Spring.GetUnitWeaponTestRange
  * @param unitID integer
+ * @param weaponNum integer
+ * @param targetID integer
+ * @return boolean inRange
+ */
+/***
+ *
+ * @function Spring.GetUnitWeaponTestRange
+ * @param unitID integer
+ * @param weaponNum integer
+ * @param posX number
+ * @param posY number
+ * @param posZ number
+ * @return boolean inRange
  */
 int LuaSyncedRead::GetUnitWeaponTestRange(lua_State* L)
 {
@@ -5525,6 +5578,43 @@ int LuaSyncedRead::GetUnitWeaponTestRange(lua_State* L)
  *
  * @function Spring.GetUnitWeaponHaveFreeLineOfFire
  * @param unitID integer
+ * @param weaponNum integer
+ * @param targetID integer
+ * @return boolean haveFreeLineOfFire
+ */
+/***
+ *
+ * @function Spring.GetUnitWeaponHaveFreeLineOfFire
+ * @param unitID integer
+ * @param weaponNum integer
+ * @param srcPosX number
+ * @param srcPosY number
+ * @param srcPosZ number
+ * @return boolean haveFreeLineOfFire
+ */
+/***
+ *
+ * @function Spring.GetUnitWeaponHaveFreeLineOfFire
+ * @param unitID integer
+ * @param weaponNum integer
+ * @param srcPosX number
+ * @param srcPosY number
+ * @param srcPosZ number
+ * @param targetID integer
+ * @return boolean haveFreeLineOfFire
+ */
+/***
+ *
+ * @function Spring.GetUnitWeaponHaveFreeLineOfFire
+ * @param unitID integer
+ * @param weaponNum integer
+ * @param srcPosX number
+ * @param srcPosY number
+ * @param srcPosZ number
+ * @param tgtPosX number
+ * @param tgtPosY number
+ * @param tgtPosZ number
+ * @return boolean haveFreeLineOfFire
  */
 int LuaSyncedRead::GetUnitWeaponHaveFreeLineOfFire(lua_State* L)
 {
@@ -5591,6 +5681,11 @@ int LuaSyncedRead::GetUnitWeaponHaveFreeLineOfFire(lua_State* L)
  *
  * @function Spring.GetUnitWeaponCanFire
  * @param unitID integer
+ * @param weaponNum integer
+ * @param ignoreAngleGood boolean?
+ * @param ignoreTargetType boolean?
+ * @param ignoreRequestedDir boolean?
+ * @return boolean canFire
  */
 int LuaSyncedRead::GetUnitWeaponCanFire(lua_State* L)
 {
@@ -5844,6 +5939,9 @@ int LuaSyncedRead::GetUnitSeparation(lua_State* L)
  *
  * @function Spring.GetUnitFeatureSeparation
  * @param unitID integer
+ * @param featureID integer
+ * @param flat boolean? (Default: `false`) if true, XZ (2D) distance; otherwise 3D distance
+ * @return number distance
  */
 int LuaSyncedRead::GetUnitFeatureSeparation(lua_State* L)
 {
@@ -7793,6 +7891,12 @@ static void ParseMapCoords(lua_State* L, const char* caller,
 /***
  *
  * @function Spring.GetGroundBlocked
+ * @param x number world x coordinate (or xMin when using 4-arg form)
+ * @param z number world z coordinate (or zMin when using 4-arg form)
+ * @param x2 number? world xMax (4-arg rectangle form)
+ * @param z2 number? world zMax (4-arg rectangle form)
+ * @return string? objectType `"feature"` or `"unit"`
+ * @return number? objectID the feature or unit ID
  */
 int LuaSyncedRead::GetGroundBlocked(lua_State* L)
 {
@@ -8260,7 +8364,7 @@ int LuaSyncedRead::IsPosInAirLos(lua_State* L)
  * @function Spring.GetUnitLosState
  * @param unitID integer
  * @param allyTeamID integer?
- * @param raw false? Return a table.
+ * @param raw false? (Default: `false`) Return a table.
  * @return table<"los"|"radar"|"typed",boolean>? los A table of LOS state names as keys and booleans as values, or `nil` if `unitID` is invalid.
  */
 int LuaSyncedRead::GetUnitLosState(lua_State* L)
@@ -8309,7 +8413,7 @@ int LuaSyncedRead::GetUnitLosState(lua_State* L)
  *
  * @function Spring.IsUnitInLos
  * @param unitID integer
- * @param allyTeamID integer
+ * @param allyTeamID integer? defaults to the calling widget/gadget's ally team
  * @return boolean inLos
  */
 int LuaSyncedRead::IsUnitInLos(lua_State* L)
@@ -8333,7 +8437,7 @@ int LuaSyncedRead::IsUnitInLos(lua_State* L)
  *
  * @function Spring.IsUnitInAirLos
  * @param unitID integer
- * @param allyTeamID integer
+ * @param allyTeamID integer? defaults to the calling widget/gadget's ally team
  * @return boolean inAirLos
  */
 int LuaSyncedRead::IsUnitInAirLos(lua_State* L)
@@ -8357,7 +8461,7 @@ int LuaSyncedRead::IsUnitInAirLos(lua_State* L)
  *
  * @function Spring.IsUnitInRadar
  * @param unitID integer
- * @param allyTeamID integer
+ * @param allyTeamID integer? defaults to the calling widget/gadget's ally team
  * @return boolean inRadar
  */
 int LuaSyncedRead::IsUnitInRadar(lua_State* L)
