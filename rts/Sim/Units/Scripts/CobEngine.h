@@ -9,12 +9,13 @@
  */
 
 #include <vector>
+#include <deque>
 
 #include "CobThread.h"
 #include "CobDeferredCallin.h"
 #include "System/creg/creg_cond.h"
 #include "System/creg/STL_Queue.h"
-#include "System/creg/STL_Map.h"
+#include "System/creg/STL_Deque.h"
 #include "System/Cpp11Compat.hpp"
 
 class CCobThread;
@@ -34,6 +35,15 @@ public:
 		int wt;
 	};
 
+	struct Slot {
+		CR_DECLARE_STRUCT(Slot)
+
+		uint32_t generation = 0;
+		bool isOccupied = false;
+
+		CCobThread thread;
+	};
+
 	struct CCobThreadComp {
 	public:
 		bool operator() (const SleepingThread& a, const SleepingThread& b) const {
@@ -43,7 +53,6 @@ public:
 
 public:
 	void Init() {
-		threadInstances.reserve(2048);
 		tickAddedThreads.reserve(128);
 
 		runningThreadIDs.reserve(512);
@@ -54,12 +63,12 @@ public:
 		curThread = nullptr;
 
 		currentTime = 0;
-		threadCounter = 0;
 	}
 	void Kill() {
-		// threadInstances is never explicitly iterated in the actual code,
-		// but iterated during sync dumps, so clean it with clear_unordered_map
-		spring::clear_unordered_map(threadInstances);
+		// threadSlots is never explicitly iterated in the actual code,
+		// but iterated during sync dumps, so clear it
+		threadSlots.clear();
+		recycledThreadSlots.clear();
 		spring::clear_unordered_map(deferredCallins);
 		tickAddedThreads.clear();
 
@@ -76,17 +85,23 @@ public:
 
 
 	CCobThread* GetThread(int threadID) {
-		const auto it = threadInstances.find(threadID);
-
-		if (it == threadInstances.end())
+		uint32_t generation;
+		size_t slotIndex;
+		UnpackThreadID(threadID, generation, slotIndex);
+		if (slotIndex >= threadSlots.size()) {
 			return nullptr;
+		}
 
-		return &(it->second);
+		Slot* matchingSlot = &threadSlots[slotIndex];
+		if (!matchingSlot->isOccupied || matchingSlot->generation != generation) {
+			return nullptr;
+		}
+
+		return &matchingSlot->thread;
 	}
 
 	bool RemoveThread(int threadID);
 	int AddThread(CCobThread&& thread);
-	int GenThreadID() { return (threadCounter++); }
 
 	void QueueAddThread(CCobThread&& thread) { tickAddedThreads.emplace_back(std::move(thread)); }
 	void QueueRemoveThread(int threadID) { tickRemovedThreads.emplace_back(threadID); }
@@ -95,15 +110,19 @@ public:
 	void ScheduleThread(const CCobThread* thread);
 	void SanityCheckThreads(const CCobInstance* owner);
 
-	const auto& GetThreadInstances() const { return threadInstances; }
+	// HACK: cob threads currently need their id ahead of being stored. A refactor
+	//       that relies on the new stability guarantees of the deque/slots means we 
+	//       could AddThread instead of separating thread ids from storage.
+	// this MUST be followed by an AddThread or a QueueAddThread or slots will leak.
+	int AllocateThreadID();
+
+	const auto& GetThreadSlots() const { return threadSlots; }
 //	const auto& GetTickAddedThreads() const { return tickAddedThreads; }
 //	const auto& GetTickRemovedThreads() const { return tickRemovedThreads; }
 //	const auto& GetRunningThreadIDs() const { return runningThreadIDs; }
 	const auto& GetWaitingThreadIDs() const { return waitingThreadIDs; }
 	const auto& GetSleepingThreadIDs() const { return sleepingThreadIDs; }
 	const auto  GetCurrTime() const { return currentTime; }
-	const auto  GetThreadCounter() const { return threadCounter; }
-	const auto  GetCurrCounter() const { return threadCounter; }
 
 	void AddDeferredCallin(CCobDeferredCallin&& deferredCallin);
 	void RunDeferredCallins();
@@ -113,9 +132,14 @@ private:
 	void WakeSleepingThreads();
 	void TickRunningThreads();
 
+	static int PackThreadID(uint32_t generation, size_t slotIndex);
+	static void UnpackThreadID(int threadID, uint32_t& generation, size_t& slotIndex);
+
 private:
-	// registry of every thread across all script instances
-	spring::unordered_map<int, CCobThread> threadInstances;
+	// slot pool of live threads across all script instances, indexed by id
+	// (this is a perf optimization to reuse instances since theres so much churn)
+	std::deque<Slot> threadSlots;
+	std::vector<size_t> recycledThreadSlots;
 	// threads that are spawned during Tick
 	std::vector<CCobThread> tickAddedThreads;
 	// threads that are killed during Tick
@@ -133,7 +157,6 @@ private:
 	CCobThread* curThread = nullptr;
 
 	int currentTime = 0;
-	int threadCounter = 0;
 };
 
 
