@@ -87,7 +87,9 @@ CR_REG_METADATA(CSolidObject,
 
 CSolidObject::CSolidObject()
 	: creationFrame { gs->frameNum }
-{}
+{
+	localModel.SetOwner(this);
+}
 
 void CSolidObject::PostLoad()
 {
@@ -153,6 +155,8 @@ void CSolidObject::Move(const float3& v, bool relative)
 	pos    += dv;
 	midPos += dv;
 	aimPos += dv;
+
+	preFrameDirty = true;
 
 	CondUpdatePrevTransform();
 }
@@ -387,9 +391,14 @@ float3 CSolidObject::GetDragAccelerationVec(float atmosphericDensity, float wate
 float3 CSolidObject::GetWantedUpDir(bool useGroundNormal, bool useObjectNormal, float dirSmoothing) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	const float3 groundUp = CGround::GetSmoothNormal(pos.x, pos.z);
 	const float3 curUpDir = float3{updir};
 	const float3 objectUp = mix(UpVector, curUpDir, useObjectNormal);
+	// When useGroundNormal is false, mix(objectUp, groundUp, 0.0f) == objectUp
+	// bit-exactly per IEEE-754, so groundUp is never observed — skip the
+	// 4 cache-unfriendly normalmap reads + isqrt in CGround::GetSmoothNormal.
+	if (!useGroundNormal)
+		return mix(objectUp, curUpDir, dirSmoothing).Normalize();
+	const float3 groundUp = CGround::GetSmoothNormal(pos.x, pos.z);
 	const float3 targetUp = mix(objectUp, groundUp, useGroundNormal);
 	const float3 wantedUp = mix(targetUp, curUpDir, dirSmoothing).Normalize();
 
@@ -448,6 +457,8 @@ void CSolidObject::UpdateDirVectors(const float3& uDir)
 	frontdir = quat * fDir;
 	rightdir = quat * rDir;
 	updir = uDir;
+
+	preFrameDirty = true;
 }
 
 void CSolidObject::CondUpdatePrevTransform()
@@ -463,11 +474,17 @@ void CSolidObject::CondUpdatePrevTransform()
 
 void CSolidObject::UpdatePrevFrameTransform()
 {
+	if (!preFrameDirty)
+		return;
+
 	for (auto& lmp : localModel.pieces) {
 		lmp.SavePrevModelSpaceTransform();
 	}
 
-	preFrameTra = Transform{ CQuaternion::MakeFrom(GetTransformMatrix(true)), pos };
+	// matches ComposeMatrix(pos) columns: x=-rightdir, y=updir, z=frontdir
+	preFrameTra = Transform{ CQuaternion::FromAxes(-rightdir, updir, frontdir), pos };
+
+	preFrameDirty = false;
 }
 
 void CSolidObject::ForcedSpin(const float3& zdir)
@@ -488,6 +505,8 @@ void CSolidObject::ForcedSpin(const float3& zdir)
 	rightdir = xdir;
 	   updir = ydir;
 
+	preFrameDirty = true;
+
 	SetHeadingFromDirection();
 	UpdateMidAndAimPos();
 }
@@ -501,6 +520,8 @@ void CSolidObject::ForcedSpin(const float3& newFrontDir, const float3& newRightD
 	frontdir = newFrontDir;
 	rightdir = newRightDir;
 	   updir = (newRightDir.cross(newFrontDir)).Normalize();
+
+	preFrameDirty = true;
 
 	SetHeadingFromDirection();
 	UpdateMidAndAimPos();

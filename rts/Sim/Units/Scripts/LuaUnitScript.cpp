@@ -50,16 +50,15 @@ void CLuaUnitScript::PostLoad()
 
 	for (auto& p: unit->localModel.pieces) {
 		pieces.push_back(&p);
-		if (!p.parent)
-			rootPiece = &p;
 	}
-	assert(rootPiece);
 
 	L = handle->GetLuaState();
 
 	hasSetSFXOccupy  = scriptIndex[LUAFN_SetSFXOccupy ] != LUA_NOREF;
 	hasRockUnit      = scriptIndex[LUAFN_RockUnit     ] != LUA_NOREF;
 	hasStartBuilding = scriptIndex[LUAFN_StartBuilding] != LUA_NOREF;
+
+	RebindWeaponPieceCaches();
 }
 
 
@@ -272,10 +271,9 @@ CLuaUnitScript::CLuaUnitScript(lua_State* L, CUnit* unit)
 	}
 	for (auto& p: unit->localModel.pieces) {
 		pieces.push_back(&p);
-		if (!p.parent)
-			rootPiece = &p;
 	}
-	assert(rootPiece);
+
+	RebindWeaponPieceCaches();
 }
 
 

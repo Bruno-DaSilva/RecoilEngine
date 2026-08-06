@@ -7,14 +7,28 @@
 #include "CobThread.h"
 #include "CobFile.h"
 
+#include <cstddef>
 #include <cstdint>
 #include "System/Misc/TracyDefs.h"
 #include "Lua/LuaUI.h"
 
+// For slot pool generation handling.
+// We're using 13 generation bits / 18 slot bits so that:
+// * at 32k MAX_UNITS, every unit could have 8 cob scripts
+// * there's room for 8,192 generations
+// both of which are WELL beyond the supported use case of the engine.
+static constexpr uint32_t THREAD_ID_GEN_BITS  = 13;
+static constexpr uint32_t THREAD_ID_SLOT_BITS = 18;
+constexpr static uint32_t GENERATION_MAX = (1 << THREAD_ID_GEN_BITS) - 1;
+constexpr static uint32_t SLOT_MAX = (1 << THREAD_ID_SLOT_BITS) - 1;
+static_assert(THREAD_ID_GEN_BITS + THREAD_ID_SLOT_BITS <= 31,                                  
+			"thread id must fit in non-negative int");
+
 CR_BIND(CCobEngine, )
 
 CR_REG_METADATA(CCobEngine, (
-	CR_MEMBER(threadInstances),
+	CR_MEMBER(threadSlots),
+	CR_MEMBER(recycledThreadSlots),
 	CR_MEMBER(tickAddedThreads),
 	CR_MEMBER(tickRemovedThreads),
 	CR_MEMBER(runningThreadIDs),
@@ -25,8 +39,7 @@ CR_REG_METADATA(CCobEngine, (
 	CR_IGNORED(curThread),
 	CR_IGNORED(deferredCallins),
 
-	CR_MEMBER(currentTime),
-	CR_MEMBER(threadCounter)
+	CR_MEMBER(currentTime)
 ))
 
 CR_BIND(CCobEngine::SleepingThread, )
@@ -34,38 +47,77 @@ CR_REG_METADATA(CCobEngine::SleepingThread, (
 	CR_MEMBER(id),
 	CR_MEMBER(wt)
 ))
+CR_BIND(CCobEngine::Slot, )
+CR_REG_METADATA(CCobEngine::Slot, (
+	CR_MEMBER(generation),
+	CR_MEMBER(isOccupied),
+	CR_MEMBER(thread)
+))
 
 static const char* const numCobThreadsPlot = "CobThreads";
+
+int CCobEngine::AllocateThreadID()
+{
+	size_t slotIndex;
+    
+	if (recycledThreadSlots.empty()) {
+		slotIndex = threadSlots.size();
+		threadSlots.emplace_back();
+	} else {
+		slotIndex = recycledThreadSlots.back();
+		recycledThreadSlots.pop_back();
+	}
+	
+	Slot* slot = &threadSlots[slotIndex];
+	slot->generation = (slot->generation + 1) & GENERATION_MAX;
+	slot->isOccupied = true;
+	return PackThreadID(slot->generation, slotIndex);
+}
 
 int CCobEngine::AddThread(CCobThread&& thread)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	if (thread.GetID() == -1)
-		thread.SetID(GenThreadID());
+	if (thread.GetID() == -1) {
+		thread.SetID(AllocateThreadID());
+	}
+	assert(thread.GetID() >= 0);
 
-	CCobInstance* o = thread.cobInst;
-	CCobThread& t = threadInstances[thread.GetID()];
+	uint32_t generation;
+    size_t slotIndex;
+    UnpackThreadID(thread.GetID(), generation, slotIndex);
+	
+	Slot* slot = &threadSlots[slotIndex];
+	slot->thread = std::move(thread);
+	slot->thread.cobInst->AddThreadID(slot->thread.GetID());
 
-	// move thread into registry, hand its ID to owner
-	t = std::move(thread);
-	o->AddThreadID(t.GetID());
-
-	TracyPlot(numCobThreadsPlot, static_cast<int64_t>(threadInstances.size()));
-
-	return (t.GetID());
+	TracyPlot(numCobThreadsPlot, static_cast<int64_t>(threadSlots.size() - recycledThreadSlots.size()));
+	return slot->thread.GetID();
 }
 
 bool CCobEngine::RemoveThread(int threadID) {
 	RECOIL_DETAILED_TRACY_ZONE;
-	const auto it = threadInstances.find(threadID);
+	assert(threadID >= 0);
 
-	if (it != threadInstances.end()) {
-		threadInstances.erase(it);
-		TracyPlot(numCobThreadsPlot, static_cast<int64_t>(threadInstances.size()));
-		return true;
+    size_t slotIndex;
+	uint32_t generation;
+	UnpackThreadID(threadID,  generation, slotIndex);
+	if unlikely(slotIndex >= threadSlots.size()) {
+    	return false;
 	}
 
-	return false;
+	Slot* matchingSlot = &threadSlots[slotIndex];
+	if (!matchingSlot->isOccupied || matchingSlot->generation != generation) {
+		return false;
+	}
+
+	std::destroy_at(&matchingSlot->thread);
+	std::construct_at(&matchingSlot->thread); // avoids double destruct when the deque tears down at engine shutdown
+
+	matchingSlot->isOccupied = false;
+	recycledThreadSlots.push_back(slotIndex);
+
+	TracyPlot(numCobThreadsPlot, static_cast<int64_t>(threadSlots.size() - recycledThreadSlots.size()));
+	return true;
 }
 
 void CCobEngine::ProcessQueuedThreads() {
@@ -78,7 +130,7 @@ void CCobEngine::ProcessQueuedThreads() {
 	}
 	tickRemovedThreads.clear();
 
-	// move new threads spawned by START into threadInstances;
+	// move new threads spawned by START into threadSlots;
 	// their ID's will already have been scheduled into either
 	// waitingThreadIDs or sleepingThreadIDs
 	for (CCobThread& t: tickAddedThreads) {
@@ -110,8 +162,8 @@ void CCobEngine::SanityCheckThreads(const CCobInstance* owner)
 	RECOIL_DETAILED_TRACY_ZONE;
 	if (false) {
 		// no threads belonging to owner should be left
-		for (const auto& p: threadInstances) {
-			assert(p.second.cobInst != owner);
+		for (const auto& p: threadSlots) {
+			assert(p.thread.cobInst != owner || p.isOccupied == false);
 		}
 		for (const CCobThread& t: tickAddedThreads) {
 			assert(t.cobInst != owner);
@@ -237,4 +289,21 @@ void CCobEngine::RunDeferredCallins()
 		if (luaUI)
 			luaUI->Cob2LuaBatch(cmdStr, callins);
 	}
+}
+
+int CCobEngine::PackThreadID(const uint32_t generation, const size_t slotIndex) {
+	assert(slotIndex <= SLOT_MAX);
+	assert(generation <= GENERATION_MAX);
+	if unlikely (slotIndex > SLOT_MAX || generation > GENERATION_MAX) {
+		LOG_L(L_ERROR, "[CCobEngine::%s] cannot pack id (generation=%u, slotIndex=%zu) — exceeds GENERATION_MAX=%u or SLOT_MAX=%u",
+			__func__, generation, slotIndex, GENERATION_MAX, SLOT_MAX);
+		return -1;
+	}
+	return static_cast<int>((generation << THREAD_ID_SLOT_BITS) | slotIndex);
+}
+
+void CCobEngine::UnpackThreadID(const int threadID, uint32_t& generation, size_t& slotIndex) {
+	const uint32_t bits = static_cast<uint32_t>(threadID);
+	generation = (bits >> THREAD_ID_SLOT_BITS) & GENERATION_MAX;
+	slotIndex = bits & SLOT_MAX;
 }
