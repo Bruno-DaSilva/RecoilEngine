@@ -63,6 +63,11 @@ public:
 	static CQuaternion MakeFrom(const float3& newFwdDir);
 	static CQuaternion MakeFrom(const CMatrix44f& mat);
 
+	// Quaternion from an orthonormal basis given as the three columns of a
+	// rotation matrix (xCol, yCol, zCol). Equivalent to MakeFrom(CMatrix44f(_, xCol, yCol, zCol))
+	// without constructing the matrix.
+	static CQuaternion FromAxes(const float3& xCol, const float3& yCol, const float3& zCol);
+
 	static const CQuaternion& AssertNormalized(const CQuaternion& q);
 public:
 	bool Normalized() const;
