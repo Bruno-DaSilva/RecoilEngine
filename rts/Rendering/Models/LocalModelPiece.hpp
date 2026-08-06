@@ -22,16 +22,16 @@ struct LocalModelPiece
 	CR_DECLARE_STRUCT(LocalModelPiece)
 
 	LocalModelPiece()
-		: dirty(true)
+		: noInterpolation { false }
+		, dirty(true)
+		, matDirty(true)
 		, wasUpdated{ true }
-		, noInterpolation { false }
 	{}
 	LocalModelPiece(const S3DModelPiece* piece);
 	~LocalModelPiece();
 
-	void AddChild(LocalModelPiece* c) { children.push_back(c); }
-	void RemoveChild(LocalModelPiece* c) { children.erase(std::find(children.begin(), children.end(), c)); }
-	void SetParent(LocalModelPiece* p) { parent = p; }
+	void AddChild(LocalModelPiece* c);
+	void RemoveChild(LocalModelPiece* c);
 	void SetLocalModel(LocalModel* lm) { localModel = lm; }
 
 	void SetLModelPieceIndex(uint32_t idx) { lmodelPieceIndex = idx; }
@@ -59,8 +59,7 @@ struct LocalModelPiece
 
 	bool GetEmitDirPos(float3& emitPos, float3& emitDir) const;
 
-	void SetDirtyRaw(bool state) { dirty = state; }
-	void SetDirty();
+	void SetDirty(bool state) { dirty = state; }
 	bool GetDirty() const { return dirty; }
 	void SetFloat3(const float3& src, float3& dst); // anim-script only
 	void SetFloat(const float& src, float& dst); // anim-script only
@@ -72,7 +71,7 @@ struct LocalModelPiece
 	void SetPositionNoInterpolation(bool noInterpolate) { noInterpolation[1] = noInterpolate; }
 	void SetScalingNoInterpolation (bool noInterpolate) { noInterpolation[2] = noInterpolate; }
 
-	void SetWasUpdatedRaw(bool state = true) { wasUpdated[0] = state; }
+	void SetWasUpdated(bool state = true) { wasUpdated[0] = state; }
 	auto GetWasUpdated() const { return wasUpdated[0] || wasUpdated[1]; }
 	void ResetWasUpdated() const; /*fake*/
 
@@ -84,9 +83,14 @@ struct LocalModelPiece
 
 	const float3& GetDirection() const { return dir; }
 
-	const Transform& GetModelSpaceTransformRaw() const { return modelSpaceTra; }
-	const Transform&  GetModelSpaceTransform() const;
-	const CMatrix44f& GetModelSpaceMatrix()    const;
+	const Transform& GetModelSpaceTransform() const { return modelSpaceTra; }
+	const CMatrix44f& GetModelSpaceMatrix() const {
+		if (matDirty) {
+			modelSpaceMat = modelSpaceTra.ToMatrix();
+			matDirty = false;
+		}
+		return modelSpaceMat;
+	}
 
 	const CollisionVolume* GetCollisionVolume() const { return colvol; }
 	      CollisionVolume* GetCollisionVolume()       { return colvol; }
@@ -98,36 +102,61 @@ struct LocalModelPiece
 	Transform GetEffectivePrevModelSpaceTransform() const;
 
 	void PostLoad();
+
+	// Layout note: members below are ordered so the fields touched by the
+	// per-tick animation sweep (CUnitScript::TickAllAnims) pack into the first
+	// two cachelines (offsets 0-128). modelSpaceMat (lazy-filled by the getter)
+	// and the cold serialised/script-visible fields trail in later lines.
+	// Reordering does not affect creg, which resolves offsets at registration.
+
 private:
-	mutable CMatrix44f modelSpaceMat; // transform relative to root LMP (SYNCED), chained pieceSpaceMat's
+	// line 1 (0-64): hot, every visit
 	mutable Transform pieceSpaceTra;  // transform relative to parent LMP (SYNCED), combines <pos> and <rot>
 	mutable Transform modelSpaceTra;  // transform relative to root LMP (SYNCED), chained pieceSpaceTra's
 
+public:
+	// line 2 (64-128): hot, every visit + dirty branch
+	LocalModelPiece* parent;
+	const S3DModelPiece* original;
+
+	// bumps on every modelSpaceTra write; lets external readers (CWeapon) skip
+	// re-deriving piece-relative positions when nothing has changed.
+	mutable uint32_t modelSpaceTraGen = 0;
+
+private:
 	float3 pos;      // translation relative to parent LMP, *INITIALLY* equal to original->offset
 	float3 rot;      // orientation relative to parent LMP, in radians (updated by scripts)
 	float scale;     // uniform scaling
 
+public:
+	uint32_t rank;   // copy from 3DModelPiece
+
+private:
 	mutable std::array<bool, 3> noInterpolation; // rotate, move, scale
 	mutable bool dirty;
-
-	Transform prevModelSpaceTra;
-
-	CollisionVolume* colvol;
-
-	float3 dir;      // cached copy of original->GetEmitDir()
-
-	mutable std::array<bool, 2> wasUpdated; // currFrame, prevFrame
+	mutable bool matDirty; // modelSpaceMat is stale w.r.t. modelSpaceTra; refilled on read
 	bool scriptSetVisible; // TODO: add (visibility) maxradius!
+
 public:
 	bool blockScriptAnims; // if true, Set{Position,Rotation} are ignored for this piece
+
+private:
+	mutable std::array<bool, 2> wasUpdated; // currFrame, prevFrame
+
+	// line 3 onward: cold
+	mutable CMatrix44f modelSpaceMat; // transform relative to root LMP (SYNCED), lazy-filled from modelSpaceTra
+	Transform prevModelSpaceTra;
+	float3 dir;      // cached copy of original->GetEmitDir()
+
+public:
 	int32_t lmodelPieceIndex; // index of this piece into LocalModel::pieces
 	int32_t scriptPieceIndex; // index of this piece into UnitScript::pieces
-
-	std::vector<LocalModelPiece*> children;
-	LocalModelPiece* parent;
-
-	std::vector<uint32_t> lodDispLists;
-	const S3DModelPiece* original;
-
 	LocalModel* localModel;
+
+private:
+	CollisionVolume* colvol;
+
+public:
+	std::vector<LocalModelPiece*> children;
+	std::vector<uint32_t> lodDispLists;
 };

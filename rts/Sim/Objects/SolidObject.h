@@ -165,6 +165,7 @@ public:
 		rightdir.x = -matrix[0]; updir.x = matrix[4]; frontdir.x = matrix[ 8];
 		rightdir.y = -matrix[1]; updir.y = matrix[5]; frontdir.y = matrix[ 9];
 		rightdir.z = -matrix[2]; updir.z = matrix[6]; frontdir.z = matrix[10];
+		preFrameDirty = true;
 	}
 
 	void AddHeading(short deltaHeading, bool useGroundNormal, bool useObjectNormal, float dirSmoothing) { SetHeading(heading + deltaHeading, useGroundNormal, useObjectNormal, dirSmoothing); }
@@ -188,6 +189,11 @@ public:
 
 	void CondUpdatePrevTransform();
 	void UpdatePrevFrameTransform();
+
+	// set by every choke-point that mutates pos / dir vectors / piece transforms;
+	// cleared at the end of UpdatePrevFrameTransform — when clean we skip the
+	// per-piece save loop and the preFrameTra rebuild entirely.
+	void SetPreFrameDirty() { preFrameDirty = true; }
 
 	CMatrix44f ComposeMatrix(const float3& p) const { return (CMatrix44f(p, -rightdir, updir, frontdir)); }
 	virtual CMatrix44f GetTransformMatrix(bool synced = false, bool fullread = false) const = 0;
@@ -356,6 +362,9 @@ public:
 	bool noSelect = false;
 	///< if true, unsynced matrices (transformation + pieceSpaceMat/modelSpaceMat) will be updated unconditionally
 	bool alwaysUpdateMat = false;
+
+	///< pos/dirs/pieces have changed since the last UpdatePrevFrameTransform; gates the save+rebuild
+	bool preFrameDirty = true;
 
 	///< specifies which draw passes will be drawn by the engine
 	uint8_t engineDrawMask = uint8_t(-1);

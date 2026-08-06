@@ -3,6 +3,7 @@
 #include "3DModel.hpp"
 #include "3DModelPiece.hpp"
 #include "3DModelDefs.hpp"
+#include "Lua/LuaObjectMaterial.h"
 #include "System/Misc/TracyDefs.h"
 
 CR_BIND(LocalModel, )
@@ -11,7 +12,8 @@ CR_REG_METADATA(LocalModel, (
 
 	CR_MEMBER(boundingVolume),
 	CR_IGNORED(luaMaterialData),
-	CR_MEMBER(needsBoundariesRecalc)
+	CR_MEMBER(needsBoundariesRecalc),
+	CR_IGNORED(owner)
 ))
 
 /** ****************************************************************************************************
@@ -26,10 +28,19 @@ void LocalModel::DrawPieces() const
 	}
 }
 
+void LocalModel::Draw() const {
+	if (!luaMaterialData->Enabled()) {
+		DrawPieces();
+		return;
+	}
+
+	DrawPiecesLOD(luaMaterialData->GetCurrentLOD());
+}
+
 void LocalModel::DrawPiecesLOD(uint32_t lod) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	if (!luaMaterialData.ValidLOD(lod))
+	if (!luaMaterialData->ValidLOD(lod))
 		return;
 
 	for (const auto& p: pieces) {
@@ -42,10 +53,20 @@ void LocalModel::SetLODCount(uint32_t lodCount)
 	RECOIL_DETAILED_TRACY_ZONE;
 	assert(Initialized());
 
-	luaMaterialData.SetLODCount(lodCount);
+	luaMaterialData->SetLODCount(lodCount);
 	pieces[0].SetLODCount(lodCount);
 }
 
+
+LocalModel::LocalModel()
+{
+	luaMaterialData = new LuaObjectMaterialData();
+}
+
+LocalModel::~LocalModel()
+{
+	spring::SafeDelete(luaMaterialData);
+}
 
 void LocalModel::SetModel(const S3DModel* model, bool initialize)
 {
@@ -96,8 +117,7 @@ LocalModelPiece* LocalModel::CreateLocalModelPieces(const S3DModelPiece* mpParen
 	LocalModelPiece* lmpChild = nullptr;
 
 	// construct an LMP(mp) in-place
-	pieces.emplace_back(mpParent);
-	LocalModelPiece* lmpParent = &pieces.back();
+	LocalModelPiece* lmpParent = &pieces.emplace_back(mpParent);
 
 	lmpParent->SetLModelPieceIndex(pieces.size() - 1);
 	lmpParent->SetScriptPieceIndex(pieces.size() - 1);
@@ -109,7 +129,6 @@ LocalModelPiece* LocalModel::CreateLocalModelPieces(const S3DModelPiece* mpParen
 
 	for (const S3DModelPiece* mpChild: mpParent->children) {
 		lmpChild = CreateLocalModelPieces(mpChild);
-		lmpChild->SetParent(lmpParent);
 		lmpParent->AddChild(lmpChild);
 	}
 

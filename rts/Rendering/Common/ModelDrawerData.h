@@ -170,7 +170,8 @@ inline void CModelDrawerDataBase<T>::UpdateObjectTrasform(const T* o)
 	ScopedTransformMemAlloc& stma = GetObjectTransformMemAlloc(o);
 
 	const auto& tmPrev = o->preFrameTra;
-	const auto  tmCurr = Transform::FromMatrix(o->GetTransformMatrix(true)); //synced transform
+	// synced transform; matches CSolidObject::ComposeMatrix(pos) — same basis used to set preFrameTra
+	const auto  tmCurr = Transform{ CQuaternion::FromAxes(-o->rightdir, o->updir, o->frontdir), o->pos };
 
 	// conditionally update new and prev synced positions
 	stma.UpdateIfChanged(0, tmPrev);
@@ -179,7 +180,7 @@ inline void CModelDrawerDataBase<T>::UpdateObjectTrasform(const T* o)
 	for (int i = 0; i < o->localModel.pieces.size(); ++i) {
 		const LocalModelPiece& lmp = o->localModel.pieces[i];
 
-		const auto& lmpTransform = lmp.GetModelSpaceTransform(); //forces dirty / wasUpdated recalculation if no other method called it yet
+		const auto& lmpTransform = lmp.GetModelSpaceTransform();
 
 		if likely(!lmp.GetWasUpdated())
 			continue;
