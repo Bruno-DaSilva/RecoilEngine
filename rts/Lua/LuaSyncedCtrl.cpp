@@ -197,6 +197,8 @@ bool LuaSyncedCtrl::PushEntries(lua_State* L)
 	REGISTER_LUA_CFUNC(SetUnitWeaponState);
 	REGISTER_LUA_CFUNC(SetUnitWeaponDamages);
 	REGISTER_LUA_CFUNC(SetUnitMaxRange);
+	REGISTER_LUA_CFUNC(SetUnitDefAutoTargetPriority);
+	REGISTER_LUA_CFUNC(SetWeaponAutoTargetPriorityEnabled);
 	REGISTER_LUA_CFUNC(SetUnitExperience);
 	REGISTER_LUA_CFUNC(AddUnitExperience);
 	REGISTER_LUA_CFUNC(SetUnitArmored);
@@ -2798,6 +2800,47 @@ int LuaSyncedCtrl::SetUnitMaxRange(lua_State* L)
 		return 0;
 
 	unit->maxRange = std::max(0.0f, luaL_checkfloat(L, 2));
+	return 0;
+}
+
+
+/***
+ * Set the auto-target priority multiplier for a target unitDef.
+ *
+ * When a weapon opted in via `Spring.SetWeaponAutoTargetPriorityEnabled` auto-targets, the
+ * priority of each candidate is multiplied by this factor (default 1, lower is targeted first).
+ * This is a cheap, fully-declarative alternative to the `AllowWeaponTarget` callin for the
+ * common case where target priority is a static function of the target's unitDef.
+ *
+ * @function Spring.SetUnitDefAutoTargetPriority
+ * @param targetUnitDefID integer
+ * @param multiplier number Priority multiplier applied to this unitDef when auto-targeted.
+ * @return nil
+ * @see Spring.SetWeaponAutoTargetPriorityEnabled
+ * @see SyncedCallins:AllowWeaponTarget
+ */
+int LuaSyncedCtrl::SetUnitDefAutoTargetPriority(lua_State* L)
+{
+	helper->SetUnitDefAutoTargetPriority(luaL_checkint(L, 1), luaL_checkfloat(L, 2));
+	return 0;
+}
+
+
+/***
+ * Opt a weaponDef into the declarative auto-target priority table.
+ *
+ * Enabled weapons multiply each auto-target candidate's priority by the per-unitDef factor set
+ * with `Spring.SetUnitDefAutoTargetPriority`. Disabled (the default) weapons are unaffected.
+ *
+ * @function Spring.SetWeaponAutoTargetPriorityEnabled
+ * @param weaponDefID integer
+ * @param enabled boolean
+ * @return nil
+ * @see Spring.SetUnitDefAutoTargetPriority
+ */
+int LuaSyncedCtrl::SetWeaponAutoTargetPriorityEnabled(lua_State* L)
+{
+	helper->SetWeaponAutoTargetPriorityEnabled(luaL_checkint(L, 1), luaL_checkboolean(L, 2));
 	return 0;
 }
 

@@ -34,6 +34,7 @@
 #include "Sim/Units/UnitDef.h"
 #include "Sim/Units/Unit.h"
 #include "Sim/Units/UnitHandler.h"
+#include "Sim/Units/UnitDefHandler.h"
 #include "Sim/Weapons/WeaponDefHandler.h"
 #include "Sim/Weapons/Weapon.h"
 #include "System/EventHandler.h"
@@ -57,6 +58,26 @@ void CGameHelper::Init()
 
 void CGameHelper::Kill()
 {
+}
+
+void CGameHelper::SetUnitDefAutoTargetPriority(int unitDefID, float multiplier)
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	if (unitDefID <= 0 || unitDefID > int(unitDefHandler->NumUnitDefs()))
+		return;
+	if (targetPriorityByUnitDef.empty())
+		targetPriorityByUnitDef.resize(unitDefHandler->NumUnitDefs() + 1, 1.0f);
+	targetPriorityByUnitDef[unitDefID] = multiplier;
+}
+
+void CGameHelper::SetWeaponAutoTargetPriorityEnabled(int weaponDefID, bool enabled)
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	if (weaponDefID < 0 || weaponDefID >= int(weaponDefHandler->NumWeaponDefs()))
+		return;
+	if (applyTargetPriorityByWeaponDef.empty())
+		applyTargetPriorityByWeaponDef.resize(weaponDefHandler->NumWeaponDefs(), 0);
+	applyTargetPriorityByWeaponDef[weaponDefID] = enabled ? 1 : 0;
 }
 
 void CGameHelper::Update()
@@ -686,6 +707,17 @@ size_t CGameHelper::GenerateWeaponTargets(const CWeapon* weapon, const CUnit* av
 
 	const bool paralyzer = (weaponDmg->paralyzeDamageTime != 0);
 
+	// Declarative auto-target priority: if this weapon opted in, each candidate's priority gets
+	// multiplied by a static per-target-unitDef factor. This replaces a per-candidate
+	// AllowWeaponTarget Lua callout for the common static case. The per-weapon opt-in is constant
+	// across the whole scan, so resolve it to a table pointer once here instead of per candidate.
+	const float* autoTargetPriorityMul = nullptr;
+	if (!helper->applyTargetPriorityByWeaponDef.empty() &&
+	     helper->applyTargetPriorityByWeaponDef[weaponDef->id] &&
+	    !helper->targetPriorityByUnitDef.empty()) {
+		autoTargetPriorityMul = helper->targetPriorityByUnitDef.data();
+	}
+
 	// copy on purpose since the below calls lua
 	QuadFieldQuery qfQuery;
 	quadField.GetQuads(qfQuery, ownerPos, scanRadius);
@@ -767,6 +799,9 @@ size_t CGameHelper::GenerateWeaponTargets(const CWeapon* weapon, const CUnit* av
 					targetPriority *= tgtPriorityMults[(targetUnit->IsCrashing()) * 3];
 					targetPriority *= tgtPriorityMults[(targetUnit == lastAttacker) * 4];
 				}
+
+				if (autoTargetPriorityMul != nullptr)
+					targetPriority *= autoTargetPriorityMul[targetUnit->unitDef->id];
 
 				const bool allowTarget = eventHandler.AllowWeaponTarget(weaponOwner->id, targetUnit->id, weapon->weaponNum, weaponDef->id, &targetPriority);
 
