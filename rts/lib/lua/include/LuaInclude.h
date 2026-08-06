@@ -11,10 +11,48 @@
 #include "lua.h"
 #include "lualib.h"
 #include "lauxlib.h"
-#include "lib/lua/src/lstate.h"
 #include "lib/streflop/streflop_cond.h"
 #include "System/Log/ILog.h"
 #include "System/BranchPrediction.h"
+
+// luajit-spike: the engine calls lua_lock()/lua_unlock() directly in a few
+// places. On master these map to LuaMutex* (no-ops, since ENABLE_USERSTATE_LOCKS
+// is 0). LuaJIT does not expose these hooks to embedders, so define them here.
+#undef lua_lock
+#undef lua_unlock
+#define lua_lock(L)   LuaMutexLock(L)
+#define lua_unlock(L) LuaMutexUnlock(L)
+
+// luajit-spike: PUC exposed L->errorJmp so the Spring opt-wrappers below could
+// tell whether they run inside a protected call (safe to raise) or not (must
+// not longjmp -> exit). LuaJIT does not expose this; conservatively report
+// "not protected" so the wrappers warn + return the default instead of raising.
+// Never crashes; at worst it is more lenient about wrong-typed optional args.
+static inline bool spring_lua_in_pcall(const lua_State*) { return false; }
+
+// luajit-spike: the PUC fork made lua_toboolean return bool and added a
+// non-asserting luaL_checknumber (the fork's plain luaL_checknumber asserts on
+// NaN/Inf). LuaJIT has neither, so provide adapters.
+static inline bool spring_lua_toboolean(lua_State* L, int idx) { return lua_toboolean(L, idx) != 0; }
+static inline lua_Number luaL_checknumber_noassert(lua_State* L, int idx) { return luaL_checknumber(L, idx); }
+
+// luajit-spike: the PUC fork used 32-bit LUA_NUMBER (float) and LUA_INTEGER
+// (int), and the entire engine was written against those narrower types.
+// LuaJIT uses double / ptrdiff_t, which breaks type-exact templates such as
+// std::clamp / std::min at many call sites. Narrow the engine-facing accessors
+// back at the boundary (matching the fork's truncation) via function-like
+// macros. The wrappers below are defined before the macros so they still call
+// the real functions; bare references (function pointers handed to the
+// luaL_SpringOpt wrappers) are unaffected, since a function-like macro only
+// expands when followed by '('.
+static inline float SpringLua_tonumber    (lua_State* L, int i) { return (float)lua_tonumber(L, i); }
+static inline float SpringLua_checknumber (lua_State* L, int i) { return (float)luaL_checknumber(L, i); }
+static inline int   SpringLua_tointeger   (lua_State* L, int i) { return (int)lua_tointeger(L, i); }
+static inline int   SpringLua_checkinteger(lua_State* L, int i) { return (int)luaL_checkinteger(L, i); }
+#define lua_tonumber(L,i)      SpringLua_tonumber((L),(i))
+#define luaL_checknumber(L,i)  SpringLua_checknumber((L),(i))
+#define lua_tointeger(L,i)     SpringLua_tointeger((L),(i))
+#define luaL_checkinteger(L,i) SpringLua_checkinteger((L),(i))
 
 
 
@@ -147,7 +185,7 @@ static inline int luaS_absIndex(lua_State* L, const int i)
 template<typename T>
 static inline T luaL_SpringOpt(lua_State* L, int idx, const T def, T(*lua_optFoo)(lua_State*, int, const T), T(*lua_toFoo)(lua_State*, int), int typeFoo, const char* caller)
 {
-	if (L->errorJmp)
+	if (spring_lua_in_pcall(L))
 		return (*lua_optFoo)(L, idx, def);
 
 	T ret = (*lua_toFoo)(L, idx);
@@ -163,7 +201,7 @@ static inline T luaL_SpringOpt(lua_State* L, int idx, const T def, T(*lua_optFoo
 
 static inline std::string luaL_SpringOptString(lua_State* L, int idx, const std::string& def, std::string(*lua_optFoo)(lua_State*, int, const std::string&), std::string(*lua_toFoo)(lua_State*, int), int typeFoo, const char* caller)
 {
-	if (L->errorJmp)
+	if (spring_lua_in_pcall(L))
 		return (*lua_optFoo)(L, idx, def);
 
 	std::string ret = (*lua_toFoo)(L, idx);
@@ -179,7 +217,7 @@ static inline std::string luaL_SpringOptString(lua_State* L, int idx, const std:
 
 static inline const char* luaL_SpringOptCString(lua_State* L, int idx, const char* def, size_t* len, const char*(*lua_optFoo)(lua_State*, int, const char*, size_t*), const char*(*lua_toFoo)(lua_State*, int, size_t*), int typeFoo, const char* caller)
 {
-	if (L->errorJmp)
+	if (spring_lua_in_pcall(L))
 		return (*lua_optFoo)(L, idx, def, len);
 
 	const char* ret = (*lua_toFoo)(L, idx, len);
@@ -196,11 +234,13 @@ static inline const char* luaL_SpringOptCString(lua_State* L, int idx, const cha
 }
 
 
-#define luaL_optboolean(L,idx,def)     (luaL_SpringOpt<bool>(L,idx,def,::luaL_optboolean,lua_toboolean,LUA_TBOOLEAN,__FUNCTION__))
-#define luaL_optfloat(L,idx,def)       ((float)luaL_SpringOpt<lua_Number>(L,idx,def,::luaL_optfloat,lua_tofloat,LUA_TNUMBER,__FUNCTION__))
-#define luaL_optinteger(L,idx,def)     (luaL_SpringOpt<lua_Integer>(L,idx,def,::luaL_optinteger,lua_tointeger,LUA_TNUMBER,__FUNCTION__))
+#define luaL_optboolean(L,idx,def)     (luaL_SpringOpt<bool>(L,idx,def,::luaL_optboolean,spring_lua_toboolean,LUA_TBOOLEAN,__FUNCTION__))
+// luajit-spike: instantiate with float (not lua_Number, which is double under
+// LuaJIT) since the paired helpers ::luaL_optfloat / lua_tofloat are float-typed.
+#define luaL_optfloat(L,idx,def)       (luaL_SpringOpt<float>(L,idx,def,::luaL_optfloat,lua_tofloat,LUA_TNUMBER,__FUNCTION__))
+#define luaL_optinteger(L,idx,def)     ((int)luaL_SpringOpt<lua_Integer>(L,idx,def,::luaL_optinteger,lua_tointeger,LUA_TNUMBER,__FUNCTION__))
 #define luaL_optlstring(L,idx,def,len) (luaL_SpringOptCString(L,idx,def,len,::luaL_optlstring,lua_tolstring,LUA_TSTRING,__FUNCTION__))
-#define luaL_optnumber(L,idx,def)      (luaL_SpringOpt<lua_Number>(L,idx,def,::luaL_optnumber,lua_tonumber,LUA_TNUMBER,__FUNCTION__))
+#define luaL_optnumber(L,idx,def)      ((float)luaL_SpringOpt<lua_Number>(L,idx,def,::luaL_optnumber,lua_tonumber,LUA_TNUMBER,__FUNCTION__))
 
 #define luaL_optsstring(L,idx,def)     (luaL_SpringOptString(L,idx,def,::luaL_optsstring,luaL_tosstring,LUA_TSTRING,__FUNCTION__))
 
@@ -223,7 +263,12 @@ struct luaContextData;
 
 static inline luaContextData* GetLuaContextData(const lua_State* L)
 {
-	return reinterpret_cast<luaContextData*>(G(L)->ud);
+	// luajit-spike: PUC read this off the global_State (G(L)->ud). LuaJIT keeps
+	// it opaque, but the context pointer is the `ud` we passed to lua_newstate,
+	// which lua_getallocf returns (shared across the state + its coroutines).
+	void* ud = nullptr;
+	lua_getallocf(const_cast<lua_State*>(L), &ud);
+	return reinterpret_cast<luaContextData*>(ud);
 }
 
 static inline lua_State* LUA_OPEN(luaContextData* lcd) {
