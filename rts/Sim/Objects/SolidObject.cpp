@@ -87,7 +87,9 @@ CR_REG_METADATA(CSolidObject,
 
 CSolidObject::CSolidObject()
 	: creationFrame { gs->frameNum }
-{}
+{
+	localModel.SetOwner(this);
+}
 
 void CSolidObject::PostLoad()
 {
@@ -153,6 +155,8 @@ void CSolidObject::Move(const float3& v, bool relative)
 	pos    += dv;
 	midPos += dv;
 	aimPos += dv;
+
+	preFrameDirty = true;
 
 	CondUpdatePrevTransform();
 }
@@ -448,6 +452,8 @@ void CSolidObject::UpdateDirVectors(const float3& uDir)
 	frontdir = quat * fDir;
 	rightdir = quat * rDir;
 	updir = uDir;
+
+	preFrameDirty = true;
 }
 
 void CSolidObject::CondUpdatePrevTransform()
@@ -463,11 +469,17 @@ void CSolidObject::CondUpdatePrevTransform()
 
 void CSolidObject::UpdatePrevFrameTransform()
 {
+	if (!preFrameDirty)
+		return;
+
 	for (auto& lmp : localModel.pieces) {
 		lmp.SavePrevModelSpaceTransform();
 	}
 
-	preFrameTra = Transform{ CQuaternion::MakeFrom(GetTransformMatrix(true)), pos };
+	// matches ComposeMatrix(pos) columns: x=-rightdir, y=updir, z=frontdir
+	preFrameTra = Transform{ CQuaternion::FromAxes(-rightdir, updir, frontdir), pos };
+
+	preFrameDirty = false;
 }
 
 void CSolidObject::ForcedSpin(const float3& zdir)
@@ -488,6 +500,8 @@ void CSolidObject::ForcedSpin(const float3& zdir)
 	rightdir = xdir;
 	   updir = ydir;
 
+	preFrameDirty = true;
+
 	SetHeadingFromDirection();
 	UpdateMidAndAimPos();
 }
@@ -501,6 +515,8 @@ void CSolidObject::ForcedSpin(const float3& newFrontDir, const float3& newRightD
 	frontdir = newFrontDir;
 	rightdir = newRightDir;
 	   updir = (newRightDir.cross(newFrontDir)).Normalize();
+
+	preFrameDirty = true;
 
 	SetHeadingFromDirection();
 	UpdateMidAndAimPos();

@@ -74,7 +74,6 @@ protected:
 
 public:
 	// subclass is responsible for populating this with script pieces
-	LocalModelPiece* rootPiece = nullptr;
 	std::vector<LocalModelPiece*> pieces;
 
 	auto* SafeGetPiece(uint32_t scriptPieceNum) const {
@@ -115,6 +114,10 @@ public:
 
 	      CUnit* GetUnit()       { return unit; }
 	const CUnit* GetUnit() const { return unit; }
+
+	// rebind LocalModelPiece* caches on every weapon of the owner unit;
+	// call after pieces[] has been (re)populated.
+	void RebindWeaponPieceCaches();
 
 	auto GetAnimArrayChecksum() const { return checksum; }
 	void TickAllAnims(int tickRate);

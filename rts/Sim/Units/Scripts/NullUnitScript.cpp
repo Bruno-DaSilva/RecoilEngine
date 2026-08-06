@@ -30,6 +30,8 @@ void CNullUnitScript::PostLoad()
 	for (auto& p: unit->localModel.pieces) {
 		pieces.push_back(&p);
 	}
+
+	RebindWeaponPieceCaches();
 }
 
 void CNullUnitScript::ShowScriptError(const std::string& msg)

@@ -6,17 +6,18 @@
 
 #include "LocalModelPiece.hpp"
 #include "Sim/Misc/CollisionVolume.h"
-#include "Lua/LuaObjectMaterial.h"
 
 struct S3DModel;
 struct S3DModelPiece;
+struct LuaObjectMaterialData;
+class CSolidObject;
 
 struct LocalModel
 {
 	CR_DECLARE_STRUCT(LocalModel)
 
-	LocalModel() {}
-	~LocalModel() { pieces.clear(); }
+	LocalModel();
+	~LocalModel();
 
 
 	bool HasPiece(unsigned int i) const { return (i < pieces.size()); }
@@ -26,10 +27,12 @@ struct LocalModel
 	      LocalModelPiece* GetPiece(unsigned int i)        { assert(HasPiece(i)); return &pieces[i]; }
 
 	const LocalModelPiece* GetRoot() const { return (GetPiece(0)); }
+	      LocalModelPiece* GetRoot()       { return (GetPiece(0)); }
+
 	const CollisionVolume* GetBoundingVolume() const { return &boundingVolume; }
 
-	const LuaObjectMaterialData* GetLuaMaterialData() const { return &luaMaterialData; }
-	      LuaObjectMaterialData* GetLuaMaterialData()       { return &luaMaterialData; }
+	const LuaObjectMaterialData* GetLuaMaterialData() const { return luaMaterialData; }
+	      LuaObjectMaterialData* GetLuaMaterialData()       { return luaMaterialData; }
 
 	const float3 GetRelMidPos() const { return (boundingVolume.GetOffsets()); }
 
@@ -40,15 +43,7 @@ struct LocalModel
 	float GetDrawRadius() const { return (boundingVolume.GetBoundingRadius()); }
 
 
-	void Draw() const {
-		if (!luaMaterialData.Enabled()) {
-			DrawPieces();
-			return;
-		}
-
-		DrawPiecesLOD(luaMaterialData.GetCurrentLOD());
-	}
-
+	void Draw() const;
 	void SetModel(const S3DModel* model, bool initialize = true);
 	void SetLODCount(unsigned int lodCount);
 	void UpdateBoundingVolume();
@@ -78,6 +73,12 @@ struct LocalModel
 
 	void SetBoundariesNeedsRecalc()       { needsBoundariesRecalc = true; }
 	bool GetBoundariesNeedsRecalc() const { return needsBoundariesRecalc; }
+
+	// back-pointer to the owning CSolidObject so per-piece script setters can
+	// mark the owner dirty for UpdatePrevFrameTransform gating. nullptr for
+	// orphaned/test models.
+	void SetOwner(CSolidObject* o) { owner = o; }
+	CSolidObject* GetOwner() const { return owner; }
 private:
 	LocalModelPiece* CreateLocalModelPieces(const S3DModelPiece* mpParent);
 
@@ -92,7 +93,9 @@ private:
 	CollisionVolume boundingVolume;
 
 	// custom Lua-set material this model should be rendered with
-	LuaObjectMaterialData luaMaterialData;
+	LuaObjectMaterialData* luaMaterialData = nullptr;
 
 	bool needsBoundariesRecalc = true;
+
+	CSolidObject* owner = nullptr;
 };

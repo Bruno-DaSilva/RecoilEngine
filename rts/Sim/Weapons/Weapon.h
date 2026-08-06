@@ -14,6 +14,7 @@
 
 class CUnit;
 class CWeaponProjectile;
+struct LocalModelPiece;
 struct WeaponDef;
 
 struct WeaponVectorsState {
@@ -106,6 +107,7 @@ public:
 	bool IsFastAutoRetargetingEnabled() const { return fastAutoRetargeting; }
 	void UpdateWeaponErrorVector();
 	void UpdateWeaponVectors();
+	void ReBindLocalModelPieces();
 protected:
 	virtual void FireImpl(const bool scriptCall) {}
 	virtual void UpdateWantedDir();
@@ -151,6 +153,9 @@ public:
 
 	int aimFromPiece;
 	int muzzlePiece;
+
+	LocalModelPiece* aimFromPieceCache = nullptr;
+	LocalModelPiece* muzzlePieceCache = nullptr;
 
 	int reaimTime;                          // time between successive reaims in ticks
 

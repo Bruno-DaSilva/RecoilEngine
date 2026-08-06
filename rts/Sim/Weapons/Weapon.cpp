@@ -247,25 +247,27 @@ void CWeapon::UpdateWeaponPieces(const bool updateAimFrom)
 	const bool aimExists = owner->script->SafeGetPiece(aimFromPiece) != nullptr;
 	const bool muzExists = owner->script->SafeGetPiece(muzzlePiece)  != nullptr;
 
-	if (aimExists && muzExists)
-		return; // everything fine
-
 	if (!aimExists && muzExists) {
 		aimFromPiece = muzzlePiece;
-		return;
-	}
-	if (aimExists && !muzExists) {
+	} else if (aimExists && !muzExists) {
 		muzzlePiece = aimFromPiece;
-		return;
+	} else if (!aimExists && !muzExists) {
+		if (!alreadyWarnedAboutMissingPieces && (owner->script != &CNullUnitScript::value) && !weaponDef->isShield && (dynamic_cast<CNoWeapon*>(this) == nullptr)) {
+			LOG_L(L_WARNING, "%s: weapon%i: Neither AimFromWeapon nor QueryWeapon defined or returned invalid pieceids", owner->unitDef->name.c_str(), weaponNum + LUA_WEAPON_BASE_INDEX);
+			alreadyWarnedAboutMissingPieces = true;
+		}
+
+		aimFromPiece = -1;
+		muzzlePiece = -1;
 	}
 
-	if (!alreadyWarnedAboutMissingPieces && (owner->script != &CNullUnitScript::value) && !weaponDef->isShield && (dynamic_cast<CNoWeapon*>(this) == nullptr)) {
-		LOG_L(L_WARNING, "%s: weapon%i: Neither AimFromWeapon nor QueryWeapon defined or returned invalid pieceids", owner->unitDef->name.c_str(), weaponNum + LUA_WEAPON_BASE_INDEX);
-		alreadyWarnedAboutMissingPieces = true;
-	}
+	ReBindLocalModelPieces();
+}
 
-	aimFromPiece = -1;
-	muzzlePiece = -1;
+void CWeapon::ReBindLocalModelPieces()
+{
+	aimFromPieceCache = owner->script->SafeGetPiece(aimFromPiece);
+	muzzlePieceCache  = owner->script->SafeGetPiece(muzzlePiece);
 }
 
 
@@ -281,10 +283,15 @@ void CWeapon::UpdateWeaponErrorVector()
 
 void CWeapon::UpdateWeaponVectors()
 {
-	ZoneScoped;
+	RECOIL_DETAILED_TRACY_ZONE;
 
-	relAimFromPos = owner->script->GetPiecePos(aimFromPiece);
-	owner->script->GetEmitDirPos(muzzlePiece, relWeaponMuzzlePos, weaponDir);
+	relAimFromPos = (aimFromPieceCache != nullptr)
+		? aimFromPieceCache->GetAbsolutePos()
+		: float3{};
+
+	if (muzzlePieceCache != nullptr)
+		muzzlePieceCache->GetEmitDirPos(relWeaponMuzzlePos, weaponDir);
+	// else: leave relWeaponMuzzlePos / weaponDir untouched, matching CUnitScript::GetEmitDirPos
 
 	aimFromPos = owner->GetObjectSpacePos(relAimFromPos);
 	weaponMuzzlePos = owner->GetObjectSpacePos(relWeaponMuzzlePos);
