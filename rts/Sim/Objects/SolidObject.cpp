@@ -467,7 +467,8 @@ void CSolidObject::UpdatePrevFrameTransform()
 		lmp.SavePrevModelSpaceTransform();
 	}
 
-	preFrameTra = Transform{ CQuaternion::MakeFrom(GetTransformMatrix(true)), pos };
+	// matches ComposeMatrix(pos) columns: x=-rightdir, y=updir, z=frontdir
+	preFrameTra = Transform{ CQuaternion::FromAxes(-rightdir, updir, frontdir), pos };
 }
 
 void CSolidObject::ForcedSpin(const float3& zdir)

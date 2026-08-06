@@ -8,6 +8,7 @@
 CR_BIND(LocalModelPiece, )
 CR_REG_METADATA(LocalModelPiece, (
 	CR_MEMBER(pos),
+	CR_MEMBER(rank),
 	CR_MEMBER(rot),
 	CR_MEMBER(scale),
 	CR_MEMBER(dir),
@@ -22,6 +23,7 @@ CR_REG_METADATA(LocalModelPiece, (
 	CR_IGNORED(wasUpdated),
 	CR_MEMBER(noInterpolation),
 	CR_MEMBER(dirty),
+	CR_IGNORED(matDirty),
 
 	CR_MEMBER(scriptSetVisible),
 	CR_MEMBER(blockScriptAnims),
@@ -44,18 +46,17 @@ CR_REG_METADATA(LocalModelPiece, (
  */
 
 LocalModelPiece::LocalModelPiece(const S3DModelPiece* piece)
-	: dirty(true)
-	, wasUpdated{ true }
+	: parent(nullptr) // set later
+	, original(piece)
+	, rank(piece->rank)
 	, noInterpolation{ false }
-
+	, dirty(true)
+	, matDirty(true)
 	, scriptSetVisible(true)
 	, blockScriptAnims(false)
-
+	, wasUpdated{ true }
 	, lmodelPieceIndex(-1)
 	, scriptPieceIndex(-1)
-
-	, original(piece)
-	, parent(nullptr) // set later
 {
 	assert(piece != nullptr);
 
@@ -76,15 +77,21 @@ LocalModelPiece::~LocalModelPiece()
 	spring::SafeDelete(colvol);
 }
 
-void LocalModelPiece::SetDirty() {
-	RECOIL_DETAILED_TRACY_ZONE;
-	dirty = true;
+void LocalModelPiece::AddChild(LocalModelPiece* c)
+{
+	// Linear sweep in CUnitScript::TickAllAnims relies on parent index < child index.
+	assert(c->lmodelPieceIndex == -1 || lmodelPieceIndex == -1 ||
+	       c->lmodelPieceIndex > lmodelPieceIndex);
+	c->parent = this;
+	children.push_back(c);
+	c->rank = rank + 1;
+}
 
-	for (LocalModelPiece* child: children) {
-		if (child->dirty)
-			continue;
-		child->SetDirty();
-	}
+void LocalModelPiece::RemoveChild(LocalModelPiece* c)
+{
+	c->parent = nullptr;
+	children.erase(std::find(children.begin(), children.end(), c));
+	c->rank = uint32_t(-1);
 }
 
 void LocalModelPiece::SetFloat3(const float3& src, float3& dst) {
@@ -92,13 +99,13 @@ void LocalModelPiece::SetFloat3(const float3& src, float3& dst) {
 	if (blockScriptAnims)
 		return;
 
-	if (!dirty && !dst.same(src)) {
-		SetDirty();
+	SetDirty(dirty || !dst.same(src));
+	dst = src;
+
+	if (dirty) {
 		assert(localModel);
 		localModel->SetBoundariesNeedsRecalc();
 	}
-
-	dst = src;
 }
 
 void LocalModelPiece::SetFloat(const float& src, float& dst)
@@ -107,13 +114,13 @@ void LocalModelPiece::SetFloat(const float& src, float& dst)
 	if (blockScriptAnims)
 		return;
 
-	if (!dirty && !(dst == src)) {
-		SetDirty();
+	SetDirty(dirty || !(dst == src));
+	dst = src;
+
+	if (dirty) {
 		assert(localModel);
 		localModel->SetBoundariesNeedsRecalc();
 	}
-
-	dst = src;
 }
 
 void LocalModelPiece::ResetWasUpdated() const
@@ -137,22 +144,6 @@ bool LocalModelPiece::SetPieceSpaceMatrix(const CMatrix44f& mat)
 	return blockScriptAnims = mat.IsRotOrRotTranMatrix();
 }
 
-const Transform& LocalModelPiece::GetModelSpaceTransform() const
-{
-	if (dirty)
-		UpdateParentMatricesRec();
-
-	return modelSpaceTra;
-}
-
-const CMatrix44f& LocalModelPiece::GetModelSpaceMatrix() const
-{
-	if (dirty)
-		UpdateParentMatricesRec();
-
-	return modelSpaceMat;
-}
-
 void LocalModelPiece::SetScriptVisible(bool b)
 {
 	scriptSetVisible = b;
@@ -161,7 +152,7 @@ void LocalModelPiece::SetScriptVisible(bool b)
 
 void LocalModelPiece::SavePrevModelSpaceTransform()
 {
-	prevModelSpaceTra = GetModelSpaceTransform();
+	prevModelSpaceTra = modelSpaceTra;
 }
 
 Transform LocalModelPiece::GetEffectivePrevModelSpaceTransform() const
@@ -169,11 +160,10 @@ Transform LocalModelPiece::GetEffectivePrevModelSpaceTransform() const
 	if (!noInterpolation[0] && !noInterpolation[1] && !noInterpolation[2])
 		return prevModelSpaceTra;
 
-	const auto& lmpTransform = GetModelSpaceTransform();
 	return Transform {
-		noInterpolation[0] ? lmpTransform.r : prevModelSpaceTra.r,
-		noInterpolation[1] ? lmpTransform.t : prevModelSpaceTra.t,
-		noInterpolation[2] ? lmpTransform.s : prevModelSpaceTra.s
+		noInterpolation[0] ? modelSpaceTra.r : prevModelSpaceTra.r,
+		noInterpolation[1] ? modelSpaceTra.t : prevModelSpaceTra.t,
+		noInterpolation[2] ? modelSpaceTra.s : prevModelSpaceTra.s
 	};
 }
 
@@ -185,7 +175,7 @@ void LocalModelPiece::UpdatePieceSpaceTransform()
 void LocalModelPiece::UpdateModelSpaceTransform(const Transform& pTra)
 {
 	modelSpaceTra = pTra * pieceSpaceTra;
-	modelSpaceMat = modelSpaceTra.ToMatrix();
+	matDirty = true;
 }
 
 void LocalModelPiece::UpdateModelSpaceTransform(const LocalModelPiece* parent)
@@ -195,7 +185,7 @@ void LocalModelPiece::UpdateModelSpaceTransform(const LocalModelPiece* parent)
 	else
 		modelSpaceTra = pieceSpaceTra;
 
-	modelSpaceMat = modelSpaceTra.ToMatrix();
+	matDirty = true;
 }
 
 void LocalModelPiece::UpdateChildTransformRec(bool updateChildTransform) const
@@ -216,7 +206,7 @@ void LocalModelPiece::UpdateChildTransformRec(bool updateChildTransform) const
 		else
 			modelSpaceTra = pieceSpaceTra;
 
-		modelSpaceMat = modelSpaceTra.ToMatrix();
+		matDirty = true;
 	}
 
 	for (auto& child : children) {
@@ -240,7 +230,7 @@ void LocalModelPiece::UpdateParentMatricesRec() const
 	else
 		modelSpaceTra = pieceSpaceTra;
 
-	modelSpaceMat = modelSpaceTra.ToMatrix();
+	matDirty = true;
 }
 
 Transform LocalModelPiece::CalcPieceSpaceTransformOrig(const float3& p, const float3& r, float s) const
@@ -317,12 +307,13 @@ bool LocalModelPiece::GetEmitDirPos(float3& emitPos, float3& emitDir) const
 		return false;
 
 	// note: actually OBJECT_TO_WORLD but transform is the same
-	emitPos = GetModelSpaceTransform() *        original->GetEmitPos()        * WORLD_TO_OBJECT_SPACE;
-	emitDir = GetModelSpaceTransform() * float4(original->GetEmitDir(), 0.0f) * WORLD_TO_OBJECT_SPACE;
+	emitPos = modelSpaceTra *        original->GetEmitPos()        * WORLD_TO_OBJECT_SPACE;
+	emitDir = modelSpaceTra * float4(original->GetEmitDir(), 0.0f) * WORLD_TO_OBJECT_SPACE;
 	return true;
 }
 
 void LocalModelPiece::PostLoad()
 {
 	wasUpdated = { true };
+	matDirty = true;
 }

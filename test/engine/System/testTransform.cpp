@@ -262,3 +262,42 @@ TEST_CASE("EulerYPR")
 		CHECK(math::fabs(1.0f - v1N.dot(v2N)) < float3::cmp_eps());
 	}
 }
+
+TEST_CASE("QuaternionFromAxesMatchesFromMatrix")
+{
+	// FromAxes should match MakeFrom(CMatrix44f) for any orthonormal basis built
+	// the same way ComposeMatrix does: CMatrix44f(pos, x, y, z) places (x, y, z)
+	// as columns 0/1/2 of the rotation part.
+	for (size_t i = 0; i < 10000; ++i) {
+		const float3 ypr{
+			srandf() * math::PI,
+			srandf() * math::PI,
+			srandf() * math::PI
+		};
+
+		// produce an orthonormal basis from a random rotation matrix
+		CMatrix44f rot;
+		rot.RotateEulerYXZ(ypr);
+		const float3 xCol{ rot.md[0][0], rot.md[0][1], rot.md[0][2] };
+		const float3 yCol{ rot.md[1][0], rot.md[1][1], rot.md[1][2] };
+		const float3 zCol{ rot.md[2][0], rot.md[2][1], rot.md[2][2] };
+
+		const float3 t{ srandf() * 10000.0f, srandf() * 10000.0f, srandf() * 10000.0f };
+		// build a matrix the way ComposeMatrix does (column basis, with translation)
+		const CMatrix44f m{ t, xCol, yCol, zCol };
+
+		CQuaternion qFromMat = CQuaternion::MakeFrom(m);
+		CQuaternion qFromAxes = CQuaternion::FromAxes(xCol, yCol, zCol);
+
+		// rotated test vector should land in (almost) the same place either way
+		const float3 v{ srandf() * 100.0f, srandf() * 100.0f, srandf() * 100.0f };
+		auto vA = qFromMat * v;
+		auto vB = qFromAxes * v;
+
+		auto vAN = vA; vAN.Normalize();
+		auto vBN = vB; vBN.Normalize();
+
+		CHECK(math::fabs(1.0f - vAN.dot(vBN)) < float3::cmp_eps());
+		CHECK(qFromMat.equals(qFromAxes));
+	}
+}

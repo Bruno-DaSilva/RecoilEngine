@@ -184,49 +184,63 @@ CQuaternion CQuaternion::MakeFrom(const float3& newFwdDir)
 CQuaternion CQuaternion::MakeFrom(const CMatrix44f& mat)
 {
 	assert(mat.IsRotOrRotTranMatrix());
-	const float trace = mat.md[0][0] + mat.md[1][1] + mat.md[2][2];
+	// md is column-major: md[col][row], so col[c] == (md[c][0], md[c][1], md[c][2])
+	return FromAxes(
+		float3{ mat.md[0][0], mat.md[0][1], mat.md[0][2] },
+		float3{ mat.md[1][0], mat.md[1][1], mat.md[1][2] },
+		float3{ mat.md[2][0], mat.md[2][1], mat.md[2][2] }
+	);
+}
+
+/// <summary>
+///  Quaternion from an orthonormal basis (the three columns of a rotation matrix).
+///  Caller is responsible for ensuring the basis is orthonormal.
+/// </summary>
+CQuaternion CQuaternion::FromAxes(const float3& xCol, const float3& yCol, const float3& zCol)
+{
+	const float trace = xCol.x + yCol.y + zCol.z;
 
 	if (trace > 0.0f) {
 		const float s = 0.5f * InvSqrt(trace + 1.0f);
 
 		return AssertNormalized(CQuaternion(
-			s * (mat.md[1][2] - mat.md[2][1]),
-			s * (mat.md[2][0] - mat.md[0][2]),
-			s * (mat.md[0][1] - mat.md[1][0]),
+			s * (yCol.z - zCol.y),
+			s * (zCol.x - xCol.z),
+			s * (xCol.y - yCol.x),
 			0.25f / s
 		));
 	}
-	else if (mat.md[0][0] > mat.md[1][1] && mat.md[0][0] > mat.md[2][2]) {
-		const float s = 2.0f * math::sqrt(1.0f + mat.md[0][0] - mat.md[1][1] - mat.md[2][2]);
+	else if (xCol.x > yCol.y && xCol.x > zCol.z) {
+		const float s = 2.0f * math::sqrt(1.0f + xCol.x - yCol.y - zCol.z);
 		const float invs = 1.0f / s;
 
 		return AssertNormalized(CQuaternion(
 			0.25f * s,
-			(mat.md[1][0] + mat.md[0][1]) * invs,
-			(mat.md[2][0] + mat.md[0][2]) * invs,
-			(mat.md[1][2] - mat.md[2][1]) * invs
+			(yCol.x + xCol.y) * invs,
+			(zCol.x + xCol.z) * invs,
+			(yCol.z - zCol.y) * invs
 		));
 	}
-	else if (mat.md[1][1] > mat.md[2][2]) {
-		const float s = 2.0f * math::sqrt(1.0f + mat.md[1][1] - mat.md[0][0] - mat.md[2][2]);
+	else if (yCol.y > zCol.z) {
+		const float s = 2.0f * math::sqrt(1.0f + yCol.y - xCol.x - zCol.z);
 		const float invs = 1.0f / s;
 
 		return AssertNormalized(CQuaternion(
-			(mat.md[1][0] + mat.md[0][1]) * invs,
+			(yCol.x + xCol.y) * invs,
 			0.25f * s,
-			(mat.md[2][1] + mat.md[1][2]) * invs,
-			(mat.md[2][0] - mat.md[0][2]) * invs
+			(zCol.y + yCol.z) * invs,
+			(zCol.x - xCol.z) * invs
 		));
 	}
 	else {
-		const float s = 2.0f * math::sqrt(1.0f + mat.md[2][2] - mat.md[0][0] - mat.md[1][1]);
+		const float s = 2.0f * math::sqrt(1.0f + zCol.z - xCol.x - yCol.y);
 		const float invs = 1.0f / s;
 
 		return AssertNormalized(CQuaternion(
-			(mat.md[2][0] + mat.md[0][2]) * invs,
-			(mat.md[2][1] + mat.md[1][2]) * invs,
+			(zCol.x + xCol.z) * invs,
+			(zCol.y + yCol.z) * invs,
 			0.25f * s,
-			(mat.md[0][1] - mat.md[1][0]) * invs
+			(xCol.y - yCol.x) * invs
 		));
 	}
 }
