@@ -4,6 +4,8 @@
 
 #include <vector>
 
+#include "System/Misc/SpringTime.h"
+
 namespace prometheus
 {
 	template<typename T> class Family;
@@ -57,6 +59,12 @@ private:
 		prometheus::Gauge* outgoingResendQueueDepth = nullptr;
 		prometheus::Gauge* incomingReorderQueueDepth = nullptr;
 		prometheus::Gauge* outgoingQueueBytes = nullptr;
+		prometheus::Gauge* unackedOutgoingAge = nullptr;
+
+		DeltaCounter responseTimeSum;
+		prometheus::Counter* responseTimeCount = nullptr;
+		/// baseline for responseTimeCount, tracking accumulated.responseTimeCount
+		double lastResponseTimeCount = 0.0;
 	};
 
 	/// this player's metric slot, created on first use
@@ -84,6 +92,9 @@ private:
 	prometheus::Family<prometheus::Gauge>* metricOutgoingResendQueueDepth = nullptr;
 	prometheus::Family<prometheus::Gauge>* metricIncomingReorderQueueDepth = nullptr;
 	prometheus::Family<prometheus::Gauge>* metricOutgoingQueueBytes = nullptr;
+	prometheus::Family<prometheus::Counter>* metricResponseTimeSum = nullptr;
+	prometheus::Family<prometheus::Counter>* metricResponseTimeCount = nullptr;
+	prometheus::Family<prometheus::Gauge>* metricUnackedOutgoingAge = nullptr;
 
 	// server-wide aggregates, exported whether or not per-player metrics are on
 	prometheus::Counter* metricTotalSentBytes = nullptr;
@@ -100,4 +111,13 @@ private:
 	prometheus::Gauge* metricTotalOutgoingResendQueueDepth = nullptr;
 	prometheus::Gauge* metricTotalIncomingReorderQueueDepth = nullptr;
 	prometheus::Gauge* metricTotalOutgoingQueueBytes = nullptr;
+
+	prometheus::Gauge* metricMaxUnackedOutgoingAge = nullptr;
+
+	/// running peak of the worst link's oldest-unacked age, feeding the gauge
+	/// above. Cleared on a fixed cadence (unackedAgePeakWindow) rather than per
+	/// scrape, so a spike that opens and clears between two scrapes still gets
+	/// read. See NetworkMetrics::Update.
+	float windowMaxUnackedAgeMs = 0.0f;
+	spring_time lastUnackedAgePeakReset = spring_notime;
 };

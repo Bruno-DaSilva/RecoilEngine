@@ -125,6 +125,22 @@ if(NOT DEFINED ENV{CI})
 endif()
 
 ################################################################################
+### NetMetrics
+# The pure-logic parts of the metrics path. All header-only, so unlike
+# UDPListener above this binds no socket and can run under CI.
+	set(test_name NetMetrics)
+	set(test_src
+			"${CMAKE_CURRENT_SOURCE_DIR}/engine/System/Net/TestNetMetrics.cpp"
+			${test_Common_sources}
+		)
+
+	set(test_libs
+			""
+		)
+
+	add_spring_test(${test_name} "${test_src}" "${test_libs}" "-DNOT_USING_CREG -DBUILDING_AI")
+
+################################################################################
 ### ILog
 	set(test_name ILog)
 	set(test_src
