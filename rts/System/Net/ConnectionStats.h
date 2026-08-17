@@ -6,6 +6,8 @@
 #include <string>
 #include <variant>
 
+#include "ResponseTimeHistogram.h"
+
 namespace netcode
 {
 
@@ -53,11 +55,14 @@ struct UdpStats {
 		/// number of send->ack samples behind the sum, so the mean over any
 		/// window is rate(sum)/rate(count)
 		double responseTimeCount = 0.0;
+		/// the same samples binned, for the exported histogram
+		ResponseTimeHistogram responseTime;
 
-		/// the sum and count describe one sample, so they only ever move together
+		/// the three response-time fields describe one sample, so they only ever move together
 		void ObserveResponseTime(float sampleMs) {
 			responseTimeSumMs += sampleMs;
 			responseTimeCount += 1.0;
+			responseTime.Observe(sampleMs);
 		}
 	} accumulated;
 

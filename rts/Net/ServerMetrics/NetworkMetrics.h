@@ -5,12 +5,14 @@
 #include <vector>
 
 #include "System/Misc/SpringTime.h"
+#include "System/Net/ResponseTimeHistogram.h"
 
 namespace prometheus
 {
 	template<typename T> class Family;
 	class Counter;
 	class Gauge;
+	class Histogram;
 	class Registry;
 }
 
@@ -65,6 +67,8 @@ private:
 		prometheus::Counter* responseTimeCount = nullptr;
 		/// baseline for responseTimeCount, tracking accumulated.responseTimeCount
 		double lastResponseTimeCount = 0.0;
+		/// per-bucket baseline for the exported histogram
+		netcode::ResponseTimeHistogram responseTimeBaseline;
 	};
 
 	/// this player's metric slot, created on first use
@@ -78,6 +82,10 @@ private:
 
 	/// MetricsPerPlayer, latched in Init(). Gates all the per-player metrics below.
 	bool perPlayerEnabled = false;
+
+	/// scratch for one poll's histogram increments, held so Update() does not
+	/// allocate on every pass
+	std::vector<double> histogramIncrements;
 
 	// per-player metrics, null unless perPlayerEnabled
 	prometheus::Family<prometheus::Counter>* metricBytes = nullptr;
@@ -105,6 +113,7 @@ private:
 	prometheus::Counter* metricTotalRedundantOutgoingChunks = nullptr;
 	prometheus::Counter* metricTotalDuplicateIncomingChunks = nullptr;
 	prometheus::Counter* metricTotalMissingIncomingChunks = nullptr;
+	prometheus::Histogram* metricResponseTimeHist = nullptr;
 	prometheus::Gauge* metricRedundancyLinks = nullptr;
 	prometheus::Gauge* metricTotalOutgoingBw = nullptr;
 	prometheus::Gauge* metricTotalUnackedOutgoingChunks = nullptr;
