@@ -48,6 +48,17 @@ struct UdpStats {
 		/// cumulative protocol header bytes
 		unsigned int sentOverheadBytes = 0;
 		unsigned int receivedOverheadBytes = 0;
+		/// cumulative send->ack time, so a 1Hz poll still reproduces the mean
+		double responseTimeSumMs = 0.0;
+		/// number of send->ack samples behind the sum, so the mean over any
+		/// window is rate(sum)/rate(count)
+		double responseTimeCount = 0.0;
+
+		/// the sum and count describe one sample, so they only ever move together
+		void ObserveResponseTime(float sampleMs) {
+			responseTimeSumMs += sampleMs;
+			responseTimeCount += 1.0;
+		}
 	} accumulated;
 
 	/**
@@ -65,6 +76,8 @@ struct UdpStats {
 		unsigned int outgoingResendQueueDepth = 0;
 		/// loss factor the UDP link is running with. See UDPConnection::SetLossFactor()
 		unsigned int lossFactor = 0;
+		/// how long the oldest un-acked chunk has waited, 0 when none are pending
+		float oldestUnackedOutgoingMs = 0.0f;
 	} live;
 };
 

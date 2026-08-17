@@ -37,6 +37,8 @@ public:
 	std::uint8_t chunkSize;
 	std::vector<std::uint8_t> data;
 
+	/// when this chunk *first* went on the wire, for response-time sampling
+	spring_time sendTime = spring_notime;
 	/// retransmission was requested because the chunk looks lost (nak or ack
 	/// timeout), but explicitly *not* because of the link duplication policy
 	bool lossSuspected = false;
@@ -151,13 +153,16 @@ private:
 	/// add header to data and send it
 	void CreateChunk(const unsigned char* data, const unsigned length, const int packetNum);
 	void SendIfNecessary(bool flushed);
-	void AckChunks(int lastAck);
+	void AckChunks(int lastAck, spring_time ackTime);
 
 	void RequestResend(const ChunkPtr& ptr, bool noSort, bool lossSuspected);
 	void SendPacket(Packet& pkt);
 
 	/// application bytes queued for this link but not yet transmitted
 	unsigned int OutgoingQueuedBytes() const;
+
+	/// how long the oldest chunk still awaiting an ack has been in flight
+	float OldestUnackedAgeMs() const;
 
 	void UpdateWaitingPackets();
 	void UpdateResendRequests();

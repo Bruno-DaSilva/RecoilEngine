@@ -19,6 +19,11 @@
 #include "System/Net/ConnectionStats.h"
 
 using metrics::DeltaSince;
+using metrics::msToSecs;
+
+// how often the max-unacked-age gauge clears its running peak. Kept well above
+// any sane scrape interval so exact scrape timings matter less
+static const spring_time unackedAgePeakWindow = spring_secs(60);
 
 
 void NetworkMetrics::Init(prometheus::Registry& registry)
@@ -52,6 +57,8 @@ void NetworkMetrics::Init(prometheus::Registry& registry)
 		"Chunks discarded on arrival because the same chunk had already been received");
 	metricTotalMissingIncomingChunks = counter("recoil_network_missing_incoming_chunks_total",
 		"Chunks from clients observed missing at a send pass. Reordering that outlives a pass counts here as well as real loss");
+	metricMaxUnackedOutgoingAge = gauge("recoil_network_max_unacked_outgoing_age_seconds",
+		"Peak, over the worst client connection, of how long an already-sent chunk has waited for an ack. Holds a running maximum that clears once a minute. Read it as max_over_time(...[1m]). Sustained growth means a stalled link rather than a slow one");
 	metricRedundancyLinks = gauge("recoil_network_redundancy_mode_connections",
 		"Live connections with a non-zero loss factor, i.e. running in proactive-retransmit mode");
 	metricTotalOutgoingBw = gauge("recoil_network_outgoing_bandwidth_bytes_per_second",
@@ -96,6 +103,12 @@ void NetworkMetrics::Init(prometheus::Registry& registry)
 		"Chunks from this client held in the reorder buffer behind a missing chunk");
 	metricOutgoingQueueBytes = gaugeFamily("recoil_network_per_connection_outgoing_queue_bytes",
 		"Application bytes queued for this client and not yet transmitted");
+	metricResponseTimeSum = counterFamily("recoil_network_per_connection_response_time_seconds_sum",
+		"Total send->ack time measured for this client. Not all packets are sampled, so this will not be perfectly accurate.");
+	metricResponseTimeCount = counterFamily("recoil_network_per_connection_response_time_seconds_count",
+		"Send->ack samples measured for this client");
+	metricUnackedOutgoingAge = gaugeFamily("recoil_network_per_connection_unacked_outgoing_age_seconds",
+		"How long this client's oldest un-acked chunk has waited; 0 when nothing is outstanding");
 }
 
 
@@ -115,6 +128,7 @@ void NetworkMetrics::ReleaseConnectionGauges(ConnectionMetrics& cm)
 	release(metricOutgoingResendQueueDepth, cm.outgoingResendQueueDepth);
 	release(metricIncomingReorderQueueDepth, cm.incomingReorderQueueDepth);
 	release(metricOutgoingQueueBytes, cm.outgoingQueueBytes);
+	release(metricUnackedOutgoingAge, cm.unackedOutgoingAge);
 }
 
 
@@ -137,6 +151,7 @@ void NetworkMetrics::Update(const CGameServer& server)
 {
 	int numRedundancyLinks = 0;
 	float totalOutgoingBw = 0.0f;
+	float maxUnackedOutgoingAge = 0.0f;
 	unsigned int totalUnackedOutgoingChunks = 0;
 	unsigned int totalOutgoingResendQueueDepth = 0;
 	unsigned int totalIncomingReorderQueueDepth = 0;
@@ -184,12 +199,15 @@ void NetworkMetrics::Update(const CGameServer& server)
 			cm.redundantOutgoingChunks.player = &metricRedundantOutgoingChunks->Add(labels);
 			cm.duplicateIncomingChunks.player  = &metricDuplicateIncomingChunks->Add(labels);
 			cm.missingIncomingChunks.player = &metricMissingIncomingChunks->Add(labels);
+			cm.responseTimeSum.player = &metricResponseTimeSum->Add(labels);
+			cm.responseTimeCount = &metricResponseTimeCount->Add(labels);
 			cm.lossFactor         = &metricLossFactor->Add(labels);
 			cm.outgoingBw         = &metricOutgoingBw->Add(labels);
 			cm.unackedOutgoingChunks      = &metricUnackedOutgoingChunks->Add(labels);
 			cm.outgoingResendQueueDepth   = &metricOutgoingResendQueueDepth->Add(labels);
 			cm.incomingReorderQueueDepth  = &metricIncomingReorderQueueDepth->Add(labels);
 			cm.outgoingQueueBytes     = &metricOutgoingQueueBytes->Add(labels);
+			cm.unackedOutgoingAge         = &metricUnackedOutgoingAge->Add(labels);
 		}
 
 		publishDelta(metricTotalSentBytes, cm.sentBytes, stats.sentBytes);
@@ -209,17 +227,33 @@ void NetworkMetrics::Update(const CGameServer& server)
 
 		numRedundancyLinks += (stats.live.lossFactor > 0);
 
+		maxUnackedOutgoingAge = std::max(maxUnackedOutgoingAge, stats.live.oldestUnackedOutgoingMs);
+
+		const double responseTimeSecs = DeltaSince(stats.accumulated.responseTimeSumMs, cm.responseTimeSum.last) * msToSecs;
+		const double responseTimeSamples = DeltaSince(stats.accumulated.responseTimeCount, cm.lastResponseTimeCount);
+
 		if (perPlayerEnabled) {
+			cm.responseTimeSum.player->Increment(responseTimeSecs);
+			cm.responseTimeCount->Increment(responseTimeSamples);
+
 			cm.lossFactor->Set(stats.live.lossFactor);
 			cm.outgoingBw->Set(stats.live.outgoingBandwidthBytesPerSec);
 			cm.unackedOutgoingChunks->Set(stats.live.unackedOutgoingChunks);
 			cm.outgoingResendQueueDepth->Set(stats.live.outgoingResendQueueDepth);
 			cm.incomingReorderQueueDepth->Set(stats.live.incomingReorderQueueDepth);
 			cm.outgoingQueueBytes->Set(stats.live.outgoingQueueBytes);
+			cm.unackedOutgoingAge->Set(stats.live.oldestUnackedOutgoingMs * msToSecs);
 		}
 	}
 
 	metricRedundancyLinks->Set(numRedundancyLinks);
+
+	windowMaxUnackedAgeMs = std::max(windowMaxUnackedAgeMs, maxUnackedOutgoingAge);
+	if ((server.lastUpdate - lastUnackedAgePeakReset) >= unackedAgePeakWindow) {
+		lastUnackedAgePeakReset = server.lastUpdate;
+		windowMaxUnackedAgeMs = maxUnackedOutgoingAge;
+	}
+	metricMaxUnackedOutgoingAge->Set(windowMaxUnackedAgeMs * msToSecs);
 	metricTotalOutgoingBw->Set(totalOutgoingBw);
 	metricTotalUnackedOutgoingChunks->Set(totalUnackedOutgoingChunks);
 	metricTotalOutgoingResendQueueDepth->Set(totalOutgoingResendQueueDepth);

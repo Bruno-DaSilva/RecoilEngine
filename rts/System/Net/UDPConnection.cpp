@@ -543,7 +543,10 @@ void UDPConnection::ProcessRawPacket(Packet& incoming)
 	}
 
 
-	AckChunks(incoming.lastContinuous);
+	// TODO: sample against the kernel's receive timestamp instead. This one is
+	// taken when we get round to processing the packet, so scheduling delay on
+	// our side lands in the response time.
+	AckChunks(incoming.lastContinuous, lastPacketRecvTime);
 	UpdateResendRequests();
 
 	if (!unackedOutgoingChunks.empty()) {
@@ -796,6 +799,14 @@ bool UDPConnection::CanReconnect() const {
 	return (globalConfig.reconnectTimeout > 0);
 }
 
+float UDPConnection::OldestUnackedAgeMs() const
+{
+	if (unackedOutgoingChunks.empty())
+		return 0.0f;
+
+	return (spring_gettime() - unackedOutgoingChunks.front()->sendTime).toMilliSecsf();
+}
+
 unsigned int UDPConnection::OutgoingQueuedBytes() const
 {
 	unsigned int bytes = 0;
@@ -822,6 +833,7 @@ ConnectionStats UDPConnection::GetStats() const
 	stats.live.incomingReorderQueueDepth = waitingPackets.size();
 	stats.live.outgoingQueueBytes = OutgoingQueuedBytes();
 	stats.live.lossFactor = netLossFactor;
+	stats.live.oldestUnackedOutgoingMs = OldestUnackedAgeMs();
 	return stats;
 }
 
@@ -1042,6 +1054,8 @@ void UDPConnection::SendIfNecessary(bool flushed)
 
 				sent = true;
 			} else if (!resend && canSendNew) {
+				newChunks[0]->sendTime = curTime;
+
 				buf.chunks.push_back(newChunks[0]);
 				unackedOutgoingChunks.push_back(newChunks[0]);
 				newChunks.pop_front();
@@ -1093,11 +1107,30 @@ void UDPConnection::SendPacket(Packet& pkt)
 	accumulatedStats.sentPackets += 1;
 }
 
-void UDPConnection::AckChunks(int lastAck)
+void UDPConnection::AckChunks(int lastAck, spring_time ackTime)
 {
+	// one ack covers every chunk up to lastAck. We sample only the newest of
+	// them, the one the client had just received, to get the most
+	// accurate RTT.
+	const bool sampling = StatsSampling();
+
+	spring_time newestAckedSendTime = spring_notime;
+	bool newestAckedLossSuspected = false;
+
 	while (!unackedOutgoingChunks.empty() && (lastAck >= (*unackedOutgoingChunks.begin())->chunkNumber)) {
+		const Chunk& chunk = *unackedOutgoingChunks.front();
+
+		if (sampling) {
+			newestAckedSendTime = chunk.sendTime;
+			newestAckedLossSuspected = chunk.lossSuspected;
+		}
+
 		unackedOutgoingChunks.pop_front();
 	}
+
+	// a chunk that went out twice cannot be attributed to either send, so we skip it
+	if (newestAckedSendTime.isTime() && !newestAckedLossSuspected)
+		accumulatedStats.ObserveResponseTime((ackTime - newestAckedSendTime).toMilliSecsf());
 
 	// resend requested and later acked, happens every now and then
 	for (size_t i = 0, n = resendRequested.size(); i < n; i++) {
