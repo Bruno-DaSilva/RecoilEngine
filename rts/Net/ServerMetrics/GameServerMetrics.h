@@ -61,6 +61,9 @@ public:
 	/// takes milliseconds; scaled to prometheus base units downstream
 	void CountIncomingThrottled(int playerId, double milliSecs);
 
+	void CountDroppedFrameTime(double milliSecs);
+	void CountLoopIteration();
+
 	void SetGameStartTime(double unixSecs);
 
 	void ResetConnectionDeltas(int playerId);

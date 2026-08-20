@@ -90,6 +90,7 @@ This is the bleeding-edge changelog since version 2025.06, for **pre-release 202
 - always output logs to stdout.
 - add boolean `Platform.isHeadless`.
 - archive cache version 20 → 21.
+- add a Prometheus `/metrics` endpoint to the game server, covering network health (per-link loss, response time, queue depths, bytes by NETMSG type), the connection lifecycle, desyncs, and server-loop health. Nothing is served until you set `MetricsPort`; `MetricsBindAddress` (default `127.0.0.1`) moves it and `MetricsPerPlayer` adds per-slot breakdowns. The endpoint is unauthenticated and has no TLS, so do not bind it to a public address. It assumes one game per process — the endpoint is torn down when the game ends. Built into `spring-dedicated` only; `spring` and `spring-headless` can host a listen-server game and export the same series, but link neither prometheus-cpp nor its vendored HTTP server unless configured with `-DENABLE_METRICS_CLIENT=ON`. `-DENABLE_METRICS=OFF` compiles it out of the dedicated server too.
 
 ## Fixes
 

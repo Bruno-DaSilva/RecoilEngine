@@ -76,6 +76,8 @@ void NetworkMetrics::Init(prometheus::Registry& registry)
 		"Time traffic to or from clients was held back by a bandwidth limit, by direction, summed over connections");
 	metricTotalOutgoingThrottled = &metricThrottledFamily->Add({{"direction", "outgoing"}});
 
+	metricLoopIterations = counter("recoil_network_loop_iterations_total",
+		"Iterations of the server netcode loop. The rate varies with traffic, so compare it against its own recent baseline; a collapse means the loop is starved");
 	metricMessageBytes = counterFamily("recoil_network_message_bytes_total",
 		"Message payload bytes by NETMSG type and direction, unicast and broadcast alike (counted once per recipient). Payload only, so it does not sum to sent_bytes_total / received_bytes_total");
 	metricTotalThrottledPackets = counter("recoil_network_throttle_dropped_packets_total",
@@ -201,6 +203,13 @@ void NetworkMetrics::CountMessageBytes(bool outgoing, unsigned char msgId, unsig
 	}
 
 	counter->Increment(bytes);
+}
+
+
+void NetworkMetrics::CountLoopIteration()
+{
+	if (metricLoopIterations != nullptr)
+		metricLoopIterations->Increment();
 }
 
 
