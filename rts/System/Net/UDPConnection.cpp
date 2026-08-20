@@ -746,8 +746,7 @@ void UDPConnection::Flush(const bool forced)
 		bool sendMore = true;
 
 		do {
-			sendMore  = (outgoing.GetAverage(true) <= globalConfig.linkOutgoingBandwidth);
-			sendMore |= ((globalConfig.linkOutgoingBandwidth <= 0) || partialPacket || forced);
+			sendMore = (!OutgoingBandwidthExceeded(true) || partialPacket || forced);
 
 			if (!outgoingData.empty() && sendMore) {
 				std::shared_ptr<const RawPacket>& packet = *(outgoingData.begin());
@@ -884,6 +883,11 @@ void UDPConnection::CreateChunk(const unsigned char* data, const unsigned length
 	lastChunkCreatedTime = spring_gettime();
 }
 
+bool UDPConnection::OutgoingBandwidthExceeded(bool includeQueued) const
+{
+	return (globalConfig.linkOutgoingBandwidth > 0 && outgoing.GetAverage(includeQueued) > globalConfig.linkOutgoingBandwidth);
+}
+
 void UDPConnection::SendIfNecessary(bool flushed)
 {
 	const spring_time curTime = spring_gettime();
@@ -1005,7 +1009,7 @@ void UDPConnection::SendIfNecessary(bool flushed)
 	}
 
 
-	while (((outgoing.GetAverage() <= globalConfig.linkOutgoingBandwidth) || (globalConfig.linkOutgoingBandwidth <= 0))) {
+	while (!OutgoingBandwidthExceeded(false)) {
 		Packet buf(lastInOrder, nak);
 
 		if (nak > 0) {
