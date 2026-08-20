@@ -44,6 +44,20 @@ public:
 	/// call per loop
 	void Update(const CGameServer& server);
 
+	// connection lifecycle funnel
+	void CountConnectionAttempt();
+	void CountConnectionRejected(const char* reason);
+	void CountConnectionEstablished(bool reconnect);
+	void CountConnectionClosed(const char* reason);
+
+	/// @return whether CountPlayerDesync() is worth calling for the players in it
+	bool CountDesyncEvent();
+	void CountPlayerDesync(int playerId);
+
+	void CountThrottledPackets(int playerId, int numPackets);
+	/// takes milliseconds; scaled to prometheus base units downstream
+	void CountIncomingThrottled(int playerId, double milliSecs);
+
 	void SetGameStartTime(double unixSecs);
 
 	void ResetConnectionDeltas(int playerId);

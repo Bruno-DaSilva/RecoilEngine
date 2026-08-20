@@ -6,6 +6,7 @@
 #include <map>
 #include <string>
 
+#include <prometheus/counter.h>
 #include <prometheus/gauge.h>
 #include <prometheus/registry.h>
 
@@ -15,15 +16,21 @@
 #include "Sim/Misc/GlobalConstants.h"
 #include "System/Metrics/Helpers.h"
 #include "System/Metrics/Metrics.h"
+#include "System/Metrics/PrometheusHelpers.h"
 
+using metrics::AddPlayerMetric;
 using metrics::msToSecs;
 
 
 void ServerHealthMetrics::Init(prometheus::Registry& registry, const std::string& gameIDHex)
 {
+	const auto counterFamily = [&](const char* name, const char* help) {
+		return &prometheus::BuildCounter().Name(name).Help(help).Register(registry);
+	};
 	const auto gaugeFamily = [&](const char* name, const char* help) {
 		return &prometheus::BuildGauge().Name(name).Help(help).Register(registry);
 	};
+	const auto counter = [&](const char* name, const char* help) { return &counterFamily(name, help)->Add({}); };
 	const auto gauge = [&](const char* name, const char* help) { return &gaugeFamily(name, help)->Add({}); };
 
 	metricServerFrame = gauge("recoil_server_frame",
@@ -51,6 +58,10 @@ void ServerHealthMetrics::Init(prometheus::Registry& registry, const std::string
 	metricPaused = gauge("recoil_server_paused",
 		"1 while the game is paused");
 
+	metricDesyncEvents = counter("recoil_server_desync_events_total",
+		"Desyncs detected by sync checking; counted once per detection, not per frame");
+	metricTotalPlayerDesyncs = counter("recoil_server_desynced_players_total",
+		"Summed count of players whose checksum differed from the reference, over all desyncs");
 	metricGameStartTs = gauge("recoil_server_game_start_timestamp_seconds",
 		"Unix time the game started");
 
@@ -74,6 +85,29 @@ void ServerHealthMetrics::Init(prometheus::Registry& registry, const std::string
 	// churn.
 	metricPlayerInfo = gaugeFamily("recoil_server_per_player_info",
 		"Constant 1, labels map a player slot to their name");
+	metricPlayerDesyncs = counterFamily("recoil_server_per_player_desyncs_total",
+		"Desyncs in which this player had a checksum differing from the reference");
+}
+
+
+bool ServerHealthMetrics::CountDesyncEvent()
+{
+	if (metricDesyncEvents == nullptr)
+		return false;
+
+	metricDesyncEvents->Increment();
+	return true;
+}
+
+// the aggregate counter is null exactly when metrics are off; testing it before
+// GetPlayerSlot keeps this from allocating a slot nobody reads
+void ServerHealthMetrics::CountPlayerDesync(int playerId)
+{
+	if (metricTotalPlayerDesyncs == nullptr)
+		return;
+
+	AddPlayerMetric(metricTotalPlayerDesyncs, metricPlayerDesyncs,
+		GetPlayerSlot(playerId).desyncs, playerId, 1);
 }
 
 

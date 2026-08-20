@@ -16,9 +16,12 @@
 #include "System/GlobalConfig.h"
 #include "System/Metrics/Helpers.h"
 #include "System/Metrics/Metrics.h"
+#include "System/Metrics/PrometheusHelpers.h"
 #include "System/Net/ConnectionStats.h"
 #include "System/Net/UDPListener.h"
 
+using metrics::AddPlayerMetric;
+using metrics::CountEvent;
 using metrics::DeltaSince;
 using metrics::msToSecs;
 
@@ -71,6 +74,29 @@ void NetworkMetrics::Init(prometheus::Registry& registry)
 	metricThrottledFamily = counterFamily("recoil_network_throttled_seconds_total",
 		"Time traffic to or from clients was held back by a bandwidth limit, by direction, summed over connections");
 	metricTotalOutgoingThrottled = &metricThrottledFamily->Add({{"direction", "outgoing"}});
+
+	metricTotalThrottledPackets = counter("recoil_network_throttle_dropped_packets_total",
+		"Incoming packets dropped because a client exceeded the waiting-packet limit");
+	metricTotalIncomingThrottled = &metricThrottledFamily->Add({{"direction", "incoming"}});
+	metricConnAttempted = counter("recoil_network_connections_attempted_total",
+		"Incoming connection attempts including invalid ones, plus the host's own local client; denominator of the connections_* funnel. Counts handshake packets rather than distinct clients, so retries inflate it");
+	metricConnRejected = counterFamily("recoil_network_connections_rejected_total",
+		"Connection attempts refused, by reason");
+	metricConnEstablished = counterFamily("recoil_network_connections_established_total",
+		"Connections bound to a player slot. reconnect=1 is a resumed session, either an existing link retargeted or a fresh link plus packetCache replay; reconnect=0 is a slot filled for the first time");
+	metricConnClosed = counterFamily("recoil_network_connections_closed_total",
+		"Connections the server tore down, by reason. Links still open when the game ends are not counted, so attempted - rejected - closed trends to the participant count rather than to zero");
+
+	metricMaxIncomingBwUsage = gauge("recoil_network_max_incoming_bandwidth_usage",
+		"Highest incoming-limiter accumulator across connections. Pinned at zero while ServerReadNet never writes the accumulator back; if it ever goes non-zero the limiter has been repaired");
+
+	gauge("recoil_network_incoming_peak_bandwidth_limit",
+		"Per-connection incoming peak bandwidth cap in limiter units (0 = unlimited)")->Set(globalConfig.linkIncomingPeakBandwidth);
+	gauge("recoil_network_incoming_sustained_bandwidth_limit",
+		"Per-connection incoming sustained bandwidth cap in limiter units (0 = unlimited)")->Set(globalConfig.linkIncomingSustainedBandwidth);
+	gauge("recoil_network_incoming_max_waiting_packets_limit",
+		"Per-connection cap on queued incoming packets before they are dropped (0 = unlimited)")->Set(globalConfig.linkIncomingMaxWaitingPackets);
+
 	metricTotalIncomingReorderStall = counter("recoil_network_incoming_reorder_stall_seconds_total",
 		"Time inbound delivery was stalled behind a missing chunk, summed over connections. Accumulated at loop rate, so it cannot miss a stall that opens and closes between two scrapes");
 	metricRedundancyLinks = gauge("recoil_network_redundancy_mode_connections",
@@ -109,6 +135,10 @@ void NetworkMetrics::Init(prometheus::Registry& registry)
 		"Chunks from this client observed missing at a send pass. Reordering that outlives a pass counts here as well as real loss");
 	metricThrottled = counterFamily("recoil_network_per_connection_throttled_seconds_total",
 		"Time traffic to or from this client was held back by a bandwidth limit, by direction");
+	metricIncomingBwUsage = gaugeFamily("recoil_network_per_connection_incoming_bandwidth_usage",
+		"Incoming-limiter accumulator for this link, in the same units as the incoming bandwidth caps");
+	metricThrottledPackets = counterFamily("recoil_network_per_connection_throttle_dropped_packets_total",
+		"Incoming packets dropped because the client exceeded the waiting-packet limit");
 	metricIncomingReorderStall = counterFamily("recoil_network_per_connection_incoming_reorder_stall_seconds_total",
 		"Time inbound delivery from this client was stalled behind a missing chunk; rate() is the fraction of the interval this player's input was blocked");
 	metricLossFactor = gaugeFamily("recoil_network_per_connection_loss_factor",
@@ -149,6 +179,62 @@ void NetworkMetrics::ReleaseConnectionGauges(ConnectionMetrics& cm)
 	release(metricIncomingReorderQueueDepth, cm.incomingReorderQueueDepth);
 	release(metricOutgoingQueueBytes, cm.outgoingQueueBytes);
 	release(metricUnackedOutgoingAge, cm.unackedOutgoingAge);
+	release(metricIncomingBwUsage, cm.incomingBandwidthUsage);
+}
+
+
+void NetworkMetrics::CountConnectionAttempt()
+{
+	if (metricConnAttempted != nullptr)
+		metricConnAttempted->Increment();
+}
+
+void NetworkMetrics::CountConnectionRejected(const char* reason)
+{
+	CountEvent(metricConnRejected, "reason", reason);
+}
+
+void NetworkMetrics::CountConnectionEstablished(bool reconnect)
+{
+	CountEvent(metricConnEstablished, "reconnect", reconnect ? "1" : "0");
+}
+
+void NetworkMetrics::CountConnectionClosed(const char* reason)
+{
+	CountEvent(metricConnClosed, "reason", reason);
+}
+
+
+// the aggregate counter is null exactly when metrics are off; testing it before
+// ConnectionSlot keeps the Count* below from allocating a slot nobody reads
+void NetworkMetrics::CountThrottledPackets(int playerId, int numPackets)
+{
+	if (metricTotalThrottledPackets == nullptr)
+		return;
+
+	AddPlayerMetric(metricTotalThrottledPackets, metricThrottledPackets,
+		ConnectionSlot(playerId).throttledPackets, playerId, numPackets);
+}
+
+void NetworkMetrics::CountIncomingThrottled(int playerId, double milliSecs)
+{
+	if (metricTotalIncomingThrottled == nullptr)
+		return;
+
+	const double seconds = milliSecs * msToSecs;
+
+	metricTotalIncomingThrottled->Increment(seconds);
+
+	if (metricThrottled == nullptr)
+		return;
+
+	// not AddPlayerMetric: this family carries a direction label as well
+	prometheus::Counter*& child = ConnectionSlot(playerId).incomingThrottled;
+
+	if (child == nullptr)
+		child = &metricThrottled->Add({{"playerid", std::to_string(playerId)}, {"direction", "incoming"}});
+
+	child->Increment(seconds);
 }
 
 
@@ -170,6 +256,7 @@ void NetworkMetrics::ResetConnectionDeltas(int playerId)
 void NetworkMetrics::Update(const CGameServer& server)
 {
 	int numRedundancyLinks = 0;
+	int maxIncomingBwUsage = 0;
 	float totalOutgoingBw = 0.0f;
 	float maxUnackedOutgoingAge = 0.0f;
 	unsigned int totalUnackedOutgoingChunks = 0;
@@ -232,7 +319,16 @@ void NetworkMetrics::Update(const CGameServer& server)
 			cm.incomingReorderQueueDepth  = &metricIncomingReorderQueueDepth->Add(labels);
 			cm.outgoingQueueBytes     = &metricOutgoingQueueBytes->Add(labels);
 			cm.unackedOutgoingAge         = &metricUnackedOutgoingAge->Add(labels);
+			cm.incomingBandwidthUsage = &metricIncomingBwUsage->Add(labels);
 		}
+
+		// always zero while ServerReadNet never writes the accumulator back
+		int maxLinkBwUsage = 0;
+
+		for (const auto& pair: p.aiClientLinks)
+			maxLinkBwUsage = std::max(maxLinkBwUsage, pair.second.bandwidthUsage);
+
+		maxIncomingBwUsage = std::max(maxIncomingBwUsage, maxLinkBwUsage);
 
 		publishDelta(metricTotalSentBytes, cm.sentBytes, stats.sentBytes);
 		publishDelta(metricTotalRecvBytes, cm.recvBytes, stats.receivedBytes);
@@ -271,6 +367,7 @@ void NetworkMetrics::Update(const CGameServer& server)
 			cm.incomingReorderQueueDepth->Set(stats.live.incomingReorderQueueDepth);
 			cm.outgoingQueueBytes->Set(stats.live.outgoingQueueBytes);
 			cm.unackedOutgoingAge->Set(stats.live.oldestUnackedOutgoingMs * msToSecs);
+			cm.incomingBandwidthUsage->Set(maxLinkBwUsage);
 		}
 	}
 
@@ -282,6 +379,7 @@ void NetworkMetrics::Update(const CGameServer& server)
 		windowMaxUnackedAgeMs = maxUnackedOutgoingAge;
 	}
 	metricMaxUnackedOutgoingAge->Set(windowMaxUnackedAgeMs * msToSecs);
+	metricMaxIncomingBwUsage->Set(maxIncomingBwUsage);
 	metricTotalOutgoingBw->Set(totalOutgoingBw);
 	metricTotalUnackedOutgoingChunks->Set(totalUnackedOutgoingChunks);
 	metricTotalOutgoingResendQueueDepth->Set(totalOutgoingResendQueueDepth);
