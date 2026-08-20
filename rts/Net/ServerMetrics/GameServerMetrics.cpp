@@ -79,3 +79,8 @@ void ServerMetrics::CountIncomingThrottled(int playerId, double milliSecs)
 {
 	networkMetrics.CountIncomingThrottled(playerId, milliSecs);
 }
+
+void ServerMetrics::CountMessageBytes(bool outgoing, unsigned char msgId, unsigned int bytes)
+{
+	networkMetrics.CountMessageBytes(outgoing, msgId, bytes);
+}

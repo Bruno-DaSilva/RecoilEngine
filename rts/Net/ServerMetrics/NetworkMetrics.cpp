@@ -13,6 +13,7 @@
 
 #include "Net/GameParticipant.h"
 #include "Net/GameServer.h"
+#include "Net/Protocol/NetMessageTypes.h"
 #include "System/GlobalConfig.h"
 #include "System/Metrics/Helpers.h"
 #include "System/Metrics/Metrics.h"
@@ -75,6 +76,8 @@ void NetworkMetrics::Init(prometheus::Registry& registry)
 		"Time traffic to or from clients was held back by a bandwidth limit, by direction, summed over connections");
 	metricTotalOutgoingThrottled = &metricThrottledFamily->Add({{"direction", "outgoing"}});
 
+	metricMessageBytes = counterFamily("recoil_network_message_bytes_total",
+		"Message payload bytes by NETMSG type and direction, unicast and broadcast alike (counted once per recipient). Payload only, so it does not sum to sent_bytes_total / received_bytes_total");
 	metricTotalThrottledPackets = counter("recoil_network_throttle_dropped_packets_total",
 		"Incoming packets dropped because a client exceeded the waiting-packet limit");
 	metricTotalIncomingThrottled = &metricThrottledFamily->Add({{"direction", "incoming"}});
@@ -180,6 +183,24 @@ void NetworkMetrics::ReleaseConnectionGauges(ConnectionMetrics& cm)
 	release(metricOutgoingQueueBytes, cm.outgoingQueueBytes);
 	release(metricUnackedOutgoingAge, cm.unackedOutgoingAge);
 	release(metricIncomingBwUsage, cm.incomingBandwidthUsage);
+}
+
+
+void NetworkMetrics::CountMessageBytes(bool outgoing, unsigned char msgId, unsigned int bytes)
+{
+	if (metricMessageBytes == nullptr)
+		return;
+
+	prometheus::Counter*& counter = messageBytesCounters[outgoing][msgId];
+
+	if (counter == nullptr) {
+		counter = &metricMessageBytes->Add({
+			{"direction", outgoing ? "outgoing" : "incoming"},
+			{"type", NetMessageName(msgId)}
+		});
+	}
+
+	counter->Increment(bytes);
 }
 
 
