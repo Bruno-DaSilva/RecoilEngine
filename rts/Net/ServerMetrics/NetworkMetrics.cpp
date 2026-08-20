@@ -9,6 +9,7 @@
 
 #include <prometheus/counter.h>
 #include <prometheus/gauge.h>
+#include <prometheus/histogram.h>
 #include <prometheus/registry.h>
 
 #include "Net/GameParticipant.h"
@@ -68,6 +69,18 @@ void NetworkMetrics::Init(prometheus::Registry& registry)
 		"Chunks discarded on arrival because the same chunk had already been received");
 	metricTotalMissingIncomingChunks = counter("recoil_network_missing_incoming_chunks_total",
 		"Chunks from clients observed missing at a send pass. Reordering that outlives a pass counts here as well as real loss");
+	prometheus::Histogram::BucketBoundaries responseTimeBounds;
+	responseTimeBounds.reserve(netcode::ResponseTimeHistogram::numBounds);
+
+	for (const float boundMs: netcode::ResponseTimeHistogram::boundsMs)
+		responseTimeBounds.push_back(boundMs * msToSecs);
+
+	metricResponseTimeHist = &prometheus::BuildHistogram()
+		.Name("recoil_network_response_time_seconds")
+		.Help("Send->ack times over all client connections. Not a round-trip time: a sample also carries the client's wait before it next transmits and its frame processing, so read the low quantiles as latency and the width above them as some form of jitter and client responsiveness. A chunk whose loss-driven resend went out is never sampled, so a badly-losing link shows up as a falling rate(_count) rather than a longer tail")
+		.Register(registry)
+		.Add({}, responseTimeBounds);
+
 	metricMaxUnackedOutgoingAge = gauge("recoil_network_max_unacked_outgoing_age_seconds",
 		"Peak, over the worst client connection, of how long an already-sent chunk has waited for an ack. Holds a running maximum that clears once a minute. Read it as max_over_time(...[1m]). Sustained growth means a stalled link rather than a slow one");
 	// direction is a label: the two halves measure the same thing, so summing
@@ -293,6 +306,9 @@ void NetworkMetrics::Update(const CGameServer& server)
 	unsigned int totalOutgoingResendQueueDepth = 0;
 	unsigned int totalIncomingReorderQueueDepth = 0;
 	unsigned int totalOutgoingQueueBytes = 0;
+	double responseTimeHistSum = 0.0;
+
+	histogramIncrements.assign(netcode::ResponseTimeHistogram::numBuckets, 0.0);
 
 	const auto publishDelta = [this](
 		prometheus::Counter* total, ConnectionMetrics::DeltaCounter& dc, double cur, double scale = 1.0
@@ -386,6 +402,11 @@ void NetworkMetrics::Update(const CGameServer& server)
 		const double responseTimeSecs = DeltaSince(stats.accumulated.responseTimeSumMs, cm.responseTimeSum.last) * msToSecs;
 		const double responseTimeSamples = DeltaSince(stats.accumulated.responseTimeCount, cm.lastResponseTimeCount);
 
+		for (std::size_t i = 0; i < netcode::ResponseTimeHistogram::numBuckets; ++i)
+			histogramIncrements[i] += DeltaSince(stats.accumulated.responseTime.counts[i], cm.responseTimeBaseline.counts[i]);
+
+		responseTimeHistSum += responseTimeSecs;
+
 		if (perPlayerEnabled) {
 			cm.responseTimeSum.player->Increment(responseTimeSecs);
 			cm.responseTimeCount->Increment(responseTimeSamples);
@@ -400,6 +421,8 @@ void NetworkMetrics::Update(const CGameServer& server)
 			cm.incomingBandwidthUsage->Set(maxLinkBwUsage);
 		}
 	}
+
+	metricResponseTimeHist->ObserveMultiple(histogramIncrements, responseTimeHistSum);
 
 	metricRedundancyLinks->Set(numRedundancyLinks);
 

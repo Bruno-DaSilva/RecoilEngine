@@ -6,6 +6,8 @@
 #include <string>
 #include <variant>
 
+#include "ResponseTimeHistogram.h"
+
 namespace netcode
 {
 
@@ -53,6 +55,8 @@ struct UdpStats {
 		/// number of send->ack samples behind the sum, so the mean over any
 		/// window is rate(sum)/rate(count)
 		double responseTimeCount = 0.0;
+		/// the same samples binned, for the exported histogram
+		ResponseTimeHistogram responseTime;
 		/// socket-level failures; ours or the environment's, not the peer's link
 		unsigned int sendErrors = 0;
 		unsigned int receiveErrors = 0;
@@ -61,10 +65,11 @@ struct UdpStats {
 		/// time inbound delivery was stalled behind a missing chunk
 		double incomingReorderStallMs = 0.0;
 
-		/// the sum and count describe one sample, so they only ever move together
+		/// the three response-time fields describe one sample, so they only ever move together
 		void ObserveResponseTime(float sampleMs) {
 			responseTimeSumMs += sampleMs;
 			responseTimeCount += 1.0;
+			responseTime.Observe(sampleMs);
 		}
 	} accumulated;
 
