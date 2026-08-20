@@ -183,6 +183,9 @@ private:
 	/// read data from demo and send it to clients
 	bool SendDemoData(int targetFrameNum);
 
+	/// send one packet to one participant; the only path to a participant's link
+	void SendTo(GameParticipant& p, const std::shared_ptr<const netcode::RawPacket>& packet);
+
 	void Broadcast(std::shared_ptr<const netcode::RawPacket> packet);
 
 	/**
