@@ -80,10 +80,10 @@ public:
 	virtual void SetLossFactor(int factor) = 0;
 
 	/**
-	 * @brief update internals
-	 * Check for unack'd packets, timeout etc.
+	 * @brief update internals. deltaMs is time since the previous call.
+	 * Check for unack'd packets, timeout etc. deltaMs is used for internal accounting.
 	 */
-	virtual void Update() {}
+	virtual void Update(float deltaMs) {}
 
 protected:
 	unsigned int dataSent = 0;

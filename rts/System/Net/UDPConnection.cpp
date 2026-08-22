@@ -398,10 +398,24 @@ void UDPConnection::DeleteBufferPacketAt(unsigned index)
 	msgQueue.erase(msgQueue.begin() + index);
 }
 
-void UDPConnection::Update()
+void UDPConnection::Update(float deltaMs)
 {
 	spring_time curTime = spring_gettime();
 	outgoing.UpdateTime(spring_tomsecs(curTime));
+
+	if (StatsSampling()) {
+		const auto bandwidthExceeded = [&](bool includeQueued) {
+			return globalConfig.linkOutgoingBandwidth > 0 && outgoing.GetAverage(includeQueued) > globalConfig.linkOutgoingBandwidth;
+		};
+		const bool chunkingBlocked = !outgoingData.empty() && bandwidthExceeded(true);
+		const bool sendingBlocked  = !newChunks.empty()    && bandwidthExceeded(false);
+
+		if (chunkingBlocked || sendingBlocked)
+			accumulatedStats.outgoingThrottledMs += deltaMs;
+
+		if (!waitingPackets.empty())
+			accumulatedStats.incomingReorderStallMs += deltaMs;
+	}
 
 	#ifdef ENABLE_DEBUG_STATS
 	{

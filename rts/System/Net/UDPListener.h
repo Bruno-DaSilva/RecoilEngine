@@ -9,6 +9,7 @@
 #include <map>
 #include <queue>
 #include <string>
+#include "System/Misc/SpringTime.h"
 
 namespace netcode
 {
@@ -78,6 +79,7 @@ public:
 
 	auto& GetSocket() { return socket; }
 private:
+	spring_time lastUpdateTime = spring_gettime();
 	/**
 	 * @brief Do we accept packets from unknown sources?
 	 * If true, we will create a new connection, if false, they get dropped.
